@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="App" type="Application" factoryName="Application">
+    <option name="MAIN_CLASS_NAME" value="com.basicsdriverupdate.App" />
+    <module name="basic-s-driver-update" />
+    <option name="VM_PARAMETERS" value="--module-path &quot;$MAVEN_REPOSITORY$/org/openjfx/javafx-controls/21.0.5/javafx-controls-21.0.5-win.jar$PATH_SEPARATOR$$MAVEN_REPOSITORY$/org/openjfx/javafx-graphics/21.0.5/javafx-graphics-21.0.5-win.jar$PATH_SEPARATOR$$MAVEN_REPOSITORY$/org/openjfx/javafx-base/21.0.5/javafx-base-21.0.5-win.jar&quot; --add-modules javafx.controls" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>
