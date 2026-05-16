@@ -23,4 +23,4 @@ foreach ($fxJar in $modulePath.Split([IO.Path]::PathSeparator)) {
     }
 }
 
-& java --module-path $modulePath --add-modules javafx.controls -jar $jar @args
+& java --enable-native-access=javafx.graphics --module-path $modulePath --add-modules javafx.controls -jar $jar @args
