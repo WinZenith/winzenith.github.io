@@ -98,14 +98,28 @@ public class DriverBackupService {
         BackupIndex index = loadIndex();
         index.getEntries().removeIf(e -> e.id().equals(entry.id()));
         saveIndex(index);
-        // Delete the backup folder
+        // Delete the backup folder recursively
         try {
             Path folder = Path.of(entry.backupFolder());
             if (Files.isDirectory(folder)) {
-                Files.deleteIfExists(folder);
+                deleteDirectory(folder);
             }
         } catch (IOException e) {
             AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
+        }
+    }
+
+    private void deleteDirectory(Path directory) throws IOException {
+        if (Files.exists(directory)) {
+            Files.walk(directory)
+                    .sorted((a, b) -> -a.compareTo(b)) // Reverse order to delete files before directories
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException e) {
+                            AppLogger.warning("Could not delete: " + path, e);
+                        }
+                    });
         }
     }
 
