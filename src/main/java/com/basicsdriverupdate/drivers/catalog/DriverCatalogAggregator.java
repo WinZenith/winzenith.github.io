@@ -26,6 +26,9 @@ public class DriverCatalogAggregator {
                 new OemNvidiaCatalogProvider(),
                 new OemAmdCatalogProvider(),
                 new OemIntelCatalogProvider(),
+                new OemRealtekCatalogProvider(),
+                new OemBroadcomCatalogProvider(),
+                new OemQualcommCatalogProvider(),
                 new WindowsUpdateCatalogProvider()
         ));
     }
@@ -35,8 +38,10 @@ public class DriverCatalogAggregator {
     }
 
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed) {
+        AppLogger.debug("CatalogAggregator: Scanning " + installed.size() + " installed drivers");
         Map<String, DriverUpdateCandidate> byDevice = new HashMap<>();
         mergeProviderResults(byDevice, installed);
+        AppLogger.debug("CatalogAggregator: Found " + byDevice.size() + " driver update candidates");
         return new ArrayList<>(byDevice.values());
     }
 

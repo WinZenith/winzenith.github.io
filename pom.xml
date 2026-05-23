@@ -16,6 +16,7 @@
         <maven.compiler.release>21</maven.compiler.release>
         <javafx.version>21.0.5</javafx.version>
         <javafx.platform>win</javafx.platform>
+        <javafx.classifier>win</javafx.classifier>
         <jackson.version>2.18.2</jackson.version>
         <junit.version>5.11.4</junit.version>
     </properties>
@@ -25,19 +26,24 @@
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-controls</artifactId>
             <version>${javafx.version}</version>
-            <classifier>${javafx.platform}</classifier>
+            <classifier>${javafx.classifier}</classifier>
         </dependency>
+<!--        <dependency>-->
+<!--            <groupId>org.openjfx</groupId>-->
+<!--            <artifactId>javafx-sdk</artifactId>-->
+<!--            <version>21</version>-->
+<!--        </dependency>-->
         <dependency>
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-graphics</artifactId>
             <version>${javafx.version}</version>
-            <classifier>${javafx.platform}</classifier>
+            <classifier>${javafx.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-base</artifactId>
             <version>${javafx.version}</version>
-            <classifier>${javafx.platform}</classifier>
+            <classifier>${javafx.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -111,15 +117,13 @@
                     <useModulePath>false</useModulePath>
                 </configuration>
             </plugin>
+            <!-- JavaFX Maven Plugin to set module path correctly -->
             <plugin>
                 <groupId>org.openjfx</groupId>
                 <artifactId>javafx-maven-plugin</artifactId>
                 <version>0.0.8</version>
                 <configuration>
                     <mainClass>com.basicsdriverupdate.App</mainClass>
-                    <options>
-                        <option>--enable-native-access=javafx.graphics</option>
-                    </options>
                 </configuration>
             </plugin>
             <plugin>

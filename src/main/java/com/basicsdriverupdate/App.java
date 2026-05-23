@@ -32,29 +32,34 @@ public class App extends Application {
 
     private final SettingsStore settingsStore = new SettingsStore();
     private final BooleanProperty busy = new SimpleBooleanProperty(false);
-    private Label adminLabel;
 
     @Override
     public void start(Stage stage) {
         AppLogger.init();
+        
+        // Request admin elevation at startup if not already running as admin
+        if (!AdminCheck.isRunningAsAdmin()) {
+            try {
+                AdminCheck.requestElevation();
+                Platform.exit();
+                return;
+            } catch (IOException e) {
+                new Alert(Alert.AlertType.ERROR, "Could not request elevation: " + e.getMessage()).showAndWait();
+                Platform.exit();
+                return;
+            }
+        }
+        
         AppSettings settings = settingsStore.load();
         if (!settings.eulaAccepted()) {
             showEula(settings);
         }
 
-        boolean admin = AdminCheck.isRunningAsAdmin();
-        adminLabel = new Label(admin ? "Administrator: Yes" : "Administrator: No");
-        Button elevateBtn = new Button("Elevate");
-        elevateBtn.setDisable(admin);
-        elevateBtn.setOnAction(e -> requestElevation());
-
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
         HBox header = new HBox(12,
                 new Label(AppInfo.DISPLAY_NAME),
-                spacer,
-                adminLabel,
-                elevateBtn);
+                spacer);
         header.setPadding(new Insets(10, 12, 10, 12));
         header.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
 
@@ -110,16 +115,6 @@ public class App extends Application {
             ));
         } catch (IOException e) {
             AppLogger.error("Failed to save EULA acceptance", e);
-        }
-    }
-
-    private void requestElevation() {
-        try {
-            AdminCheck.requestElevation();
-            new Alert(Alert.AlertType.INFORMATION,
-                    "If prompted by UAC, approve to restart as administrator.").showAndWait();
-        } catch (IOException e) {
-            new Alert(Alert.AlertType.ERROR, "Could not request elevation: " + e.getMessage()).showAndWait();
         }
     }
 

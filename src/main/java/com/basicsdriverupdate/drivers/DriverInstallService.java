@@ -9,11 +9,13 @@ import com.basicsdriverupdate.util.ProcessRunner;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class DriverInstallService {
 
     private final DriverBackupService backupService = new DriverBackupService();
     private final ProcessRunner processRunner = new ProcessRunner(900);
+    private final AtomicBoolean cancellationFlag = new AtomicBoolean(false);
 
     public InstallResult install(DriverUpdateCandidate candidate, AppSettings settings)
             throws IOException, InterruptedException {
@@ -32,6 +34,18 @@ public class DriverInstallService {
         }
         return new InstallResult(false, false,
                 "No Windows Update package ID. Open " + candidate.source() + " support to download certified driver.");
+    }
+
+    public void cancel() {
+        cancellationFlag.set(true);
+    }
+
+    public void resetCancellation() {
+        cancellationFlag.set(false);
+    }
+
+    public boolean isCancelled() {
+        return cancellationFlag.get();
     }
 
     public record InstallResult(boolean installed, boolean rebootRequired, String message) {

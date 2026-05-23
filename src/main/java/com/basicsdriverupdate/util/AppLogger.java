@@ -43,6 +43,11 @@ public final class AppLogger {
         LOG.info(msg);
     }
 
+    public static void debug(String msg) {
+        init();
+        LOG.fine(msg);
+    }
+
     public static void warning(String msg, Throwable t) {
         init();
         LOG.log(Level.WARNING, msg, t);

@@ -1,6 +1,7 @@
 package com.basicsdriverupdate.drivers.catalog;
 
 import com.basicsdriverupdate.drivers.model.InstalledDriver;
+import com.basicsdriverupdate.util.AppLogger;
 
 import java.util.regex.Pattern;
 
@@ -20,11 +21,20 @@ public class OemAmdCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String fetchLatestVersion(InstalledDriver driver) {
+        AppLogger.debug("AMD: Fetching latest version for " + driver.friendlyName());
+        
         String body = httpGet("https://www.amd.com/en/support");
         String v = extractVersion(body, Pattern.compile("Adrenalin[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+)"));
         if (v == null) {
             v = extractVersion(body, VERSION);
         }
+        
+        if (v != null) {
+            AppLogger.debug("AMD: Found version " + v + " for " + driver.friendlyName());
+        } else {
+            AppLogger.debug("AMD: Could not find version for " + driver.friendlyName());
+        }
+        
         return v;
     }
 }

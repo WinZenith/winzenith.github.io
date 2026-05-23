@@ -30,14 +30,24 @@ public final class AdminCheck {
 
     public static void requestElevation() throws IOException {
         String javaHome = System.getProperty("java.home");
-        String javaBin = javaHome + "\\bin\\java.exe";
+        String javaBin = javaHome + "\\bin\\javaw.exe";
         String classPath = System.getProperty("java.class.path");
+        String modulePath = System.getProperty("jdk.module.path");
         String mainClass = "com.basicsdriverupdate.App";
+        
+        StringBuilder args = new StringBuilder();
+        args.append("'--enable-native-access=javafx.graphics'");
+        if (modulePath != null && !modulePath.isEmpty()) {
+            args.append(",'--module-path','").append(modulePath.replace("'", "''")).append("'");
+        }
+        args.append(",'--add-modules','javafx.controls'");
+        args.append(",'-cp','").append(classPath.replace("'", "''")).append("'");
+        args.append(",'").append(mainClass).append("'");
+        
         String cmd = String.format(
-                "Start-Process -FilePath '%s' -ArgumentList '-cp','%s','%s' -Verb RunAs",
+                "Start-Process -FilePath '%s' -ArgumentList %s -Verb RunAs",
                 javaBin.replace("'", "''"),
-                classPath.replace("'", "''"),
-                mainClass
+                args.toString()
         );
         new ProcessBuilder("powershell", "-NoProfile", "-Command", cmd).start();
     }

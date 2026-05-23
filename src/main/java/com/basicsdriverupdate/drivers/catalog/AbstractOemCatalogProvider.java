@@ -3,6 +3,7 @@ package com.basicsdriverupdate.drivers.catalog;
 import com.basicsdriverupdate.drivers.model.DriverUpdateCandidate;
 import com.basicsdriverupdate.drivers.model.InstalledDriver;
 import com.basicsdriverupdate.drivers.model.UpdateSeverity;
+import com.basicsdriverupdate.util.AppLogger;
 import com.basicsdriverupdate.util.VersionCompare;
 
 import java.io.IOException;
@@ -37,10 +38,12 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             if (OemVendorHelper.detect(driver) != vendor) {
                 continue;
             }
+            AppLogger.debug(vendor.label() + ": Matched driver " + driver.friendlyName() + " (current version: " + driver.driverVersion() + ")");
             if (latest == null) {
                 latest = fetchLatestVersion(driver);
             }
             if (latest != null && VersionCompare.isOlder(driver.driverVersion(), latest)) {
+                AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName() + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
                 out.add(new DriverUpdateCandidate(
                         driver,
                         latest,
@@ -50,6 +53,8 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                         "Check " + vendor.label() + " support site for certified package.",
                         UpdateSeverity.RECOMMENDED
                 ));
+            } else if (latest != null) {
+                AppLogger.debug(vendor.label() + ": Driver " + driver.friendlyName() + " is up to date (current: " + driver.driverVersion() + ", latest: " + latest + ")");
             }
         }
         return out;
