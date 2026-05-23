@@ -33,15 +33,12 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
     @Override
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed) {
         List<DriverUpdateCandidate> out = new ArrayList<>();
-        String latest = null;
         for (InstalledDriver driver : installed) {
             if (OemVendorHelper.detect(driver) != vendor) {
                 continue;
             }
             AppLogger.debug(vendor.label() + ": Matched driver " + driver.friendlyName() + " (current version: " + driver.driverVersion() + ")");
-            if (latest == null) {
-                latest = fetchLatestVersion(driver);
-            }
+            String latest = fetchLatestVersion(driver);
             if (latest != null && VersionCompare.isOlder(driver.driverVersion(), latest)) {
                 AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName() + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
                 out.add(new DriverUpdateCandidate(

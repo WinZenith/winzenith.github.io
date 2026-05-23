@@ -94,6 +94,21 @@ public class DriverBackupService {
         }
     }
 
+    public void removeBackupEntry(DriverBackupEntry entry) throws IOException {
+        BackupIndex index = loadIndex();
+        index.getEntries().removeIf(e -> e.id().equals(entry.id()));
+        saveIndex(index);
+        // Delete the backup folder
+        try {
+            Path folder = Path.of(entry.backupFolder());
+            if (Files.isDirectory(folder)) {
+                Files.deleteIfExists(folder);
+            }
+        } catch (IOException e) {
+            AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
+        }
+    }
+
     private void pruneDeviceBackups(BackupIndex index, String deviceId) {
         List<DriverBackupEntry> deviceEntries = index.getEntries().stream()
                 .filter(e -> e.deviceId().equals(deviceId))

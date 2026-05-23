@@ -3,6 +3,7 @@ package com.basicsdriverupdate.drivers.catalog;
 import com.basicsdriverupdate.drivers.model.DriverUpdateCandidate;
 import com.basicsdriverupdate.drivers.model.InstalledDriver;
 import com.basicsdriverupdate.drivers.model.UpdateSeverity;
+import com.basicsdriverupdate.util.AppLogger;
 import com.basicsdriverupdate.util.JsonMapper;
 import com.basicsdriverupdate.util.PowerShellScripts;
 import com.basicsdriverupdate.util.ProcessResult;
@@ -29,7 +30,9 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
 
     @Override
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed) {
+        AppLogger.debug("WindowsUpdate: Searching for driver updates");
         if (!com.basicsdriverupdate.util.AppPaths.isWindows()) {
+            AppLogger.debug("WindowsUpdate: Not running on Windows, skipping");
             return List.of();
         }
         try {
@@ -37,13 +40,16 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
             ProcessResult result = processRunner.run(
                     ProcessRunner.powershellScript(script.toString(), String.valueOf(WU_SEARCH_TIMEOUT_SECONDS)));
             if (!result.success()) {
+                AppLogger.debug("WindowsUpdate: PowerShell script failed: " + result.combinedOutput());
                 return List.of();
             }
+            AppLogger.debug("WindowsUpdate: Found " + result.stdout().length() + " bytes of output");
             return matchUpdates(installed, result.stdout());
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
+            AppLogger.debug("WindowsUpdate: Exception: " + e.getMessage());
             return List.of();
         }
     }

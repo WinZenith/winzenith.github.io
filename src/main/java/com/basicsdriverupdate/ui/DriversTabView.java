@@ -38,7 +38,7 @@ import java.util.function.BooleanSupplier;
 public class DriversTabView extends BorderPane {
 
     private final DriverScanService scanService = new DriverScanService();
-    private final DriverCatalogAggregator catalog = DriverCatalogAggregator.createDefault();
+    private final DriverCatalogAggregator catalog = DriverCatalogAggregator.createWithoutWindowsUpdate();
     private final DriverInstallService installService = new DriverInstallService();
     private final SettingsStore settingsStore = new SettingsStore();
     private final BooleanProperty busy;
@@ -81,7 +81,7 @@ public class DriversTabView extends BorderPane {
         upToDateLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 5 0 5 0;");
         
         TableView<DriverRow> outdatedTable = buildTable(outdatedRows);
-        TableView<DriverRow> upToDateTable = buildTable(upToDateRows);
+        TableView<DriverRow> upToDateTable = buildUpToDateTable(upToDateRows);
         
         VBox.setVgrow(outdatedTable, Priority.ALWAYS);
         VBox.setVgrow(upToDateTable, Priority.ALWAYS);
@@ -175,6 +175,22 @@ public class DriversTabView extends BorderPane {
         });
 
         table.getColumns().addAll(deviceCol, currentCol, availableCol, sourceCol, actionCol);
+        return table;
+    }
+
+    private TableView<DriverRow> buildUpToDateTable(ObservableList<DriverRow> items) {
+        TableView<DriverRow> table = new TableView<>(items);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+
+        TableColumn<DriverRow, String> deviceCol = new TableColumn<>("Device");
+        deviceCol.setCellValueFactory(c -> c.getValue().deviceNameProperty());
+        deviceCol.setPrefWidth(220);
+
+        TableColumn<DriverRow, String> currentCol = new TableColumn<>("Current");
+        currentCol.setCellValueFactory(c -> c.getValue().currentVersionProperty());
+        currentCol.setPrefWidth(100);
+
+        table.getColumns().addAll(deviceCol, currentCol);
         return table;
     }
 

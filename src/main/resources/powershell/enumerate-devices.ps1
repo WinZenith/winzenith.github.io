@@ -3,16 +3,8 @@ $ErrorActionPreference = 'Stop'
 $drivers = Get-CimInstance Win32_PnPSignedDriver |
     Where-Object { $_.DeviceID -and $_.DriverVersion } |
     ForEach-Object {
-        $hwIds = ''
-        try {
-            $device = Get-PnpDevice -Id $_.DeviceID -ErrorAction SilentlyContinue
-            if ($device) {
-                $hwIds = ($device.HardwareId) -join ';'
-            }
-        } catch {
-            # Fallback to DeviceID if PnpDevice fails
-            $hwIds = $_.DeviceID
-        }
+        # Use DeviceID as hardware IDs since it contains vendor information (e.g., PCI\VEN_10DE)
+        $hwIds = $_.DeviceID
         [ordered]@{
             deviceId       = $_.DeviceID
             friendlyName   = if ($_.DeviceName) { $_.DeviceName } else { $_.DeviceID }
@@ -24,10 +16,4 @@ $drivers = Get-CimInstance Win32_PnPSignedDriver |
             status         = 'OK'
         }
     }
-# Debug: Log sample hardware IDs
-$sampleDrivers = $drivers | Select-Object -First 5 | ForEach-Object {
-    "Driver: $($_.friendlyName), HW IDs: $($_.hardwareIds), Provider: $($_.provider)"
-}
-Write-Host "Sample drivers (first 5):"
-$sampleDrivers | ForEach-Object { Write-Host $_ }
 $drivers | ConvertTo-Json -Depth 4 -Compress
