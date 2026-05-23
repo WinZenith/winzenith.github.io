@@ -2,6 +2,7 @@ package com.basicsdriverupdate.drivers.catalog;
 
 import com.basicsdriverupdate.drivers.model.DriverUpdateCandidate;
 import com.basicsdriverupdate.drivers.model.InstalledDriver;
+import com.basicsdriverupdate.util.AppLogger;
 import com.basicsdriverupdate.util.VersionCompare;
 
 import java.util.ArrayList;
