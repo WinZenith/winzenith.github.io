@@ -5,6 +5,7 @@ import com.basicsdriverupdate.settings.SettingsStore;
 import com.basicsdriverupdate.ui.DriversTabView;
 import com.basicsdriverupdate.ui.RestoreTabView;
 import com.basicsdriverupdate.ui.WindowsUpdateTabView;
+import com.basicsdriverupdate.ui.SoftwareUpdatesTabView;
 import com.basicsdriverupdate.util.AdminCheck;
 import com.basicsdriverupdate.util.AppInfo;
 import com.basicsdriverupdate.util.AppLogger;
@@ -16,7 +17,7 @@ import javafx.beans.property.SimpleBooleanProperty;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
-import javafx.scene.control.Button;
+
 import javafx.scene.control.Label;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
@@ -33,27 +34,29 @@ public class App extends Application {
     private final SettingsStore settingsStore = new SettingsStore();
     private final BooleanProperty busy = new SimpleBooleanProperty(false);
 
+
     @Override
     public void start(Stage stage) {
         AppLogger.init();
-        
-        // Request admin elevation at startup if not already running as admin
-        if (!AdminCheck.isRunningAsAdmin()) {
-            try {
-                AdminCheck.requestElevation();
-                Platform.exit();
-                return;
-            } catch (IOException e) {
-                new Alert(Alert.AlertType.ERROR, "Could not request elevation: " + e.getMessage()).showAndWait();
-                Platform.exit();
-                return;
-            }
-        }
-        
         AppSettings settings = settingsStore.load();
         if (!settings.eulaAccepted()) {
             showEula(settings);
         }
+
+        boolean admin = AdminCheck.isRunningAsAdmin();
+
+        // If running on Windows and not elevated, request elevation at startup (no prompt)
+        if (!admin && AppPaths.isWindows()) {
+            try {
+                AdminCheck.requestElevation();
+            } catch (IOException e) {
+                new Alert(Alert.AlertType.ERROR, "Could not request elevation: " + e.getMessage()).showAndWait();
+            }
+            Platform.exit();
+            return;
+        }
+
+
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
@@ -66,12 +69,14 @@ public class App extends Application {
         DriversTabView driversTab = new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
         RestoreTabView restoreTab = new RestoreTabView(busy, AdminCheck::isRunningAsAdmin);
         WindowsUpdateTabView wuTab = new WindowsUpdateTabView(busy, AdminCheck::isRunningAsAdmin);
+        SoftwareUpdatesTabView softwareTab = new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
 
         Tab restoreTabPane = new Tab("Restore", restoreTab);
         TabPane tabs = new TabPane(
                 new Tab("Drivers", driversTab),
                 restoreTabPane,
-                new Tab("Windows Update", wuTab)
+                new Tab("Windows Update", wuTab),
+                new Tab("Software updates", softwareTab)
         );
         tabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
             if (newTab == restoreTabPane) {
@@ -117,6 +122,8 @@ public class App extends Application {
             AppLogger.error("Failed to save EULA acceptance", e);
         }
     }
+
+
 
     public static void main(String[] args) {
         launch(args);

@@ -53,6 +53,10 @@ public final class AppLogger {
         LOG.log(Level.WARNING, msg, t);
     }
 
+    public static void warning(String msg) {
+        warning(msg, null);
+    }
+
     public static void error(String msg, Throwable t) {
         init();
         LOG.log(Level.SEVERE, msg, t);
@@ -62,5 +66,9 @@ public final class AppLogger {
                 t.printStackTrace(pw);
             }
         }
+    }
+
+    public static void error(String msg) {
+        error(msg, null);
     }
 }

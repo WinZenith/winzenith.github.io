@@ -10,6 +10,10 @@ import com.basicsdriverupdate.util.ProcessRunner;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.awt.Desktop;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 public class DriverInstallService {
 
@@ -37,12 +41,36 @@ public class DriverInstallService {
             boolean reboot = result.stdout() != null && result.stdout().contains("\"rebootRequired\":true");
             return new InstallResult(true, reboot, result.stdout());
         }
-        // For OEM drivers, remove backup since installation isn't actually performed
+        // For OEM drivers or missing Windows Update package ID: attempt to open vendor support page
         if (backupEntry != null) {
             backupService.removeBackupEntry(backupEntry);
         }
+        // Build support URL for known vendors
+        String source = candidate.source() != null ? candidate.source() : "Vendor";
+        String supportUrl;
+        switch (source) {
+            case "Intel" -> supportUrl = "https://www.intel.com/content/www/us/en/support/detect.html";
+            case "Nvidia", "NVIDIA" -> supportUrl = "https://www.nvidia.com/Download/index.aspx";
+            case "AMD" -> supportUrl = "https://www.amd.com/en/support";
+            case "Realtek" -> supportUrl = "https://www.realtek.com/en/downloads";
+            case "Broadcom" -> supportUrl = "https://www.broadcom.com/support";
+            case "Qualcomm" -> supportUrl = "https://www.qualcomm.com/support";
+            default -> {
+                String q = URLEncoder.encode(source + " driver download", StandardCharsets.UTF_8);
+                supportUrl = "https://www.google.com/search?q=" + q;
+            }
+        }
+        try {
+            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+                Desktop.getDesktop().browse(new URI(supportUrl));
+            } else {
+                new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", supportUrl).start();
+            }
+        } catch (Exception e) {
+            // ignore
+        }
         return new InstallResult(false, false,
-                "No Windows Update package ID. Open " + candidate.source() + " support to download certified driver.");
+                "No Windows Update package ID. Open " + source + " support to download certified driver. (" + supportUrl + ")");
     }
 
     public void cancel() {
