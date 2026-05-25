@@ -62,7 +62,8 @@ public class DriversTabView extends BorderPane {
         scanButton.setOnAction(e -> startScan());
         HBox top = new HBox(12, scanButton, progressBar, progressLabel, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
-        top.setPadding(new Insets(8));
+        top.setPadding(new Insets(12, 16, 12, 16));
+        top.setStyle("-fx-background-color: #FFFFFF; -fx-border-color: #E5E7EB; -fx-border-width: 0 0 1 0;");
 
         VBox tablesContainer = buildTablesContainer();
         setTop(top);
@@ -74,11 +75,8 @@ public class DriversTabView extends BorderPane {
     }
 
     private VBox buildTablesContainer() {
-        Label outdatedLabel = new Label("Outdated Drivers");
-        outdatedLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 5 0 5 0;");
-        
-        Label upToDateLabel = new Label("Up to Date Drivers");
-        upToDateLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 5 0 5 0;");
+        UILabel outdatedLabel = UILabel.sectionTitle("Outdated Drivers");
+        UILabel upToDateLabel = UILabel.sectionTitle("Up to Date Drivers");
         
         TableView<DriverRow> outdatedTable = buildTable(outdatedRows);
         TableView<DriverRow> upToDateTable = buildUpToDateTable(upToDateRows);
@@ -86,7 +84,8 @@ public class DriversTabView extends BorderPane {
         VBox.setVgrow(outdatedTable, Priority.ALWAYS);
         VBox.setVgrow(upToDateTable, Priority.ALWAYS);
         
-        VBox container = new VBox(5, outdatedLabel, outdatedTable, upToDateLabel, upToDateTable);
+        VBox container = new VBox(8, outdatedLabel, outdatedTable, upToDateLabel, upToDateTable);
+        container.setPadding(new Insets(12, 16, 12, 16));
         return container;
     }
 
@@ -111,12 +110,12 @@ public class DriversTabView extends BorderPane {
         sourceCol.setPrefWidth(90);
 
         TableColumn<DriverRow, Void> actionCol = new TableColumn<>("Action");
-        actionCol.setPrefWidth(150);
+        actionCol.setPrefWidth(200);
         actionCol.setCellFactory(col -> new TableCell<>() {
-            private final Button updateBtn = new Button("Update");
-            private final Button stopBtn = new Button("Stop");
+            private final UIButton updateBtn = UIButton.small("Update");
+            private final UIButton stopBtn = UIButton.small("Stop");
             private final ProgressBar downloadProgress = new ProgressBar(0);
-            private final Label sizeLabel = new Label();
+            private final UILabel sizeLabel = new UILabel("");
 
             {
                 updateBtn.setOnAction(e -> {
@@ -135,7 +134,6 @@ public class DriversTabView extends BorderPane {
                 downloadProgress.setVisible(false);
                 stopBtn.setVisible(false);
                 stopBtn.setDisable(true);
-                sizeLabel.setStyle("-fx-font-size: 11px;");
             }
 
             @Override
@@ -150,7 +148,7 @@ public class DriversTabView extends BorderPane {
                         updateBtn.setTooltip(new Tooltip(row.candidate().title()));
                     }
                     
-                    HBox container = new HBox(5, updateBtn, sizeLabel, downloadProgress, stopBtn);
+                    HBox container = new HBox(6, updateBtn, sizeLabel, downloadProgress, stopBtn);
                     container.setAlignment(Pos.CENTER_LEFT);
                     setGraphic(container);
                 }

@@ -6,6 +6,7 @@ import com.basicsdriverupdate.ui.DriversTabView;
 import com.basicsdriverupdate.ui.RestoreTabView;
 import com.basicsdriverupdate.ui.WindowsUpdateTabView;
 import com.basicsdriverupdate.ui.SoftwareUpdatesTabView;
+import com.basicsdriverupdate.ui.UILabel;
 import com.basicsdriverupdate.util.AdminCheck;
 import com.basicsdriverupdate.util.AppInfo;
 import com.basicsdriverupdate.util.AppLogger;
@@ -17,8 +18,6 @@ import javafx.beans.property.SimpleBooleanProperty;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
-
-import javafx.scene.control.Label;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
@@ -56,15 +55,13 @@ public class App extends Application {
             return;
         }
 
-
-
+        // Modern header with improved styling
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox header = new HBox(12,
-                new Label(AppInfo.DISPLAY_NAME),
-                spacer);
-        header.setPadding(new Insets(10, 12, 10, 12));
-        header.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
+        UILabel titleLabel = UILabel.header(AppInfo.DISPLAY_NAME);
+        HBox header = new HBox(16, titleLabel, spacer);
+        header.setPadding(new Insets(14, 16, 14, 16));
+        header.setStyle("-fx-background-color: #FFFFFF; -fx-border-color: #E5E7EB; -fx-border-width: 0 0 1 0;");
 
         DriversTabView driversTab = new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
         RestoreTabView restoreTab = new RestoreTabView(busy, AdminCheck::isRunningAsAdmin);
@@ -95,6 +92,9 @@ public class App extends Application {
         }
 
         Scene scene = new Scene(root, 920, 560);
+        // Load light theme stylesheet
+        String stylesheet = getClass().getResource("/styles.css").toExternalForm();
+        scene.getStylesheets().add(stylesheet);
         stage.setTitle(AppInfo.DISPLAY_NAME);
         stage.setScene(scene);
         stage.show();

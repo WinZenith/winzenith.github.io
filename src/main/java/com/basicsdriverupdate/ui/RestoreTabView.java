@@ -39,7 +39,8 @@ public class RestoreTabView extends BorderPane {
         refreshButton.setOnAction(e -> refresh());
         HBox top = new HBox(12, refreshButton, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
-        top.setPadding(new Insets(8));
+        top.setPadding(new Insets(12, 16, 12, 16));
+        top.setStyle("-fx-background-color: #FFFFFF; -fx-border-color: #E5E7EB; -fx-border-width: 0 0 1 0;");
         setTop(top);
         setCenter(buildTable());
         if (!AppPaths.isWindows()) {
@@ -68,7 +69,7 @@ public class RestoreTabView extends BorderPane {
         TableColumn<RestoreRow, Void> actionCol = new TableColumn<>("Action");
         actionCol.setPrefWidth(90);
         actionCol.setCellFactory(col -> new TableCell<>() {
-            private final Button revertBtn = new Button("Revert");
+            private final UIButton revertBtn = UIButton.small("Revert");
 
             {
                 revertBtn.setOnAction(e -> {
