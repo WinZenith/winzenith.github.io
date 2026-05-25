@@ -27,6 +27,16 @@ public class DriverInstallService {
         if (settings.autoBackupDrivers()) {
             backupEntry = backupService.backupBeforeUpdate(candidate.installed(), settings);
         }
+
+        // Block pre-release candidates (alpha/beta/rc/preview/test) to ensure only stable drivers are installed
+        String availVer = candidate.availableVersion();
+        if (availVer != null && availVer.matches("(?i).*\\b(alpha|beta|rc|preview|test)\\b.*")) {
+            if (backupEntry != null) {
+                backupService.removeBackupEntry(backupEntry);
+            }
+            return new InstallResult(false, false, "Blocked: candidate appears to be a pre-release (alpha/beta/rc/preview). Only stable releases are installed.");
+        }
+
         if ("WindowsUpdate".equals(candidate.source()) && candidate.packageId() != null && !candidate.packageId().isBlank()) {
             Path script = PowerShellScripts.resolve("wu-install.ps1");
             ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
@@ -60,17 +70,25 @@ public class DriverInstallService {
                 supportUrl = "https://www.google.com/search?q=" + q;
             }
         }
-        try {
-            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
-                Desktop.getDesktop().browse(new URI(supportUrl));
-            } else {
-                new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", supportUrl).start();
+
+        // Only open vendor support automatically for trusted providers
+        java.util.Set<String> trusted = java.util.Set.of("Intel","Nvidia","NVIDIA","AMD","Realtek","Broadcom","Qualcomm","HP","Dell","Lenovo","Logitech","Synaptics");
+        if (trusted.contains(source)) {
+            try {
+                if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+                    Desktop.getDesktop().browse(new URI(supportUrl));
+                } else {
+                    new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", supportUrl).start();
+                }
+            } catch (Exception e) {
+                // ignore
             }
-        } catch (Exception e) {
-            // ignore
+            return new InstallResult(false, false,
+                    "No Windows Update package ID. Open " + source + " support to download certified driver. (" + supportUrl + ")");
+        } else {
+            return new InstallResult(false, false,
+                    "No Windows Update package ID and source is not in trusted providers. Visit: " + supportUrl + " to obtain a certified driver and ensure it's signed.");
         }
-        return new InstallResult(false, false,
-                "No Windows Update package ID. Open " + source + " support to download certified driver. (" + supportUrl + ")");
     }
 
     public void cancel() {
