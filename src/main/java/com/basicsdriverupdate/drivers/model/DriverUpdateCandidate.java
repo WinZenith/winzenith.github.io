@@ -7,6 +7,7 @@ public record DriverUpdateCandidate(
         String packageId,
         String title,
         String description,
-        UpdateSeverity severity
+        UpdateSeverity severity,
+        String downloadUrl
 ) {
 }

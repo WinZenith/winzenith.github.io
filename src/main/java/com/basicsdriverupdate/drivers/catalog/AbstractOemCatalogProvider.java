@@ -41,6 +41,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             String latest = fetchLatestVersion(driver);
             if (latest != null && VersionCompare.isOlder(driver.driverVersion(), latest)) {
                 AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName() + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
+                String downloadUrl = getDownloadUrl(driver);
                 out.add(new DriverUpdateCandidate(
                         driver,
                         latest,
@@ -48,7 +49,8 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                         vendor.name() + ":" + sanitize(deviceKey(driver)),
                         vendor.label() + " driver update available",
                         "Check " + vendor.label() + " support site for certified package.",
-                        UpdateSeverity.RECOMMENDED
+                        UpdateSeverity.RECOMMENDED,
+                        downloadUrl
                 ));
             } else if (latest != null) {
                 AppLogger.debug(vendor.label() + ": Driver " + driver.friendlyName() + " is up to date (current: " + driver.driverVersion() + ", latest: " + latest + ")");
@@ -87,6 +89,11 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
         if (m.find()) {
             return m.group(1);
         }
+        return null;
+    }
+
+    protected String getDownloadUrl(InstalledDriver driver) {
+        // Override in subclasses to return vendor-specific download URL
         return null;
     }
 
