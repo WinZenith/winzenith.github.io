@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -107,8 +108,8 @@ public class DriverInstallService {
     private ProcessResult downloadFile(String url, Path destination) throws IOException, InterruptedException {
         // Use PowerShell to download file
         String psCommand = "Invoke-WebRequest -Uri '" + url + "' -OutFile '" + destination + "'";
-        ProcessResult result = processRunner.run(new ProcessBuilder(
-                "powershell", "-NoProfile", "-Command", psCommand).command().toArray(new String[0]));
+        ProcessResult result = processRunner.run(List.of(new ProcessBuilder(
+                "powershell", "-NoProfile", "-Command", psCommand).command().toArray(new String[0])));
         return result;
     }
 
@@ -117,16 +118,16 @@ public class DriverInstallService {
         
         if (filename.endsWith(".inf")) {
             // Install INF file using pnputil
-            return processRunner.run(new ProcessBuilder(
-                    "pnputil.exe", "/add-driver", driverFile.toString(), "/install").command().toArray(new String[0]));
+            return processRunner.run(List.of(new ProcessBuilder(
+                    "pnputil.exe", "/add-driver", driverFile.toString(), "/install").command().toArray(new String[0])));
         } else if (filename.endsWith(".exe")) {
             // Execute installer (trusted vendors only)
-            return processRunner.run(new ProcessBuilder(driverFile.toString()).command().toArray(new String[0]));
+            return processRunner.run(List.of(new ProcessBuilder(driverFile.toString()).command().toArray(new String[0])));
         } else if (filename.endsWith(".zip") || filename.endsWith(".rar")) {
-            return new ProcessResult(false, "", "Compressed driver packages require manual extraction. Download: " + driverFile);
+            return new ProcessResult(1, "", "Compressed driver packages require manual extraction. Download: " + driverFile);
         }
         
-        return new ProcessResult(false, "", "Unknown driver file type: " + filename);
+        return new ProcessResult(2, "", "Unknown driver file type: " + filename);
     }
 
     private String extractFilename(String url) {
