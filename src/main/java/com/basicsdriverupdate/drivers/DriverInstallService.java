@@ -58,6 +58,13 @@ public class DriverInstallService {
 
         // For OEM drivers: download from provided URL and install via pnputil
         if (candidate.downloadUrl() != null && !candidate.downloadUrl().isBlank()) {
+            // Verify the download URL is from a trusted provider for the candidate's source
+            if (!isTrustedSource(candidate)) {
+                if (backupEntry != null) {
+                    backupService.removeBackupEntry(backupEntry);
+                }
+                return new InstallResult(false, false, "Blocked: download URL is not from a trusted vendor. URL: " + candidate.downloadUrl());
+            }
             if (backupEntry != null) {
                 backupService.removeBackupEntry(backupEntry);
             }
@@ -97,7 +104,7 @@ public class DriverInstallService {
             }
             
             AppLogger.info("Driver installed successfully from: " + driverFile);
-            return new InstallResult(true, false, "Driver installed from " + candidate.source());
+            return new InstallResult(true, false, "Driver installed from " + driverFile.toString());
             
         } catch (Exception e) {
             AppLogger.warning("Error during download and install: " + e.getMessage());
@@ -137,6 +144,38 @@ public class DriverInstallService {
             return path.substring(path.lastIndexOf('/') + 1);
         } catch (Exception e) {
             return "driver_" + System.currentTimeMillis();
+        }
+    }
+
+    private boolean isTrustedSource(DriverUpdateCandidate candidate) {
+        if (candidate == null || candidate.downloadUrl() == null) return false;
+        try {
+            java.net.URL u = new java.net.URL(candidate.downloadUrl());
+            String host = u.getHost().toLowerCase();
+            String source = candidate.source() != null ? candidate.source() : "";
+            switch (source) {
+                case "Intel":
+                    return host.contains("intel.com");
+                case "Nvidia":
+                    return host.contains("nvidia.com") || host.contains("geforce.com");
+                case "AMD":
+                    return host.contains("amd.com");
+                case "Realtek":
+                    return host.contains("realtek.com");
+                case "Broadcom":
+                    return host.contains("broadcom.com");
+                case "Qualcomm":
+                    return host.contains("qualcomm.com");
+                case "WindowsUpdate":
+                    return host.contains("microsoft.com") || host.contains("download.microsoft.com") || host.contains("catalog.update.microsoft.com");
+                default:
+                    for (String t : new String[]{"intel.com", "nvidia.com", "amd.com", "realtek.com", "broadcom.com", "qualcomm.com", "microsoft.com"}) {
+                        if (host.contains(t)) return true;
+                    }
+                    return false;
+            }
+        } catch (Exception e) {
+            return false;
         }
     }
 
