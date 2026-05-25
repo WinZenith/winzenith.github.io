@@ -1,0 +1,14 @@
+[
+  {
+    "id": "example-explicit-filename",
+    "provider": "ExampleVendor",
+    "component": "network",
+    "platform": "windows",
+    "arch": "x64",
+    "match_method": "filename",
+    "match_value": "example-driver.sys",
+    "version": "1.2.3.4",
+    "test_only": true,
+    "confidence": 0.1
+  }
+]
