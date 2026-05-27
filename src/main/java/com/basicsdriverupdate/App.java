@@ -7,6 +7,9 @@ import com.basicsdriverupdate.ui.RestoreTabView;
 import com.basicsdriverupdate.ui.WindowsUpdateTabView;
 import com.basicsdriverupdate.ui.SoftwareUpdatesTabView;
 import com.basicsdriverupdate.ui.UILabel;
+import com.basicsdriverupdate.ui.UIButton;
+
+import javafx.scene.layout.VBox;
 import com.basicsdriverupdate.util.AdminCheck;
 import com.basicsdriverupdate.util.AppInfo;
 import com.basicsdriverupdate.util.AppLogger;
@@ -55,36 +58,34 @@ public class App extends Application {
             return;
         }
 
-        // Modern header with improved styling
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
-        UILabel titleLabel = UILabel.header(AppInfo.DISPLAY_NAME);
-        HBox header = new HBox(16, titleLabel, spacer);
-        header.setPadding(new Insets(14, 16, 14, 16));
-        header.setStyle("-fx-background-color: #FFFFFF; -fx-border-color: #E5E7EB; -fx-border-width: 0 0 1 0;");
-
+        // Modern left sidebar with theme toggle
         DriversTabView driversTab = new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
         RestoreTabView restoreTab = new RestoreTabView(busy, AdminCheck::isRunningAsAdmin);
         WindowsUpdateTabView wuTab = new WindowsUpdateTabView(busy, AdminCheck::isRunningAsAdmin);
         SoftwareUpdatesTabView softwareTab = new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
 
-        Tab restoreTabPane = new Tab("Restore", restoreTab);
-        TabPane tabs = new TabPane(
-                new Tab("Drivers", driversTab),
-                restoreTabPane,
-                new Tab("Windows Update", wuTab),
-                new Tab("Software updates", softwareTab)
-        );
-        tabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
-            if (newTab == restoreTabPane) {
-                restoreTab.refresh();
-            }
-        });
-        tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-
         BorderPane root = new BorderPane();
-        root.setTop(header);
-        root.setCenter(tabs);
+
+        VBox sidebar = new VBox(12);
+        sidebar.setPadding(new Insets(16));
+        sidebar.getStyleClass().add("sidebar");
+
+        UIButton driversBtn = UIButton.primary("Drivers");
+        UIButton restoreBtn = UIButton.secondary("Restore");
+        UIButton wuBtn = UIButton.secondary("Windows Update");
+        UIButton softwareBtn = UIButton.secondary("Software updates");
+
+        driversBtn.setOnAction(e -> root.setCenter(driversTab));
+        restoreBtn.setOnAction(e -> { root.setCenter(restoreTab); restoreTab.refresh(); });
+        wuBtn.setOnAction(e -> root.setCenter(wuTab));
+        softwareBtn.setOnAction(e -> root.setCenter(softwareTab));
+
+
+
+        sidebar.getChildren().addAll(driversBtn, restoreBtn, wuBtn, softwareBtn);
+
+        root.setLeft(sidebar);
+        root.setCenter(driversTab);
 
         if (!AppPaths.isWindows()) {
             new Alert(Alert.AlertType.WARNING,
@@ -92,8 +93,8 @@ public class App extends Application {
         }
 
         Scene scene = new Scene(root, 920, 560);
-        // Load light theme stylesheet
-        String stylesheet = getClass().getResource("/styles.css").toExternalForm();
+        // Load modern theme stylesheet
+        String stylesheet = getClass().getResource("/styles-modern.css").toExternalForm();
         scene.getStylesheets().add(stylesheet);
         stage.setTitle(AppInfo.DISPLAY_NAME);
         stage.setScene(scene);

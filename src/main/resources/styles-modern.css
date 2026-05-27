@@ -1,0 +1,198 @@
+/* Modern JavaFX Theme - styles-modern.css (Light) */
+
+/* Design tokens */
+.root {
+    /* Palette */
+    -primary-color: #3366FF;
+    -primary-600: #2B57E6;
+    -muted: #6B7280;
+    -success: #16A34A;
+    -warning: #F59E0B;
+    -danger: #EF4444;
+
+    -bg: #F5F7FA;             /* very light cool gray */
+    -surface: #FFFFFF;        /* card/panel surface */
+    -glass: rgba(16,24,40,0.04);
+
+    /* Layout & scale */
+    -radius: 8;               /* border radius in px */
+    -shadow-sm: rgba(16,24,40,0.06);
+    -shadow-md: rgba(16,24,40,0.10);
+
+    -font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+    -font-size: 13px;
+    -text-primary: #0F1724;
+    -text-secondary: #6B7280;
+}
+
+/* Base */
+.root {
+    -fx-font-family: 'Inter', 'Segoe UI', 'Arial';
+    -fx-font-size: 13px;
+    -fx-text-fill: -text-primary;
+    -fx-background-color: -bg;
+}
+
+/* Window header (if styled by CSS) */
+.header {
+    -fx-background-color: -surface;
+    -fx-border-color: rgba(16,24,40,0.06);
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 14 16 14 16;
+}
+
+/* Buttons (primary by default) */
+.button {
+    -fx-padding: 8 14 8 14;
+    -fx-font-size: 13px;
+    -fx-font-weight: 600;
+    -fx-text-fill: white;
+    -fx-background-color: -primary-color;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-cursor: hand;
+    -fx-effect: dropshadow(gaussian, rgba(16,24,40,0.06), 8, 0.0, 0, 2);
+}
+.button:hover {
+    -fx-translate-y: -1; /* subtle lift */
+    -fx-background-color: -primary-600;
+}
+.button:pressed {
+    -fx-translate-y: 0;
+    -fx-background-color: derive(-primary-color, -8%);
+}
+.button:focused {
+    -fx-effect: dropshadow( gaussian , rgba(51,102,255,0.12) , 0, 0.0 , 0 , 6 );
+}
+
+/* Secondary / ghost buttons */
+.button.secondary {
+    -fx-background-color: transparent;
+    -fx-text-fill: -text-primary;
+    -fx-border-color: rgba(16,24,40,0.06);
+    -fx-border-width: 1;
+}
+.button.secondary:hover {
+    -fx-background-color: rgba(16,24,40,0.02);
+}
+
+/* Danger / Success variants */
+.button.danger { -fx-background-color: -danger; }
+.button.success { -fx-background-color: -success; }
+
+/* Labels / Typography */
+.label { -fx-text-fill: -text-primary; -fx-font-size: 13px; }
+.label.header { -fx-font-size: 18px; -fx-font-weight: 600; }
+.label.section-title { -fx-font-size: 14px; -fx-font-weight: 600; -fx-padding: 8 0 6 0; }
+.label.secondary { -fx-text-fill: -text-secondary; }
+
+/* Table modern flat style */
+.table-view {
+    -fx-background-color: -surface;
+    -fx-border-color: transparent;
+    -fx-padding: 0;
+    -fx-background-insets: 0;
+}
+.table-view .column-header-background {
+    -fx-background-color: transparent;
+}
+.table-view .column-header {
+    -fx-font-weight: 600;
+    -fx-font-size: 12px;
+    -fx-text-fill: -text-secondary;
+    -fx-padding: 12 16 12 16;
+}
+.table-view .table-cell {
+    -fx-padding: 12 16 12 16;
+    -fx-font-size: 13px;
+    -fx-border-color: transparent;
+}
+.table-view .table-row-cell {
+    -fx-background-color: transparent;
+}
+.table-view .table-row-cell:hover {
+    -fx-background-color: rgba(51,102,255,0.04); /* subtle hover */
+}
+.table-view .table-row-cell:selected {
+    -fx-background-color: rgba(51,102,255,0.08);
+}
+
+/* Optional zebra (very subtle) */
+.table-view .table-row-cell:odd { -fx-background-color: transparent; }
+.table-view .table-row-cell:even { -fx-background-color: rgba(16,24,40,0.01); }
+
+/* Text inputs */
+.text-field, .text-area {
+    -fx-font-size: 13px;
+    -fx-padding: 8;
+    -fx-border-color: rgba(16,24,40,0.06);
+    -fx-border-radius: 6;
+    -fx-background-radius: 6;
+    -fx-border-width: 1;
+    -fx-text-fill: -text-primary;
+    -fx-control-inner-background: -surface;
+}
+.text-field:focused, .text-area:focused {
+    -fx-border-color: -primary-color;
+    -fx-border-width: 2;
+}
+
+/* Scrollbar (thin modern thumb) */
+.scroll-bar { -fx-background-color: transparent; }
+.scroll-bar .thumb {
+    -fx-background-color: rgba(16,24,40,0.12);
+    -fx-background-radius: 6;
+}
+.scroll-bar .thumb:hover { -fx-background-color: rgba(16,24,40,0.24); }
+
+/* Tab pane modern */
+.tab-pane .tab-header-background { -fx-background-color: transparent; }
+.tab-pane .tab {
+    -fx-padding: 12 18 12 18;
+    -fx-font-size: 13px;
+    -fx-text-fill: -text-secondary;
+    -fx-background-color: transparent;
+}
+.tab-pane .tab:selected {
+    -fx-text-fill: -text-primary;
+    -fx-border-color: transparent;
+    -fx-font-weight: 600;
+}
+
+/* Cards / panels */
+.container-card {
+    -fx-background-color: -surface;
+    -fx-padding: 12;
+    -fx-border-radius: 8;
+    -fx-background-radius: 8;
+    -fx-effect: dropshadow( gaussian , rgba(16,24,40,0.04) , 10, 0.0 , 0 , 4 );
+}
+
+/* Badges */
+.badge { -fx-padding: 4 8 4 8; -fx-background-radius: 12; -fx-font-weight: 600; -fx-font-size: 11px; }
+.badge.success { -fx-background-color: rgba(22,163,74,0.10); -fx-text-fill: -success; }
+.badge.warning { -fx-background-color: rgba(245,158,11,0.10); -fx-text-fill: -warning; }
+.badge.danger { -fx-background-color: rgba(239,68,68,0.10); -fx-text-fill: -danger; }
+
+/* Empty state (structures only) */
+.empty-state { -fx-alignment: center; -fx-spacing: 12; -fx-padding: 40; }
+.empty-state .icon { -fx-opacity: 0.9; }
+.empty-state h3 { -fx-font-size: 18px; -fx-font-weight: 600; }
+.empty-state p { -fx-font-size: 13px; -fx-text-fill: -text-secondary; }
+
+/* Dialogs */
+.dialog-pane { -fx-background-color: -surface; }
+.dialog-pane .header-panel { -fx-background-color: transparent; -fx-padding: 16; }
+
+/* Accessibility focus */
+.button:focused, .text-field:focused, .combo-box:focused { -fx-effect: dropshadow( gaussian , rgba(51,102,255,0.12) , 0, 0.0 , 0 , 6 ); }
+
+/* Sidebar */
+.sidebar {
+    -fx-background-color: -surface;
+    -fx-padding: 12;
+    -fx-spacing: 8;
+    -fx-border-width: 0 1 0 0;
+    -fx-border-color: rgba(16,24,40,0.04);
+}
+
