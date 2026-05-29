@@ -65,6 +65,21 @@ public class DriverInstallService {
                 }
                 return new InstallResult(false, false, "Blocked: download URL is not from a trusted vendor. URL: " + candidate.downloadUrl());
             }
+
+            // Intel product pages (intel.com/content/.../download/.../.html) require JS and
+            // license acceptance; cannot be downloaded automatically — open in browser instead.
+            if (candidate.downloadUrl().contains("intel.com") && candidate.downloadUrl().matches(".*/download/\\d+/.*\\.html$")) {
+                try {
+                    java.awt.Desktop.getDesktop().browse(java.net.URI.create(candidate.downloadUrl()));
+                } catch (Exception ignored) {
+                }
+                if (backupEntry != null) {
+                    backupService.removeBackupEntry(backupEntry);
+                }
+                return new InstallResult(false, false,
+                        "Intel driver page opened in your browser. Download the driver and install it manually.");
+            }
+
             if (backupEntry != null) {
                 backupService.removeBackupEntry(backupEntry);
             }
@@ -129,7 +144,14 @@ public class DriverInstallService {
                     "pnputil.exe", "/add-driver", driverFile.toString(), "/install").command().toArray(new String[0])));
         } else if (filename.endsWith(".exe")) {
             // Execute installer (trusted vendors only)
-            return processRunner.run(List.of(new ProcessBuilder(driverFile.toString()).command().toArray(new String[0])));
+            // Use silent flag for Intel installer executables
+            String[] cmd;
+            if ("Intel".equals(candidate.source())) {
+                cmd = new String[]{driverFile.toString(), "/S"};
+            } else {
+                cmd = new String[]{driverFile.toString()};
+            }
+            return processRunner.run(List.of(new ProcessBuilder(cmd).command().toArray(new String[0])));
         } else if (filename.endsWith(".zip") || filename.endsWith(".rar")) {
             return new ProcessResult(1, "", "Compressed driver packages require manual extraction. Download: " + driverFile);
         }

@@ -136,7 +136,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
         return null;
     }
 
-    private String findFirstMatchingLink(String html, Pattern pattern) {
+    protected String findFirstMatchingLink(String html, Pattern pattern) {
         if (html == null) return null;
         Matcher m = pattern.matcher(html);
         if (m.find()) {
@@ -145,7 +145,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
         return null;
     }
 
-    private boolean isLikelyStable(String url) {
+    protected boolean isLikelyStable(String url) {
         if (url == null) return false;
         String lower = url.toLowerCase();
         return !lower.matches(".*\\b(alpha|beta|rc|preview|test)\\b.*");
