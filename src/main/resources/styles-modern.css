@@ -115,6 +115,10 @@
 }
 .table-view .table-row-cell:selected {
     -fx-background-color: rgba(51,102,255,0.08);
+    -fx-text-fill: -text-primary;
+}
+.table-view .table-row-cell:selected .table-cell {
+    -fx-text-fill: -text-primary;
 }
 
 /* Optional zebra (very subtle) */

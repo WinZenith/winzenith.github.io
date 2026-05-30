@@ -42,6 +42,9 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             if (latest != null && VersionCompare.isOlder(driver.driverVersion(), latest)) {
                 AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName() + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
                 String downloadUrl = getDownloadUrl(driver);
+                if (downloadUrl == null) {
+                    downloadUrl = "";
+                }
                 out.add(new DriverUpdateCandidate(
                         driver,
                         latest,
@@ -66,7 +69,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(20))
-                    .header("User-Agent", "SBasicDriverUpdater/1.0")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
                     .GET()
                     .build();
             HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
@@ -90,6 +93,43 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             return m.group(1);
         }
         return null;
+    }
+
+    /**
+     * Decodes common HTML entities in a string so extracted URLs are usable.
+     * Handles numeric references (&#58; &#47; &#46; etc.) and named entities (&amp; &lt; etc.).
+     */
+    protected static String decodeHtmlEntities(String s) {
+        if (s == null) return null;
+        String result = s;
+        // Numeric character references: &#58; → :  &#47; → /  &#46; → .  etc.
+        StringBuilder sb = new StringBuilder(result.length());
+        int i = 0;
+        while (i < result.length()) {
+            if (result.charAt(i) == '&' && i + 1 < result.length() && result.charAt(i + 1) == '#') {
+                int semi = result.indexOf(';', i + 2);
+                if (semi > i + 2) {
+                    String entity = result.substring(i + 2, semi);
+                    try {
+                        int codePoint = Integer.parseInt(entity);
+                        sb.appendCodePoint(codePoint);
+                        i = semi + 1;
+                        continue;
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            sb.append(result.charAt(i));
+            i++;
+        }
+        result = sb.toString();
+        // Named entities
+        result = result.replace("&amp;", "&");
+        result = result.replace("&lt;", "<");
+        result = result.replace("&gt;", ">");
+        result = result.replace("&quot;", "\"");
+        result = result.replace("&apos;", "'");
+        return result;
     }
 
     protected String getDownloadUrl(InstalledDriver driver) {

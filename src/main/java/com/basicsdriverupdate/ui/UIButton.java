@@ -56,4 +56,10 @@ public class UIButton extends Button {
     public static UIButton small(String text) {
         return new UIButton(text, ButtonStyle.SMALL);
     }
+
+    public void setStyleType(ButtonStyle style) {
+        getStyleClass().removeAll("button", "secondary", "success", "danger");
+        setStyle(null);
+        applyStyle(style);
+    }
 }

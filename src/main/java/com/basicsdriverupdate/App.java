@@ -71,16 +71,14 @@ public class App extends Application {
         sidebar.getStyleClass().add("sidebar");
 
         UIButton driversBtn = UIButton.primary("Drivers");
-        UIButton restoreBtn = UIButton.secondary("Restore");
+        UIButton restoreBtn = UIButton.secondary("Rollback driver");
         UIButton wuBtn = UIButton.secondary("Windows Update");
         UIButton softwareBtn = UIButton.secondary("Software updates");
 
-        driversBtn.setOnAction(e -> root.setCenter(driversTab));
-        restoreBtn.setOnAction(e -> { root.setCenter(restoreTab); restoreTab.refresh(); });
-        wuBtn.setOnAction(e -> root.setCenter(wuTab));
-        softwareBtn.setOnAction(e -> root.setCenter(softwareTab));
-
-
+        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(driversTab); });
+        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
+        wuBtn.setOnAction(e -> { selectTab(wuBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(wuTab); });
+        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(softwareTab); });
 
         sidebar.getChildren().addAll(driversBtn, restoreBtn, wuBtn, softwareBtn);
 
@@ -99,6 +97,13 @@ public class App extends Application {
         stage.setTitle(AppInfo.DISPLAY_NAME);
         stage.setScene(scene);
         stage.show();
+    }
+
+    private void selectTab(UIButton selected, UIButton... all) {
+        for (UIButton btn : all) {
+            btn.setStyleType(UIButton.ButtonStyle.SECONDARY);
+        }
+        selected.setStyleType(UIButton.ButtonStyle.PRIMARY);
     }
 
     private void showEula(AppSettings settings) {

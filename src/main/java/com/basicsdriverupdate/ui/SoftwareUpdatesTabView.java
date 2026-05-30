@@ -9,6 +9,7 @@ import com.basicsdriverupdate.util.ProcessResult;
 import com.basicsdriverupdate.util.AppPaths;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
+import javafx.beans.value.ChangeListener;
 import javafx.collections.FXCollections;
 import javafx.collections.ListChangeListener;
 import javafx.collections.ObservableList;
@@ -62,7 +63,16 @@ public class SoftwareUpdatesTabView extends BorderPane {
         setTop(top);
         setCenter(table);
 
-        rows.addListener((ListChangeListener<SoftwareUpdateEntry>) c -> updateInstallButtonState());
+        rows.addListener((ListChangeListener<SoftwareUpdateEntry>) c -> {
+            while (c.next()) {
+                if (c.wasAdded()) {
+                    for (SoftwareUpdateEntry entry : c.getAddedSubList()) {
+                        entry.selectedProperty().addListener((obs, oldVal, newVal) -> updateInstallButtonState());
+                    }
+                }
+            }
+            updateInstallButtonState();
+        });
 
         if (!AppPaths.isWindows()) {
             scanButton.setDisable(true);
@@ -119,6 +129,18 @@ public class SoftwareUpdatesTabView extends BorderPane {
         });
 
         table.getColumns().addAll(selCol, nameCol, currentCol, availCol, actionCol);
+
+        table.setRowFactory(tv -> {
+            TableRow<SoftwareUpdateEntry> row = new TableRow<>();
+            row.setOnMouseClicked(event -> {
+                if (!row.isEmpty()) {
+                    SoftwareUpdateEntry entry = row.getItem();
+                    entry.selectedProperty().set(!entry.selectedProperty().get());
+                }
+            });
+            return row;
+        });
+
         return table;
     }
 

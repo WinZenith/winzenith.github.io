@@ -15,8 +15,6 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.net.URI;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 
 public class DriverInstallService {
 
@@ -56,28 +54,17 @@ public class DriverInstallService {
             return new InstallResult(true, reboot, result.stdout());
         }
 
-        // For OEM drivers: download from provided URL and install via pnputil
+        // For OEM drivers: download from provided URL and install automatically
         if (candidate.downloadUrl() != null && !candidate.downloadUrl().isBlank()) {
-            // Verify the download URL is from a trusted provider for the candidate's source
-            if (!isTrustedSource(candidate)) {
-                if (backupEntry != null) {
-                    backupService.removeBackupEntry(backupEntry);
-                }
-                return new InstallResult(false, false, "Blocked: download URL is not from a trusted vendor. URL: " + candidate.downloadUrl());
-            }
+            // Decode any HTML entities in the URL first
+            String decodedUrl = decodeHtmlEntities(candidate.downloadUrl());
 
-            // Intel product pages (intel.com/content/.../download/.../.html) require JS and
-            // license acceptance; cannot be downloaded automatically — open in browser instead.
-            if (candidate.downloadUrl().contains("intel.com") && candidate.downloadUrl().matches(".*/download/\\d+/.*\\.html$")) {
-                try {
-                    java.awt.Desktop.getDesktop().browse(java.net.URI.create(candidate.downloadUrl()));
-                } catch (Exception ignored) {
-                }
+            // Verify the download URL is from a trusted provider for the candidate's source
+            if (!isTrustedSource(decodedUrl, candidate.source())) {
                 if (backupEntry != null) {
                     backupService.removeBackupEntry(backupEntry);
                 }
-                return new InstallResult(false, false,
-                        "Intel driver page opened in your browser. Download the driver and install it manually.");
+                return new InstallResult(false, false, "Blocked: download URL is not from a trusted vendor. URL: " + decodedUrl);
             }
 
             if (backupEntry != null) {
@@ -91,7 +78,7 @@ public class DriverInstallService {
             backupService.removeBackupEntry(backupEntry);
         }
         return new InstallResult(false, false,
-                "No download available for " + candidate.source() + ". Update source data or check vendor website manually.");
+                "No download URL available for " + candidate.source() + ". Check vendor website manually.");
     }
 
     private InstallResult downloadAndInstallDriver(DriverUpdateCandidate candidate) {
@@ -99,20 +86,21 @@ public class DriverInstallService {
             Path downloadsDir = Paths.get(System.getProperty("user.home"), "Downloads");
             Files.createDirectories(downloadsDir);
             
-            String filename = extractFilename(candidate.downloadUrl());
+            // Decode any HTML entities in the URL as a safety net
+            String downloadUrl = decodeHtmlEntities(candidate.downloadUrl());
+            
+            String filename = extractFilename(downloadUrl);
             Path driverFile = downloadsDir.resolve(filename);
             
-            AppLogger.info("Downloading driver from: " + candidate.downloadUrl());
+            AppLogger.info("Downloading driver from: " + downloadUrl);
             
-            // Use curl or powershell to download
-            ProcessResult downloadResult = downloadFile(candidate.downloadUrl(), driverFile);
+            ProcessResult downloadResult = downloadFile(downloadUrl, driverFile);
             if (!downloadResult.success()) {
                 return new InstallResult(false, false, "Download failed: " + downloadResult.combinedOutput());
             }
             
             AppLogger.info("Driver downloaded to: " + driverFile);
             
-            // Install via pnputil (for INF files) or direct execution
             ProcessResult installResult = installDriverFile(driverFile, candidate);
             if (!installResult.success()) {
                 return new InstallResult(false, false, "Installation failed: " + installResult.combinedOutput());
@@ -128,11 +116,50 @@ public class DriverInstallService {
     }
 
     private ProcessResult downloadFile(String url, Path destination) throws IOException, InterruptedException {
-        // Use PowerShell to download file
-        String psCommand = "Invoke-WebRequest -Uri '" + url + "' -OutFile '" + destination + "'";
-        ProcessResult result = processRunner.run(List.of(new ProcessBuilder(
-                "powershell", "-NoProfile", "-Command", psCommand).command().toArray(new String[0])));
-        return result;
+        // Write a PowerShell download script to a temp file to avoid quoting issues
+        Path scriptFile = Files.createTempFile("sbasic-download-", ".ps1");
+        try {
+            String script = "$ErrorActionPreference = 'Stop'\n"
+                    + "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n"
+                    + "$url = '" + url.replace("'", "''") + "'\n"
+                    + "$out = '" + destination.toString().replace("'", "''") + "'\n"
+                    + "$ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'\n"
+                    + "Invoke-WebRequest -Uri $url -OutFile $out -UserAgent $ua -UseBasicParsing -MaximumRedirection 10\n";
+            Files.writeString(scriptFile, script);
+            ProcessResult result = processRunner.run(List.of(new ProcessBuilder(
+                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.toString()
+            ).command().toArray(new String[0])));
+            if (result.success() && Files.exists(destination) && Files.size(destination) > 0) {
+                AppLogger.info("Downloaded " + Files.size(destination) + " bytes from " + url);
+                return new ProcessResult(0, "", "");
+            }
+            AppLogger.warning("PowerShell download failed: " + result.combinedOutput());
+        } finally {
+            Files.deleteIfExists(scriptFile);
+        }
+
+        // Fallback: curl with cookie jar
+        Path cookieJar = Files.createTempFile("sbasic-cookies-", ".txt");
+        try {
+            ProcessResult curlResult = processRunner.run(List.of(new ProcessBuilder(
+                    "curl", "-L", "-s", "-S",
+                    "-o", destination.toString(),
+                    "-c", cookieJar.toString(),
+                    "-b", cookieJar.toString(),
+                    "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                    "-H", "Accept: application/octet-stream, */*",
+                    "--max-time", "300",
+                    url
+            ).command().toArray(new String[0])));
+            if (curlResult.success() && Files.exists(destination) && Files.size(destination) > 0) {
+                AppLogger.info("Downloaded " + Files.size(destination) + " bytes via curl from " + url);
+                return new ProcessResult(0, "", "");
+            }
+        } finally {
+            Files.deleteIfExists(cookieJar);
+        }
+
+        return new ProcessResult(-1, "", "Download failed for: " + url);
     }
 
     private ProcessResult installDriverFile(Path driverFile, DriverUpdateCandidate candidate) throws IOException, InterruptedException {
@@ -152,11 +179,60 @@ public class DriverInstallService {
                 cmd = new String[]{driverFile.toString()};
             }
             return processRunner.run(List.of(new ProcessBuilder(cmd).command().toArray(new String[0])));
-        } else if (filename.endsWith(".zip") || filename.endsWith(".rar")) {
-            return new ProcessResult(1, "", "Compressed driver packages require manual extraction. Download: " + driverFile);
+        } else if (filename.endsWith(".zip")) {
+            // Extract zip and look for INF files or setup.exe
+            Path extractDir = driverFile.getParent().resolve(
+                    driverFile.getFileName().toString().replace(".zip", "_extracted"));
+            Files.createDirectories(extractDir);
+            
+            // Extract using PowerShell Expand-Archive
+            ProcessResult extractResult = processRunner.run(List.of(new ProcessBuilder(
+                    "powershell", "-NoProfile", "-Command",
+                    "Expand-Archive -Path '" + driverFile + "' -DestinationPath '" + extractDir + "' -Force"
+            ).command().toArray(new String[0])));
+            
+            if (!extractResult.success()) {
+                return new ProcessResult(1, "", "Failed to extract zip: " + extractResult.combinedOutput());
+            }
+            
+            // Look for setup.exe or *.inf files in the extracted directory
+            Path setupExe = findFile(extractDir, "setup.exe");
+            if (setupExe != null) {
+                String[] cmd = "Intel".equals(candidate.source())
+                        ? new String[]{setupExe.toString(), "/S"}
+                        : new String[]{setupExe.toString()};
+                return processRunner.run(List.of(new ProcessBuilder(cmd).command().toArray(new String[0])));
+            }
+            
+            // Look for INF files and install via pnputil
+            Path infFile = findFile(extractDir, ".inf");
+            if (infFile != null) {
+                return processRunner.run(List.of(new ProcessBuilder(
+                        "pnputil.exe", "/add-driver", infFile.toString(), "/install"
+                ).command().toArray(new String[0])));
+            }
+            
+            return new ProcessResult(1, "", "No setup.exe or .inf found in extracted archive: " + extractDir);
+        } else if (filename.endsWith(".rar")) {
+            return new ProcessResult(1, "", "RAR archives require manual extraction. Download: " + driverFile);
         }
         
         return new ProcessResult(2, "", "Unknown driver file type: " + filename);
+    }
+
+    private Path findFile(Path dir, String nameOrExtension) throws IOException {
+        try (var walk = Files.walk(dir, 5)) {
+            return walk.filter(Files::isRegularFile)
+                    .filter(p -> {
+                        String name = p.getFileName().toString().toLowerCase();
+                        if (nameOrExtension.startsWith(".")) {
+                            return name.endsWith(nameOrExtension.toLowerCase());
+                        }
+                        return name.equals(nameOrExtension.toLowerCase());
+                    })
+                    .findFirst()
+                    .orElse(null);
+        }
     }
 
     private String extractFilename(String url) {
@@ -169,12 +245,44 @@ public class DriverInstallService {
         }
     }
 
-    private boolean isTrustedSource(DriverUpdateCandidate candidate) {
-        if (candidate == null || candidate.downloadUrl() == null) return false;
+    /**
+     * Decodes common HTML entities in a string so extracted URLs are usable.
+     */
+    private static String decodeHtmlEntities(String s) {
+        if (s == null) return null;
+        StringBuilder sb = new StringBuilder(s.length());
+        int i = 0;
+        while (i < s.length()) {
+            if (s.charAt(i) == '&' && i + 1 < s.length() && s.charAt(i + 1) == '#') {
+                int semi = s.indexOf(';', i + 2);
+                if (semi > i + 2) {
+                    String entity = s.substring(i + 2, semi);
+                    try {
+                        int codePoint = Integer.parseInt(entity);
+                        sb.appendCodePoint(codePoint);
+                        i = semi + 1;
+                        continue;
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            sb.append(s.charAt(i));
+            i++;
+        }
+        String result = sb.toString();
+        result = result.replace("&amp;", "&");
+        result = result.replace("&lt;", "<");
+        result = result.replace("&gt;", ">");
+        result = result.replace("&quot;", "\"");
+        result = result.replace("&apos;", "'");
+        return result;
+    }
+
+    private boolean isTrustedSource(String url, String source) {
+        if (url == null || source == null) return false;
         try {
-            java.net.URL u = new java.net.URL(candidate.downloadUrl());
+            java.net.URL u = new java.net.URL(url);
             String host = u.getHost().toLowerCase();
-            String source = candidate.source() != null ? candidate.source() : "";
             switch (source) {
                 case "Intel":
                     return host.contains("intel.com");

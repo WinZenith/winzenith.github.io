@@ -318,15 +318,6 @@ public class DriversTabView extends BorderPane {
             sizeDisplay = "Vendor site";
         }
         
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                "Update driver for:\n" + row.installed().friendlyName()
-                        + "\n\nCurrent: " + row.installed().driverVersion()
-                        + "\nNew: " + c.availableVersion() + " (" + c.source() + ")"
-                        + "\n\nA backup will be saved before installation.");
-        if (confirm.showAndWait().orElse(null) != javafx.scene.control.ButtonType.OK) {
-            return;
-        }
-        
         currentInstallCell = cell;
         installService.resetCancellation();
         busy.set(true);
