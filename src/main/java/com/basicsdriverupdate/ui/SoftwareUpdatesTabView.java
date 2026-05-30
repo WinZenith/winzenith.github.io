@@ -56,7 +56,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         HBox top = new HBox(12, scanButton, updateSelectedButton, progress, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
-        top.setStyle("-fx-background-color: #FFFFFF; -fx-border-color: #E5E7EB; -fx-border-width: 0 0 1 0;");
+        top.getStyleClass().add("toolbar");
 
         TableView<SoftwareUpdateEntry> table = buildTable();
         VBox.setVgrow(table, Priority.ALWAYS);

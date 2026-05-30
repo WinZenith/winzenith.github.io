@@ -2,17 +2,14 @@ package com.basicsdriverupdate.ui;
 
 import javafx.scene.control.Button;
 
-/**
- * Modern styled button component with predefined styles.
- */
 public class UIButton extends Button {
 
     public enum ButtonStyle {
-        PRIMARY,      // Blue primary button
-        SECONDARY,    // Gray secondary button
-        SUCCESS,      // Green success button
-        DANGER,       // Red danger button
-        SMALL         // Compact small button
+        PRIMARY,
+        SECONDARY,
+        SUCCESS,
+        DANGER,
+        SMALL
     }
 
     public UIButton(String text) {
@@ -21,19 +18,17 @@ public class UIButton extends Button {
 
     public UIButton(String text, ButtonStyle style) {
         super(text);
+        getStyleClass().add("button");
         applyStyle(style);
     }
 
     private void applyStyle(ButtonStyle style) {
         switch (style) {
-            case PRIMARY -> getStyleClass().add("button"); // Default from CSS
-            case SECONDARY -> getStyleClass().addAll("button", "secondary");
-            case SUCCESS -> getStyleClass().addAll("button", "success");
-            case DANGER -> getStyleClass().addAll("button", "danger");
-            case SMALL -> {
-                getStyleClass().add("button");
-                setStyle("-fx-padding: 6 12;");
-            }
+            case PRIMARY -> getStyleClass().add("accent");
+            case SECONDARY -> getStyleClass().add("button-outlined");
+            case SUCCESS -> getStyleClass().add("success");
+            case DANGER -> getStyleClass().add("danger");
+            case SMALL -> getStyleClass().add("small");
         }
     }
 
@@ -58,8 +53,8 @@ public class UIButton extends Button {
     }
 
     public void setStyleType(ButtonStyle style) {
-        getStyleClass().removeAll("button", "secondary", "success", "danger");
-        setStyle(null);
+        getStyleClass().removeAll("button", "accent", "button-outlined", "success", "danger", "small");
+        getStyleClass().add("button");
         applyStyle(style);
     }
 }

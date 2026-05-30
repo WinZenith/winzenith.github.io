@@ -40,7 +40,7 @@ public class RestoreTabView extends BorderPane {
         HBox top = new HBox(12, refreshButton, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
-        top.setStyle("-fx-background-color: #FFFFFF; -fx-border-color: #E5E7EB; -fx-border-width: 0 0 1 0;");
+        top.getStyleClass().add("toolbar");
         setTop(top);
         setCenter(buildTable());
         if (!AppPaths.isWindows()) {

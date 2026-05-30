@@ -6,9 +6,12 @@ import com.basicsdriverupdate.ui.DriversTabView;
 import com.basicsdriverupdate.ui.RestoreTabView;
 import com.basicsdriverupdate.ui.WindowsUpdateTabView;
 import com.basicsdriverupdate.ui.SoftwareUpdatesTabView;
-import com.basicsdriverupdate.ui.UILabel;
 import com.basicsdriverupdate.ui.UIButton;
 
+import atlantafx.base.theme.Dracula;
+import javafx.geometry.Pos;
+import javafx.scene.control.Label;
+import javafx.scene.control.Separator;
 import javafx.scene.layout.VBox;
 import com.basicsdriverupdate.util.AdminCheck;
 import com.basicsdriverupdate.util.AppInfo;
@@ -21,12 +24,8 @@ import javafx.beans.property.SimpleBooleanProperty;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
-import javafx.scene.control.Tab;
-import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
-import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
 import javafx.stage.Stage;
 
 import java.io.IOException;
@@ -39,6 +38,8 @@ public class App extends Application {
 
     @Override
     public void start(Stage stage) {
+        Application.setUserAgentStylesheet(new Dracula().getUserAgentStylesheet());
+
         AppLogger.init();
         AppSettings settings = settingsStore.load();
         if (!settings.eulaAccepted()) {
@@ -66,21 +67,29 @@ public class App extends Application {
 
         BorderPane root = new BorderPane();
 
-        VBox sidebar = new VBox(12);
+        Label appTitle = new Label("SBasic Tools");
+        appTitle.getStyleClass().addAll("label", "large");
+        appTitle.setStyle("-fx-text-fill: #50fa7b; -fx-font-size: 18px; -fx-font-weight: bold; -fx-padding: 0 0 4 0;");
+
+        VBox sidebar = new VBox(6);
         sidebar.setPadding(new Insets(16));
         sidebar.getStyleClass().add("sidebar");
+        sidebar.setAlignment(Pos.TOP_LEFT);
 
         UIButton driversBtn = UIButton.primary("Drivers");
-        UIButton restoreBtn = UIButton.secondary("Rollback driver");
+        UIButton restoreBtn = UIButton.secondary("Rollback");
         UIButton wuBtn = UIButton.secondary("Windows Update");
-        UIButton softwareBtn = UIButton.secondary("Software updates");
+        UIButton softwareBtn = UIButton.secondary("Software update");
+
+        Separator sep = new Separator();
+        sep.setStyle("-fx-padding: 4 0 4 0;");
 
         driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(driversTab); });
         restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
         wuBtn.setOnAction(e -> { selectTab(wuBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(wuTab); });
         softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(softwareTab); });
 
-        sidebar.getChildren().addAll(driversBtn, restoreBtn, wuBtn, softwareBtn);
+        sidebar.getChildren().addAll(appTitle, sep, driversBtn, restoreBtn, wuBtn, softwareBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);
@@ -90,10 +99,8 @@ public class App extends Application {
                     AppInfo.DISPLAY_NAME + " is designed for Windows only.").showAndWait();
         }
 
-        Scene scene = new Scene(root, 920, 560);
-        // Load modern theme stylesheet
-        String stylesheet = getClass().getResource("/styles-modern.css").toExternalForm();
-        scene.getStylesheets().add(stylesheet);
+        Scene scene = new Scene(root, 960, 600);
+        scene.getStylesheets().add(getClass().getResource("/custom.css").toExternalForm());
         stage.setTitle(AppInfo.DISPLAY_NAME);
         stage.setScene(scene);
         stage.show();

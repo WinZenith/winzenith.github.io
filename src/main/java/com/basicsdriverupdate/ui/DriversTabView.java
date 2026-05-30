@@ -63,7 +63,7 @@ public class DriversTabView extends BorderPane {
         HBox top = new HBox(12, scanButton, progressBar, progressLabel, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
-        top.setStyle("-fx-background-color: #FFFFFF; -fx-border-color: #E5E7EB; -fx-border-width: 0 0 1 0;");
+        top.getStyleClass().add("toolbar");
 
         VBox tablesContainer = buildTablesContainer();
         setTop(top);
