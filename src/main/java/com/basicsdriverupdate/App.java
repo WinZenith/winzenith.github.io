@@ -4,7 +4,6 @@ import com.basicsdriverupdate.settings.AppSettings;
 import com.basicsdriverupdate.settings.SettingsStore;
 import com.basicsdriverupdate.ui.DriversTabView;
 import com.basicsdriverupdate.ui.RestoreTabView;
-import com.basicsdriverupdate.ui.WindowsUpdateTabView;
 import com.basicsdriverupdate.ui.SoftwareUpdatesTabView;
 import com.basicsdriverupdate.ui.UIButton;
 
@@ -62,7 +61,6 @@ public class App extends Application {
         // Modern left sidebar with theme toggle
         DriversTabView driversTab = new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
         RestoreTabView restoreTab = new RestoreTabView(busy, AdminCheck::isRunningAsAdmin);
-        WindowsUpdateTabView wuTab = new WindowsUpdateTabView(busy, AdminCheck::isRunningAsAdmin);
         SoftwareUpdatesTabView softwareTab = new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
 
         BorderPane root = new BorderPane();
@@ -78,18 +76,16 @@ public class App extends Application {
 
         UIButton driversBtn = UIButton.primary("Drivers");
         UIButton restoreBtn = UIButton.secondary("Rollback");
-        UIButton wuBtn = UIButton.secondary("Windows Update");
         UIButton softwareBtn = UIButton.secondary("Software update");
 
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(driversTab); });
-        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
-        wuBtn.setOnAction(e -> { selectTab(wuBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(wuTab); });
-        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, wuBtn, softwareBtn); root.setCenter(softwareTab); });
+        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, softwareBtn); root.setCenter(driversTab); });
+        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, softwareBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
+        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, softwareBtn); root.setCenter(softwareTab); });
 
-        sidebar.getChildren().addAll(appTitle, sep, driversBtn, restoreBtn, wuBtn, softwareBtn);
+        sidebar.getChildren().addAll(appTitle, sep, driversBtn, restoreBtn, softwareBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);
