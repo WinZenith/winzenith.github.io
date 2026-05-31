@@ -51,4 +51,26 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
         // Don't apply fallback to other Realtek drivers to avoid false positives
         return null;
     }
+
+    @Override
+    protected String getDownloadUrl(InstalledDriver driver) {
+        // For Realtek, we return their main download page
+        // Realtek organizes drivers by category on their site
+        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
+        
+        if (name.contains("cardreader") || name.contains("card reader")) {
+            return "https://www.realtek.com/en/downloads/category/5";
+        } else if (name.contains("audio") || name.contains("hd audio") || name.contains("ac'97")) {
+            return "https://www.realtek.com/en/downloads/category/6";
+        } else if (name.contains("ethernet") || name.contains("lan") || name.contains("gbe") || name.contains("pcie")) {
+            return "https://www.realtek.com/en/downloads/category/4";
+        } else if (name.contains("wlan") || name.contains("wifi") || name.contains("wireless")) {
+            return "https://www.realtek.com/en/downloads/category/3";
+        } else if (name.contains("bluetooth")) {
+            return "https://www.realtek.com/en/downloads/category/10";
+        } else {
+            // General Realtek downloads page
+            return "https://www.realtek.com/en/downloads";
+        }
+    }
 }

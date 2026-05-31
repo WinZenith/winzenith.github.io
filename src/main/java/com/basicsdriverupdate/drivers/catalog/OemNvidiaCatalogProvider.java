@@ -2,7 +2,11 @@ package com.basicsdriverupdate.drivers.catalog;
 
 import com.basicsdriverupdate.drivers.model.InstalledDriver;
 import com.basicsdriverupdate.util.AppLogger;
+import com.basicsdriverupdate.drivers.catalog.OemVendorHelper;
 
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.regex.Pattern;
 
 public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
@@ -56,5 +60,25 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
             return m.group(1).trim();
         }
         return "unknown";
+    }
+
+    @Override
+    protected String getDownloadUrl(InstalledDriver driver) {
+        // For NVIDIA, we construct a search URL based on the GPU model
+        // This will direct users to the NVIDIA download page for their specific GPU
+        String gpuModel = extractGpuModel(driver);
+        if (!"unknown".equalsIgnoreCase(gpuModel)) {
+            // NVIDIA download search URL pattern
+            try {
+                return String.format("https://www.nvidia.com/Download/index.aspx?lang=en-us&search=%s", 
+                                   java.net.URLEncoder.encode(gpuModel, java.nio.charset.StandardCharsets.UTF_8.toString()));
+            } catch (UnsupportedEncodingException e) {
+                // Fallback if encoding fails
+                return "https://www.nvidia.com/Download/index.aspx?lang=en-us";
+            }
+        }
+        
+        // Fallback to general NVIDIA driver download page
+        return "https://www.nvidia.com/Download/index.aspx?lang=en-us";
     }
 }

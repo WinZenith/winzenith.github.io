@@ -9,6 +9,8 @@ import com.basicsdriverupdate.util.ProcessResult;
 import com.basicsdriverupdate.util.ProcessRunner;
 
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -167,6 +169,90 @@ public class DriverInstallService {
             }
         }
 
+        // NVIDIA-specific download handling
+        if (url.contains("nvidia.com")) {
+            // For NVIDIA, we need to extract the actual download link from their download page
+            // Since NVIDIA uses JavaScript-heavy pages, we'll construct a direct download URL
+            // based on the search parameters or use their direct download pattern
+            
+            // Extract search term if present
+            String searchTerm = null;
+            if (url.contains("search=")) {
+                int start = url.indexOf("search=") + 7;
+                int end = url.indexOf("&", start);
+                if (end == -1) end = url.length();
+                try {
+                    searchTerm = java.net.URLDecoder.decode(url.substring(start, end), java.nio.charset.StandardCharsets.UTF_8.name());
+                } catch (Exception e) {
+                    searchTerm = null;
+                }
+            }
+            
+            // If we have a search term, try to construct a direct download URL
+            // Note: In a real implementation, we would need to scrape the NVIDIA site or use their API
+            // For now, we'll return the URL as-is and let the generic downloader handle it
+            // but we'll add a special user agent to mimic a browser
+            String ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+            
+            ProcessResult step1 = processRunner.run(List.of(new ProcessBuilder(
+                    "curl", "-L", "-s", "-S",
+                    "--ssl-no-revoke",
+                    "-o", destination.toString(),
+                    "-A", ua,
+                    "--max-time", "300",
+                    url
+            ).command().toArray(new String[0])));
+            
+            if (step1.success() && Files.exists(destination) && Files.size(destination) > 0) {
+                // Check if we got an HTML page (likely the download page) vs actual driver file
+                String contentTypeCheck = "";
+                try {
+                    contentTypeCheck = Files.probeContentType(destination);
+                } catch (Exception ignored) {}
+                
+                // If we got HTML, we need to extract the actual download link
+                if (contentTypeCheck != null && contentTypeCheck.contains("text/html")) {
+                    String pageHtml = Files.readString(destination);
+                    String decoded = decodeHtmlEntities(pageHtml);
+                    
+                    // Look for NVIDIA download button/link patterns
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("https:\\/\\/us\\.download\\.nvidia\\.com\\/Windows\\/[0-9_.-]+\\/[^\\\"\\s]+\\.exe")
+                            .matcher(decoded);
+                    if (m.find()) {
+                        String actualDownloadUrl = m.group(0);
+                        AppLogger.info("NVIDIA: Found actual download URL: " + actualDownloadUrl);
+                        
+                         // Now download the actual driver file
+                         ProcessResult step2 = processRunner.run(List.of(new ProcessBuilder(
+                                 "curl", "-L", "-s", "-S",
+                                 "--ssl-no-revoke",
+                                 "-o", destination.toString(),
+                                 "-A", ua,
+                                 "--max-time", "300",
+                                 actualDownloadUrl
+                         ).command().toArray(new String[0])));
+                        
+                        if (step2.success() && Files.exists(destination) && Files.size(destination) > 0) {
+                            AppLogger.info("Downloaded " + Files.size(destination) + " bytes from " + actualDownloadUrl);
+                            return new ProcessResult(0, "", "");
+                        } else {
+                            return new ProcessResult(-1, "", "NVIDIA driver download failed: " + step2.combinedOutput());
+                        }
+                    } else {
+                        // If we can't find the direct link, return the HTML page info
+                        return new ProcessResult(-1, "", "Could not find direct download link in NVIDIA page. Got HTML page instead of driver file.");
+                    }
+                } else {
+                    // We got a non-HTML file, assume it's the driver
+                    AppLogger.info("Downloaded " + Files.size(destination) + " bytes from " + url);
+                    return new ProcessResult(0, "", "");
+                }
+            } else {
+                return new ProcessResult(-1, "", "NVIDIA download failed: " + step1.combinedOutput());
+            }
+        }
+        
         Path scriptFile = Files.createTempFile("sbasic-download-", ".ps1");
         try {
             String script = "$ErrorActionPreference = 'Stop'\n"

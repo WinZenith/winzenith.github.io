@@ -88,13 +88,13 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
 
     private String getUrlForCategory(String category) {
         return switch (category) {
-            case "bluetooth" -> "https://www.intel.com/content/www/us/en/download/18649/intel-wireless-bluetooth-drivers-for-windows-10-and-windows-11.html";
-            case "wifi" -> "https://www.intel.com/content/www/us/en/download/18649/intel-wireless-bluetooth-drivers-for-windows-10-and-windows-11.html";
-            case "management-engine" -> "https://www.intel.com/content/www/us/en/download/19115/intel-management-engine-interface-consumer-driver-for-intel-7-8-9-10-11-12-13-generation.html";
-            case "serial-io" -> "https://www.intel.com/content/www/us/en/download/19607/intel-serial-io-drivers-for-windows-10-and-windows-11.html";
-            case "graphics" -> "https://www.intel.com/content/www/us/en/download-center/home.html?action=filter&productType=graphics";
-            case "chipset" -> "https://www.intel.com/content/www/us/en/download-center/home.html?action=filter&productType=chipsets";
-            default -> "https://www.intel.com/content/www/us/en/support/detect.html";
+            case "bluetooth" -> "https://downloadcenter.intel.com/product/80939/Bluetooth";
+            case "wifi" -> "https://downloadcenter.intel.com/product/80939/Wireless";
+            case "management-engine" -> "https://downloadcenter.intel.com/product/80939/Chipset";
+            case "serial-io" -> "https://downloadcenter.intel.com/product/80939/Chipset";
+            case "graphics" -> "https://downloadcenter.intel.com/product/80939/Graphics";
+            case "chipset" -> "https://downloadcenter.intel.com/product/80939/Chipset";
+            default -> "https://downloadcenter.intel.com";
         };
     }
 
