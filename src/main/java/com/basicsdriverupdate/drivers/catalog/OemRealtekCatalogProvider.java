@@ -49,7 +49,7 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String getVendorPageUrl(InstalledDriver driver) {
-        return "https://realtek-hd-audio-drivers-x64.en.softonic.com/download";
+        return "https://www.realtek.com/en/downloads";
     }
 
     @Override
