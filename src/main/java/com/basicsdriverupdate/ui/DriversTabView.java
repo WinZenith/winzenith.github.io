@@ -339,7 +339,10 @@ public class DriversTabView extends BorderPane {
         }
         DriverUpdateCandidate c = row.candidate();
 
-        if (c.downloadUrl() == null || c.downloadUrl().isBlank()) {
+        boolean isWuInstall = "WindowsUpdate".equals(c.source())
+                && c.packageId() != null && !c.packageId().isBlank();
+
+        if (!isWuInstall && (c.downloadUrl() == null || c.downloadUrl().isBlank())) {
             showManualDownloadDialog(c);
             return;
         }
@@ -439,6 +442,7 @@ public class DriversTabView extends BorderPane {
 
     private void showManualDownloadDialog(DriverUpdateCandidate candidate) {
         String source = candidate.source() != null ? candidate.source() : "this provider";
+        String deviceName = candidate.installed().friendlyName();
         String vendorUrl = candidate.vendorPageUrl();
         if (vendorUrl == null || vendorUrl.isBlank()) {
             new Alert(Alert.AlertType.INFORMATION,
@@ -447,7 +451,7 @@ public class DriversTabView extends BorderPane {
         }
 
         Alert alert = new Alert(Alert.AlertType.INFORMATION,
-                source + " drivers cannot be downloaded automatically.\n\n"
+                "Automatic download is not available for " + deviceName + ".\n\n"
                         + "Please use the button below to go to the " + source
                         + " website, download the driver, and install it manually.",
                 ButtonType.OK, ButtonType.CANCEL);

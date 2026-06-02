@@ -16,7 +16,7 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
     private static final String LOOKUP_URL = "https://www.nvidia.com/Download/API/lookupValueSearch.aspx";
 
     private static final Pattern GPU_MODEL_PATTERN = Pattern.compile(
-            "(GeForce\\s+(?:RTX|GTX|GT|GT\\s+\\d+|RTX\\s+\\d+|GTX\\s+\\d+))", Pattern.CASE_INSENSITIVE);
+            "(GeForce\\s+(?:RTX|GTX|GT)\\s*\\d+(?:\\s+\\d+)*(?:\\s+(?:Ti|SUPER))?)", Pattern.CASE_INSENSITIVE);
     private static final Pattern VERSION_PATTERN = Pattern.compile(
             "Version\\s*([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)", Pattern.CASE_INSENSITIVE);
     private static final Pattern DOWNLOAD_LINK_PATTERN = Pattern.compile(
@@ -175,7 +175,15 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
         if (gpuName != null) {
             for (Map.Entry<String, int[]> entry : GPU_PSID_PFID.entrySet()) {
                 String key = normalizeGpuName(entry.getKey());
-                if (key != null && key.contains(gpuName)) {
+                if (key == null) continue;
+                if (key.equalsIgnoreCase(gpuName) || gpuName.contains(key)) {
+                    return entry.getValue();
+                }
+            }
+            for (Map.Entry<String, int[]> entry : GPU_PSID_PFID.entrySet()) {
+                String key = normalizeGpuName(entry.getKey());
+                if (key == null) continue;
+                if (key.contains(gpuName)) {
                     return entry.getValue();
                 }
             }

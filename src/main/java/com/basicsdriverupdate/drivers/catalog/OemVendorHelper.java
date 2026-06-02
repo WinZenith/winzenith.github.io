@@ -9,7 +9,8 @@ public enum OemVendorHelper {
     INTEL("VEN_8086", "8086", "Intel"),
     REALTEK("VEN_10EC", "10EC", "Realtek"),
     BROADCOM("VEN_14E4", "14E4", "Broadcom"),
-    QUALCOMM("VEN_168C", "168C", "Qualcomm");
+    QUALCOMM("VEN_168C", "168C", "Qualcomm"),
+    SYNAPTICS("VEN_06CB", "06CB", "Synaptics");
 
     private final String pciPattern;
     private final String venId;

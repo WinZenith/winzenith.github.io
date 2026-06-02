@@ -30,6 +30,7 @@ public class DriverCatalogAggregator {
                 new OemRealtekCatalogProvider(),
                 new OemBroadcomCatalogProvider(),
                 new OemQualcommCatalogProvider(),
+                new OemSynapticsCatalogProvider(),
                 new WindowsUpdateCatalogProvider()
         ));
     }
@@ -41,7 +42,8 @@ public class DriverCatalogAggregator {
                 new OemIntelCatalogProvider(),
                 new OemRealtekCatalogProvider(),
                 new OemBroadcomCatalogProvider(),
-                new OemQualcommCatalogProvider()
+                new OemQualcommCatalogProvider(),
+                new OemSynapticsCatalogProvider()
         ));
     }
 

@@ -109,6 +109,18 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
         if (inf != null && !inf.isBlank() && title.contains(inf.replace(".inf", "").toLowerCase(Locale.ROOT))) {
             return true;
         }
+        if (!name.isBlank()) {
+            String[] tokens = name.split("[\\s,\\-()]+");
+            int matched = 0;
+            for (String token : tokens) {
+                if (token.length() >= 3 && title.contains(token)) {
+                    matched++;
+                }
+            }
+            if (matched >= 2) {
+                return true;
+            }
+        }
         return false;
     }
 
