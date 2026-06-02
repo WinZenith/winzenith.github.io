@@ -20,12 +20,4 @@ public class UISectionContainer extends VBox {
     public static UISectionContainer create() {
         return new UISectionContainer();
     }
-
-    public static UISectionContainer compact() {
-        return new UISectionContainer(4);
-    }
-
-    public static UISectionContainer spacious() {
-        return new UISectionContainer(16);
-    }
 }

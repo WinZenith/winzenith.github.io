@@ -499,39 +499,4 @@ public class SoftwareUpdateService {
         if (lastResult != null) return lastResult;
         throw new IOException("Failed to run winget upgrade" + (lastEx != null ? ": " + lastEx.getMessage() : ""));
     }
-
-    public List<Path> cleanupInstallersForPackage(SoftwareUpdateEntry pkg, Instant since) {
-        List<Path> deleted = new ArrayList<>();
-        Path downloads = Paths.get(System.getProperty("user.home"), "Downloads");
-        if (!Files.isDirectory(downloads)) {
-            return deleted;
-        }
-        Set<String> exts = Set.of(".exe", ".msi", ".msix", ".msixbundle", ".zip", ".msu");
-        String idToken = pkg.id() == null ? "" : pkg.id().toLowerCase();
-        String name = pkg.getName() == null ? "" : pkg.getName().toLowerCase();
-        try (DirectoryStream<Path> ds = Files.newDirectoryStream(downloads)) {
-            for (Path p : ds) {
-                try {
-                    if (!Files.isRegularFile(p)) continue;
-                    String fileName = p.getFileName().toString().toLowerCase();
-                    boolean extOk = exts.stream().anyMatch(fileName::endsWith);
-                    if (!extOk) continue;
-                    FileTime ft = Files.getLastModifiedTime(p);
-                    Instant modified = ft.toInstant();
-                    if (modified.isBefore(since)) continue;
-                    boolean containsToken = (!idToken.isBlank() && fileName.contains(idToken)) || (!name.isBlank() && Arrays.stream(name.split("\\s+"))
-                            .anyMatch(fileName::contains));
-                    if (!containsToken) continue;
-                    Files.deleteIfExists(p);
-                    deleted.add(p);
-                    AppLogger.info("Deleted installer: " + p);
-                } catch (Exception e) {
-                    AppLogger.warning("Could not delete candidate installer: " + p + " -> " + e.getMessage());
-                }
-            }
-        } catch (IOException e) {
-            AppLogger.warning("Failed to enumerate Downloads for cleanup: " + e.getMessage());
-        }
-        return deleted;
-    }
 }

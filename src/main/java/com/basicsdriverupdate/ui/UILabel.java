@@ -38,31 +38,7 @@ public class UILabel extends Label {
         }
     }
 
-    public static UILabel header(String text) {
-        return new UILabel(text, LabelStyle.HEADER);
-    }
-
     public static UILabel sectionTitle(String text) {
         return new UILabel(text, LabelStyle.SECTION_TITLE);
-    }
-
-    public static UILabel secondary(String text) {
-        return new UILabel(text, LabelStyle.SECONDARY);
-    }
-
-    public static UILabel statusSuccess(String text) {
-        return new UILabel(text, LabelStyle.STATUS_SUCCESS);
-    }
-
-    public static UILabel statusWarning(String text) {
-        return new UILabel(text, LabelStyle.STATUS_WARNING);
-    }
-
-    public static UILabel statusDanger(String text) {
-        return new UILabel(text, LabelStyle.STATUS_DANGER);
-    }
-
-    public static UILabel statusInfo(String text) {
-        return new UILabel(text, LabelStyle.STATUS_INFO);
     }
 }
