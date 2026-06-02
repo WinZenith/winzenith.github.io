@@ -41,9 +41,13 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             String latest = fetchLatestVersion(driver);
             if (latest != null && VersionCompare.isOlder(driver.driverVersion(), latest)) {
                 AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName() + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
-                String downloadUrl = getDownloadUrl(driver);
+                String vendorPageUrl = getVendorPageUrl(driver);
+                String downloadUrl = resolveDirectDownloadUrl(driver, vendorPageUrl);
                 if (downloadUrl == null) {
                     downloadUrl = "";
+                }
+                if (vendorPageUrl == null) {
+                    vendorPageUrl = "";
                 }
                 out.add(new DriverUpdateCandidate(
                         driver,
@@ -53,7 +57,8 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                         vendor.label() + " driver update available",
                         "Check " + vendor.label() + " support site for certified package.",
                         UpdateSeverity.RECOMMENDED,
-                        downloadUrl
+                        downloadUrl,
+                        vendorPageUrl
                 ));
             } else if (latest != null) {
                 AppLogger.debug(vendor.label() + ": Driver " + driver.friendlyName() + " is up to date (current: " + driver.driverVersion() + ", latest: " + latest + ")");
@@ -132,47 +137,41 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
         return result;
     }
 
-    protected String getDownloadUrl(InstalledDriver driver) {
-        // Subclasses may override to provide precise direct-download URLs.
-        // Default: try a small set of vendor support pages and look for the first
-        // anchor that links to a common driver package file extension.
-        String[] pages;
-        switch (vendor) {
-            case INTEL -> pages = new String[]{
-                    "https://downloadcenter.intel.com",
-                    "https://www.intel.com/content/www/us/en/download-center/home.html"
-            };
-            case NVIDIA -> pages = new String[]{
-                    "https://www.nvidia.com/Download/index.aspx",
-                    "https://www.nvidia.com/Download/Find.aspx"
-            };
-            case AMD -> pages = new String[]{
-                    "https://www.amd.com/en/support"
-            };
-            case REALTEK -> pages = new String[]{
-                    "https://www.realtek.com/en/downloads"
-            };
-            case BROADCOM -> pages = new String[]{
-                    "https://www.broadcom.com/support/download-search"
-            };
-            case QUALCOMM -> pages = new String[]{
-                    "https://www.qualcomm.com/support"
-            };
-            default -> pages = new String[]{"https://www." + vendor.label().toLowerCase() + ".com/support"};
-        }
+    /**
+     * Returns the vendor's product/support page URL for this driver.
+     * Subclasses should override to provide the correct page URL.
+     */
+    protected String getVendorPageUrl(InstalledDriver driver) {
+        return switch (vendor) {
+            case INTEL -> "https://downloadcenter.intel.com";
+            case NVIDIA -> "https://www.nvidia.com/Download/index.aspx";
+            case AMD -> "https://www.amd.com/en/support";
+            case REALTEK -> "https://www.realtek.com/en/downloads";
+            case BROADCOM -> "https://www.broadcom.com/support/download-search";
+            case QUALCOMM -> "https://www.qualcomm.com/support";
+            default -> "https://www." + vendor.label().toLowerCase() + ".com/support";
+        };
+    }
 
-        Pattern linkPattern = Pattern.compile("href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi|inf|cab))\"",
+    /**
+     * Attempts to resolve a direct download URL for the driver.
+     * Default: scrapes the vendor page for links matching common driver file extensions.
+     * Subclasses should override for vendor-specific resolution logic.
+     *
+     * @return direct download URL, or null if unable to resolve
+     */
+    protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
+        if (vendorPageUrl == null || vendorPageUrl.isBlank()) {
+            return null;
+        }
+        Pattern linkPattern = Pattern.compile("(?:href|data-href)\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi|inf|cab))\"",
                 Pattern.CASE_INSENSITIVE);
-
-        for (String p : pages) {
-            String body = httpGet(p);
-            String found = findFirstMatchingLink(body, linkPattern);
-            if (found != null && isLikelyStable(found)) {
-                AppLogger.debug(vendor.label() + ": Found candidate download URL: " + found);
-                return found;
-            }
+        String body = httpGet(vendorPageUrl);
+        String found = findFirstMatchingLink(body, linkPattern);
+        if (found != null && isLikelyStable(found)) {
+            AppLogger.debug(vendor.label() + ": Resolved direct download URL: " + found);
+            return found;
         }
-
         return null;
     }
 

@@ -75,7 +75,7 @@ public class App extends Application {
         sidebar.setAlignment(Pos.TOP_LEFT);
 
         UIButton driversBtn = UIButton.primary("Drivers");
-        UIButton restoreBtn = UIButton.secondary("Rollback");
+        UIButton restoreBtn = UIButton.secondary("Rollback drivers");
         UIButton softwareBtn = UIButton.secondary("Software update");
 
         Separator sep = new Separator();
@@ -99,6 +99,7 @@ public class App extends Application {
         scene.getStylesheets().add(getClass().getResource("/custom.css").toExternalForm());
         stage.setTitle(AppInfo.DISPLAY_NAME);
         stage.setScene(scene);
+        stage.setMaximized(true);
         stage.show();
     }
 

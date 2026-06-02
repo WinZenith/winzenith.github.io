@@ -85,7 +85,8 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                         best.title,
                         best.description,
                         best.severity,
-                        ""
+                        "",
+                        "https://www.catalog.update.microsoft.com"
                 ));
             }
         }

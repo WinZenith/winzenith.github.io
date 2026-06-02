@@ -8,6 +8,7 @@ import com.basicsdriverupdate.drivers.model.DriverUpdateCandidate;
 import com.basicsdriverupdate.drivers.model.InstalledDriver;
 import com.basicsdriverupdate.settings.AppSettings;
 import com.basicsdriverupdate.settings.SettingsStore;
+import com.basicsdriverupdate.util.AppLogger;
 import com.basicsdriverupdate.util.AppPaths;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
@@ -17,12 +18,13 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
-import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -38,7 +40,7 @@ import java.util.function.BooleanSupplier;
 public class DriversTabView extends BorderPane {
 
     private final DriverScanService scanService = new DriverScanService();
-    private final DriverCatalogAggregator catalog = DriverCatalogAggregator.createWithoutWindowsUpdate();
+    private final DriverCatalogAggregator catalog = DriverCatalogAggregator.createDefault();
     private final DriverInstallService installService = new DriverInstallService();
     private final SettingsStore settingsStore = new SettingsStore();
     private final BooleanProperty busy;
@@ -51,6 +53,7 @@ public class DriversTabView extends BorderPane {
     private final Label progressLabel = new Label("0%");
     private final Button scanButton = new Button("Scan for outdated drivers");
     private TableCell<DriverRow, Void> currentInstallCell;
+    private TableView<DriverRow> outdatedTable;
 
     public DriversTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -68,6 +71,11 @@ public class DriversTabView extends BorderPane {
         VBox tablesContainer = buildTablesContainer();
         setTop(top);
         setCenter(tablesContainer);
+        busy.addListener((obs, oldVal, newVal) -> {
+            if (outdatedTable != null) {
+                outdatedTable.refresh();
+            }
+        });
         if (!AppPaths.isWindows()) {
             statusLabel.setText("This application requires Windows.");
             scanButton.setDisable(true);
@@ -78,7 +86,7 @@ public class DriversTabView extends BorderPane {
         UILabel outdatedLabel = UILabel.sectionTitle("Outdated Drivers");
         UILabel upToDateLabel = UILabel.sectionTitle("Up to Date Drivers");
         
-        TableView<DriverRow> outdatedTable = buildTable(outdatedRows);
+        outdatedTable = buildTable(outdatedRows);
         TableView<DriverRow> upToDateTable = buildUpToDateTable(upToDateRows);
         
         VBox.setVgrow(outdatedTable, Priority.ALWAYS);
@@ -110,14 +118,21 @@ public class DriversTabView extends BorderPane {
         sourceCol.setPrefWidth(90);
 
         TableColumn<DriverRow, Void> actionCol = new TableColumn<>("Action");
-        actionCol.setPrefWidth(200);
+        actionCol.setPrefWidth(280);
         actionCol.setCellFactory(col -> new TableCell<>() {
             private final UIButton updateBtn = UIButton.small("Update");
             private final UIButton stopBtn = UIButton.small("Stop");
             private final ProgressBar downloadProgress = new ProgressBar(0);
             private final UILabel sizeLabel = new UILabel("");
+            private final Label installingLabel = new Label("Installing driver. Please wait…");
+            private final ProgressIndicator spinner = new ProgressIndicator();
 
             {
+                spinner.setPrefSize(48, 48);
+                spinner.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
+                installingLabel.setVisible(false);
+                spinner.setVisible(false);
+
                 updateBtn.setOnAction(e -> {
                     DriverRow row = getTableView().getItems().get(getIndex());
                     if (row != null && row.hasUpdate()) {
@@ -148,7 +163,7 @@ public class DriversTabView extends BorderPane {
                         updateBtn.setTooltip(new Tooltip(row.candidate().title()));
                     }
                     
-                    HBox container = new HBox(6, updateBtn, sizeLabel, downloadProgress, stopBtn);
+                    HBox container = new HBox(6, updateBtn, sizeLabel, downloadProgress, stopBtn, installingLabel, spinner);
                     container.setAlignment(Pos.CENTER_LEFT);
                     setGraphic(container);
                 }
@@ -161,6 +176,18 @@ public class DriversTabView extends BorderPane {
                 stopBtn.setVisible(true);
                 stopBtn.setDisable(false);
                 updateBtn.setVisible(false);
+                installingLabel.setVisible(false);
+                spinner.setVisible(false);
+            }
+            
+            private void showInstallingState() {
+                updateBtn.setVisible(false);
+                stopBtn.setVisible(false);
+                stopBtn.setDisable(true);
+                downloadProgress.setVisible(false);
+                sizeLabel.setText("");
+                installingLabel.setVisible(true);
+                spinner.setVisible(true);
             }
             
             private void hideDownloadProgress() {
@@ -168,6 +195,8 @@ public class DriversTabView extends BorderPane {
                 stopBtn.setVisible(false);
                 stopBtn.setDisable(true);
                 sizeLabel.setText("");
+                installingLabel.setVisible(false);
+                spinner.setVisible(false);
                 updateBtn.setVisible(true);
             }
         });
@@ -309,65 +338,59 @@ public class DriversTabView extends BorderPane {
             return;
         }
         DriverUpdateCandidate c = row.candidate();
-        
-        // Calculate file size display
-        String sizeDisplay = "";
-        if ("WindowsUpdate".equals(c.source())) {
-            sizeDisplay = "~50 MB";
-        } else {
-            sizeDisplay = "Vendor site";
+
+        if (c.downloadUrl() == null || c.downloadUrl().isBlank()) {
+            showManualDownloadDialog(c);
+            return;
         }
+        
+        String sizeDisplay = "Downloading...";
         
         currentInstallCell = cell;
         installService.resetCancellation();
+        installService.setProgressCallback((bytesReceived, totalBytes, fraction) -> {
+            String sizeText;
+            if (totalBytes > 0) {
+                sizeText = formatBytes(bytesReceived) + " / " + formatBytes(totalBytes);
+            } else {
+                sizeText = formatBytes(bytesReceived);
+            }
+            Platform.runLater(() -> {
+                if (currentInstallCell != null) {
+                    showCellDownloadProgress(currentInstallCell, sizeText, fraction);
+                }
+            });
+        });
+        installService.setStatusCallback(status -> Platform.runLater(() -> {
+            if (currentInstallCell != null) {
+                showCellInstallingState(currentInstallCell);
+            }
+        }));
         busy.set(true);
-        statusLabel.setText("Installing update for " + row.installed().friendlyName() + "…");
+        statusLabel.setText("Installing update for " + row.installed().friendlyName() + "...");
         
-        // Show download progress in the cell
         final TableCell<DriverRow, Void> finalCell = cell;
-        final String finalSizeDisplay = sizeDisplay;
         Platform.runLater(() -> {
             if (finalCell != null) {
-                showCellDownloadProgress(finalCell, finalSizeDisplay, 0.0);
+                showCellDownloadProgress(finalCell, sizeDisplay, 0.0);
             }
         });
         
         AppSettings settings = settingsStore.load();
         new Thread(() -> {
             try {
-                // Simulate download progress
-                for (int i = 0; i <= 100 && !installService.isCancelled(); i += 10) {
-                    Thread.sleep(200);
-                    final double progress = i / 100.0;
-                    Platform.runLater(() -> {
-                        if (currentInstallCell != null) {
-                            showCellDownloadProgress(currentInstallCell, finalSizeDisplay, progress);
-                        }
-                    });
-                }
-                
-                if (installService.isCancelled()) {
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Installation cancelled for " + row.installed().friendlyName());
-                        if (currentInstallCell != null) {
-                            hideCellDownloadProgress(currentInstallCell);
-                        }
-                        currentInstallCell = null;
-                    });
-                    return;
-                }
-                
                 DriverInstallService.InstallResult result = installService.install(c, settings);
                 Platform.runLater(() -> {
                     if (result.installed()) {
                         statusLabel.setText("Update installed for " + row.installed().friendlyName());
                         row.setCandidate(null);
-                        splitRows(new java.util.HashMap<>());
+                        outdatedRows.remove(row);
+                        upToDateRows.add(row);
                         if (result.rebootRequired()) {
                             new Alert(Alert.AlertType.INFORMATION, "Restart required to finish installation.").showAndWait();
                         }
                     } else {
-                        new Alert(Alert.AlertType.INFORMATION, result.message()).showAndWait();
+                        showErrorWithFallback(result.message(), c.vendorPageUrl());
                     }
                     if (currentInstallCell != null) {
                         hideCellDownloadProgress(currentInstallCell);
@@ -376,29 +399,100 @@ public class DriversTabView extends BorderPane {
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> {
-                    new Alert(Alert.AlertType.ERROR, "Install failed:\n" + ex.getMessage()).showAndWait();
+                    showErrorWithFallback("Install failed:\n" + ex.getMessage(), c.vendorPageUrl());
                     if (currentInstallCell != null) {
                         hideCellDownloadProgress(currentInstallCell);
                     }
                     currentInstallCell = null;
                 });
             } finally {
+                installService.setProgressCallback(null);
+                installService.setStatusCallback(null);
                 Platform.runLater(() -> busy.set(false));
             }
         }, "driver-install").start();
     }
+
+    private void showErrorWithFallback(String message, String vendorPageUrl) {
+        if (vendorPageUrl != null && !vendorPageUrl.isBlank()) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, message + "\n\nYou can try downloading manually from the vendor website.",
+                    ButtonType.OK, ButtonType.CANCEL);
+            alert.setTitle("Download Failed");
+            alert.setHeaderText("Manual download available");
+
+            Button openWebsiteBtn = (Button) alert.getDialogPane().lookupButton(ButtonType.CANCEL);
+            openWebsiteBtn.setText("Open Website");
+            openWebsiteBtn.setOnAction(e -> {
+                try {
+                    java.awt.Desktop.getDesktop().browse(new java.net.URI(vendorPageUrl));
+                } catch (Exception ex) {
+                    AppLogger.warning("Failed to open browser: " + ex.getMessage());
+                }
+                alert.close();
+            });
+
+            alert.showAndWait();
+        } else {
+            new Alert(Alert.AlertType.INFORMATION, message).showAndWait();
+        }
+    }
+
+    private void showManualDownloadDialog(DriverUpdateCandidate candidate) {
+        String source = candidate.source() != null ? candidate.source() : "this provider";
+        String vendorUrl = candidate.vendorPageUrl();
+        if (vendorUrl == null || vendorUrl.isBlank()) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "No automatic download is available for " + source + " drivers.").showAndWait();
+            return;
+        }
+
+        Alert alert = new Alert(Alert.AlertType.INFORMATION,
+                source + " drivers cannot be downloaded automatically.\n\n"
+                        + "Please use the button below to go to the " + source
+                        + " website, download the driver, and install it manually.",
+                ButtonType.OK, ButtonType.CANCEL);
+        alert.setTitle("Manual Download Required");
+        alert.setHeaderText(source + " driver update");
+
+        Button openWebsiteBtn = (Button) alert.getDialogPane().lookupButton(ButtonType.CANCEL);
+        openWebsiteBtn.setText("Open " + source + " Website");
+        openWebsiteBtn.setOnAction(e -> {
+            try {
+                java.awt.Desktop.getDesktop().browse(new java.net.URI(vendorUrl));
+            } catch (Exception ex) {
+                AppLogger.warning("Failed to open browser: " + ex.getMessage());
+            }
+            alert.close();
+        });
+
+        alert.getDialogPane().lookupButton(ButtonType.OK).addEventFilter(javafx.event.ActionEvent.ACTION, e -> {
+            alert.close();
+        });
+
+        alert.showAndWait();
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
+        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
+        return String.format("%.2f GB", bytes / (1024.0 * 1024 * 1024));
+    }
     
     private void showCellDownloadProgress(TableCell<DriverRow, Void> cell, String size, double progress) {
         try {
-            // Find the progress bar and label in the cell's graphic
             if (cell.getGraphic() instanceof HBox) {
                 HBox container = (HBox) cell.getGraphic();
                 for (var child : container.getChildren()) {
                     if (child instanceof ProgressBar) {
                         ((ProgressBar) child).setVisible(true);
                         ((ProgressBar) child).setProgress(progress);
-                    } else if (child instanceof Label) {
-                        ((Label) child).setText(size);
+                    } else if (child instanceof UILabel) {
+                        ((UILabel) child).setText(size);
+                    } else if (child instanceof Label label) {
+                        label.setText(size);
+                    } else if (child instanceof ProgressIndicator) {
+                        ((ProgressIndicator) child).setVisible(false);
                     } else if (child instanceof Button && ((Button) child).getText().equals("Stop")) {
                         ((Button) child).setVisible(true);
                         ((Button) child).setDisable(false);
@@ -421,11 +515,38 @@ public class DriversTabView extends BorderPane {
                         ((ProgressBar) child).setVisible(false);
                     } else if (child instanceof Label) {
                         ((Label) child).setText("");
+                        ((Label) child).setVisible(false);
+                    } else if (child instanceof ProgressIndicator) {
+                        ((ProgressIndicator) child).setVisible(false);
                     } else if (child instanceof Button && ((Button) child).getText().equals("Stop")) {
                         ((Button) child).setVisible(false);
                         ((Button) child).setDisable(true);
                     } else if (child instanceof Button && ((Button) child).getText().equals("Update")) {
                         ((Button) child).setVisible(true);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Ignore
+        }
+    }
+
+    private void showCellInstallingState(TableCell<DriverRow, Void> cell) {
+        try {
+            if (cell.getGraphic() instanceof HBox) {
+                HBox container = (HBox) cell.getGraphic();
+                for (var child : container.getChildren()) {
+                    if (child instanceof UIButton) {
+                        child.setVisible(false);
+                    } else if (child instanceof ProgressBar) {
+                        ((ProgressBar) child).setVisible(false);
+                    } else if (child instanceof UILabel) {
+                        ((UILabel) child).setVisible(false);
+                    } else if (child instanceof Label label) {
+                        label.setText("Installing driver. Please wait…");
+                        label.setVisible(true);
+                    } else if (child instanceof ProgressIndicator) {
+                        ((ProgressIndicator) child).setVisible(true);
                     }
                 }
             }

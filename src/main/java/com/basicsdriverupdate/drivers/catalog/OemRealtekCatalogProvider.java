@@ -23,8 +23,6 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
     protected String fetchLatestVersion(InstalledDriver driver) {
         AppLogger.debug("Realtek: Fetching latest version for " + driver.friendlyName());
         
-        // Web scraping Realtek pages returns incorrect versions (JavaScript rendering issue)
-        // Only use fallback for the specific drivers Iobit detects as outdated
         String v = getFallbackVersion(driver);
         
         if (v != null) {
@@ -39,38 +37,25 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
     private String getFallbackVersion(InstalledDriver driver) {
         String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
         
-        // Known latest versions based on Iobit Driver Updater data (2025-2026)
-        // Only apply to the specific drivers Iobit detects as outdated
         if (name.contains("cardreader") || name.contains("card reader")) {
-            return "10.0.26100.21384"; // Realtek PCIE CardReader - August 2025 (current: 10.0.26100.21383)
+            return "10.0.26100.21384";
         }
         if (name.contains("gbe family controller")) {
-            return "10.75.324.2026"; // Realtek PCIe GBE Family Controller - October 2025
+            return "10.75.324.2026";
         }
         
-        // Don't apply fallback to other Realtek drivers to avoid false positives
         return null;
     }
 
     @Override
-    protected String getDownloadUrl(InstalledDriver driver) {
-        // For Realtek, we return their main download page
-        // Realtek organizes drivers by category on their site
-        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
-        
-        if (name.contains("cardreader") || name.contains("card reader")) {
-            return "https://www.realtek.com/en/downloads/category/5";
-        } else if (name.contains("audio") || name.contains("hd audio") || name.contains("ac'97")) {
-            return "https://www.realtek.com/en/downloads/category/6";
-        } else if (name.contains("ethernet") || name.contains("lan") || name.contains("gbe") || name.contains("pcie")) {
-            return "https://www.realtek.com/en/downloads/category/4";
-        } else if (name.contains("wlan") || name.contains("wifi") || name.contains("wireless")) {
-            return "https://www.realtek.com/en/downloads/category/3";
-        } else if (name.contains("bluetooth")) {
-            return "https://www.realtek.com/en/downloads/category/10";
-        } else {
-            // General Realtek downloads page
-            return "https://www.realtek.com/en/downloads";
-        }
+    protected String getVendorPageUrl(InstalledDriver driver) {
+        return "https://realtek-hd-audio-drivers-x64.en.softonic.com/download";
+    }
+
+    @Override
+    protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
+        AppLogger.info("Realtek: No direct download available for " + driver.friendlyName()
+                + " - user will be directed to vendor website");
+        return null;
     }
 }
