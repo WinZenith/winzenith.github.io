@@ -2,7 +2,7 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $classes = Join-Path $root "target\classes"
-if (-not (Test-Path (Join-Path $classes "com\basicsdriverupdate\App.class"))) {
+if (-not (Test-Path (Join-Path $classes "com\sbtools\App.class"))) {
     Write-Error "Compiled classes not found. Build the project in IntelliJ or run: mvn compile"
     exit 1
 }
@@ -26,5 +26,5 @@ $classpath = @(
 
 & $jdk `
     -cp $classpath `
-    com.basicsdriverupdate.App `
+    com.sbtools.App `
     @args

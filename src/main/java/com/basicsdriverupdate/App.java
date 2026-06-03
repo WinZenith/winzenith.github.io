@@ -65,7 +65,7 @@ public class App extends Application {
 
         BorderPane root = new BorderPane();
 
-        Label appTitle = new Label("SBasic Tools");
+        Label appTitle = new Label("SB Tools");
         appTitle.getStyleClass().addAll("label", "large");
         appTitle.setStyle("-fx-text-fill: #50fa7b; -fx-font-size: 18px; -fx-font-weight: bold; -fx-padding: 0 0 4 0;");
 

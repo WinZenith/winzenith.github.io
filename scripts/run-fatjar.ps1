@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$jar = Join-Path $root "target\basic-s-driver-update-1.0-SNAPSHOT-shaded.jar"
+$jar = Join-Path $root "target\sb-tools-1.0-SNAPSHOT-shaded.jar"
 if (-not (Test-Path $jar)) {
     Write-Error "Shaded JAR not found. Run: mvn package"
     exit 1

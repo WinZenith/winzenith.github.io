@@ -60,7 +60,7 @@ public class DriverInstallService {
             reportStatus("Creating system restore point…");
             AppLogger.info("Creating system restore point before driver update");
             boolean created = restoreService.createRestorePoint(
-                    "SBasic Driver Update: " + candidate.installed().friendlyName());
+                    "SB Tools driver update: " + candidate.installed().friendlyName());
             if (created) {
                 AppLogger.info("System restore point created successfully");
             } else {

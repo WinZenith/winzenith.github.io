@@ -324,7 +324,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Would you like to create a System Restore Point before proceeding with the updates?");
         confirm.setHeaderText(AppInfo.DISPLAY_NAME);
         if (confirm.showAndWait().orElse(null) == javafx.scene.control.ButtonType.OK) {
-            boolean created = restoreService.createRestorePoint("SBasic software update");
+            boolean created = restoreService.createRestorePoint("SB Tools software update");
             if (!created) {
                 AppLogger.warning("Restore point creation failed or skipped.");
             }
@@ -390,7 +390,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         Alert confirmRestore = new Alert(Alert.AlertType.CONFIRMATION, "Would you like to create a System Restore Point before proceeding with the update?");
         confirmRestore.setHeaderText(AppInfo.DISPLAY_NAME);
         if (confirmRestore.showAndWait().orElse(null) == javafx.scene.control.ButtonType.OK) {
-            restoreService.createRestorePoint("SBasic software update");
+            restoreService.createRestorePoint("SB Tools software update");
         }
         busy.set(true);
         currentInstallCell = cell;
