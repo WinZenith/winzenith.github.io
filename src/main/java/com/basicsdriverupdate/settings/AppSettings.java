@@ -9,6 +9,6 @@ public record AppSettings(
         boolean eulaAccepted
 ) {
     public static AppSettings defaults() {
-        return new AppSettings(true, false, false);
+        return new AppSettings(true, true, false);
     }
 }

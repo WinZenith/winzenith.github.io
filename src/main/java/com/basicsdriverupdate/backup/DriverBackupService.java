@@ -40,14 +40,6 @@ public class DriverBackupService {
 
     public DriverBackupEntry backupBeforeUpdate(InstalledDriver driver, AppSettings settings)
             throws IOException, InterruptedException {
-        if (settings.createSystemRestorePoint()) {
-            try {
-                Path cp = PowerShellScripts.resolve("checkpoint-restore.ps1");
-                processRunner.run(ProcessRunner.powershellScript(cp.toString()));
-            } catch (Exception e) {
-                AppLogger.warning("System restore point skipped", e);
-            }
-        }
         String inf = driver.infName();
         if (inf == null || inf.isBlank()) {
             inf = "driver.inf";

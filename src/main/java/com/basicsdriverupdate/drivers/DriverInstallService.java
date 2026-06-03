@@ -1,6 +1,7 @@
 package com.basicsdriverupdate.drivers;
 
 import com.basicsdriverupdate.backup.DriverBackupService;
+import com.basicsdriverupdate.backup.SystemRestoreService;
 import com.basicsdriverupdate.drivers.model.DriverUpdateCandidate;
 import com.basicsdriverupdate.settings.AppSettings;
 import com.basicsdriverupdate.util.AppLogger;
@@ -39,6 +40,7 @@ public class DriverInstallService {
             .build();
 
     private final DriverBackupService backupService = new DriverBackupService();
+    private final SystemRestoreService restoreService = new SystemRestoreService();
     private final ProcessRunner processRunner = new ProcessRunner(900);
     private final AtomicBoolean cancellationFlag = new AtomicBoolean(false);
     private volatile ProgressCallback progressCallback;
@@ -54,6 +56,18 @@ public class DriverInstallService {
 
     public InstallResult install(DriverUpdateCandidate candidate, AppSettings settings)
             throws IOException, InterruptedException {
+        if (settings.createSystemRestorePoint()) {
+            reportStatus("Creating system restore point…");
+            AppLogger.info("Creating system restore point before driver update");
+            boolean created = restoreService.createRestorePoint(
+                    "SBasic Driver Update: " + candidate.installed().friendlyName());
+            if (created) {
+                AppLogger.info("System restore point created successfully");
+            } else {
+                AppLogger.warning("System restore point creation failed or was skipped");
+            }
+        }
+
         com.basicsdriverupdate.backup.DriverBackupEntry backupEntry = null;
         if (settings.autoBackupDrivers()) {
             backupEntry = backupService.backupBeforeUpdate(candidate.installed(), settings);
