@@ -1,0 +1,44 @@
+package com.sbtools.ui;
+
+import javafx.scene.control.Label;
+
+public class UILabel extends Label {
+
+    public enum LabelStyle {
+        BODY,
+        SECONDARY,
+        HEADER,
+        SECTION_TITLE,
+        STATUS_SUCCESS,
+        STATUS_WARNING,
+        STATUS_DANGER,
+        STATUS_INFO
+    }
+
+    public UILabel(String text) {
+        this(text, LabelStyle.BODY);
+    }
+
+    public UILabel(String text, LabelStyle style) {
+        super(text);
+        getStyleClass().add("label");
+        applyStyle(style);
+    }
+
+    private void applyStyle(LabelStyle style) {
+        switch (style) {
+            case BODY -> { }
+            case SECONDARY -> getStyleClass().add("text-muted");
+            case HEADER -> getStyleClass().addAll("large");
+            case SECTION_TITLE -> getStyleClass().addAll("large");
+            case STATUS_SUCCESS -> getStyleClass().add("success");
+            case STATUS_WARNING -> getStyleClass().add("warning");
+            case STATUS_DANGER -> getStyleClass().add("danger");
+            case STATUS_INFO -> getStyleClass().add("accent");
+        }
+    }
+
+    public static UILabel sectionTitle(String text) {
+        return new UILabel(text, LabelStyle.SECTION_TITLE);
+    }
+}
