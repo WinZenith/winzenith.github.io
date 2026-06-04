@@ -13,7 +13,7 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.release>17</maven.compiler.release>
         <javafx.version>21.0.5</javafx.version>
         <javafx.platform>win</javafx.platform>
         <javafx.classifier>win</javafx.classifier>
@@ -164,6 +164,50 @@
                                     </excludes>
                                 </filter>
                             </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Launch4j plugin to create Windows executable with custom icon -->
+            <plugin>
+                <groupId>com.akathist.maven.plugins.launch4j</groupId>
+                <artifactId>launch4j-maven-plugin</artifactId>
+                <version>2.5.3</version>
+                <executions>
+                    <execution>
+                        <id>l4j-clui</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>launch4j</goal>
+                        </goals>
+                        <configuration>
+                            <headerType>gui</headerType>
+                            <outfile>target/SBTools.exe</outfile>
+                            <jar>target/${project.artifactId}-${project.version}-shaded.jar</jar>
+                            <errTitle>SBTools Error</errTitle>
+                            <icon>src/main/resources/app.ico</icon>
+                            <classPath>
+                                <mainClass>com.sbtools.App</mainClass>
+                            </classPath>
+                            <jre>
+                                <path></path>
+                                <minVersion>17</minVersion>
+                                <jdkPreference>preferJre</jdkPreference>
+                                <initialHeapSize>128</initialHeapSize>
+                                <maxHeapSize>1024</maxHeapSize>
+                            </jre>
+                            <versionInfo>
+                                <fileVersion>1.0.0.0</fileVersion>
+                                <txtFileVersion>1.0.0.0</txtFileVersion>
+                                <fileDescription>SBTools - Windows Driver Update Tool</fileDescription>
+                                <copyright>2024</copyright>
+                                <productVersion>1.0.0.0</productVersion>
+                                <txtProductVersion>1.0.0.0</txtProductVersion>
+                                <productName>SBTools</productName>
+                                <companyName></companyName>
+                                <internalName>sbtools</internalName>
+                                <originalFilename>SBTools.exe</originalFilename>
+                            </versionInfo>
                         </configuration>
                     </execution>
                 </executions>

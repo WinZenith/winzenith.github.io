@@ -68,7 +68,8 @@ public class DriverCatalogAggregator {
             Consumer<List<DriverUpdateCandidate>> onProviderFinished) {
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
         int poolSize = Math.min(providers.size(), 4);
-        try (ExecutorService pool = Executors.newFixedThreadPool(poolSize)) {
+        ExecutorService pool = Executors.newFixedThreadPool(poolSize);
+        try {
             var futures = providers.stream()
                     .map(provider -> pool.submit(() -> {
                         if (onProviderStarted != null) {
@@ -92,6 +93,8 @@ public class DriverCatalogAggregator {
                     }
                 }
             }
+        } finally {
+            pool.shutdown();
         }
     }
 

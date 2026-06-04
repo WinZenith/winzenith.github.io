@@ -29,26 +29,55 @@ public final class AdminCheck {
     }
 
     public static void requestElevation() throws IOException {
-        String javaHome = System.getProperty("java.home");
-        String javaBin = javaHome + "\\bin\\javaw.exe";
-        String classPath = System.getProperty("java.class.path");
-        String modulePath = System.getProperty("jdk.module.path");
-        String mainClass = "com.sbtools.App";
+        // Only use EXE for elevation if actually running from EXE (for custom UAC icon)
+        String exePath = getExePath();
         
-        StringBuilder args = new StringBuilder();
-        args.append("'--enable-native-access=javafx.graphics'");
-        if (modulePath != null && !modulePath.isEmpty()) {
-            args.append(",'--module-path','").append(modulePath.replace("'", "''")).append("'");
+        if (exePath != null && new java.io.File(exePath).exists()) {
+            // Running from EXE, use it for elevation (shows custom icon)
+            String cmd = String.format(
+                    "Start-Process -FilePath '%s' -Verb RunAs",
+                    exePath.replace("'", "''")
+            );
+            new ProcessBuilder("powershell", "-NoProfile", "-Command", cmd).start();
+        } else {
+            // Running from JAR/IntelliJ, use javaw.exe with proper JVM arguments (shows Java icon)
+            String javaHome = System.getProperty("java.home");
+            String javaBin = javaHome + "\\bin\\javaw.exe";
+            String classPath = System.getProperty("java.class.path");
+            String modulePath = System.getProperty("jdk.module.path");
+            String mainClass = "com.sbtools.App";
+            
+            StringBuilder args = new StringBuilder();
+            args.append("'--enable-native-access=javafx.graphics'");
+            if (modulePath != null && !modulePath.isEmpty()) {
+                args.append(",'--module-path','").append(modulePath.replace("'", "''")).append("'");
+            }
+            args.append(",'--add-modules','javafx.controls'");
+            args.append(",'-cp','").append(classPath.replace("'", "''")).append("'");
+            args.append(",'").append(mainClass).append("'");
+            
+            String cmd = String.format(
+                    "Start-Process -FilePath '%s' -ArgumentList %s -Verb RunAs",
+                    javaBin.replace("'", "''"),
+                    args.toString()
+            );
+            new ProcessBuilder("powershell", "-NoProfile", "-Command", cmd).start();
         }
-        args.append(",'--add-modules','javafx.controls'");
-        args.append(",'-cp','").append(classPath.replace("'", "''")).append("'");
-        args.append(",'").append(mainClass).append("'");
-        
-        String cmd = String.format(
-                "Start-Process -FilePath '%s' -ArgumentList %s -Verb RunAs",
-                javaBin.replace("'", "''"),
-                args.toString()
-        );
-        new ProcessBuilder("powershell", "-NoProfile", "-Command", cmd).start();
+    }
+    
+    private static String getExePath() {
+        try {
+            String classPath = AdminCheck.class.getProtectionDomain().getCodeSource().getLocation().getPath();
+            // Only return EXE path if actually running from EXE (not just if it exists in target)
+            if (classPath.contains(".exe") && classPath.toLowerCase().endsWith(".exe")) {
+                java.io.File exeFile = new java.io.File(classPath);
+                if (exeFile.exists()) {
+                    return exeFile.getAbsolutePath();
+                }
+            }
+        } catch (Exception e) {
+            // Ignore errors, fall back to javaw.exe
+        }
+        return null;
     }
 }

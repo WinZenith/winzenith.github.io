@@ -11,6 +11,8 @@ import atlantafx.base.theme.Dracula;
 import javafx.geometry.Pos;
 import javafx.scene.control.Label;
 import javafx.scene.control.Separator;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 import javafx.scene.layout.VBox;
 import com.sbtools.util.AdminCheck;
 import com.sbtools.util.AppInfo;
@@ -65,9 +67,16 @@ public class App extends Application {
 
         BorderPane root = new BorderPane();
 
-        Label appTitle = new Label("SB Tools");
+        // Load logo icon
+        Image logoImage = new Image(getClass().getResourceAsStream("/logo-ico.png"));
+        ImageView logoView = new ImageView(logoImage);
+        logoView.setFitHeight(48);
+        logoView.setFitWidth(48);
+        logoView.setPreserveRatio(true);
+
+        Label appTitle = new Label("SBTools");
         appTitle.getStyleClass().addAll("label", "large");
-        appTitle.setStyle("-fx-text-fill: #50fa7b; -fx-font-size: 18px; -fx-font-weight: bold; -fx-padding: 0 0 4 0;");
+        appTitle.setStyle("-fx-text-fill: #2AE061; -fx-font-size: 20px; -fx-font-weight: bold; -fx-font-family: 'Segoe UI', 'Orbitron', sans-serif; -fx-letter-spacing: 1px; -fx-padding: 8 0 4 0;");
 
         VBox sidebar = new VBox(6);
         sidebar.setPadding(new Insets(16));
@@ -85,7 +94,7 @@ public class App extends Application {
         restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, softwareBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
         softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, softwareBtn); root.setCenter(softwareTab); });
 
-        sidebar.getChildren().addAll(appTitle, sep, driversBtn, restoreBtn, softwareBtn);
+        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, restoreBtn, softwareBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);
@@ -98,6 +107,7 @@ public class App extends Application {
         Scene scene = new Scene(root, 960, 600);
         scene.getStylesheets().add(getClass().getResource("/custom.css").toExternalForm());
         stage.setTitle(AppInfo.DISPLAY_NAME);
+        stage.getIcons().add(logoImage);
         stage.setScene(scene);
         stage.setMaximized(true);
         stage.show();
