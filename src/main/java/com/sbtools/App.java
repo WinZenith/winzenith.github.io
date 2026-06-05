@@ -5,6 +5,7 @@ import com.sbtools.settings.SettingsStore;
 import com.sbtools.ui.DriversTabView;
 import com.sbtools.ui.RestoreTabView;
 import com.sbtools.ui.SoftwareUpdatesTabView;
+import com.sbtools.ui.SystemInfoTabView;
 import com.sbtools.ui.UIButton;
 
 import atlantafx.base.theme.Dracula;
@@ -64,6 +65,7 @@ public class App extends Application {
         DriversTabView driversTab = new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
         RestoreTabView restoreTab = new RestoreTabView(busy, AdminCheck::isRunningAsAdmin);
         SoftwareUpdatesTabView softwareTab = new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
+        SystemInfoTabView systemInfoTab = new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin);
 
         BorderPane root = new BorderPane();
 
@@ -86,15 +88,17 @@ public class App extends Application {
         UIButton driversBtn = UIButton.primary("Drivers");
         UIButton restoreBtn = UIButton.secondary("Rollback drivers");
         UIButton softwareBtn = UIButton.secondary("Software update");
+        UIButton systemInfoBtn = UIButton.secondary("System Information");
 
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, softwareBtn); root.setCenter(driversTab); });
-        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, softwareBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
-        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, softwareBtn); root.setCenter(softwareTab); });
+        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn); root.setCenter(driversTab); });
+        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
+        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn); root.setCenter(softwareTab); });
+        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn); root.setCenter(systemInfoTab); });
 
-        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, restoreBtn, softwareBtn);
+        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, restoreBtn, softwareBtn, systemInfoBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);

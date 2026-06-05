@@ -39,6 +39,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private final ObservableList<SoftwareUpdateEntry> rows = FXCollections.observableArrayList();
     private final Label statusLabel = new Label("Scan for available app updates via winget.");
     private final ProgressIndicator progress = new ProgressIndicator();
+    private final ProgressBar batchProgressBar = new ProgressBar(0);
+    private final Label batchProgressLabel = new Label();
     private final Button scanButton = new Button("Scan");
     private final Button updateSelectedButton = new Button("Update Selected");
     private TableCell<SoftwareUpdateEntry, Void> currentInstallCell;
@@ -48,12 +50,15 @@ public class SoftwareUpdatesTabView extends BorderPane {
         this.adminCheck = adminCheck;
         progress.setVisible(false);
         progress.setMaxSize(24, 24);
+        batchProgressBar.setVisible(false);
+        batchProgressBar.setPrefWidth(150);
+        batchProgressLabel.setVisible(false);
 
         scanButton.setOnAction(e -> scan());
         updateSelectedButton.setOnAction(e -> updateSelected());
         updateSelectedButton.setDisable(true);
 
-        HBox top = new HBox(12, scanButton, updateSelectedButton, progress, statusLabel);
+        HBox top = new HBox(12, scanButton, updateSelectedButton, progress, batchProgressBar, batchProgressLabel, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -330,13 +335,29 @@ public class SoftwareUpdatesTabView extends BorderPane {
             }
         }
         busy.set(true);
-        statusLabel.setText("Installing " + selected.size() + " update(s) …");
+        int total = selected.size();
+        statusLabel.setText("Installing " + total + " update(s) …");
+        Platform.runLater(() -> {
+            progress.setVisible(true);
+            batchProgressBar.setVisible(true);
+            batchProgressBar.setProgress(0);
+            batchProgressLabel.setVisible(true);
+            batchProgressLabel.setText("0 / " + total);
+            scanButton.setDisable(true);
+            updateSelectedButton.setDisable(true);
+        });
 
         new Thread(() -> {
+            int completed = 0;
             for (SoftwareUpdateEntry e : selected) {
                 try {
+                    int current = completed;
                     Instant start = Instant.now();
-                    Platform.runLater(() -> statusLabel.setText("Installing " + e.getName() + "…"));
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Installing " + e.getName() + "…");
+                        batchProgressLabel.setText(current + " / " + total);
+                        batchProgressBar.setProgress((double) current / total);
+                    });
                     ProcessResult res = service.updatePackage(e.id(), true, 1200);
                     if (res.success()) {
                         List<Path> candidates = service.findCandidateInstallersForPackage(e, start);
@@ -373,8 +394,13 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 } catch (Exception ex) {
                     AppLogger.warning("Exception during update: " + ex.getMessage());
                 }
+                completed++;
             }
             Platform.runLater(() -> {
+                progress.setVisible(false);
+                batchProgressBar.setVisible(false);
+                batchProgressLabel.setVisible(false);
+                scanButton.setDisable(false);
                 busy.set(false);
                 statusLabel.setText("Selected updates finished. Re-scan to refresh list.");
                 scan();
@@ -395,7 +421,12 @@ public class SoftwareUpdatesTabView extends BorderPane {
         busy.set(true);
         currentInstallCell = cell;
         statusLabel.setText("Installing update for " + entry.getName() + " …");
-        Platform.runLater(() -> showCellInstallingState(cell));
+        Platform.runLater(() -> {
+            progress.setVisible(true);
+            scanButton.setDisable(true);
+            updateSelectedButton.setDisable(true);
+            showCellInstallingState(cell);
+        });
 
         new Thread(() -> {
             try {
@@ -437,6 +468,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR, "Install failed:\n" + ex.getMessage()).showAndWait());
             } finally {
                 Platform.runLater(() -> {
+                    progress.setVisible(false);
+                    scanButton.setDisable(false);
+                    updateSelectedButton.setDisable(false);
+                    updateInstallButtonState();
                     if (currentInstallCell != null) {
                         hideCellInstallingState(currentInstallCell);
                     }
