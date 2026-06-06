@@ -244,15 +244,27 @@ public class SoftwareUpdatesTabView extends BorderPane {
         busy.set(true);
         progress.setVisible(true);
         scanButton.setDisable(true);
-        statusLabel.setText("Checking winget for updates…");
+        statusLabel.setText("Scanning for updates…");
         rows.clear();
         new Thread(() -> {
+            List<SoftwareUpdateEntry> allUpdates = new java.util.ArrayList<>();
+            int wingetCount = 0;
+            int wuCount = 0;
             try {
-                if (!service.isWingetAvailable()) {
+                boolean wingetAvailable = service.isWingetAvailable();
+                if (wingetAvailable) {
+                    try {
+                        List<SoftwareUpdateEntry> wingetUpdates = service.scanForUpdates();
+                        wingetCount = wingetUpdates.size();
+                        allUpdates.addAll(wingetUpdates);
+                    } catch (Exception ex) {
+                        AppLogger.warning("winget scan failed: " + ex.getMessage());
+                    }
+                } else {
                     String diag = service.getWingetDiagnostics();
                     final String diagnostics = diag;
                     Platform.runLater(() -> {
-                        statusLabel.setText("winget not found on PATH.");
+                        statusLabel.setText("winget not found. Checking Windows Update…");
                         TextArea ta = new TextArea(diagnostics);
                         ta.setEditable(false);
                         ta.setWrapText(true);
@@ -293,12 +305,30 @@ public class SoftwareUpdatesTabView extends BorderPane {
                         a.getDialogPane().setContent(content);
                         a.showAndWait();
                     });
-                    return;
                 }
-                List<SoftwareUpdateEntry> updates = service.scanForUpdates();
+
+                try {
+                    List<SoftwareUpdateEntry> wuUpdates = service.scanForWindowsUpdates();
+                    wuCount = wuUpdates.size();
+                    allUpdates.addAll(wuUpdates);
+                } catch (Exception ex) {
+                    AppLogger.warning("Windows Update scan failed: " + ex.getMessage());
+                }
+
+                final int wc = wingetCount;
+                final int wuc = wuCount;
+                final List<SoftwareUpdateEntry> finalUpdates = allUpdates;
                 Platform.runLater(() -> {
-                    rows.setAll(updates);
-                    statusLabel.setText(updates.size() + " outdated program(s) found.");
+                    rows.setAll(finalUpdates);
+                    if (wc > 0 && wuc > 0) {
+                        statusLabel.setText(finalUpdates.size() + " outdated item(s) found (" + wc + " app(s), " + wuc + " Windows Update(s)).");
+                    } else if (wc > 0) {
+                        statusLabel.setText(wc + " outdated app(s) found.");
+                    } else if (wuc > 0) {
+                        statusLabel.setText(wuc + " Windows Update(s) found.");
+                    } else {
+                        statusLabel.setText("Everything is up to date.");
+                    }
                     updateInstallButtonState();
                 });
             } catch (Exception ex) {
@@ -358,30 +388,37 @@ public class SoftwareUpdatesTabView extends BorderPane {
                         batchProgressLabel.setText(current + " / " + total);
                         batchProgressBar.setProgress((double) current / total);
                     });
-                    ProcessResult res = service.updatePackage(e.id(), true, 1200);
+                    ProcessResult res;
+                    if ("WindowsUpdate".equals(e.source()) && e.updateId() != null) {
+                        res = service.installWindowsUpdate(e.updateId(), 1200);
+                    } else {
+                        res = service.updatePackage(e.id(), true, 1200);
+                    }
                     if (res.success()) {
-                        List<Path> candidates = service.findCandidateInstallersForPackage(e, start);
-                        if (candidates != null && !candidates.isEmpty()) {
-                            AtomicBoolean userConfirmed = new AtomicBoolean(false);
-                            CountDownLatch latch = new CountDownLatch(1);
-                            Platform.runLater(() -> {
-                                StringBuilder sb = new StringBuilder();
-                                for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
-                                Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                                        "The following installer files were detected in your Downloads folder:\n\n" + sb.toString() + "\nDelete these files?");
-                                del.setHeaderText("Delete installer files for " + (e.getName() != null ? e.getName() : e.id()));
-                                if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
-                                    userConfirmed.set(true);
+                        if (!"WindowsUpdate".equals(e.source())) {
+                            List<Path> candidates = service.findCandidateInstallersForPackage(e, start);
+                            if (candidates != null && !candidates.isEmpty()) {
+                                AtomicBoolean userConfirmed = new AtomicBoolean(false);
+                                CountDownLatch latch = new CountDownLatch(1);
+                                Platform.runLater(() -> {
+                                    StringBuilder sb = new StringBuilder();
+                                    for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
+                                    Alert del = new Alert(Alert.AlertType.CONFIRMATION,
+                                            "The following installer files were detected in your Downloads folder:\n\n" + sb.toString() + "\nDelete these files?");
+                                    del.setHeaderText("Delete installer files for " + (e.getName() != null ? e.getName() : e.id()));
+                                    if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
+                                        userConfirmed.set(true);
+                                    }
+                                    latch.countDown();
+                                });
+                                try {
+                                    latch.await();
+                                    if (userConfirmed.get()) {
+                                        service.deleteInstallerFiles(candidates);
+                                    }
+                                } catch (InterruptedException ie) {
+                                    Thread.currentThread().interrupt();
                                 }
-                                latch.countDown();
-                            });
-                            try {
-                                latch.await();
-                                if (userConfirmed.get()) {
-                                    service.deleteInstallerFiles(candidates);
-                                }
-                            } catch (InterruptedException ie) {
-                                Thread.currentThread().interrupt();
                             }
                         }
                         Platform.runLater(() -> {
@@ -431,30 +468,37 @@ public class SoftwareUpdatesTabView extends BorderPane {
         new Thread(() -> {
             try {
                 Instant start = Instant.now();
-                ProcessResult res = service.updatePackage(entry.id(), true, 1200);
+                ProcessResult res;
+                if ("WindowsUpdate".equals(entry.source()) && entry.updateId() != null) {
+                    res = service.installWindowsUpdate(entry.updateId(), 1200);
+                } else {
+                    res = service.updatePackage(entry.id(), true, 1200);
+                }
                 if (res.success()) {
-                    List<Path> candidates = service.findCandidateInstallersForPackage(entry, start);
-                    if (candidates != null && !candidates.isEmpty()) {
-                        AtomicBoolean userConfirmed = new AtomicBoolean(false);
-                        CountDownLatch latch = new CountDownLatch(1);
-                        Platform.runLater(() -> {
-                            StringBuilder sb = new StringBuilder();
-                            for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
-                            Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                                    "The following installer files were detected in your Downloads folder:\n\n" + sb.toString() + "\nDelete these files?");
-                            del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
-                            if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
-                                userConfirmed.set(true);
+                    if (!"WindowsUpdate".equals(entry.source())) {
+                        List<Path> candidates = service.findCandidateInstallersForPackage(entry, start);
+                        if (candidates != null && !candidates.isEmpty()) {
+                            AtomicBoolean userConfirmed = new AtomicBoolean(false);
+                            CountDownLatch latch = new CountDownLatch(1);
+                            Platform.runLater(() -> {
+                                StringBuilder sb = new StringBuilder();
+                                for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
+                                Alert del = new Alert(Alert.AlertType.CONFIRMATION,
+                                        "The following installer files were detected in your Downloads folder:\n\n" + sb.toString() + "\nDelete these files?");
+                                del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
+                                if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
+                                    userConfirmed.set(true);
+                                }
+                                latch.countDown();
+                            });
+                            try {
+                                latch.await();
+                                if (userConfirmed.get()) {
+                                    service.deleteInstallerFiles(candidates);
+                                }
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
                             }
-                            latch.countDown();
-                        });
-                        try {
-                            latch.await();
-                            if (userConfirmed.get()) {
-                                service.deleteInstallerFiles(candidates);
-                            }
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
                         }
                     }
                     Platform.runLater(() -> {

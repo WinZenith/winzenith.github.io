@@ -8,13 +8,24 @@ import javafx.beans.property.StringProperty;
 public class SoftwareUpdateEntry {
 
     private final String id;
+    private final String source;
+    private final String updateId;
+    private final long sizeBytes;
     private final StringProperty name = new SimpleStringProperty();
     private final StringProperty currentVersion = new SimpleStringProperty();
     private final StringProperty availableVersion = new SimpleStringProperty();
     private final BooleanProperty selected = new SimpleBooleanProperty(false);
 
     public SoftwareUpdateEntry(String id, String name, String currentVersion, String availableVersion) {
+        this(id, name, currentVersion, availableVersion, "winget", null, 0);
+    }
+
+    public SoftwareUpdateEntry(String id, String name, String currentVersion, String availableVersion,
+                               String source, String updateId, long sizeBytes) {
         this.id = id;
+        this.source = source == null ? "winget" : source;
+        this.updateId = updateId;
+        this.sizeBytes = sizeBytes;
         this.name.set(name == null ? "" : name);
         this.currentVersion.set(currentVersion == null ? "" : currentVersion);
         this.availableVersion.set(availableVersion == null ? "" : availableVersion);
@@ -38,6 +49,18 @@ public class SoftwareUpdateEntry {
 
     public BooleanProperty selectedProperty() {
         return selected;
+    }
+
+    public String source() {
+        return source;
+    }
+
+    public String updateId() {
+        return updateId;
+    }
+
+    public long sizeBytes() {
+        return sizeBytes;
     }
 
     public String getName() {

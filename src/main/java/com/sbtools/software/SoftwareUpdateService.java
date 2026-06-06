@@ -2,6 +2,7 @@ package com.sbtools.software;
 
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.JsonMapper;
+import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -439,6 +440,81 @@ public class SoftwareUpdateService {
             }
         }
         return deleted;
+    }
+
+    public List<SoftwareUpdateEntry> scanForWindowsUpdates() {
+        List<SoftwareUpdateEntry> results = new ArrayList<>();
+        if (!com.sbtools.util.AppPaths.isWindows()) {
+            return results;
+        }
+        try {
+            Path script = PowerShellScripts.resolve("wu-search-updates.ps1");
+            ProcessResult result = runner.run(
+                    ProcessRunner.powershellScript(script.toString()), 120);
+            if (!result.success()) {
+                AppLogger.warning("Windows Update search failed: " + result.combinedOutput());
+                return results;
+            }
+            String stdout = result.stdout();
+            if (stdout == null || stdout.isBlank()) {
+                return results;
+            }
+            JsonNode root = JsonMapper.parseTree(stdout);
+            if (root.isArray()) {
+                for (JsonNode n : root) {
+                    String updateId = findText(n, "updateId");
+                    String title = findText(n, "title");
+                    String description = findText(n, "description");
+                    String version = findText(n, "version");
+                    long sizeBytes = 0;
+                    JsonNode sizeNode = n.get("sizeBytes");
+                    if (sizeNode != null && !sizeNode.isNull()) {
+                        sizeBytes = sizeNode.asLong(0);
+                    }
+                    String severity = findText(n, "severity");
+                    String kbArticle = findText(n, "kbArticle");
+
+                    String displayVersion = kbArticle != null && !kbArticle.isBlank()
+                            ? "KB" + kbArticle
+                            : (version != null ? version : "");
+                    String name = title != null ? title : (description != null ? description : "Windows Update");
+
+                    SoftwareUpdateEntry entry = new SoftwareUpdateEntry(
+                            updateId, name, "", displayVersion,
+                            "WindowsUpdate", updateId, sizeBytes);
+                    results.add(entry);
+                }
+            } else if (root.isObject()) {
+                String updateId = findText(root, "updateId");
+                String title = findText(root, "title");
+                String description = findText(root, "description");
+                String version = findText(root, "version");
+                long sizeBytes = 0;
+                JsonNode sizeNode = root.get("sizeBytes");
+                if (sizeNode != null && !sizeNode.isNull()) {
+                    sizeBytes = sizeNode.asLong(0);
+                }
+                String kbArticle = findText(root, "kbArticle");
+
+                String displayVersion = kbArticle != null && !kbArticle.isBlank()
+                        ? "KB" + kbArticle
+                        : (version != null ? version : "");
+                String name = title != null ? title : (description != null ? description : "Windows Update");
+
+                results.add(new SoftwareUpdateEntry(
+                        updateId, name, "", displayVersion,
+                        "WindowsUpdate", updateId, sizeBytes));
+            }
+            AppLogger.info("Found " + results.size() + " Windows Update(s)");
+        } catch (Exception e) {
+            AppLogger.warning("Windows Update scan failed: " + e.getMessage());
+        }
+        return results;
+    }
+
+    public ProcessResult installWindowsUpdate(String updateId, long timeoutSeconds) throws IOException, InterruptedException {
+        Path script = PowerShellScripts.resolve("wu-install.ps1");
+        return runner.run(ProcessRunner.powershellScript(script.toString(), updateId), timeoutSeconds);
     }
 
     private static String findText(JsonNode node, String... keys) {
