@@ -6,6 +6,8 @@ import com.sbtools.ui.DriversTabView;
 import com.sbtools.ui.RestoreTabView;
 import com.sbtools.ui.SoftwareUpdatesTabView;
 import com.sbtools.ui.SystemInfoTabView;
+import com.sbtools.ui.UninstallerTabView;
+import com.sbtools.ui.StartupTabView;
 import com.sbtools.ui.UIButton;
 
 import atlantafx.base.theme.Dracula;
@@ -66,6 +68,8 @@ public class App extends Application {
         RestoreTabView restoreTab = new RestoreTabView(busy, AdminCheck::isRunningAsAdmin);
         SoftwareUpdatesTabView softwareTab = new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
         SystemInfoTabView systemInfoTab = new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin);
+        UninstallerTabView uninstallerTab = new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin);
+        StartupTabView startupTab = new StartupTabView(busy, AdminCheck::isRunningAsAdmin);
 
         BorderPane root = new BorderPane();
 
@@ -89,16 +93,20 @@ public class App extends Application {
         UIButton restoreBtn = UIButton.secondary("Rollback drivers");
         UIButton softwareBtn = UIButton.secondary("Software update");
         UIButton systemInfoBtn = UIButton.secondary("System Information");
+        UIButton uninstallerBtn = UIButton.secondary("Uninstaller");
+        UIButton startupBtn = UIButton.secondary("Startup items/services");
 
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn); root.setCenter(driversTab); });
-        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
-        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn); root.setCenter(softwareTab); });
-        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn); root.setCenter(systemInfoTab); });
+        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn); root.setCenter(driversTab); });
+        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
+        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn); root.setCenter(softwareTab); });
+        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn); root.setCenter(systemInfoTab); });
+        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn); root.setCenter(uninstallerTab); });
+        startupBtn.setOnAction(e -> { selectTab(startupBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn); root.setCenter(startupTab); });
 
-        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, restoreBtn, softwareBtn, systemInfoBtn);
+        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);
