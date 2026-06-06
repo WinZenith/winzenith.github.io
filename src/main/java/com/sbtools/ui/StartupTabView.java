@@ -1,18 +1,20 @@
 package com.sbtools.ui;
 
 import com.sbtools.startup.StartupItem;
+import com.sbtools.startup.StartupItemType;
 import com.sbtools.startup.StartupService;
 import com.sbtools.startup.StartupService.StartupBackupEntry;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
-import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
+import javafx.collections.transformation.SortedList;
 import javafx.geometry.Insets;
+import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.layout.BorderPane;
@@ -32,25 +34,35 @@ public class StartupTabView extends BorderPane {
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
 
-    private final ObservableList<StartupItem> allItems = FXCollections.observableArrayList();
-    private final FilteredList<StartupItem> filteredItems = new FilteredList<>(allItems);
+    private final ObservableList<StartupItem> registryItems = FXCollections.observableArrayList();
+    private final ObservableList<StartupItem> taskItems = FXCollections.observableArrayList();
+    private final ObservableList<StartupItem> serviceItems = FXCollections.observableArrayList();
+
+    private final FilteredList<StartupItem> filteredRegistry = new FilteredList<>(registryItems);
+    private final FilteredList<StartupItem> filteredTasks = new FilteredList<>(taskItems);
+    private final FilteredList<StartupItem> filteredServices = new FilteredList<>(serviceItems);
+
+    private final SortedList<StartupItem> sortedRegistry = new SortedList<>(filteredRegistry);
+    private final SortedList<StartupItem> sortedTasks = new SortedList<>(filteredTasks);
+    private final SortedList<StartupItem> sortedServices = new SortedList<>(filteredServices);
 
     private final Label statusLabel = new Label("Scan system to list startup items.");
     private final ProgressIndicator progress = new ProgressIndicator();
-    
+
     private final Button scanButton = new Button("Scan");
     private final Button toggleButton = new Button("Enable/Disable");
     private final Button deleteButton = new Button("Delete");
     private final Button backupsButton = new Button("Backups & Restore");
-    private final TextField searchField = new TextField();
 
-    private final ToggleGroup categoryGroup = new ToggleGroup();
-    private final ToggleButton allToggle = new ToggleButton("All");
-    private final ToggleButton registryToggle = new ToggleButton("Registry");
-    private final ToggleButton folderToggle = new ToggleButton("Startup Folders");
-    private final ToggleButton tasksToggle = new ToggleButton("Scheduled Tasks");
+    private final TextField registrySearch = new TextField();
+    private final TextField taskSearch = new TextField();
+    private final TextField serviceSearch = new TextField();
 
-    private final TableView<StartupItem> table = new TableView<>(filteredItems);
+    private final TableView<StartupItem> registryTable = new TableView<>(sortedRegistry);
+    private final TableView<StartupItem> taskTable = new TableView<>(sortedTasks);
+    private final TableView<StartupItem> serviceTable = new TableView<>(sortedServices);
+
+    private final TabPane tabPane = new TabPane();
 
     public StartupTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -59,105 +71,112 @@ public class StartupTabView extends BorderPane {
         progress.setVisible(false);
         progress.setMaxSize(24, 24);
 
-        // Scan button
         scanButton.setOnAction(e -> scan());
-
-        // Toggle button
         toggleButton.setOnAction(e -> triggerToggle());
         toggleButton.setDisable(true);
         toggleButton.getStyleClass().add("button-outlined");
-
-        // Delete button
         deleteButton.setOnAction(e -> triggerDelete());
         deleteButton.setDisable(true);
         deleteButton.getStyleClass().add("danger");
-
-        // Backups button
         backupsButton.setOnAction(e -> showBackupsDialog());
         backupsButton.getStyleClass().add("button-outlined");
 
-        // Search field
-        searchField.setPromptText("Search items...");
-        searchField.setPrefWidth(200);
-        searchField.textProperty().addListener((obs, oldVal, newVal) -> applyFilter());
+        registrySearch.setPromptText("Search startup apps...");
+        registrySearch.setPrefWidth(200);
+        registrySearch.textProperty().addListener((obs, oldVal, newVal) -> applyRegistryFilter());
 
-        // Category toggles
-        allToggle.setToggleGroup(categoryGroup);
-        allToggle.setSelected(true);
-        registryToggle.setToggleGroup(categoryGroup);
-        folderToggle.setToggleGroup(categoryGroup);
-        tasksToggle.setToggleGroup(categoryGroup);
+        taskSearch.setPromptText("Search scheduled tasks...");
+        taskSearch.setPrefWidth(200);
+        taskSearch.textProperty().addListener((obs, oldVal, newVal) -> applyTaskFilter());
 
-        categoryGroup.selectedToggleProperty().addListener((obs, oldVal, newVal) -> {
-            if (newVal == null) {
-                oldVal.setSelected(true); // Prevent unselecting everything
-                return;
-            }
-            applyFilter();
+        serviceSearch.setPromptText("Search services...");
+        serviceSearch.setPrefWidth(200);
+        serviceSearch.textProperty().addListener((obs, oldVal, newVal) -> applyServiceFilter());
+
+        buildTable(registryTable, "Startup Item Name", "Publisher", "Location", "Command / Execution Path");
+        buildTable(taskTable, "Task Name", "Publisher", "Location", "Actions / Command");
+        buildTable(serviceTable, "Service Name", "Display Name", "Start Type", "Binary Path");
+
+        sortedRegistry.comparatorProperty().bind(registryTable.comparatorProperty());
+        sortedTasks.comparatorProperty().bind(taskTable.comparatorProperty());
+        sortedServices.comparatorProperty().bind(serviceTable.comparatorProperty());
+
+        Tab registryTab = createTab("Startup apps", registryTable, registrySearch);
+        Tab taskTab = createTab("Scheduled tasks", taskTable, taskSearch);
+        Tab serviceTab = createTab("Windows services", serviceTable, serviceSearch);
+
+        tabPane.getTabs().addAll(registryTab, taskTab, serviceTab);
+        tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+
+        tabPane.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
+            updateButtonStates();
         });
 
-        // Top toolbar
         HBox top = new HBox(12,
-                allToggle, registryToggle, folderToggle, tasksToggle,
-                new Separator(javafx.geometry.Orientation.VERTICAL),
-                searchField, scanButton, toggleButton, deleteButton, backupsButton,
+                scanButton, toggleButton, deleteButton, backupsButton,
+                new Separator(Orientation.VERTICAL),
                 progress, statusLabel
         );
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
 
-        // Build TableView
-        buildTable();
-
         setTop(top);
-        setCenter(table);
+        setCenter(tabPane);
 
-        // Table selection listener
-        table.getSelectionModel().selectedItemProperty().addListener((obs, oldSelection, newSelection) -> {
-            boolean hasSelection = newSelection != null;
-            toggleButton.setDisable(!hasSelection || busy.get());
-            deleteButton.setDisable(!hasSelection || busy.get());
-        });
-
-        // Global busy listener
         busy.addListener((obs, oldVal, newVal) -> {
             scanButton.setDisable(newVal);
-            toggleButton.setDisable(newVal || table.getSelectionModel().getSelectedItem() == null);
-            deleteButton.setDisable(newVal || table.getSelectionModel().getSelectedItem() == null);
+            toggleButton.setDisable(newVal || getSelectedTable().getSelectionModel().getSelectedItem() == null);
+            deleteButton.setDisable(newVal || getSelectedTable().getSelectionModel().getSelectedItem() == null);
             backupsButton.setDisable(newVal);
-            searchField.setDisable(newVal);
-            allToggle.setDisable(newVal);
-            registryToggle.setDisable(newVal);
-            folderToggle.setDisable(newVal);
-            tasksToggle.setDisable(newVal);
+            registrySearch.setDisable(newVal);
+            taskSearch.setDisable(newVal);
+            serviceSearch.setDisable(newVal);
+            tabPane.setDisable(newVal);
         });
 
         if (!AppPaths.isWindows()) {
             scanButton.setDisable(true);
             statusLabel.setText("Startup manager is only available on Windows.");
         } else {
-            // Auto scan on load
             Platform.runLater(this::scan);
         }
     }
 
-    private void buildTable() {
+    private Tab createTab(String title, TableView<StartupItem> table, TextField searchField) {
+        Tab tab = new Tab(title);
+        HBox searchBar = new HBox(8, searchField);
+        searchBar.setAlignment(Pos.CENTER_RIGHT);
+        searchBar.setPadding(new Insets(0, 8, 0, 0));
+
+        VBox content = new VBox(0, searchBar, table);
+        VBox.setVgrow(table, Priority.ALWAYS);
+        tab.setContent(content);
+
+        table.getSelectionModel().selectedItemProperty().addListener((obs, oldSel, newSel) -> {
+            updateButtonStates();
+        });
+
+        return tab;
+    }
+
+    private void buildTable(TableView<StartupItem> table, String nameHeader, String publisherHeader,
+                            String locationHeader, String pathHeader) {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<StartupItem, String> nameCol = new TableColumn<>("Startup Item Name");
+        TableColumn<StartupItem, String> nameCol = new TableColumn<>(nameHeader);
         nameCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getName()));
         nameCol.setPrefWidth(220);
 
-        TableColumn<StartupItem, String> publisherCol = new TableColumn<>("Publisher");
+        TableColumn<StartupItem, String> publisherCol = new TableColumn<>(publisherHeader);
         publisherCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getPublisher()));
         publisherCol.setPrefWidth(180);
 
-        TableColumn<StartupItem, String> locationCol = new TableColumn<>("Location");
+        TableColumn<StartupItem, String> locationCol = new TableColumn<>(locationHeader);
         locationCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getLocation()));
         locationCol.setPrefWidth(160);
 
-        TableColumn<StartupItem, String> pathCol = new TableColumn<>("Command / Execution Path");
+        TableColumn<StartupItem, String> pathCol = new TableColumn<>(pathHeader);
         pathCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getPath()));
         pathCol.setPrefWidth(300);
 
@@ -195,28 +214,52 @@ public class StartupTabView extends BorderPane {
         });
     }
 
-    private void applyFilter() {
-        String filter = searchField.getText();
-        boolean filterReg = registryToggle.isSelected();
-        boolean filterFolder = folderToggle.isSelected();
-        boolean filterTasks = tasksToggle.isSelected();
+    private TableView<StartupItem> getSelectedTable() {
+        Tab selectedTab = tabPane.getSelectionModel().getSelectedItem();
+        if (selectedTab == null) return registryTable;
+        String title = selectedTab.getText();
+        return switch (title) {
+            case "Startup apps" -> registryTable;
+            case "Scheduled tasks" -> taskTable;
+            case "Windows services" -> serviceTable;
+            default -> registryTable;
+        };
+    }
 
-        filteredItems.setPredicate(item -> {
-            // Category filter
-            if (filterReg && !item.getLocation().contains("Run")) return false;
-            if (filterFolder && !item.getLocation().contains("Startup Folder")) return false;
-            if (filterTasks && !"Scheduled Task".equals(item.getLocation())) return false;
+    private void updateButtonStates() {
+        TableView<StartupItem> table = getSelectedTable();
+        boolean hasSelection = table.getSelectionModel().getSelectedItem() != null;
+        toggleButton.setDisable(!hasSelection || busy.get());
+        deleteButton.setDisable(!hasSelection || busy.get());
 
-            // Search text filter
-            if (filter == null || filter.isBlank()) {
-                return true;
-            }
-            String lower = filter.toLowerCase();
-            return item.getName().toLowerCase().contains(lower) ||
-                   item.getPublisher().toLowerCase().contains(lower) ||
-                   item.getPath().toLowerCase().contains(lower) ||
-                   item.getLocation().toLowerCase().contains(lower);
-        });
+        Tab selectedTab = tabPane.getSelectionModel().getSelectedItem();
+        if (selectedTab != null && "Windows services".equals(selectedTab.getText())) {
+            deleteButton.setDisable(true);
+        }
+    }
+
+    private void applyRegistryFilter() {
+        String filter = registrySearch.getText();
+        filteredRegistry.setPredicate(item -> matchesSearch(item, filter));
+    }
+
+    private void applyTaskFilter() {
+        String filter = taskSearch.getText();
+        filteredTasks.setPredicate(item -> matchesSearch(item, filter));
+    }
+
+    private void applyServiceFilter() {
+        String filter = serviceSearch.getText();
+        filteredServices.setPredicate(item -> matchesSearch(item, filter));
+    }
+
+    private boolean matchesSearch(StartupItem item, String filter) {
+        if (filter == null || filter.isBlank()) return true;
+        String lower = filter.toLowerCase();
+        return item.getName().toLowerCase().contains(lower) ||
+               item.getPublisher().toLowerCase().contains(lower) ||
+               item.getPath().toLowerCase().contains(lower) ||
+               item.getLocation().toLowerCase().contains(lower);
     }
 
     private void scan() {
@@ -224,15 +267,25 @@ public class StartupTabView extends BorderPane {
         busy.set(true);
         progress.setVisible(true);
         statusLabel.setText("Scanning startup items...");
-        allItems.clear();
+        registryItems.clear();
+        taskItems.clear();
+        serviceItems.clear();
 
         new Thread(() -> {
             try {
-                List<StartupItem> items = service.listAll();
+                List<StartupItem> regItems = service.listRegistryApps();
+                List<StartupItem> taskItemsResult = service.listScheduledTasks();
+                List<StartupItem> svcItems = service.listWindowsServices();
+
                 Platform.runLater(() -> {
-                    allItems.setAll(items);
-                    applyFilter();
-                    statusLabel.setText("Found " + items.size() + " startup item(s).");
+                    registryItems.setAll(regItems);
+                    taskItems.setAll(taskItemsResult);
+                    serviceItems.setAll(svcItems);
+                    applyRegistryFilter();
+                    applyTaskFilter();
+                    applyServiceFilter();
+                    int total = regItems.size() + taskItemsResult.size() + svcItems.size();
+                    statusLabel.setText("Found " + total + " startup item(s).");
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to scan startup items", e);
@@ -250,7 +303,7 @@ public class StartupTabView extends BorderPane {
     }
 
     private void triggerToggle() {
-        StartupItem selected = table.getSelectionModel().getSelectedItem();
+        StartupItem selected = getSelectedTable().getSelectionModel().getSelectedItem();
         if (selected == null || busy.get()) return;
 
         busy.set(true);
@@ -262,8 +315,7 @@ public class StartupTabView extends BorderPane {
             try {
                 service.toggleStatus(selected);
                 Platform.runLater(() -> {
-                    table.refresh();
-                    applyFilter();
+                    getSelectedTable().refresh();
                     statusLabel.setText("Item " + (selected.isEnabled() ? "enabled" : "disabled") + " successfully.");
                 });
             } catch (Exception e) {
@@ -282,7 +334,7 @@ public class StartupTabView extends BorderPane {
     }
 
     private void triggerDelete() {
-        StartupItem selected = table.getSelectionModel().getSelectedItem();
+        StartupItem selected = getSelectedTable().getSelectionModel().getSelectedItem();
         if (selected == null || busy.get()) return;
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
@@ -301,8 +353,13 @@ public class StartupTabView extends BorderPane {
                 try {
                     service.deleteItem(selected);
                     Platform.runLater(() -> {
-                        allItems.remove(selected);
-                        applyFilter();
+                        if (selected.getType() == StartupItemType.REGISTRY) {
+                            registryItems.remove(selected);
+                        } else if (selected.getType() == StartupItemType.TASK) {
+                            taskItems.remove(selected);
+                        }
+                        applyRegistryFilter();
+                        applyTaskFilter();
                         statusLabel.setText("Startup item deleted successfully.");
                         new Alert(Alert.AlertType.INFORMATION, "The startup item has been deleted. You can restore it anytime from the Backups panel.").showAndWait();
                     });
@@ -371,7 +428,7 @@ public class StartupTabView extends BorderPane {
 
         Button restoreBtn = new Button("Restore Selected");
         Button deleteBackupBtn = new Button("Delete Backup");
-        
+
         restoreBtn.setDisable(true);
         deleteBackupBtn.setDisable(true);
 
@@ -388,7 +445,7 @@ public class StartupTabView extends BorderPane {
                 service.restoreBackup(selected);
                 backups.remove(selected);
                 new Alert(Alert.AlertType.INFORMATION, "Startup item restored successfully.").showAndWait();
-                scan(); // Refresh the main startup items list
+                scan();
             } catch (Exception ex) {
                 AppLogger.error("Failed to restore startup item", ex);
                 new Alert(Alert.AlertType.ERROR, "Failed to restore backup:\n" + ex.getMessage()).showAndWait();

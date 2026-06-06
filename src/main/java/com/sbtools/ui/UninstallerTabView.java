@@ -12,6 +12,7 @@ import javafx.beans.property.SimpleBooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
+import javafx.collections.transformation.SortedList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
@@ -34,6 +35,7 @@ public class UninstallerTabView extends BorderPane {
 
     private final ObservableList<InstalledApp> allApps = FXCollections.observableArrayList();
     private final FilteredList<InstalledApp> filteredApps = new FilteredList<>(allApps);
+    private final SortedList<InstalledApp> sortedApps = new SortedList<>(filteredApps);
 
     private final Label statusLabel = new Label("Scan system to list installed software.");
     private final ProgressIndicator progress = new ProgressIndicator();
@@ -45,7 +47,7 @@ public class UninstallerTabView extends BorderPane {
     private final ToggleButton win32Toggle = new ToggleButton("Desktop Apps");
     private final ToggleButton appxToggle = new ToggleButton("Windows Store Apps");
 
-    private final TableView<InstalledApp> table = new TableView<>(filteredApps);
+    private final TableView<InstalledApp> table = new TableView<>(sortedApps);
 
     public UninstallerTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -92,6 +94,7 @@ public class UninstallerTabView extends BorderPane {
 
         // Build TableView
         buildTable();
+        sortedApps.comparatorProperty().bind(table.comparatorProperty());
 
         setTop(top);
         setCenter(table);
@@ -217,8 +220,68 @@ public class UninstallerTabView extends BorderPane {
         confirm.initModality(Modality.APPLICATION_MODAL);
 
         if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
-            runUninstallWizard(selected);
+            Alert restorePointDialog = new Alert(Alert.AlertType.CONFIRMATION);
+            restorePointDialog.setTitle("System Restore Point");
+            restorePointDialog.setHeaderText("Create a restore point?");
+            restorePointDialog.setContentText("Would you like to create a System Restore point before uninstalling " + selected.getName() + "?");
+            restorePointDialog.initModality(Modality.APPLICATION_MODAL);
+
+            if (restorePointDialog.showAndWait().orElse(null) == ButtonType.OK) {
+                runUninstallWithRestorePoint(selected);
+            } else {
+                runUninstallWizard(selected);
+            }
         }
+    }
+
+    private void runUninstallWithRestorePoint(InstalledApp app) {
+        busy.set(true);
+        progress.setVisible(true);
+        statusLabel.setText("Creating System Restore point...");
+
+        new Thread(() -> {
+            try {
+                ProcessResult result = new com.sbtools.util.ProcessRunner(120).run(
+                        List.of("powershell.exe", "-Command",
+                                "Checkpoint-Computer -Description 'Before uninstalling " + app.getName().replace("'", "''") + "' -RestorePointType MODIFY_SETTINGS"));
+                if (!result.success()) {
+                    Platform.runLater(() -> {
+                        progress.setVisible(false);
+                        Alert errorAlert = new Alert(Alert.AlertType.WARNING);
+                        errorAlert.setTitle("Restore Point Failed");
+                        errorAlert.setHeaderText("Could not create restore point");
+                        errorAlert.setContentText("Failed to create a System Restore point:\n" + result.combinedOutput()
+                                + "\n\nDo you want to continue with the uninstall?");
+                        errorAlert.initModality(Modality.APPLICATION_MODAL);
+
+                        ButtonType yesBtn = new ButtonType("Yes");
+                        ButtonType noBtn = new ButtonType("No");
+                        errorAlert.getButtonTypes().setAll(yesBtn, noBtn);
+
+                        if (errorAlert.showAndWait().orElse(noBtn) == yesBtn) {
+                            runUninstallWizard(app);
+                        } else {
+                            busy.set(false);
+                            statusLabel.setText("Uninstallation cancelled.");
+                        }
+                    });
+                    return;
+                }
+
+                Platform.runLater(() -> {
+                    statusLabel.setText("Restore point created. Starting uninstaller...");
+                    runUninstallWizard(app);
+                });
+            } catch (Exception e) {
+                AppLogger.error("Failed to create restore point", e);
+                Platform.runLater(() -> {
+                    progress.setVisible(false);
+                    busy.set(false);
+                    statusLabel.setText("Restore point failed.");
+                    new Alert(Alert.AlertType.ERROR, "Failed to create System Restore point:\n" + e.getMessage()).showAndWait();
+                });
+            }
+        }, "restore-point").start();
     }
 
     private void runUninstallWizard(InstalledApp app) {

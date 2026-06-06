@@ -12,6 +12,8 @@ public class StartupItem {
     private String registryValueName;
     private String filePath;
     private String taskPath;
+    private StartupItemType type;
+    private String serviceStartType;
 
     public StartupItem() {
         this.id = UUID.randomUUID().toString();
@@ -28,6 +30,22 @@ public class StartupItem {
         this.registryValueName = registryValueName;
         this.filePath = filePath;
         this.taskPath = taskPath;
+    }
+
+    public StartupItem(String name, String publisher, String path, boolean enabled, String location,
+                       String registryValueName, String filePath, String taskPath,
+                       StartupItemType type, String serviceStartType) {
+        this.id = UUID.randomUUID().toString();
+        this.name = name;
+        this.publisher = publisher;
+        this.path = path;
+        this.enabled = enabled;
+        this.location = location;
+        this.registryValueName = registryValueName;
+        this.filePath = filePath;
+        this.taskPath = taskPath;
+        this.type = type;
+        this.serviceStartType = serviceStartType;
     }
 
     public String getId() {
@@ -100,5 +118,21 @@ public class StartupItem {
 
     public void setTaskPath(String taskPath) {
         this.taskPath = taskPath;
+    }
+
+    public StartupItemType getType() {
+        return type;
+    }
+
+    public void setType(StartupItemType type) {
+        this.type = type;
+    }
+
+    public String getServiceStartType() {
+        return serviceStartType;
+    }
+
+    public void setServiceStartType(String serviceStartType) {
+        this.serviceStartType = serviceStartType;
     }
 }

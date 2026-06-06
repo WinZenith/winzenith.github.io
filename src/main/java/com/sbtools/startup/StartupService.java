@@ -12,42 +12,38 @@ import com.sun.jna.platform.win32.WinReg.HKEY;
 import com.sun.jna.ptr.IntByReference;
 import com.sun.jna.ptr.PointerByReference;
 
-import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.*;
 
 public class StartupService {
 
     private static final String REG_RUN = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    private static final String REG_RUN_ONCE = "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce";
     private static final String REG_RUN_DISABLED = "Software\\Microsoft\\Windows\\CurrentVersion\\RunDisabled";
+    private static final String REG_STARTUP_APPROVED = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 
-    private final ProcessRunner processRunner = new ProcessRunner(60); // 1-minute timeout for PowerShell commands
+    private final ProcessRunner processRunner = new ProcessRunner(60);
 
     public static class StartupBackupEntry {
         private String id;
         private String name;
-        private String type; // "Registry", "File", "Task"
+        private String type; // "Registry", "Task"
         private String command;
         private String location;
-        
+
         // Registry specific
-        private String hive; // "HKCU", "HKLM"
+        private String hive;
         private String keyPath;
         private String valueName;
-        
-        // File specific
-        private String originalFilePath;
-        private String backupFileName;
-        
+
         // Task specific
         private String taskPath;
         private String backupXmlName;
-        
+
         private long backupTime;
 
         public StartupBackupEntry() {}
@@ -77,10 +73,6 @@ public class StartupService {
         public void setKeyPath(String keyPath) { this.keyPath = keyPath; }
         public String getValueName() { return valueName; }
         public void setValueName(String valueName) { this.valueName = valueName; }
-        public String getOriginalFilePath() { return originalFilePath; }
-        public void setOriginalFilePath(String originalFilePath) { this.originalFilePath = originalFilePath; }
-        public String getBackupFileName() { return backupFileName; }
-        public void setBackupFileName(String backupFileName) { this.backupFileName = backupFileName; }
         public String getTaskPath() { return taskPath; }
         public void setTaskPath(String taskPath) { this.taskPath = taskPath; }
         public String getBackupXmlName() { return backupXmlName; }
@@ -89,54 +81,190 @@ public class StartupService {
         public void setBackupTime(long backupTime) { this.backupTime = backupTime; }
     }
 
-    /**
-     * Lists all startup items from Registry Run keys, Startup folders, and Scheduled Tasks.
-     */
     public List<StartupItem> listAll() {
         List<StartupItem> items = new ArrayList<>();
+        if (!AppPaths.isWindows()) return items;
 
-        if (!AppPaths.isWindows()) {
-            return items;
-        }
+        items.addAll(listRegistryApps());
+        items.addAll(listScheduledTasks());
+        items.addAll(listWindowsServices());
 
-        // 1. Scan Registry Keys (HKCU and HKLM)
-        scanRegistry(WinReg.HKEY_CURRENT_USER, "HKCU Run", REG_RUN, true, items);
+        items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
+        return items;
+    }
+
+    public List<StartupItem> listRegistryApps() {
+        List<StartupItem> items = new ArrayList<>();
+        if (!AppPaths.isWindows()) return items;
+
+        scanRegistryWithApproval(WinReg.HKEY_CURRENT_USER, "HKCU", REG_RUN, items);
+        scanRegistryWithApproval(WinReg.HKEY_LOCAL_MACHINE, "HKLM", REG_RUN, items);
+        scanOrphanedApproved(WinReg.HKEY_CURRENT_USER, "HKCU", items);
+        scanOrphanedApproved(WinReg.HKEY_LOCAL_MACHINE, "HKLM", items);
+
+        scanRegistry(WinReg.HKEY_CURRENT_USER, "HKCU RunOnce", REG_RUN_ONCE, true, items);
+        scanRegistry(WinReg.HKEY_LOCAL_MACHINE, "HKLM RunOnce", REG_RUN_ONCE, true, items);
+
         scanRegistry(WinReg.HKEY_CURRENT_USER, "HKCU Run (Disabled)", REG_RUN_DISABLED, false, items);
-        scanRegistry(WinReg.HKEY_LOCAL_MACHINE, "HKLM Run", REG_RUN, true, items);
         scanRegistry(WinReg.HKEY_LOCAL_MACHINE, "HKLM Run (Disabled)", REG_RUN_DISABLED, false, items);
 
-        // 2. Scan Startup folders and Scheduled Tasks using get-startup-details.ps1
+        scanRegistry32bit(WinReg.HKEY_LOCAL_MACHINE, "HKLM (32-bit) Run", REG_RUN, items);
+
+        items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
+        return items;
+    }
+
+    private void scanRegistryWithApproval(HKEY hive, String hivePrefix, String keyPath, List<StartupItem> items) {
+        try {
+            if (!Advapi32Util.registryKeyExists(hive, keyPath)) {
+                return;
+            }
+
+            Map<String, Object> approvedValues = new HashMap<>();
+            try {
+                if (Advapi32Util.registryKeyExists(hive, REG_STARTUP_APPROVED)) {
+                    Map<String, Object> allApproved = Advapi32Util.registryGetValues(hive, REG_STARTUP_APPROVED);
+                    approvedValues.putAll(allApproved);
+                }
+            } catch (Exception ignored) {}
+
+            Map<String, Object> values = Advapi32Util.registryGetValues(hive, keyPath);
+            for (Map.Entry<String, Object> entry : values.entrySet()) {
+                String valName = entry.getKey();
+                Object valData = entry.getValue();
+                if (valData instanceof String cmd) {
+                    boolean enabled;
+
+                    Object approvedData = approvedValues.get(valName);
+                    if (approvedData instanceof byte[] bytes && bytes.length > 0) {
+                        enabled = bytes[0] == 0x02;
+                    } else {
+                        enabled = true;
+                    }
+
+                    String exePath = extractExecutablePath(cmd);
+                    String publisher = getCompanyName(exePath);
+                    if (publisher == null || publisher.isBlank()) {
+                        publisher = "Unknown";
+                    }
+                    items.add(new StartupItem(
+                            valName,
+                            publisher,
+                            cmd,
+                            enabled,
+                            hivePrefix + " Run",
+                            valName,
+                            "",
+                            "",
+                            StartupItemType.REGISTRY,
+                            null
+                    ));
+                }
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to scan registry for " + hivePrefix + " " + keyPath + ": " + e.getMessage());
+        }
+    }
+
+    private void scanOrphanedApproved(HKEY hive, String hivePrefix, List<StartupItem> items) {
+        try {
+            if (!Advapi32Util.registryKeyExists(hive, REG_STARTUP_APPROVED)) {
+                return;
+            }
+
+            Set<String> existingNames = new HashSet<>();
+            if (Advapi32Util.registryKeyExists(hive, REG_RUN)) {
+                existingNames.addAll(Advapi32Util.registryGetValues(hive, REG_RUN).keySet());
+            }
+
+            Map<String, Object> approvedValues = Advapi32Util.registryGetValues(hive, REG_STARTUP_APPROVED);
+            for (Map.Entry<String, Object> entry : approvedValues.entrySet()) {
+                String valName = entry.getKey();
+                if (existingNames.contains(valName)) continue;
+
+                Object valData = entry.getValue();
+                if (valData instanceof byte[] bytes && bytes.length > 0) {
+                    boolean enabled = bytes[0] == 0x02;
+                    items.add(new StartupItem(
+                            valName,
+                            "Unknown",
+                            "",
+                            enabled,
+                            hivePrefix + " Run",
+                            valName,
+                            "",
+                            "",
+                            StartupItemType.REGISTRY,
+                            null
+                    ));
+                }
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to scan orphaned StartupApproved for " + hivePrefix + ": " + e.getMessage());
+        }
+    }
+
+    private void scanRegistry32bit(HKEY hive, String locationLabel, String keyPath, List<StartupItem> items) {
+        try {
+            String fullPath = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run";
+            if (!Advapi32Util.registryKeyExists(hive, fullPath)) {
+                return;
+            }
+
+            Map<String, Object> approvedValues = new HashMap<>();
+            String approvedPath = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+            try {
+                if (Advapi32Util.registryKeyExists(hive, approvedPath)) {
+                    Map<String, Object> allApproved = Advapi32Util.registryGetValues(hive, approvedPath);
+                    approvedValues.putAll(allApproved);
+                }
+            } catch (Exception ignored) {}
+
+            Map<String, Object> values = Advapi32Util.registryGetValues(hive, fullPath);
+            for (Map.Entry<String, Object> entry : values.entrySet()) {
+                String valName = entry.getKey();
+                Object valData = entry.getValue();
+                if (valData instanceof String cmd) {
+                    boolean enabled = true;
+                    Object approvedData = approvedValues.get(valName);
+                    if (approvedData instanceof byte[] bytes && bytes.length > 0) {
+                        enabled = bytes[0] == 0x02;
+                    }
+
+                    String exePath = extractExecutablePath(cmd);
+                    String publisher = getCompanyName(exePath);
+                    if (publisher == null || publisher.isBlank()) {
+                        publisher = "Unknown";
+                    }
+                    items.add(new StartupItem(
+                            valName,
+                            publisher,
+                            cmd,
+                            enabled,
+                            locationLabel,
+                            valName,
+                            "",
+                            "",
+                            StartupItemType.REGISTRY,
+                            null
+                    ));
+                }
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to scan 32-bit registry for " + locationLabel + ": " + e.getMessage());
+        }
+    }
+
+    public List<StartupItem> listScheduledTasks() {
+        List<StartupItem> items = new ArrayList<>();
+        if (!AppPaths.isWindows()) return items;
+
         try {
             Path script = PowerShellScripts.resolve("get-startup-details.ps1");
             ProcessResult result = processRunner.run(ProcessRunner.powershellScript(script.toString()));
             if (result.success() && result.stdout() != null && !result.stdout().isBlank()) {
                 JsonNode root = JsonMapper.parseTree(result.stdout());
-                
-                // Parse Startup Folders
-                JsonNode foldersNode = root.path("StartupFolders");
-                if (foldersNode.isArray()) {
-                    for (JsonNode node : foldersNode) {
-                        String name = node.path("Name").asText("");
-                        String path = node.path("Path").asText("");
-                        String filePath = node.path("FilePath").asText("");
-                        String location = node.path("Location").asText("");
-                        boolean enabled = node.path("Enabled").asBoolean(true);
-                        String publisher = node.path("Publisher").asText("");
 
-                        items.add(new StartupItem(
-                                name,
-                                publisher.isEmpty() ? "Unknown" : publisher,
-                                path,
-                                enabled,
-                                location,
-                                "",       // registryValueName
-                                filePath,
-                                ""        // taskPath
-                        ));
-                    }
-                }
-
-                // Parse Scheduled Tasks
                 JsonNode tasksNode = root.path("ScheduledTasks");
                 if (tasksNode.isArray()) {
                     for (JsonNode node : tasksNode) {
@@ -152,9 +280,11 @@ public class StartupService {
                                 path,
                                 enabled,
                                 "Scheduled Task",
-                                "",       // registryValueName
-                                "",       // filePath
-                                taskPath
+                                "",
+                                "",
+                                taskPath,
+                                StartupItemType.TASK,
+                                null
                         ));
                     }
                 }
@@ -165,9 +295,110 @@ public class StartupService {
             AppLogger.error("Error running startup detail script", e);
         }
 
-        // Sort items alphabetically
         items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
         return items;
+    }
+
+    public List<StartupItem> listWindowsServices() {
+        List<StartupItem> items = new ArrayList<>();
+        if (!AppPaths.isWindows()) return items;
+
+        try {
+            ProcessResult result = processRunner.run(List.of("sc.exe", "query", "type=", "service", "state=", "all"),
+                    30);
+            if (!result.success() || result.stdout() == null) {
+                AppLogger.warning("Failed to query services: " + result.combinedOutput());
+                return items;
+            }
+
+            List<String[]> services = parseScQueryOutput(result.stdout());
+            for (String[] svc : services) {
+                String serviceName = svc[0];
+                String displayName = svc[1];
+
+                String startType = queryServiceStartType(serviceName);
+                if (startType == null) continue;
+
+                String binaryPath = queryServiceBinaryPath(serviceName);
+                boolean enabled = !"Disabled".equals(startType);
+
+                items.add(new StartupItem(
+                        serviceName,
+                        displayName.isEmpty() ? "Unknown" : displayName,
+                        binaryPath,
+                        enabled,
+                        "Start Type: " + startType,
+                        "",
+                        "",
+                        "",
+                        StartupItemType.SERVICE,
+                        startType
+                ));
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to enumerate Windows services: " + e.getMessage());
+        }
+
+        items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
+        return items;
+    }
+
+    private List<String[]> parseScQueryOutput(String output) {
+        List<String[]> services = new ArrayList<>();
+        String currentServiceName = "";
+        String currentDisplayName = "";
+
+        for (String line : output.split("\\r?\\n")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("SERVICE_NAME:")) {
+                if (!currentServiceName.isEmpty()) {
+                    services.add(new String[]{currentServiceName, currentDisplayName});
+                }
+                currentServiceName = trimmed.substring("SERVICE_NAME:".length()).trim();
+                currentDisplayName = "";
+            } else if (trimmed.startsWith("DISPLAY_NAME:")) {
+                currentDisplayName = trimmed.substring("DISPLAY_NAME:".length()).trim();
+            }
+        }
+        if (!currentServiceName.isEmpty()) {
+            services.add(new String[]{currentServiceName, currentDisplayName});
+        }
+        return services;
+    }
+
+    private String queryServiceStartType(String serviceName) {
+        try {
+            ProcessResult result = processRunner.run(List.of("sc.exe", "qc", serviceName), 10);
+            if (!result.success() || result.stdout() == null) return null;
+
+            for (String line : result.stdout().split("\\r?\\n")) {
+                String trimmed = line.trim();
+                String upper = trimmed.toUpperCase();
+                if (upper.contains("START_TYPE") && upper.contains(":")) {
+                    String afterColon = trimmed.substring(trimmed.indexOf(':') + 1).trim();
+                    String upperVal = afterColon.toUpperCase();
+                    if (upperVal.contains("AUTO_START")) return "Automatic";
+                    if (upperVal.contains("DEMAND_START")) return "Manual";
+                    if (upperVal.contains("DISABLED")) return "Disabled";
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private String queryServiceBinaryPath(String serviceName) {
+        try {
+            ProcessResult result = processRunner.run(List.of("sc.exe", "qc", serviceName), 10);
+            if (!result.success() || result.stdout() == null) return "";
+
+            for (String line : result.stdout().split("\\r?\\n")) {
+                String trimmed = line.trim();
+                if (trimmed.toUpperCase().contains("BINARY_PATH_NAME") && trimmed.contains(":")) {
+                    return trimmed.substring(trimmed.indexOf(':') + 1).trim();
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
     }
 
     private void scanRegistry(HKEY hive, String locationLabel, String keyPath, boolean active, List<StartupItem> items) {
@@ -192,8 +423,10 @@ public class StartupService {
                             active,
                             locationLabel,
                             valName,
-                            "", // filePath
-                            ""  // taskPath
+                            "",
+                            "",
+                            StartupItemType.REGISTRY,
+                            null
                     ));
                 }
             }
@@ -202,100 +435,67 @@ public class StartupService {
         }
     }
 
-    /**
-     * Toggles the enabled/disabled status of a startup item.
-     */
     public void toggleStatus(StartupItem item) throws Exception {
-        if ("Scheduled Task".equals(item.getLocation())) {
-            // Toggle Scheduled Task
-            String scriptName = item.isEnabled() ? "disable-task" : "enable-task";
+        if (item.getType() == StartupItemType.TASK) {
             String cmd = item.isEnabled() ? "Disable-ScheduledTask" : "Enable-ScheduledTask";
-            ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command", 
+            ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
                     cmd + " -TaskName '" + item.getName() + "' -TaskPath '" + item.getTaskPath() + "'"));
             if (!result.success()) {
                 throw new IOException("Failed to toggle Scheduled Task: " + result.combinedOutput());
             }
             item.setEnabled(!item.isEnabled());
-        } else if (item.getLocation().contains("Startup Folder")) {
-            // Toggle Shortcut/File in Startup Folder
-            File file = new File(item.getFilePath());
-            if (!file.exists()) {
-                throw new FileNotFoundException("Startup item file not found: " + item.getFilePath());
-            }
-            
-            String newPath;
-            if (item.isEnabled()) {
-                // Disable: rename file by adding .disabled
-                newPath = item.getFilePath() + ".disabled";
-            } else {
-                // Enable: remove .disabled suffix
-                if (item.getFilePath().endsWith(".disabled")) {
-                    newPath = item.getFilePath().substring(0, item.getFilePath().length() - 9);
-                } else {
-                    newPath = item.getFilePath();
-                }
-            }
-            
-            File destFile = new File(newPath);
-            if (!file.renameTo(destFile)) {
-                throw new IOException("Failed to rename file from " + file.getName() + " to " + destFile.getName());
-            }
-            
-            item.setFilePath(newPath);
-            item.setEnabled(!item.isEnabled());
-        } else if (item.getLocation().contains("Run")) {
-            // Toggle Registry Item (Move between Run and RunDisabled)
+        } else if (item.getType() == StartupItemType.REGISTRY) {
             boolean isHkcu = item.getLocation().contains("HKCU");
             HKEY hive = isHkcu ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
-            
-            String sourceKey = item.isEnabled() ? REG_RUN : REG_RUN_DISABLED;
-            String destKey = item.isEnabled() ? REG_RUN_DISABLED : REG_RUN;
-            
-            if (!Advapi32Util.registryValueExists(hive, sourceKey, item.getRegistryValueName())) {
-                throw new IllegalArgumentException("Registry value does not exist: " + item.getRegistryValueName());
+
+            if (!Advapi32Util.registryKeyExists(hive, REG_STARTUP_APPROVED)) {
+                Advapi32Util.registryCreateKey(hive, REG_STARTUP_APPROVED);
             }
-            
-            String cmd = Advapi32Util.registryGetStringValue(hive, sourceKey, item.getRegistryValueName());
-            
-            if (!Advapi32Util.registryKeyExists(hive, destKey)) {
-                Advapi32Util.registryCreateKey(hive, destKey);
+
+            if (item.isEnabled()) {
+                // Disable: write 03 to StartupApproved\Run
+                byte[] disableBytes = new byte[]{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+                Advapi32Util.registrySetBinaryValue(hive, REG_STARTUP_APPROVED, item.getRegistryValueName(), disableBytes);
+            } else {
+                // Enable: write 02 to StartupApproved\Run
+                byte[] enableBytes = new byte[]{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+                Advapi32Util.registrySetBinaryValue(hive, REG_STARTUP_APPROVED, item.getRegistryValueName(), enableBytes);
             }
-            
-            Advapi32Util.registrySetStringValue(hive, destKey, item.getRegistryValueName(), cmd);
-            Advapi32Util.registryDeleteValue(hive, sourceKey, item.getRegistryValueName());
-            
-            item.setLocation(isHkcu ? (item.isEnabled() ? "HKCU Run (Disabled)" : "HKCU Run") 
-                                    : (item.isEnabled() ? "HKLM Run (Disabled)" : "HKLM Run"));
+            item.setEnabled(!item.isEnabled());
+        } else if (item.getType() == StartupItemType.SERVICE) {
+            String serviceName = item.getName();
+            String scConfigArg;
+            if (item.isEnabled()) {
+                scConfigArg = "start= disabled";
+            } else {
+                scConfigArg = "start= demand";
+            }
+
+            ProcessResult result = processRunner.run(List.of("sc.exe", "config", serviceName, scConfigArg));
+            if (!result.success()) {
+                throw new IOException("Failed to toggle service start type: " + result.combinedOutput());
+            }
+
+            item.setServiceStartType(item.isEnabled() ? "Disabled" : "Manual");
+            item.setLocation("Start Type: " + item.getServiceStartType());
             item.setEnabled(!item.isEnabled());
         }
     }
 
-    /**
-     * Safely deletes a startup item, creating a backup first.
-     */
     public void deleteItem(StartupItem item) throws Exception {
-        // 1. Create a backup entry
         createBackup(item);
 
-        // 2. Perform deletion
-        if ("Scheduled Task".equals(item.getLocation())) {
-            ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command", 
+        if (item.getType() == StartupItemType.TASK) {
+            ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
                     "Unregister-ScheduledTask -TaskName '" + item.getName() + "' -TaskPath '" + item.getTaskPath() + "' -Confirm:$false"));
             if (!result.success()) {
                 throw new IOException("Failed to delete Scheduled Task: " + result.combinedOutput());
             }
-        } else if (item.getLocation().contains("Startup Folder")) {
-            File file = new File(item.getFilePath());
-            if (file.exists()) {
-                if (!file.delete()) {
-                    throw new IOException("Failed to delete startup shortcut file: " + item.getFilePath());
-                }
-            }
-        } else if (item.getLocation().contains("Run")) {
+        } else if (item.getType() == StartupItemType.REGISTRY) {
             boolean isHkcu = item.getLocation().contains("HKCU");
             HKEY hive = isHkcu ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
             String keyPath = item.getLocation().contains("(Disabled)") ? REG_RUN_DISABLED : REG_RUN;
-            
+
             if (Advapi32Util.registryValueExists(hive, keyPath, item.getRegistryValueName())) {
                 Advapi32Util.registryDeleteValue(hive, keyPath, item.getRegistryValueName());
             }
@@ -342,31 +542,18 @@ public class StartupService {
                 Instant.now().toEpochMilli()
         );
 
-        if ("Scheduled Task".equals(item.getLocation())) {
+        if (item.getType() == StartupItemType.TASK) {
             entry.setType("Task");
             entry.setTaskPath(item.getTaskPath());
             entry.setBackupXmlName("task.xml");
 
-            // Export task configuration to XML via PowerShell
             Path xmlPath = backupFolder.resolve("task.xml");
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
                     "Export-ScheduledTask -TaskName '" + item.getName() + "' -TaskPath '" + item.getTaskPath() + "' | Out-File -FilePath '" + xmlPath.toAbsolutePath().toString() + "' -Encoding utf8"));
             if (!result.success()) {
                 throw new IOException("Failed to export Scheduled Task configuration: " + result.combinedOutput());
             }
-        } else if (item.getLocation().contains("Startup Folder")) {
-            entry.setType("File");
-            entry.setOriginalFilePath(item.getFilePath());
-            
-            File origFile = new File(item.getFilePath());
-            if (origFile.exists()) {
-                String fileName = origFile.getName();
-                entry.setBackupFileName(fileName);
-                Files.copy(origFile.toPath(), backupFolder.resolve(fileName), StandardCopyOption.REPLACE_EXISTING);
-            } else {
-                throw new FileNotFoundException("Original shortcut file not found for backup: " + item.getFilePath());
-            }
-        } else if (item.getLocation().contains("Run")) {
+        } else if (item.getType() == StartupItemType.REGISTRY) {
             entry.setType("Registry");
             boolean isHkcu = item.getLocation().contains("HKCU");
             entry.setHive(isHkcu ? "HKCU" : "HKLM");
@@ -374,15 +561,11 @@ public class StartupService {
             entry.setValueName(item.getRegistryValueName());
         }
 
-        // Add to backup index
         List<StartupBackupEntry> index = listBackups();
         index.add(entry);
         saveBackupsIndex(index);
     }
 
-    /**
-     * Restores a startup item from a backup entry.
-     */
     public void restoreBackup(StartupBackupEntry entry) throws Exception {
         Path backupFolder = getBackupsDir().resolve(entry.getId());
 
@@ -392,21 +575,12 @@ public class StartupService {
                 Advapi32Util.registryCreateKey(hive, entry.getKeyPath());
             }
             Advapi32Util.registrySetStringValue(hive, entry.getKeyPath(), entry.getValueName(), entry.getCommand());
-        } else if ("File".equals(entry.getType())) {
-            Path backupFilePath = backupFolder.resolve(entry.getBackupFileName());
-            if (!Files.exists(backupFilePath)) {
-                throw new FileNotFoundException("Backup file missing: " + backupFilePath);
-            }
-            Path origPath = Path.of(entry.getOriginalFilePath());
-            Files.createDirectories(origPath.getParent());
-            Files.copy(backupFilePath, origPath, StandardCopyOption.REPLACE_EXISTING);
         } else if ("Task".equals(entry.getType())) {
             Path xmlPath = backupFolder.resolve(entry.getBackupXmlName());
             if (!Files.exists(xmlPath)) {
                 throw new FileNotFoundException("Backup XML file missing: " + xmlPath);
             }
-            
-            // Register Scheduled Task from XML config using PowerShell
+
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
                     "Register-ScheduledTask -Xml (Get-Content '" + xmlPath.toAbsolutePath().toString() + "' -Raw) -TaskName '" + entry.getName() + "' -TaskPath '" + entry.getTaskPath() + "' -Force"));
             if (!result.success()) {
@@ -414,10 +588,8 @@ public class StartupService {
             }
         }
 
-        // Delete backup files and directory
         deleteDirectoryRecursively(backupFolder);
 
-        // Remove from index
         List<StartupBackupEntry> index = listBackups();
         index.removeIf(e -> e.getId().equals(entry.getId()));
         saveBackupsIndex(index);
@@ -461,13 +633,12 @@ public class StartupService {
         if (spaceIdx == -1) {
             return trimmed;
         }
-        // Try progressively longer substrings to handle folders with spaces (e.g. C:\Program Files)
         String[] parts = trimmed.split(" ");
         StringBuilder sb = new StringBuilder();
         for (String part : parts) {
             if (sb.length() > 0) sb.append(" ");
             sb.append(part);
-            File file = new File(sb.toString());
+            java.io.File file = new java.io.File(sb.toString());
             if (file.exists() && file.isFile()) {
                 return sb.toString();
             }
