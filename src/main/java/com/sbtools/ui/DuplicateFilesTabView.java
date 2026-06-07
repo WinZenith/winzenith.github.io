@@ -2,6 +2,7 @@ package com.sbtools.ui;
 
 import com.sbtools.duplicates.DuplicateFileRow;
 import com.sbtools.duplicates.DuplicateFinderService;
+import com.sbtools.duplicates.DuplicateFinderService.CleanResult;
 import com.sbtools.util.AppLogger;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
@@ -276,11 +277,19 @@ public class DuplicateFilesTabView extends BorderPane {
         String actionLabel = useRecycleBin ? "Moved" : "Deleted";
         new Thread(() -> {
             try {
-                int deleted = service.clean(selected, useRecycleBin);
-                String msg = actionLabel + " " + deleted + " older copy(ies).";
+                CleanResult result = service.clean(selected, useRecycleBin);
+                int deleted = result.getDeleted();
+                int failed = result.getFailed();
+                String msg;
+                if (failed == 0) {
+                    msg = actionLabel + " " + deleted + " older copy(ies).";
+                } else {
+                    msg = actionLabel + " " + deleted + " older copy(ies). "
+                            + failed + " file(s) could not be deleted.";
+                }
                 Platform.runLater(() -> {
                     statusLabel.setText(msg);
-                    new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
+                    new Alert(failed > 0 ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, msg).showAndWait();
                     rows.removeAll(selected);
                     cleanButton.setDisable(true);
                 });

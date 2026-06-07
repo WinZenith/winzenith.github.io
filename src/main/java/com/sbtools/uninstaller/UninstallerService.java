@@ -37,10 +37,16 @@ public class UninstallerService {
                     JsonNode rootNode = JsonMapper.parseTree(json);
                     if (rootNode.isArray()) {
                         for (JsonNode node : rootNode) {
-                            apps.add(parseAppxNode(node));
+                            InstalledApp app = parseAppxNode(node);
+                            if (!isMicrosoftOrWindows(app)) {
+                                apps.add(app);
+                            }
                         }
                     } else if (rootNode.isObject()) {
-                        apps.add(parseAppxNode(rootNode));
+                        InstalledApp app = parseAppxNode(rootNode);
+                        if (!isMicrosoftOrWindows(app)) {
+                            apps.add(app);
+                        }
                     }
                 }
             } else {
@@ -69,6 +75,14 @@ public class UninstallerService {
                 "", "", false, packageFullName, "",
                 installDate, installedSize, "Store"
         );
+    }
+
+    private boolean isMicrosoftOrWindows(InstalledApp app) {
+        String lowerName = app.getName().toLowerCase();
+        String lowerPub = app.getPublisher().toLowerCase();
+        return lowerPub.contains("microsoft")
+                || lowerName.contains("microsoft")
+                || lowerName.contains("windows");
     }
 
     /**

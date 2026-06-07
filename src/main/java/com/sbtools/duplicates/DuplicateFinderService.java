@@ -16,6 +16,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -211,33 +212,35 @@ public class DuplicateFinderService {
         return result;
     }
 
-    public int clean(List<DuplicateFileRow> selectedRows) {
+    public CleanResult clean(List<DuplicateFileRow> selectedRows) {
         return clean(selectedRows, false);
     }
 
-    public int clean(List<DuplicateFileRow> selectedRows, boolean useRecycleBin) {
-        if (useRecycleBin) {
-            List<String> allPaths = new ArrayList<>();
-            for (DuplicateFileRow row : selectedRows) {
-                if (!row.isSelected() || row.getDeletablePaths() == null) continue;
-                allPaths.addAll(row.getDeletablePaths());
-            }
-            return moveToRecycleBin(allPaths);
-        }
-
+    public CleanResult clean(List<DuplicateFileRow> selectedRows, boolean useRecycleBin) {
         int deleted = 0;
+        int failed = 0;
+
         for (DuplicateFileRow row : selectedRows) {
             if (!row.isSelected() || row.getDeletablePaths() == null) continue;
             for (String path : row.getDeletablePaths()) {
-                try {
-                    Files.deleteIfExists(Paths.get(path));
-                    deleted++;
-                } catch (IOException e) {
-                    AppLogger.warning("Failed to delete duplicate: " + path + " — " + e.getMessage());
+                if (useRecycleBin) {
+                    if (moveToRecycleBin(Collections.singletonList(path)) > 0) {
+                        deleted++;
+                    } else {
+                        failed++;
+                    }
+                } else {
+                    try {
+                        Files.deleteIfExists(Paths.get(path));
+                        deleted++;
+                    } catch (Exception e) {
+                        AppLogger.warning("Failed to delete duplicate: " + path + " — " + e.getMessage());
+                        failed++;
+                    }
                 }
             }
         }
-        return deleted;
+        return new CleanResult(deleted, failed);
     }
 
     private int moveToRecycleBin(List<String> paths) {
@@ -258,5 +261,18 @@ public class DuplicateFinderService {
 
         AppLogger.warning("SHFileOperationW returned " + result);
         return 0;
+    }
+
+    public static class CleanResult {
+        private final int deleted;
+        private final int failed;
+
+        public CleanResult(int deleted, int failed) {
+            this.deleted = deleted;
+            this.failed = failed;
+        }
+
+        public int getDeleted() { return deleted; }
+        public int getFailed() { return failed; }
     }
 }

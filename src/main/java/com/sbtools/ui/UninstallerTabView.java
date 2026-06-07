@@ -155,20 +155,9 @@ public class UninstallerTabView extends BorderPane {
                 } else {
                     InstalledApp app = getTableRow().getItem();
                     imageView.setImage(null);
-                    if (app.isWin32()) {
-                        String loc = app.getInstallLocation();
-                        if (loc != null && !loc.isBlank()) {
-                            java.io.File dir = new java.io.File(loc);
-                            if (dir.isDirectory()) {
-                                java.io.File[] exes = dir.listFiles(f -> f.getName().toLowerCase().endsWith(".exe"));
-                                if (exes != null && exes.length > 0) {
-                                    loc = exes[0].getAbsolutePath();
-                                }
-                            }
-                        }
-                        if (loc != null && !loc.isBlank()) {
-                            imageView.setImage(com.sbtools.util.IconExtractor.extractIcon(loc));
-                        }
+                    String loc = resolveAppIconPath(app);
+                    if (loc != null) {
+                        imageView.setImage(com.sbtools.util.IconExtractor.extractIcon(loc));
                     }
                     setGraphic(iconPane);
                 }
@@ -230,6 +219,64 @@ public class UninstallerTabView extends BorderPane {
             });
             return row;
         });
+    }
+
+    private static String resolveAppIconPath(InstalledApp app) {
+        String loc = app.getInstallLocation();
+        if (loc != null && !loc.isBlank()) {
+            File file = new File(loc);
+            if (file.isDirectory()) {
+                String exe = findFirstExe(file);
+                if (exe != null) return exe;
+            } else if (file.isFile() && loc.toLowerCase().endsWith(".exe")) {
+                return loc;
+            }
+        }
+        if (app.isWin32()) {
+            String uninstallStr = app.getUninstallString();
+            if (uninstallStr != null && !uninstallStr.isBlank()) {
+                String exePath = extractExeFromUninstallString(uninstallStr);
+                if (exePath != null) return exePath;
+            }
+        }
+        return null;
+    }
+
+    private static String findFirstExe(File dir) {
+        File[] topExes = dir.listFiles(f -> f.isFile() && f.getName().toLowerCase().endsWith(".exe"));
+        if (topExes != null && topExes.length > 0) {
+            return topExes[0].getAbsolutePath();
+        }
+        File[] subDirs = dir.listFiles(File::isDirectory);
+        if (subDirs != null) {
+            for (File subDir : subDirs) {
+                File[] subExes = subDir.listFiles(f -> f.isFile() && f.getName().toLowerCase().endsWith(".exe"));
+                if (subExes != null && subExes.length > 0) {
+                    return subExes[0].getAbsolutePath();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String extractExeFromUninstallString(String uninstallStr) {
+        String path = uninstallStr.trim();
+        if (path.startsWith("\"")) {
+            int end = path.indexOf("\"", 1);
+            if (end > 1) {
+                path = path.substring(1, end);
+            }
+        } else {
+            int space = path.indexOf(' ');
+            if (space > 0) {
+                path = path.substring(0, space);
+            }
+        }
+        if (path.toLowerCase().endsWith(".exe")) {
+            File f = new File(path);
+            if (f.isFile()) return f.getAbsolutePath();
+        }
+        return null;
     }
 
     private String formatSize(int sizeKB) {

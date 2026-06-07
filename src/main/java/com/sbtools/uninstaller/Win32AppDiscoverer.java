@@ -80,6 +80,7 @@ public class Win32AppDiscoverer {
         int systemComponent = getIntValue(hive, keyPath, "SystemComponent", 0);
         String parentKeyName = getStringValue(hive, keyPath, "ParentKeyName");
         String releaseType = getStringValue(hive, keyPath, "ReleaseType");
+        String publisher = getStringValue(hive, keyPath, "Publisher");
 
         if (displayName.isEmpty() || uninstallString.isEmpty()) {
             return false;
@@ -96,7 +97,18 @@ public class Win32AppDiscoverer {
         if (displayName.matches("(?i).*KB\\d{6}.*")) {
             return false;
         }
+        if (isMicrosoftOrWindows(publisher, displayName)) {
+            return false;
+        }
         return true;
+    }
+
+    private boolean isMicrosoftOrWindows(String publisher, String displayName) {
+        String lowerPub = publisher != null ? publisher.toLowerCase() : "";
+        String lowerName = displayName != null ? displayName.toLowerCase() : "";
+        return lowerPub.contains("microsoft")
+                || lowerName.contains("microsoft")
+                || lowerName.contains("windows");
     }
 
     private static String getStringValue(HKEY hive, String keyPath, String valueName) {
