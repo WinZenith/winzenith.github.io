@@ -2,7 +2,7 @@
   <configuration default="false" name="App" type="Application" factoryName="Application">
     <option name="MAIN_CLASS_NAME" value="com.sbtools.App" />
     <module name="basic-s-driver-update" />
-    <option name="VM_PARAMETERS" value="--enable-native-access=javafx.graphics --module-path &quot;$MAVEN_REPOSITORY$/org/openjfx/javafx-controls/21.0.5/javafx-controls-21.0.5-win.jar;$MAVEN_REPOSITORY$/org/openjfx/javafx-graphics/21.0.5/javafx-graphics-21.0.5-win.jar;$MAVEN_REPOSITORY$/org/openjfx/javafx-base/21.0.5/javafx-base-21.0.5-win.jar&quot; --add-modules javafx.controls" />
+    <option name="VM_PARAMETERS" value="--enable-native-access=javafx.graphics --add-modules javafx.controls --module-path C:\Users\durot\.m2\repository\org\openjfx\javafx-base\21.0.5\javafx-base-21.0.5-win.jar;C:\Users\durot\.m2\repository\org\openjfx\javafx-graphics\21.0.5\javafx-graphics-21.0.5-win.jar;C:\Users\durot\.m2\repository\org\openjfx\javafx-controls\21.0.5\javafx-controls-21.0.5-win.jar" />
     <method v="2">
       <option name="Make" enabled="true" />
     </method>

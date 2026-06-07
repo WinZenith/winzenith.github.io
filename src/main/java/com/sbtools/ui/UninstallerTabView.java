@@ -125,29 +125,104 @@ public class UninstallerTabView extends BorderPane {
     private void buildTable() {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<InstalledApp, String> nameCol = new TableColumn<>("Application Name");
-        nameCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().getName()));
-        nameCol.setPrefWidth(320);
+        TableColumn<InstalledApp, String> iconCol = new TableColumn<>(" ");
+        iconCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(""));
+        iconCol.setPrefWidth(36);
+        iconCol.setMinWidth(36);
+        iconCol.setMaxWidth(36);
+        iconCol.setResizable(false);
+        iconCol.setSortable(false);
+        iconCol.setCellFactory(col -> new TableCell<>() {
+            private final javafx.scene.image.ImageView imageView = new javafx.scene.image.ImageView();
+            private final javafx.scene.layout.StackPane iconPane = new javafx.scene.layout.StackPane(imageView);
+            {
+                getStyleClass().add("icon-cell");
+                imageView.setFitWidth(20);
+                imageView.setFitHeight(20);
+                imageView.setPreserveRatio(true);
+                imageView.setSmooth(true);
+                imageView.setCache(true);
+                iconPane.setMaxSize(24, 24);
+                iconPane.setPrefSize(24, 24);
+                iconPane.setMinSize(24, 24);
+            }
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(null);
+                if (empty || getItem() == null || getTableRow() == null || getTableRow().getItem() == null) {
+                    setGraphic(null);
+                } else {
+                    InstalledApp app = getTableRow().getItem();
+                    imageView.setImage(null);
+                    if (app.isWin32()) {
+                        String loc = app.getInstallLocation();
+                        if (loc != null && !loc.isBlank()) {
+                            java.io.File dir = new java.io.File(loc);
+                            if (dir.isDirectory()) {
+                                java.io.File[] exes = dir.listFiles(f -> f.getName().toLowerCase().endsWith(".exe"));
+                                if (exes != null && exes.length > 0) {
+                                    loc = exes[0].getAbsolutePath();
+                                }
+                            }
+                        }
+                        if (loc != null && !loc.isBlank()) {
+                            imageView.setImage(com.sbtools.util.IconExtractor.extractIcon(loc));
+                        }
+                    }
+                    setGraphic(iconPane);
+                }
+            }
+        });
 
-        TableColumn<InstalledApp, String> publisherCol = new TableColumn<>("Publisher");
-        publisherCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().getPublisher()));
-        publisherCol.setPrefWidth(200);
+        javafx.util.Callback<TableColumn<InstalledApp, String>, TableCell<InstalledApp, String>> textCellFactory = col -> new TableCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item);
+                setGraphic(null);
+                if (!getStyleClass().contains("text-cell")) {
+                    getStyleClass().add("text-cell");
+                }
+            }
+        };
+
+        TableColumn<InstalledApp, String> nameCol = new TableColumn<>("Application");
+        nameCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().getName()));
+        nameCol.setPrefWidth(360);
+        nameCol.setCellFactory(textCellFactory);
+
+        TableColumn<InstalledApp, String> sizeCol = new TableColumn<>("Size");
+        sizeCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(formatSize(c.getValue().getEstimatedSize())));
+        sizeCol.setPrefWidth(100);
+        sizeCol.setCellFactory(textCellFactory);
 
         TableColumn<InstalledApp, String> versionCol = new TableColumn<>("Version");
         versionCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().getVersion()));
         versionCol.setPrefWidth(120);
+        versionCol.setCellFactory(textCellFactory);
 
-        TableColumn<InstalledApp, String> locationCol = new TableColumn<>("Install Directory / Package ID");
-        locationCol.setCellValueFactory(c -> {
-            InstalledApp app = c.getValue();
-            String location = app.isWin32() ? app.getInstallLocation() : app.getAppxPackageFullName();
-            return new javafx.beans.property.SimpleStringProperty(location);
-        });
+        TableColumn<InstalledApp, String> typeCol = new TableColumn<>("Type");
+        typeCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().getArchitecture()));
+        typeCol.setPrefWidth(80);
+        typeCol.setCellFactory(textCellFactory);
 
-        table.getColumns().addAll(nameCol, publisherCol, versionCol, locationCol);
+        TableColumn<InstalledApp, String> dateCol = new TableColumn<>("Install Date");
+        dateCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(formatDate(c.getValue().getInstallDate())));
+        dateCol.setPrefWidth(140);
+        dateCol.setCellFactory(textCellFactory);
+
+        TableColumn<InstalledApp, String> publisherCol = new TableColumn<>("Company");
+        publisherCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().getPublisher()));
+        publisherCol.setPrefWidth(200);
+        publisherCol.setCellFactory(textCellFactory);
+
+        table.getColumns().addAll(iconCol, nameCol, sizeCol, versionCol, typeCol, dateCol, publisherCol);
 
         table.setRowFactory(tv -> {
             TableRow<InstalledApp> row = new TableRow<>();
+            row.setMinHeight(28);
+            row.setPrefHeight(28);
             row.setOnMouseClicked(event -> {
                 if (event.getClickCount() == 2 && (!row.isEmpty())) {
                     triggerUninstall();
@@ -155,6 +230,32 @@ public class UninstallerTabView extends BorderPane {
             });
             return row;
         });
+    }
+
+    private String formatSize(int sizeKB) {
+        if (sizeKB <= 0) return "";
+        if (sizeKB >= 1024 * 1024) {
+            return String.format("%.2f GB", sizeKB / (1024.0 * 1024.0));
+        } else if (sizeKB >= 1024) {
+            return String.format("%.2f MB", sizeKB / 1024.0);
+        } else {
+            return sizeKB + " KB";
+        }
+    }
+
+    private String formatDate(String dateStr) {
+        if (dateStr == null || dateStr.length() < 8) return "";
+        try {
+            String year = dateStr.substring(0, 4);
+            String month = dateStr.substring(4, 6);
+            String day = dateStr.substring(6, 8);
+            String time = dateStr.length() >= 14
+                    ? " " + dateStr.substring(8, 10) + ":" + dateStr.substring(10, 12) + ":" + dateStr.substring(12, 14)
+                    : "";
+            return year + "-" + month + "-" + day + time;
+        } catch (Exception e) {
+            return dateStr;
+        }
     }
 
     private void applyFilter() {
@@ -166,7 +267,8 @@ public class UninstallerTabView extends BorderPane {
             filteredApps.setPredicate(app ->
                     app.getName().toLowerCase().contains(lower) ||
                     app.getPublisher().toLowerCase().contains(lower) ||
-                    app.getVersion().toLowerCase().contains(lower)
+                    app.getVersion().toLowerCase().contains(lower) ||
+                    app.getArchitecture().toLowerCase().contains(lower)
             );
         }
     }

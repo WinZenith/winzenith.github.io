@@ -18,22 +18,14 @@ public class Win32AppDiscoverer {
     public List<InstalledApp> discoverApps() {
         List<InstalledApp> apps = new ArrayList<>();
 
-        // 1. Scan HKLM (64-bit apps on 64-bit OS)
-        scanRegistryPath(WinReg.HKEY_LOCAL_MACHINE, UNINSTALL_PATH, "HKLM", apps);
+        scanRegistryPath(WinReg.HKEY_LOCAL_MACHINE, UNINSTALL_PATH, "HKLM", "64-bit", apps);
+        scanRegistryPath(WinReg.HKEY_LOCAL_MACHINE, WOW6432_UNINSTALL_PATH, "HKLM", "32-bit", apps);
+        scanRegistryPath(WinReg.HKEY_CURRENT_USER, UNINSTALL_PATH, "HKCU", "", apps);
 
-        // 2. Scan HKLM Wow6432Node (32-bit apps on 64-bit OS)
-        scanRegistryPath(WinReg.HKEY_LOCAL_MACHINE, WOW6432_UNINSTALL_PATH, "HKLM", apps);
-
-        // 3. Scan HKCU (Per-user apps)
-        scanRegistryPath(WinReg.HKEY_CURRENT_USER, UNINSTALL_PATH, "HKCU", apps);
-
-        // Deduplicate apps by name and version or uninstall string to avoid double entries
-        // from some programs listing themselves in multiple registries.
         List<InstalledApp> deduped = new ArrayList<>();
         TreeSet<String> seen = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
 
         for (InstalledApp app : apps) {
-            // Create a unique key
             String uniqueKey = app.getName() + "||" + app.getVersion();
             if (!seen.contains(uniqueKey)) {
                 seen.add(uniqueKey);
@@ -41,12 +33,11 @@ public class Win32AppDiscoverer {
             }
         }
 
-        // Sort by name alphabetically
         deduped.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
         return deduped;
     }
 
-    private void scanRegistryPath(HKEY hive, String parentPath, String hiveLabel, List<InstalledApp> apps) {
+    private void scanRegistryPath(HKEY hive, String parentPath, String hiveLabel, String archLabel, List<InstalledApp> apps) {
         try {
             if (!Advapi32Util.registryKeyExists(hive, parentPath)) {
                 return;
@@ -65,22 +56,16 @@ public class Win32AppDiscoverer {
                         String version = getStringValue(hive, fullPath, "DisplayVersion");
                         String installLocation = getStringValue(hive, fullPath, "InstallLocation");
                         String uninstallString = getStringValue(hive, fullPath, "UninstallString");
+                        String installDate = getStringValue(hive, fullPath, "InstallDate");
+                        int estimatedSize = getIntValue(hive, fullPath, "EstimatedSize", 0);
 
-                        // Add the app
                         apps.add(new InstalledApp(
-                                name,
-                                publisher,
-                                version,
-                                installLocation,
-                                uninstallString,
-                                fullPath,
-                                true, // isWin32
-                                "",   // no appx full name
-                                hiveLabel
+                                name, publisher, version, installLocation,
+                                uninstallString, fullPath, true,
+                                "", hiveLabel, installDate, estimatedSize, archLabel
                         ));
                     }
                 } catch (Exception e) {
-                    // Ignore errors reading a specific subkey (e.g. access denied to specific key)
                     AppLogger.debug("Skipping subkey registry read: " + subkeyName + " - " + e.getMessage());
                 }
             }
@@ -108,7 +93,6 @@ public class Win32AppDiscoverer {
         if ("Security Update".equalsIgnoreCase(releaseType) || "Update".equalsIgnoreCase(releaseType) || "Hotfix".equalsIgnoreCase(releaseType)) {
             return false;
         }
-        // Exclude system patches / updates e.g. KBxxxxxx
         if (displayName.matches("(?i).*KB\\d{6}.*")) {
             return false;
         }
@@ -121,7 +105,6 @@ public class Win32AppDiscoverer {
                 return Advapi32Util.registryGetStringValue(hive, keyPath, valueName);
             }
         } catch (Exception e) {
-            // Ignore value-specific read issues
         }
         return "";
     }
@@ -132,7 +115,6 @@ public class Win32AppDiscoverer {
                 return Advapi32Util.registryGetIntValue(hive, keyPath, valueName);
             }
         } catch (Exception e) {
-            // Ignore
         }
         return defaultValue;
     }

@@ -165,7 +165,19 @@
 }
 
 .table-view .table-cell {
-    -fx-padding: 10 16 10 16;
+    -fx-padding: 0;
+    -fx-font-size: 13px;
+    -fx-text-fill: #f8f8f2;
+    -fx-border-color: transparent;
+}
+
+.table-view .table-cell.text-cell {
+    -fx-padding: 6 8 6 8;
+}
+
+.table-view .table-cell.icon-cell {
+    -fx-padding: 0;
+    -fx-alignment: CENTER;
     -fx-font-size: 13px;
     -fx-text-fill: #f8f8f2;
     -fx-border-color: transparent;

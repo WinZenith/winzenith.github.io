@@ -61,17 +61,13 @@ public class UninstallerService {
         String version = node.path("Version").asText("");
         String publisher = node.path("Publisher").asText("");
         String installLocation = node.path("InstallLocation").asText("");
+        String installDate = node.path("InstallDate").asText("");
+        int installedSize = node.path("InstalledSize").asInt(0);
 
         return new InstalledApp(
-                name,
-                publisher,
-                version,
-                installLocation,
-                "", // No UninstallString
-                "", // No RegistryKeyPath
-                false, // isWin32
-                packageFullName,
-                "" // Registry hive not applicable
+                name, publisher, version, installLocation,
+                "", "", false, packageFullName, "",
+                installDate, installedSize, "Store"
         );
     }
 
