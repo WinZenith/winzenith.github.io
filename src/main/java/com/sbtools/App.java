@@ -6,9 +6,11 @@ import com.sbtools.ui.DriversTabView;
 import com.sbtools.ui.RestoreTabView;
 import com.sbtools.ui.SoftwareUpdatesTabView;
 import com.sbtools.ui.SystemInfoTabView;
+import com.sbtools.ui.SystemRestoreTabView;
 import com.sbtools.ui.UninstallerTabView;
 import com.sbtools.ui.StartupTabView;
 import com.sbtools.ui.CleanerTabView;
+import com.sbtools.ui.DuplicateFilesTabView;
 import com.sbtools.ui.UIButton;
 
 import atlantafx.base.theme.Dracula;
@@ -67,11 +69,13 @@ public class App extends Application {
         // Modern left sidebar with theme toggle
         DriversTabView driversTab = new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
         RestoreTabView restoreTab = new RestoreTabView(busy, AdminCheck::isRunningAsAdmin);
+        SystemRestoreTabView sysRestoreTab = new SystemRestoreTabView(busy, AdminCheck::isRunningAsAdmin);
         SoftwareUpdatesTabView softwareTab = new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
         SystemInfoTabView systemInfoTab = new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin);
         UninstallerTabView uninstallerTab = new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin);
         StartupTabView startupTab = new StartupTabView(busy, AdminCheck::isRunningAsAdmin);
         CleanerTabView cleanerTab = new CleanerTabView(busy, AdminCheck::isRunningAsAdmin);
+        DuplicateFilesTabView duplicateFilesTab = new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin);
 
         BorderPane root = new BorderPane();
 
@@ -93,24 +97,28 @@ public class App extends Application {
 
         UIButton driversBtn = UIButton.primary("Drivers");
         UIButton restoreBtn = UIButton.secondary("Rollback drivers");
+        UIButton sysRestoreBtn = UIButton.secondary("System restore");
         UIButton softwareBtn = UIButton.secondary("Software update");
         UIButton systemInfoBtn = UIButton.secondary("System Information");
         UIButton uninstallerBtn = UIButton.secondary("Uninstaller");
         UIButton startupBtn = UIButton.secondary("Startup items/services");
         UIButton cleanerBtn = UIButton.secondary("System cleanup");
+        UIButton duplicateFilesBtn = UIButton.secondary("Duplicate Files");
 
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn); root.setCenter(driversTab); });
-        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
-        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn); root.setCenter(softwareTab); });
-        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn); root.setCenter(systemInfoTab); });
-        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn); root.setCenter(uninstallerTab); });
-        startupBtn.setOnAction(e -> { selectTab(startupBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn); root.setCenter(startupTab); });
-        cleanerBtn.setOnAction(e -> { selectTab(cleanerBtn, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn); root.setCenter(cleanerTab); });
+        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(driversTab); });
+        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
+        sysRestoreBtn.setOnAction(e -> { selectTab(sysRestoreBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(sysRestoreTab); });
+        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(softwareTab); });
+        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(systemInfoTab); });
+        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(uninstallerTab); });
+        startupBtn.setOnAction(e -> { selectTab(startupBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(startupTab); });
+        cleanerBtn.setOnAction(e -> { selectTab(cleanerBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(cleanerTab); });
+        duplicateFilesBtn.setOnAction(e -> { selectTab(duplicateFilesBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(duplicateFilesTab); });
 
-        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, restoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn);
+        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);

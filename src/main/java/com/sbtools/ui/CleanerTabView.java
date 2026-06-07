@@ -4,7 +4,6 @@ import com.sbtools.cleaner.CleanupCategory;
 import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanupService;
 import com.sbtools.util.AppLogger;
-import com.sbtools.util.AppPaths;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
@@ -17,8 +16,7 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
-import javafx.scene.control.Tab;
-import javafx.scene.control.TabPane;
+
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
@@ -40,17 +38,7 @@ public class CleanerTabView extends BorderPane {
         this.busy = busy;
         this.adminCheck = adminCheck;
 
-        TabPane tabPane = new TabPane();
-        tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-
-        Tab systemCleanupTab = new Tab("System Cleanup");
-        systemCleanupTab.setContent(buildSystemCleanupContent());
-
-        Tab duplicateFilesTab = new Tab("Duplicate Files");
-        duplicateFilesTab.setContent(new DuplicateFilesTabView(adminCheck));
-
-        tabPane.getTabs().addAll(systemCleanupTab, duplicateFilesTab);
-        setCenter(tabPane);
+        setCenter(buildSystemCleanupContent());
     }
 
     private VBox buildSystemCleanupContent() {
