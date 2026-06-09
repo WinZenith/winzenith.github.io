@@ -55,7 +55,6 @@ public class CleanupService {
                 case REGISTRY_DEFRAG -> scanRegistryDefrag(row);
                 case EMPTY_RECYCLE_BIN -> scanRecycleBin(row);
                 case JUNK_FILES -> scanJunkFiles(row);
-                case INVALID_SHORTCUTS -> scanInvalidShortcuts(row);
                 case PRIVACY_TRACES -> scanPrivacyTraces(row);
                 case WEB_BROWSING_TRACES -> scanBrowserTraces(row);
                 case CACHE -> scanCache(row);
@@ -114,7 +113,6 @@ public class CleanupService {
             case REGISTRY_DEFRAG -> cleanRegistryDefrag();
             case EMPTY_RECYCLE_BIN -> cleanRecycleBin();
             case JUNK_FILES -> cleanDirectoryPattern(getJunkDirs());
-            case INVALID_SHORTCUTS -> cleanInvalidShortcuts();
             case PRIVACY_TRACES -> cleanPrivacyTraces();
             case WEB_BROWSING_TRACES -> cleanBrowserTraces();
             case CACHE -> cleanDirectoryPattern(getCacheDirs());
@@ -784,105 +782,6 @@ public class CleanupService {
 
     private void scanJunkFiles(CleanupRow row) {
         scanDirectorySizes(row, getJunkDirs());
-    }
-
-    // ── Invalid Shortcuts ─────────────────────────────────────────────────
-
-    private void scanInvalidShortcuts(CleanupRow row) {
-        int count = 0;
-        List<Path> searchPaths = new ArrayList<>();
-        addPath(searchPaths, System.getenv("USERPROFILE") + "\\Desktop");
-        addPath(searchPaths, System.getenv("APPDATA") + "\\Microsoft\\Windows\\Start Menu");
-        addPath(searchPaths, System.getenv("APPDATA") + "\\Microsoft\\Internet Explorer\\Quick Launch");
-        addPath(searchPaths, System.getenv("PUBLIC") + "\\Desktop");
-
-        for (Path dir : searchPaths) {
-            if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> files = Files.find(dir, 5,
-                        (p, a) -> p.toString().toLowerCase().endsWith(".lnk") && a.isRegularFile())) {
-                    count += files.mapToInt(p -> isShortcutBroken(p) ? 1 : 0).sum();
-                } catch (Exception ignored) {}
-            }
-        }
-        row.setItemCount(count);
-        row.setSizeOrCountText(count + " broken shortcut" + (count == 1 ? "" : "s"));
-    }
-
-    private boolean isShortcutBroken(Path lnkPath) {
-        try {
-            byte[] data = Files.readAllBytes(lnkPath);
-            if (data.length < 28) return true;
-            int flags = (data[20] & 0xFF) | ((data[21] & 0xFF) << 8);
-            boolean hasTargetIdList = (flags & 0x01) != 0;
-            boolean hasLinkInfo = (flags & 0x02) != 0;
-            boolean hasRelativePath = (flags & 0x04) != 0;
-
-            int offset = 78;
-            String target = "";
-
-            if (hasRelativePath && offset + 4 < data.length) {
-                int charCount = (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8);
-                offset += 4;
-                if (offset + charCount * 2 <= data.length) {
-                    StringBuilder sb = new StringBuilder();
-                    for (int i = 0; i < charCount - 1; i++) {
-                        char c = (char) ((data[offset + i * 2] & 0xFF) | ((data[offset + i * 2 + 1] & 0xFF) << 8));
-                        sb.append(c);
-                    }
-                    target = sb.toString().trim();
-                }
-            } else if (hasLinkInfo && offset + 28 < data.length) {
-                int linkInfoSize = (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8)
-                        | ((data[offset + 2] & 0xFF) << 16) | ((data[offset + 3] & 0xFF) << 24);
-                if (linkInfoSize >= 28 && offset + 28 < data.length) {
-                    int localBasePathOffset = (data[offset + 24] & 0xFF) | ((data[offset + 25] & 0xFF) << 8)
-                            | ((data[offset + 26] & 0xFF) << 16) | ((data[offset + 27] & 0xFF) << 24);
-                    if (localBasePathOffset > 0 && offset + localBasePathOffset < data.length) {
-                        int maxChars = (data.length - offset - localBasePathOffset) / 2;
-                        StringBuilder sb = new StringBuilder();
-                        for (int i = 0; i < maxChars; i++) {
-                            int pos = offset + localBasePathOffset + i * 2;
-                            if (pos + 1 >= data.length) break;
-                            char c = (char) ((data[pos] & 0xFF) | ((data[pos + 1] & 0xFF) << 8));
-                            if (c == 0) break;
-                            sb.append(c);
-                        }
-                        target = sb.toString().trim();
-                    }
-                }
-            }
-
-            if (target.isEmpty()) return true;
-            Path targetPath = Paths.get(target);
-            return !Files.exists(targetPath);
-
-        } catch (Exception e) {
-            return true;
-        }
-    }
-
-    private long cleanInvalidShortcuts() {
-        long cleaned = 0;
-        List<Path> searchPaths = new ArrayList<>();
-        addPath(searchPaths, System.getenv("USERPROFILE") + "\\Desktop");
-        addPath(searchPaths, System.getenv("APPDATA") + "\\Microsoft\\Windows\\Start Menu");
-        addPath(searchPaths, System.getenv("APPDATA") + "\\Microsoft\\Internet Explorer\\Quick Launch");
-        addPath(searchPaths, System.getenv("PUBLIC") + "\\Desktop");
-
-        for (Path dir : searchPaths) {
-            if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> files = Files.find(dir, 5,
-                        (p, a) -> p.toString().toLowerCase().endsWith(".lnk") && a.isRegularFile())) {
-                    for (Path lnk : (Iterable<Path>) files::iterator) {
-                        if (isShortcutBroken(lnk)) {
-                            deletePermanently(lnk);
-                            cleaned++;
-                        }
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-        return cleaned;
     }
 
     // ── Privacy Traces ────────────────────────────────────────────────────

@@ -5,7 +5,6 @@ public enum CleanupCategory {
     REGISTRY_DEFRAG("Registry Defrag", "Compact and optimize registry hives"),
     EMPTY_RECYCLE_BIN("Empty Recycle Bin", "Files in the Recycle Bin"),
     JUNK_FILES("Junk files", "Temporary files from applications"),
-    INVALID_SHORTCUTS("Invalid shortcuts", "Broken shortcut (.lnk) files"),
     PRIVACY_TRACES("Privacy traces", "Recent documents, run history, and usage traces"),
     WEB_BROWSING_TRACES("Web browsing traces", "Browser cache, cookies, and history across all browsers"),
     CACHE("Cache", "System and application cache data"),
