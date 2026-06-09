@@ -9,6 +9,7 @@ import com.sbtools.ui.SystemInfoTabView;
 import com.sbtools.ui.UninstallerTabView;
 import com.sbtools.ui.StartupTabView;
 import com.sbtools.ui.CleanerTabView;
+import com.sbtools.ui.DiskToolsTabView;
 import com.sbtools.ui.DuplicateFilesTabView;
 import com.sbtools.ui.UIButton;
 
@@ -74,6 +75,7 @@ public class App extends Application {
         StartupTabView startupTab = new StartupTabView(busy, AdminCheck::isRunningAsAdmin);
         CleanerTabView cleanerTab = new CleanerTabView(busy, AdminCheck::isRunningAsAdmin);
         DuplicateFilesTabView duplicateFilesTab = new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin);
+        DiskToolsTabView diskToolsTab = new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
 
         BorderPane root = new BorderPane();
 
@@ -101,20 +103,22 @@ public class App extends Application {
         UIButton startupBtn = UIButton.secondary("Startup items/services");
         UIButton cleanerBtn = UIButton.secondary("System cleanup");
         UIButton duplicateFilesBtn = UIButton.secondary("Duplicate Files");
+        UIButton diskToolsBtn = UIButton.secondary("Disk Tools");
 
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(driversTab); });
-        backupRestoreBtn.setOnAction(e -> { selectTab(backupRestoreBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(backupRestoreTab); });
-        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(softwareTab); });
-        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(systemInfoTab); });
-        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(uninstallerTab); });
-        startupBtn.setOnAction(e -> { selectTab(startupBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(startupTab); });
-        cleanerBtn.setOnAction(e -> { selectTab(cleanerBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(cleanerTab); });
-        duplicateFilesBtn.setOnAction(e -> { selectTab(duplicateFilesBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(duplicateFilesTab); });
+        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(driversTab); });
+        backupRestoreBtn.setOnAction(e -> { selectTab(backupRestoreBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(backupRestoreTab); });
+        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(softwareTab); });
+        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(systemInfoTab); });
+        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(uninstallerTab); });
+        startupBtn.setOnAction(e -> { selectTab(startupBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(startupTab); });
+        cleanerBtn.setOnAction(e -> { selectTab(cleanerBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(cleanerTab); });
+        duplicateFilesBtn.setOnAction(e -> { selectTab(duplicateFilesBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(duplicateFilesTab); });
+        diskToolsBtn.setOnAction(e -> { selectTab(diskToolsBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(diskToolsTab); });
 
-        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn);
+        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);

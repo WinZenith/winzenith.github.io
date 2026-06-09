@@ -596,6 +596,8 @@ public class UninstallerTabView extends BorderPane {
                 ProcessResult result = service.runUninstaller(app);
                 AppLogger.info("Uninstaller completed with exit code: " + result.exitCode());
 
+                waitForUninstallCompletion(app);
+
                 Platform.runLater(() -> statusLabel.setText("Scanning leftovers for " + app.getName() + "..."));
                 List<String> fileLeftovers = service.scanFilesystemLeftovers(app);
                 List<String> regLeftovers = service.scanRegistryLeftovers(app);
@@ -616,6 +618,27 @@ public class UninstallerTabView extends BorderPane {
                 });
             }
         }, "uninstallation-workflow").start();
+    }
+
+    private void waitForUninstallCompletion(InstalledApp app) throws InterruptedException {
+        String installLocation = app.getInstallLocation();
+        if (installLocation != null && !installLocation.isBlank()) {
+            File installDir = new File(installLocation);
+            if (installDir.exists()) {
+                AppLogger.info("Waiting for uninstaller to finish - polling install directory: " + installLocation);
+                long deadline = System.currentTimeMillis() + 30000;
+                while (installDir.exists() && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(500);
+                }
+                if (installDir.exists()) {
+                    AppLogger.info("Timeout reached waiting for install directory removal, proceeding with scan");
+                } else {
+                    AppLogger.info("Install directory removed, uninstaller confirmed complete");
+                }
+            }
+        } else {
+            Thread.sleep(2000);
+        }
     }
 
     private void showLeftoversReview(InstalledApp app, List<String> fileLeftovers, List<String> regLeftovers) {
