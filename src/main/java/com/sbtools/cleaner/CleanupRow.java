@@ -43,10 +43,6 @@ public class CleanupRow {
         return sizeOrCountText;
     }
 
-    public String getSizeOrCountText() {
-        return sizeOrCountText.get();
-    }
-
     public void setSizeOrCountText(String text) {
         this.sizeOrCountText.set(text);
     }

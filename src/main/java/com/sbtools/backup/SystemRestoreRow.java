@@ -20,10 +20,6 @@ public class SystemRestoreRow {
         this.eventType.set(formatEventType(eventTypeCode));
     }
 
-    public int getSequenceNumber() {
-        return sequenceNumber;
-    }
-
     public boolean isSelected() {
         return selected.get();
     }

@@ -59,19 +59,8 @@ public class SoftwareUpdateEntry {
         return updateId;
     }
 
-    public long sizeBytes() {
-        return sizeBytes;
-    }
-
     public String getName() {
         return name.get();
     }
 
-    public String getCurrentVersion() {
-        return currentVersion.get();
-    }
-
-    public String getAvailableVersion() {
-        return availableVersion.get();
-    }
 }

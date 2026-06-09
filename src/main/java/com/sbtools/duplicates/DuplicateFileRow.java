@@ -52,10 +52,8 @@ public class DuplicateFileRow {
     public long getFileSize() { return fileSize.get(); }
 
     public StringProperty checksumMd5Property() { return checksumMd5; }
-    public String getChecksumMd5() { return checksumMd5.get(); }
 
     public IntegerProperty totalDuplicatesProperty() { return totalDuplicates; }
-    public int getTotalDuplicates() { return totalDuplicates.get(); }
 
     public List<String> getDeletablePaths() { return deletablePaths; }
 }

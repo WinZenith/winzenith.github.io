@@ -18,7 +18,6 @@
         <javafx.platform>win</javafx.platform>
         <javafx.classifier>win</javafx.classifier>
         <jackson.version>2.18.2</jackson.version>
-        <junit.version>5.11.4</junit.version>
     </properties>
 
     <dependencies>
@@ -28,11 +27,6 @@
             <version>${javafx.version}</version>
             <classifier>${javafx.classifier}</classifier>
         </dependency>
-<!--        <dependency>-->
-<!--            <groupId>org.openjfx</groupId>-->
-<!--            <artifactId>javafx-sdk</artifactId>-->
-<!--            <version>21</version>-->
-<!--        </dependency>-->
         <dependency>
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-graphics</artifactId>
@@ -59,12 +53,6 @@
             <groupId>io.github.mkpaz</groupId>
             <artifactId>atlantafx-base</artifactId>
             <version>2.0.1</version>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <version>${junit.version}</version>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>net.java.dev.jna</groupId>
@@ -122,14 +110,6 @@
                 <version>3.13.0</version>
                 <configuration>
                     <release>${maven.compiler.release}</release>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.2</version>
-                <configuration>
-                    <useModulePath>false</useModulePath>
                 </configuration>
             </plugin>
             <!-- JavaFX Maven Plugin to set module path correctly -->
