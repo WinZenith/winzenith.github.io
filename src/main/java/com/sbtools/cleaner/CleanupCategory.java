@@ -2,6 +2,7 @@ package com.sbtools.cleaner;
 
 public enum CleanupCategory {
     REGISTRY("Registry", "Invalid or unused registry entries"),
+    REGISTRY_DEFRAG("Registry Defrag", "Compact and optimize registry hives"),
     EMPTY_RECYCLE_BIN("Empty Recycle Bin", "Files in the Recycle Bin"),
     JUNK_FILES("Junk files", "Temporary files from applications"),
     INVALID_SHORTCUTS("Invalid shortcuts", "Broken shortcut (.lnk) files"),
@@ -21,7 +22,8 @@ public enum CleanupCategory {
     OFFICE_DOCUMENT_CACHE("Office Document Cache", "Microsoft Office file cache"),
     WINDOWS_DEFENDER_CACHE("Windows Defender Cache", "Defender scan history and quarantine files"),
     WINDOWS_LOG_FILES("Windows Log Files", "System log files (*.log)"),
-    WINDOWS_STORE_CACHE("Windows Store Cache", "Per-app Windows Store package caches");
+    WINDOWS_STORE_CACHE("Windows Store Cache", "Per-app Windows Store package caches"),
+    OTHER_PROGRAMS_CACHE("Other Programs Cache", "Cache data from Discord, VS Code, Adobe, Steam, Slack, Zoom, and Teams");
 
     private final String displayName;
     private final String description;

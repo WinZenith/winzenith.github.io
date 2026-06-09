@@ -1,6 +1,11 @@
 package com.sbtools.uninstaller;
 
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleBooleanProperty;
+
 public class InstalledApp {
+    private final BooleanProperty selected = new SimpleBooleanProperty(false);
+
     private final String name;
     private final String publisher;
     private final String version;
@@ -38,6 +43,10 @@ public class InstalledApp {
         this(name, publisher, version, installLocation, uninstallString, registryKeyPath,
                 win32, appxPackageFullName, registryHive, "", 0, "");
     }
+
+    public BooleanProperty selectedProperty() { return selected; }
+    public boolean isSelected() { return selected.get(); }
+    public void setSelected(boolean selected) { this.selected.set(selected); }
 
     public String getName() { return name; }
     public String getPublisher() { return publisher; }

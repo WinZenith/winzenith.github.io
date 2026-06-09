@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.function.BooleanSupplier;
 import java.nio.file.Path;
+import com.sbtools.settings.AppSettings;
+import com.sbtools.settings.SettingsStore;
 import javafx.collections.FXCollections;
 
 public class SoftwareUpdatesTabView extends BorderPane {
@@ -42,8 +44,12 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private final ProgressBar batchProgressBar = new ProgressBar(0);
     private final Label batchProgressLabel = new Label();
     private final Button scanButton = new Button("Scan");
+    private final Button stopScanButton = new Button("Stop scan");
     private final Button updateSelectedButton = new Button("Update Selected");
+    private final SettingsStore settingsStore = new SettingsStore();
     private TableCell<SoftwareUpdateEntry, Void> currentInstallCell;
+    private volatile boolean scanCancelled;
+    private volatile Thread scanThread;
 
     public SoftwareUpdatesTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -55,10 +61,14 @@ public class SoftwareUpdatesTabView extends BorderPane {
         batchProgressLabel.setVisible(false);
 
         scanButton.setOnAction(e -> scan());
+        stopScanButton.setOnAction(e -> stopScan());
+        stopScanButton.setDisable(true);
         updateSelectedButton.setOnAction(e -> updateSelected());
         updateSelectedButton.setDisable(true);
+        Button ignoredListButton = new Button("Ignored List");
+        ignoredListButton.setOnAction(e -> showIgnoredListDialog());
 
-        HBox top = new HBox(12, scanButton, updateSelectedButton, progress, batchProgressBar, batchProgressLabel, statusLabel);
+        HBox top = new HBox(12, scanButton, stopScanButton, updateSelectedButton, ignoredListButton, progress, batchProgressBar, batchProgressLabel, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -112,12 +122,15 @@ public class SoftwareUpdatesTabView extends BorderPane {
         actionCol.setPrefWidth(280);
         actionCol.setCellFactory(col -> new TableCell<>() {
             private final Button updateBtn = new Button("Update");
+            private final Button skipBtn = new Button("Skip");
             private final ProgressBar downloadProgress = new ProgressBar(ProgressBar.INDETERMINATE_PROGRESS);
             private final Label sizeLabel = new Label("Installing…");
             private final Label installingLabel = new Label("Installing update. Please wait…");
             private final ProgressIndicator spinner = new ProgressIndicator();
 
             {
+                updateBtn.setStyle("-fx-font-family: \"Segoe UI\", sans-serif; -fx-font-size: 12;");
+                skipBtn.setStyle("-fx-font-family: \"Segoe UI\", sans-serif; -fx-font-size: 12;");
                 spinner.setPrefSize(48, 48);
                 spinner.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
                 spinner.setVisible(false);
@@ -132,6 +145,13 @@ public class SoftwareUpdatesTabView extends BorderPane {
                         updateSingle(entry, this);
                     }
                 });
+
+                skipBtn.setOnAction(e -> {
+                    SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
+                    if (entry != null) {
+                        skipEntry(entry);
+                    }
+                });
             }
 
             @Override
@@ -142,7 +162,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 } else {
                     SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
                     updateBtn.setDisable(entry == null || busy.get());
-                    HBox container = new HBox(6, updateBtn, sizeLabel, downloadProgress, installingLabel, spinner);
+                    HBox container = new HBox(6, updateBtn, skipBtn, sizeLabel, downloadProgress, installingLabel, spinner);
                     container.setAlignment(Pos.CENTER_LEFT);
                     setGraphic(container);
                 }
@@ -239,14 +259,29 @@ public class SoftwareUpdatesTabView extends BorderPane {
         }
     }
 
+    private void stopScan() {
+        scanCancelled = true;
+        if (scanThread != null) {
+            scanThread.interrupt();
+            scanThread = null;
+        }
+        busy.set(false);
+        progress.setVisible(false);
+        scanButton.setDisable(false);
+        stopScanButton.setDisable(true);
+        statusLabel.setText("Scan stopped.");
+    }
+
     private void scan() {
         if (busy.get()) return;
+        scanCancelled = false;
         busy.set(true);
         progress.setVisible(true);
         scanButton.setDisable(true);
+        stopScanButton.setDisable(false);
         statusLabel.setText("Scanning for updates…");
-        rows.clear();
         new Thread(() -> {
+            scanThread = Thread.currentThread();
             List<SoftwareUpdateEntry> allUpdates = new java.util.ArrayList<>();
             int wingetCount = 0;
             int wuCount = 0;
@@ -254,6 +289,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 boolean wingetAvailable = service.isWingetAvailable();
                 if (wingetAvailable) {
                     try {
+                        if (scanCancelled) return;
                         List<SoftwareUpdateEntry> wingetUpdates = service.scanForUpdates();
                         wingetCount = wingetUpdates.size();
                         allUpdates.addAll(wingetUpdates);
@@ -307,6 +343,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     });
                 }
 
+                if (scanCancelled) return;
+
                 try {
                     List<SoftwareUpdateEntry> wuUpdates = service.scanForWindowsUpdates();
                     wuCount = wuUpdates.size();
@@ -315,13 +353,25 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     AppLogger.warning("Windows Update scan failed: " + ex.getMessage());
                 }
 
+                if (scanCancelled) return;
+
                 final int wc = wingetCount;
                 final int wuc = wuCount;
                 final List<SoftwareUpdateEntry> finalUpdates = allUpdates;
+                AppSettings settings = settingsStore.load();
+                List<String> skippedIds = settings.skippedSoftwareIds();
+                java.util.Set<String> skippedIdSet = skippedIds.stream()
+                    .map(s -> { int t = s.lastIndexOf('\t'); return t >= 0 ? s.substring(t + 1) : s; })
+                    .collect(java.util.stream.Collectors.toSet());
+                final List<SoftwareUpdateEntry> filteredUpdates = finalUpdates.stream()
+                    .filter(e -> !skippedIdSet.contains(e.id()))
+                    .collect(Collectors.toList());
+                if (scanCancelled) return;
                 Platform.runLater(() -> {
-                    rows.setAll(finalUpdates);
+                    if (scanCancelled) return;
+                    rows.setAll(filteredUpdates);
                     if (wc > 0 && wuc > 0) {
-                        statusLabel.setText(finalUpdates.size() + " outdated item(s) found (" + wc + " app(s), " + wuc + " Windows Update(s)).");
+                        statusLabel.setText(filteredUpdates.size() + " outdated item(s) found (" + wc + " app(s), " + wuc + " Windows Update(s)).");
                     } else if (wc > 0) {
                         statusLabel.setText(wc + " outdated app(s) found.");
                     } else if (wuc > 0) {
@@ -332,15 +382,19 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     updateInstallButtonState();
                 });
             } catch (Exception ex) {
-                Platform.runLater(() -> {
-                    statusLabel.setText("Scan failed: " + ex.getMessage());
-                    new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
-                });
+                if (!scanCancelled) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Scan failed: " + ex.getMessage());
+                        new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
+                    });
+                }
             } finally {
+                scanThread = null;
                 Platform.runLater(() -> {
                     busy.set(false);
                     progress.setVisible(false);
                     scanButton.setDisable(false);
+                    stopScanButton.setDisable(true);
                 });
             }
         }, "software-scan").start();
@@ -524,5 +578,80 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 });
             }
         }, "software-install-single").start();
+    }
+
+    private void skipEntry(SoftwareUpdateEntry entry) {
+        try {
+            AppSettings current = settingsStore.load();
+            List<String> skipped = new java.util.ArrayList<>(current.skippedSoftwareIds());
+            String stored = entry.getName() + "\t" + entry.id();
+            if (skipped.stream().noneMatch(s -> s.endsWith("\t" + entry.id()))) {
+                skipped.add(stored);
+            }
+            AppSettings updated = new AppSettings(
+                current.autoBackupDrivers(),
+                current.createSystemRestorePoint(),
+                current.eulaAccepted(),
+                current.excludedDriverIds(),
+                skipped
+            );
+            settingsStore.save(updated);
+        } catch (Exception ex) {
+            AppLogger.warning("Failed to skip software entry: " + ex.getMessage());
+        }
+        rows.remove(entry);
+    }
+
+    private void showIgnoredListDialog() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(AppInfo.DISPLAY_NAME);
+        dialog.setHeaderText("Ignored Software Updates");
+
+        AppSettings current = settingsStore.load();
+        ObservableList<String> skippedIds = FXCollections.observableArrayList(current.skippedSoftwareIds());
+
+        ListView<String> listView = new ListView<>();
+        listView.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                } else {
+                    int t = item.lastIndexOf('\t');
+                    setText(t >= 0 ? item.substring(0, t) : item);
+                }
+            }
+        });
+        listView.setItems(skippedIds);
+        listView.setPrefHeight(300);
+
+        Button removeBtn = new Button("Remove Selected");
+        removeBtn.setOnAction(e -> {
+            String selected = listView.getSelectionModel().getSelectedItem();
+            if (selected != null) {
+                skippedIds.remove(selected);
+                try {
+                    AppSettings updated = new AppSettings(
+                        current.autoBackupDrivers(),
+                        current.createSystemRestorePoint(),
+                        current.eulaAccepted(),
+                        current.excludedDriverIds(),
+                        new java.util.ArrayList<>(skippedIds)
+                    );
+                    settingsStore.save(updated);
+                } catch (Exception ex) {
+                    AppLogger.warning("Failed to update ignored list: " + ex.getMessage());
+                }
+            }
+        });
+
+        VBox layout = new VBox(10, new Label("Skipped software updates:"), listView, removeBtn);
+        layout.setPadding(new Insets(10));
+        layout.setPrefWidth(500);
+
+        dialog.getDialogPane().setContent(layout);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.CLOSE);
+        dialog.showAndWait();
     }
 }

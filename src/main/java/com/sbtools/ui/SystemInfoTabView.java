@@ -19,7 +19,6 @@ import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.control.ProgressBar;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
@@ -324,7 +323,6 @@ public class SystemInfoTabView extends BorderPane {
         VBox container = new VBox(8);
         container.setPadding(new Insets(12));
 
-        // Group devices by deviceClass, sorted alphabetically
         java.util.TreeMap<String, List<OtherDevice>> grouped = new java.util.TreeMap<>();
         for (OtherDevice dev : devices) {
             String cls = (dev.deviceClass() != null && !dev.deviceClass().isBlank())
@@ -406,7 +404,6 @@ public class SystemInfoTabView extends BorderPane {
         grid.add(keyLabel, 0, row);
         grid.add(valueLabel, 1, row);
 
-        // Alternate row background
         if (row % 2 == 0) {
             keyLabel.setStyle(keyLabel.getStyle() + " -fx-background-color: #21222c;");
             valueLabel.setStyle(valueLabel.getStyle() + " -fx-background-color: #21222c;");
@@ -421,9 +418,6 @@ public class SystemInfoTabView extends BorderPane {
         return wrapper;
     }
 
-    /**
-     * Simple wrapper that puts a VBox inside a ScrollPane for overflow.
-     */
     private static class ScrollableContainer extends javafx.scene.control.ScrollPane {
         ScrollableContainer(javafx.scene.Node content) {
             super(content);

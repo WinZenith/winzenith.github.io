@@ -52,6 +52,7 @@ public class CleanupService {
         try {
             switch (row.getCategory()) {
                 case REGISTRY -> scanRegistry(row);
+                case REGISTRY_DEFRAG -> scanRegistryDefrag(row);
                 case EMPTY_RECYCLE_BIN -> scanRecycleBin(row);
                 case JUNK_FILES -> scanJunkFiles(row);
                 case INVALID_SHORTCUTS -> scanInvalidShortcuts(row);
@@ -72,6 +73,7 @@ public class CleanupService {
                 case WINDOWS_DEFENDER_CACHE -> scanWindowsDefenderCache(row);
                 case WINDOWS_LOG_FILES -> scanWindowsLogFiles(row);
                 case WINDOWS_STORE_CACHE -> scanWindowsStoreCache(row);
+                case OTHER_PROGRAMS_CACHE -> scanOtherProgramsCache(row);
             }
         } catch (Exception e) {
             AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
@@ -109,6 +111,7 @@ public class CleanupService {
     private long cleanCategory(CleanupCategory category, Path backupRootOrNull) throws Exception {
         return switch (category) {
             case REGISTRY -> cleanRegistry(backupRootOrNull);
+            case REGISTRY_DEFRAG -> cleanRegistryDefrag();
             case EMPTY_RECYCLE_BIN -> cleanRecycleBin();
             case JUNK_FILES -> cleanDirectoryPattern(getJunkDirs());
             case INVALID_SHORTCUTS -> cleanInvalidShortcuts();
@@ -129,10 +132,27 @@ public class CleanupService {
             case WINDOWS_DEFENDER_CACHE -> cleanWindowsDefenderCache();
             case WINDOWS_LOG_FILES -> cleanWindowsLogFiles();
             case WINDOWS_STORE_CACHE -> cleanWindowsStoreCache();
+            case OTHER_PROGRAMS_CACHE -> cleanOtherProgramsCache();
         };
     }
 
     // ── Registry ──────────────────────────────────────────────────────────
+
+    private void scanRegistryDefrag(CleanupRow row) {
+        long size = RegistryDefragService.estimateSize();
+        row.setTotalBytes(size);
+        if (size > 0) {
+            row.setSizeOrCountText(formatBytes(size) + " estimated defrag gain");
+        } else {
+            row.setSizeOrCountText("Ready to compact");
+        }
+        row.setItemCount(1);
+    }
+
+    private long cleanRegistryDefrag() {
+        RegistryDefragService.DefragResult result = RegistryDefragService.defrag();
+        return result.defraggedCount() > 0 ? 1 : 0;
+    }
 
     private void scanRegistry(CleanupRow row) {
         int count = 0;
@@ -142,6 +162,12 @@ public class CleanupService {
                 "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
         count += countInvalidRegistryValues(WinReg.HKEY_LOCAL_MACHINE,
                 "Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        count += countInvalidFileExtensions();
+        count += countInvalidCLSIDEntries();
+        count += countInvalidAppPaths();
+        count += countInvalidUninstallerEntries();
+        count += countOrphanedSharedDLLs();
+        count += countInvalidInstallerComponents();
         row.setItemCount(count);
         row.setSizeOrCountText(count + " invalid entr" + (count == 1 ? "y" : "ies"));
     }
@@ -177,6 +203,203 @@ public class CleanupService {
         return count;
     }
 
+    private int countInvalidFileExtensions() {
+        int count = 0;
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "")) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CLASSES_ROOT, "");
+                for (String key : subKeys) {
+                    if (key.startsWith(".")) {
+                        try {
+                            String defaultVal = Advapi32Util.registryGetStringValue(WinReg.HKEY_CLASSES_ROOT, key, "");
+                            if (defaultVal != null && !defaultVal.isEmpty()) {
+                                if (defaultVal.startsWith("{")) {
+                                    if (!Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + defaultVal)) {
+                                        count++;
+                                    }
+                                } else {
+                                    if (!Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, defaultVal)) {
+                                        count++;
+                                    }
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private int countInvalidCLSIDEntries() {
+        int count = 0;
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "CLSID")) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CLASSES_ROOT, "CLSID");
+                for (String guid : subKeys) {
+                    if (guid.startsWith("{")) {
+                        try {
+                            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\InprocServer32")) {
+                                String serverPath = Advapi32Util.registryGetStringValue(
+                                        WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\InprocServer32", "");
+                                if (serverPath != null && !serverPath.isEmpty()) {
+                                    Path p = Paths.get(serverPath);
+                                    if (!Files.exists(p)) {
+                                        count++;
+                                    }
+                                }
+                            } else if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\LocalServer32")) {
+                                String serverPath = Advapi32Util.registryGetStringValue(
+                                        WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\LocalServer32", "");
+                                if (serverPath != null && !serverPath.isEmpty()) {
+                                    String cleanPath = serverPath;
+                                    if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
+                                        cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
+                                    }
+                                    int spaceIdx = cleanPath.indexOf(" -");
+                                    if (spaceIdx > 0) cleanPath = cleanPath.substring(0, spaceIdx);
+                                    Path p = Paths.get(cleanPath);
+                                    if (!Files.exists(p)) {
+                                        count++;
+                                    }
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private int countInvalidAppPaths() {
+        int count = 0;
+        String keyPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths";
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_LOCAL_MACHINE, keyPath);
+                for (String appKey : subKeys) {
+                    try {
+                        String exePath = Advapi32Util.registryGetStringValue(
+                                WinReg.HKEY_LOCAL_MACHINE, keyPath + "\\" + appKey, "");
+                        if (exePath != null && !exePath.isEmpty()) {
+                            String cleanPath = exePath;
+                            if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
+                                cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
+                            }
+                            Path p = Paths.get(cleanPath);
+                            if (!Files.exists(p)) {
+                                count++;
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private int countInvalidUninstallerEntries() {
+        int count = 0;
+        String keyPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_LOCAL_MACHINE, keyPath);
+                for (String guid : subKeys) {
+                    if (guid.startsWith("{")) {
+                        try {
+                            String fullPath = keyPath + "\\" + guid;
+                            String displayIcon = null;
+                            String uninstallString = null;
+                            try {
+                                displayIcon = Advapi32Util.registryGetStringValue(
+                                        WinReg.HKEY_LOCAL_MACHINE, fullPath, "DisplayIcon");
+                            } catch (Exception ignored) {}
+                            try {
+                                uninstallString = Advapi32Util.registryGetStringValue(
+                                        WinReg.HKEY_LOCAL_MACHINE, fullPath, "UninstallString");
+                            } catch (Exception ignored) {}
+                            String pathToCheck = null;
+                            if (displayIcon != null && !displayIcon.isEmpty()) {
+                                pathToCheck = displayIcon;
+                            } else if (uninstallString != null && !uninstallString.isEmpty()) {
+                                pathToCheck = uninstallString;
+                            }
+                            if (pathToCheck != null) {
+                                String cleanPath = pathToCheck;
+                                if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
+                                    cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
+                                }
+                                int spaceIdx = cleanPath.indexOf(" -");
+                                if (spaceIdx > 0) cleanPath = cleanPath.substring(0, spaceIdx);
+                                Path p = Paths.get(cleanPath);
+                                if (!Files.exists(p)) {
+                                    count++;
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private int countOrphanedSharedDLLs() {
+        int count = 0;
+        String keyPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs";
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
+                Map<String, Object> values = Advapi32Util.registryGetValues(
+                        WinReg.HKEY_LOCAL_MACHINE, keyPath);
+                for (String filePath : values.keySet()) {
+                    try {
+                        Path p = Paths.get(filePath);
+                        if (!Files.exists(p)) {
+                            count++;
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private int countInvalidInstallerComponents() {
+        int count = 0;
+        String basePath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData";
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, basePath)) {
+                String[] sids = Advapi32Util.registryGetKeys(WinReg.HKEY_LOCAL_MACHINE, basePath);
+                for (String sid : sids) {
+                    String compPath = basePath + "\\" + sid + "\\Components";
+                    try {
+                        if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, compPath)) {
+                            String[] compGUIDs = Advapi32Util.registryGetKeys(
+                                    WinReg.HKEY_LOCAL_MACHINE, compPath);
+                            for (String compGUID : compGUIDs) {
+                                try {
+                                    String valPath = compPath + "\\" + compGUID;
+                                    Map<String, Object> vals = Advapi32Util.registryGetValues(
+                                            WinReg.HKEY_LOCAL_MACHINE, valPath);
+                                    for (String valName : vals.keySet()) {
+                                        if (valName.contains(":") || valName.contains("\\")) {
+                                            Path p = Paths.get(valName);
+                                            if (!Files.exists(p)) {
+                                                count++;
+                                            }
+                                        }
+                                    }
+                                } catch (Exception ignored) {}
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
     private long cleanRegistry(Path backupRootOrNull) {
         long cleaned = 0;
         cleaned += deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_CURRENT_USER,
@@ -185,6 +408,12 @@ public class CleanupService {
                 "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
         cleaned += deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_LOCAL_MACHINE,
                 "Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        cleaned += cleanInvalidFileExtensions(backupRootOrNull);
+        cleaned += cleanInvalidCLSIDEntries(backupRootOrNull);
+        cleaned += cleanInvalidAppPaths(backupRootOrNull);
+        cleaned += cleanInvalidUninstallerEntries(backupRootOrNull);
+        cleaned += cleanOrphanedSharedDLLs(backupRootOrNull);
+        cleaned += cleanInvalidInstallerComponents(backupRootOrNull);
         return cleaned;
     }
 
@@ -238,6 +467,274 @@ public class CleanupService {
         } catch (Exception e) {
             AppLogger.warning("Registry cleanup error: " + e.getMessage());
         }
+        return count;
+    }
+
+    private void backupRegKey(Path backupRootOrNull, String description, String hiveName, String keyPath) {
+        if (backupRootOrNull != null) {
+            try {
+                Path regBackup = backupRootOrNull.resolve("registry-" + description + ".reg");
+                Files.createDirectories(regBackup.getParent());
+                new ProcessBuilder("reg", "export", hiveName + "\\" + keyPath, regBackup.toString(), "/y")
+                        .inheritIO().start().waitFor();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private long cleanInvalidFileExtensions(Path backupRootOrNull) {
+        long count = 0;
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "")) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CLASSES_ROOT, "");
+                List<String> toDelete = new ArrayList<>();
+                for (String key : subKeys) {
+                    if (key.startsWith(".")) {
+                        try {
+                            String defaultVal = Advapi32Util.registryGetStringValue(WinReg.HKEY_CLASSES_ROOT, key, "");
+                            if (defaultVal != null && !defaultVal.isEmpty()) {
+                                if (defaultVal.startsWith("{")) {
+                                    if (!Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + defaultVal)) {
+                                        toDelete.add(key);
+                                    }
+                                } else {
+                                    if (!Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, defaultVal)) {
+                                        toDelete.add(key);
+                                    }
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+                if (!toDelete.isEmpty()) {
+                    backupRegKey(backupRootOrNull, "fileextensions", "HKCR", "");
+                    for (String key : toDelete) {
+                        try {
+                            Advapi32Util.registryDeleteKey(WinReg.HKEY_CLASSES_ROOT, key);
+                            count++;
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private long cleanInvalidCLSIDEntries(Path backupRootOrNull) {
+        long count = 0;
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "CLSID")) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CLASSES_ROOT, "CLSID");
+                List<String> toDelete = new ArrayList<>();
+                for (String guid : subKeys) {
+                    if (guid.startsWith("{")) {
+                        try {
+                            boolean invalid = false;
+                            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\InprocServer32")) {
+                                String serverPath = Advapi32Util.registryGetStringValue(
+                                        WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\InprocServer32", "");
+                                if (serverPath != null && !serverPath.isEmpty()) {
+                                    Path p = Paths.get(serverPath);
+                                    if (!Files.exists(p)) invalid = true;
+                                }
+                            } else if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\LocalServer32")) {
+                                String serverPath = Advapi32Util.registryGetStringValue(
+                                        WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\LocalServer32", "");
+                                if (serverPath != null && !serverPath.isEmpty()) {
+                                    String cleanPath = serverPath;
+                                    if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
+                                        cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
+                                    }
+                                    int spaceIdx = cleanPath.indexOf(" -");
+                                    if (spaceIdx > 0) cleanPath = cleanPath.substring(0, spaceIdx);
+                                    Path p = Paths.get(cleanPath);
+                                    if (!Files.exists(p)) invalid = true;
+                                }
+                            }
+                            if (invalid) toDelete.add(guid);
+                        } catch (Exception ignored) {}
+                    }
+                }
+                if (!toDelete.isEmpty()) {
+                    backupRegKey(backupRootOrNull, "clsid", "HKCR", "CLSID");
+                    for (String guid : toDelete) {
+                        try {
+                            Advapi32Util.registryDeleteKey(WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid);
+                            count++;
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private long cleanInvalidAppPaths(Path backupRootOrNull) {
+        long count = 0;
+        String keyPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths";
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_LOCAL_MACHINE, keyPath);
+                List<String> toDelete = new ArrayList<>();
+                for (String appKey : subKeys) {
+                    try {
+                        String exePath = Advapi32Util.registryGetStringValue(
+                                WinReg.HKEY_LOCAL_MACHINE, keyPath + "\\" + appKey, "");
+                        if (exePath != null && !exePath.isEmpty()) {
+                            String cleanPath = exePath;
+                            if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
+                                cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
+                            }
+                            Path p = Paths.get(cleanPath);
+                            if (!Files.exists(p)) {
+                                toDelete.add(appKey);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+                if (!toDelete.isEmpty()) {
+                    backupRegKey(backupRootOrNull, "apppaths", "HKLM", keyPath);
+                    for (String appKey : toDelete) {
+                        try {
+                            Advapi32Util.registryDeleteKey(
+                                    WinReg.HKEY_LOCAL_MACHINE, keyPath + "\\" + appKey);
+                            count++;
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private long cleanInvalidUninstallerEntries(Path backupRootOrNull) {
+        long count = 0;
+        String keyPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_LOCAL_MACHINE, keyPath);
+                List<String> toDelete = new ArrayList<>();
+                for (String guid : subKeys) {
+                    if (guid.startsWith("{")) {
+                        try {
+                            String fullPath = keyPath + "\\" + guid;
+                            String displayIcon = null;
+                            String uninstallString = null;
+                            try {
+                                displayIcon = Advapi32Util.registryGetStringValue(
+                                        WinReg.HKEY_LOCAL_MACHINE, fullPath, "DisplayIcon");
+                            } catch (Exception ignored) {}
+                            try {
+                                uninstallString = Advapi32Util.registryGetStringValue(
+                                        WinReg.HKEY_LOCAL_MACHINE, fullPath, "UninstallString");
+                            } catch (Exception ignored) {}
+                            String pathToCheck = null;
+                            if (displayIcon != null && !displayIcon.isEmpty()) {
+                                pathToCheck = displayIcon;
+                            } else if (uninstallString != null && !uninstallString.isEmpty()) {
+                                pathToCheck = uninstallString;
+                            }
+                            if (pathToCheck != null) {
+                                String cleanPath = pathToCheck;
+                                if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
+                                    cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
+                                }
+                                int spaceIdx = cleanPath.indexOf(" -");
+                                if (spaceIdx > 0) cleanPath = cleanPath.substring(0, spaceIdx);
+                                Path p = Paths.get(cleanPath);
+                                if (!Files.exists(p)) {
+                                    toDelete.add(guid);
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+                if (!toDelete.isEmpty()) {
+                    backupRegKey(backupRootOrNull, "uninstall", "HKLM", keyPath);
+                    for (String guid : toDelete) {
+                        try {
+                            Advapi32Util.registryDeleteKey(
+                                    WinReg.HKEY_LOCAL_MACHINE, keyPath + "\\" + guid);
+                            count++;
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private long cleanOrphanedSharedDLLs(Path backupRootOrNull) {
+        long count = 0;
+        String keyPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs";
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
+                Map<String, Object> values = Advapi32Util.registryGetValues(
+                        WinReg.HKEY_LOCAL_MACHINE, keyPath);
+                List<String> toDelete = new ArrayList<>();
+                for (String filePath : values.keySet()) {
+                    try {
+                        Path p = Paths.get(filePath);
+                        if (!Files.exists(p)) {
+                            toDelete.add(filePath);
+                        }
+                    } catch (Exception ignored) {}
+                }
+                if (!toDelete.isEmpty()) {
+                    backupRegKey(backupRootOrNull, "shareddlls", "HKLM", keyPath);
+                    for (String valName : toDelete) {
+                        try {
+                            Advapi32Util.registryDeleteValue(
+                                    WinReg.HKEY_LOCAL_MACHINE, keyPath, valName);
+                            count++;
+                        } catch (Exception ignored) {}
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return count;
+    }
+
+    private long cleanInvalidInstallerComponents(Path backupRootOrNull) {
+        long count = 0;
+        String basePath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData";
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, basePath)) {
+                String[] sids = Advapi32Util.registryGetKeys(WinReg.HKEY_LOCAL_MACHINE, basePath);
+                backupRegKey(backupRootOrNull, "installercomponents", "HKLM", basePath);
+                for (String sid : sids) {
+                    String compPath = basePath + "\\" + sid + "\\Components";
+                    try {
+                        if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, compPath)) {
+                            String[] compGUIDs = Advapi32Util.registryGetKeys(
+                                    WinReg.HKEY_LOCAL_MACHINE, compPath);
+                            for (String compGUID : compGUIDs) {
+                                try {
+                                    String valPath = compPath + "\\" + compGUID;
+                                    Map<String, Object> vals = Advapi32Util.registryGetValues(
+                                            WinReg.HKEY_LOCAL_MACHINE, valPath);
+                                    List<String> toDelete = new ArrayList<>();
+                                    for (String valName : vals.keySet()) {
+                                        if (valName.contains(":") || valName.contains("\\")) {
+                                            Path p = Paths.get(valName);
+                                            if (!Files.exists(p)) {
+                                                toDelete.add(valName);
+                                            }
+                                        }
+                                    }
+                                    for (String valName : toDelete) {
+                                        try {
+                                            Advapi32Util.registryDeleteValue(
+                                                    WinReg.HKEY_LOCAL_MACHINE, valPath, valName);
+                                            count++;
+                                        } catch (Exception ignored) {}
+                                    }
+                                } catch (Exception ignored) {}
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ignored) {}
         return count;
     }
 
@@ -418,7 +915,6 @@ public class CleanupService {
                     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU")) {
                 Map<String, Object> values = Advapi32Util.registryGetValues(WinReg.HKEY_CURRENT_USER,
                         "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU");
-                // just count entries
             }
         } catch (Exception ignored) {}
     }
@@ -547,6 +1043,24 @@ public class CleanupService {
         }
         profiles.add(new BrowserProfile("Vivaldi", vivaldiDirs));
 
+        // Chromium
+        List<Path> chromiumDirs = new ArrayList<>();
+        if (localAppData != null) {
+            Path chromium = Paths.get(localAppData, "Chromium", "User Data", "Default");
+            chromiumDirs.add(chromium.resolve("Cache"));
+            chromiumDirs.add(chromium.resolve("Code Cache"));
+        }
+        profiles.add(new BrowserProfile("Chromium", chromiumDirs));
+
+        // Yandex Browser
+        List<Path> yandexDirs = new ArrayList<>();
+        if (localAppData != null) {
+            Path yandex = Paths.get(localAppData, "Yandex", "YandexBrowser", "User Data", "Default");
+            yandexDirs.add(yandex.resolve("Cache"));
+            yandexDirs.add(yandex.resolve("Code Cache"));
+        }
+        profiles.add(new BrowserProfile("Yandex Browser", yandexDirs));
+
         return profiles;
     }
 
@@ -575,7 +1089,6 @@ public class CleanupService {
                     cleaned += deleteDirectoryContents(dir);
                 }
             }
-            // Also try to delete cookies and history files
             String localAppData = System.getenv("LOCALAPPDATA");
             String appData = System.getenv("APPDATA");
             String userProfile = System.getenv("USERPROFILE");
@@ -630,6 +1143,40 @@ public class CleanupService {
                         Path base = Paths.get(localAppData, "Vivaldi", "User Data", "Default");
                         extraFiles.add(base.resolve("Cookies"));
                         extraFiles.add(base.resolve("History"));
+                    }
+                }
+                case "Opera" -> {
+                    if (appData != null) {
+                        Path base = Paths.get(appData, "Opera Software", "Opera Stable");
+                        extraFiles.add(base.resolve("Cookies"));
+                        extraFiles.add(base.resolve("History"));
+                    }
+                }
+                case "Opera GX" -> {
+                    if (appData != null) {
+                        Path base = Paths.get(appData, "Opera Software", "Opera GX Stable");
+                        extraFiles.add(base.resolve("Cookies"));
+                        extraFiles.add(base.resolve("History"));
+                    }
+                }
+                case "Chromium" -> {
+                    if (localAppData != null) {
+                        Path base = Paths.get(localAppData, "Chromium", "User Data", "Default");
+                        extraFiles.add(base.resolve("Cookies"));
+                        extraFiles.add(base.resolve("Cookies-journal"));
+                        extraFiles.add(base.resolve("History"));
+                        extraFiles.add(base.resolve("History-journal"));
+                        extraFiles.add(base.resolve("Login Data"));
+                    }
+                }
+                case "Yandex Browser" -> {
+                    if (localAppData != null) {
+                        Path base = Paths.get(localAppData, "Yandex", "YandexBrowser", "User Data", "Default");
+                        extraFiles.add(base.resolve("Cookies"));
+                        extraFiles.add(base.resolve("Cookies-journal"));
+                        extraFiles.add(base.resolve("History"));
+                        extraFiles.add(base.resolve("History-journal"));
+                        extraFiles.add(base.resolve("Login Data"));
                     }
                 }
             }
@@ -1268,6 +1815,371 @@ public class CleanupService {
                 } catch (Exception ignored) {}
             }
         }
+        return cleaned;
+    }
+
+    // ── Discord Cache ────────────────────────────────────────────────────
+
+    private void scanDiscordCache(CleanupRow row) {
+        long totalSize = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path discord = Paths.get(appData, "discord");
+            List<Path> dirs = new ArrayList<>();
+            Path cache = discord.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path codeCache = discord.resolve("Code Cache");
+            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
+            Path gpuCache = discord.resolve("GPUCache");
+            if (Files.isDirectory(gpuCache)) dirs.add(gpuCache);
+            for (Path dir : dirs) {
+                try (Stream<Path> walk = Files.walk(dir)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanDiscordCache() {
+        long cleaned = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path discord = Paths.get(appData, "discord");
+            List<Path> dirs = new ArrayList<>();
+            Path cache = discord.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path codeCache = discord.resolve("Code Cache");
+            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
+            Path gpuCache = discord.resolve("GPUCache");
+            if (Files.isDirectory(gpuCache)) dirs.add(gpuCache);
+            for (Path dir : dirs) {
+                if (Files.isDirectory(dir)) {
+                    cleaned += deleteDirectoryContents(dir);
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    // ── VS Code Cache ─────────────────────────────────────────────────────
+
+    private void scanVscodeCache(CleanupRow row) {
+        long totalSize = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path code = Paths.get(appData, "Code");
+            List<Path> dirs = new ArrayList<>();
+            Path cache = code.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path cachedData = code.resolve("CachedData");
+            if (Files.isDirectory(cachedData)) dirs.add(cachedData);
+            Path cachedExtensions = code.resolve("CachedExtensions");
+            if (Files.isDirectory(cachedExtensions)) dirs.add(cachedExtensions);
+            for (Path dir : dirs) {
+                try (Stream<Path> walk = Files.walk(dir)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanVscodeCache() {
+        long cleaned = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path code = Paths.get(appData, "Code");
+            List<Path> dirs = new ArrayList<>();
+            Path cache = code.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path cachedData = code.resolve("CachedData");
+            if (Files.isDirectory(cachedData)) dirs.add(cachedData);
+            Path cachedExtensions = code.resolve("CachedExtensions");
+            if (Files.isDirectory(cachedExtensions)) dirs.add(cachedExtensions);
+            for (Path dir : dirs) {
+                if (Files.isDirectory(dir)) {
+                    cleaned += deleteDirectoryContents(dir);
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Adobe Cache ───────────────────────────────────────────────────────
+
+    private void scanAdobeCache(CleanupRow row) {
+        long totalSize = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path adobeCommon = Paths.get(appData, "Adobe", "Common");
+            List<Path> dirs = new ArrayList<>();
+            Path mediaCache = adobeCommon.resolve("Media Cache");
+            if (Files.isDirectory(mediaCache)) dirs.add(mediaCache);
+            Path mediaCacheFiles = adobeCommon.resolve("Media Cache Files");
+            if (Files.isDirectory(mediaCacheFiles)) dirs.add(mediaCacheFiles);
+            for (Path dir : dirs) {
+                try (Stream<Path> walk = Files.walk(dir)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanAdobeCache() {
+        long cleaned = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path adobeCommon = Paths.get(appData, "Adobe", "Common");
+            List<Path> dirs = new ArrayList<>();
+            Path mediaCache = adobeCommon.resolve("Media Cache");
+            if (Files.isDirectory(mediaCache)) dirs.add(mediaCache);
+            Path mediaCacheFiles = adobeCommon.resolve("Media Cache Files");
+            if (Files.isDirectory(mediaCacheFiles)) dirs.add(mediaCacheFiles);
+            for (Path dir : dirs) {
+                if (Files.isDirectory(dir)) {
+                    cleaned += deleteDirectoryContents(dir);
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Steam Cache ───────────────────────────────────────────────────────
+
+    private void scanSteamCache(CleanupRow row) {
+        long totalSize = 0;
+        String progFilesX86 = System.getenv("PROGRAMFILES(X86)");
+        if (progFilesX86 != null) {
+            Path steam = Paths.get(progFilesX86, "Steam");
+            List<Path> dirs = new ArrayList<>();
+            Path appcache = steam.resolve("appcache");
+            if (Files.isDirectory(appcache)) dirs.add(appcache);
+            Path logs = steam.resolve("logs");
+            if (Files.isDirectory(logs)) dirs.add(logs);
+            Path downloading = steam.resolve("steamapps").resolve("downloading");
+            if (Files.isDirectory(downloading)) dirs.add(downloading);
+            for (Path dir : dirs) {
+                try (Stream<Path> walk = Files.walk(dir)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanSteamCache() {
+        long cleaned = 0;
+        String progFilesX86 = System.getenv("PROGRAMFILES(X86)");
+        if (progFilesX86 != null) {
+            Path steam = Paths.get(progFilesX86, "Steam");
+            List<Path> dirs = new ArrayList<>();
+            Path appcache = steam.resolve("appcache");
+            if (Files.isDirectory(appcache)) dirs.add(appcache);
+            Path logs = steam.resolve("logs");
+            if (Files.isDirectory(logs)) dirs.add(logs);
+            Path downloading = steam.resolve("steamapps").resolve("downloading");
+            if (Files.isDirectory(downloading)) dirs.add(downloading);
+            for (Path dir : dirs) {
+                if (Files.isDirectory(dir)) {
+                    cleaned += deleteDirectoryContents(dir);
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Slack Cache ───────────────────────────────────────────────────────
+
+    private void scanSlackCache(CleanupRow row) {
+        long totalSize = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path slack = Paths.get(appData, "Slack");
+            List<Path> dirs = new ArrayList<>();
+            Path cache = slack.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path codeCache = slack.resolve("Code Cache");
+            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
+            Path gpuCache = slack.resolve("GPUCache");
+            if (Files.isDirectory(gpuCache)) dirs.add(gpuCache);
+            for (Path dir : dirs) {
+                try (Stream<Path> walk = Files.walk(dir)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanSlackCache() {
+        long cleaned = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path slack = Paths.get(appData, "Slack");
+            List<Path> dirs = new ArrayList<>();
+            Path cache = slack.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path codeCache = slack.resolve("Code Cache");
+            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
+            Path gpuCache = slack.resolve("GPUCache");
+            if (Files.isDirectory(gpuCache)) dirs.add(gpuCache);
+            for (Path dir : dirs) {
+                if (Files.isDirectory(dir)) {
+                    cleaned += deleteDirectoryContents(dir);
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Zoom Cache ────────────────────────────────────────────────────────
+
+    private void scanZoomCache(CleanupRow row) {
+        long totalSize = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path zoomData = Paths.get(appData, "Zoom", "data");
+            if (Files.isDirectory(zoomData)) {
+                try (Stream<Path> walk = Files.walk(zoomData, 1)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".bin"))
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+            Path recordings = Paths.get(appData, "Zoom", "data", "recordings");
+            if (Files.isDirectory(recordings)) {
+                try (Stream<Path> walk = Files.walk(recordings)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanZoomCache() {
+        long cleaned = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path zoomData = Paths.get(appData, "Zoom", "data");
+            if (Files.isDirectory(zoomData)) {
+                try (Stream<Path> files = Files.list(zoomData)) {
+                    for (Path f : (Iterable<Path>) files::iterator) {
+                        if (Files.isRegularFile(f) && f.getFileName().toString().toLowerCase().endsWith(".bin")) {
+                            long size = Files.size(f);
+                            deletePermanently(f);
+                            cleaned += size;
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+            Path recordings = Paths.get(appData, "Zoom", "data", "recordings");
+            if (Files.isDirectory(recordings)) {
+                cleaned += deleteDirectoryContents(recordings);
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Teams Cache ───────────────────────────────────────────────────────
+
+    private void scanTeamsCache(CleanupRow row) {
+        long totalSize = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path teams = Paths.get(appData, "Microsoft", "Teams");
+            List<Path> dirs = new ArrayList<>();
+            Path cache = teams.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path codeCache = teams.resolve("Code Cache");
+            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
+            Path appCache = teams.resolve("Application Cache");
+            if (Files.isDirectory(appCache)) dirs.add(appCache);
+            for (Path dir : dirs) {
+                try (Stream<Path> walk = Files.walk(dir)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanTeamsCache() {
+        long cleaned = 0;
+        String appData = System.getenv("APPDATA");
+        if (appData != null) {
+            Path teams = Paths.get(appData, "Microsoft", "Teams");
+            List<Path> dirs = new ArrayList<>();
+            Path cache = teams.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path codeCache = teams.resolve("Code Cache");
+            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
+            Path appCache = teams.resolve("Application Cache");
+            if (Files.isDirectory(appCache)) dirs.add(appCache);
+            for (Path dir : dirs) {
+                if (Files.isDirectory(dir)) {
+                    cleaned += deleteDirectoryContents(dir);
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Other Programs Cache (combined) ───────────────────────────────────
+
+    private void scanOtherProgramsCache(CleanupRow row) {
+        long totalSize = 0;
+        int totalItems = 0;
+        CleanupRow temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
+        scanDiscordCache(temp);
+        totalSize += temp.getTotalBytes();
+        totalItems += temp.getItemCount();
+        scanVscodeCache(temp);
+        totalSize += temp.getTotalBytes();
+        totalItems += temp.getItemCount();
+        scanAdobeCache(temp);
+        totalSize += temp.getTotalBytes();
+        totalItems += temp.getItemCount();
+        scanSteamCache(temp);
+        totalSize += temp.getTotalBytes();
+        totalItems += temp.getItemCount();
+        scanSlackCache(temp);
+        totalSize += temp.getTotalBytes();
+        totalItems += temp.getItemCount();
+        scanZoomCache(temp);
+        totalSize += temp.getTotalBytes();
+        totalItems += temp.getItemCount();
+        scanTeamsCache(temp);
+        totalSize += temp.getTotalBytes();
+        totalItems += temp.getItemCount();
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanOtherProgramsCache() {
+        long cleaned = 0;
+        cleaned += cleanDiscordCache();
+        cleaned += cleanVscodeCache();
+        cleaned += cleanAdobeCache();
+        cleaned += cleanSteamCache();
+        cleaned += cleanSlackCache();
+        cleaned += cleanZoomCache();
+        cleaned += cleanTeamsCache();
         return cleaned;
     }
 

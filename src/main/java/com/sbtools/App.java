@@ -2,11 +2,10 @@ package com.sbtools;
 
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
+import com.sbtools.ui.BackupRestoreTabView;
 import com.sbtools.ui.DriversTabView;
-import com.sbtools.ui.RestoreTabView;
 import com.sbtools.ui.SoftwareUpdatesTabView;
 import com.sbtools.ui.SystemInfoTabView;
-import com.sbtools.ui.SystemRestoreTabView;
 import com.sbtools.ui.UninstallerTabView;
 import com.sbtools.ui.StartupTabView;
 import com.sbtools.ui.CleanerTabView;
@@ -68,8 +67,7 @@ public class App extends Application {
 
         // Modern left sidebar with theme toggle
         DriversTabView driversTab = new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
-        RestoreTabView restoreTab = new RestoreTabView(busy, AdminCheck::isRunningAsAdmin);
-        SystemRestoreTabView sysRestoreTab = new SystemRestoreTabView(busy, AdminCheck::isRunningAsAdmin);
+        BackupRestoreTabView backupRestoreTab = new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdmin);
         SoftwareUpdatesTabView softwareTab = new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
         SystemInfoTabView systemInfoTab = new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin);
         UninstallerTabView uninstallerTab = new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin);
@@ -96,8 +94,7 @@ public class App extends Application {
         sidebar.setAlignment(Pos.TOP_LEFT);
 
         UIButton driversBtn = UIButton.primary("Drivers");
-        UIButton restoreBtn = UIButton.secondary("Rollback drivers");
-        UIButton sysRestoreBtn = UIButton.secondary("System restore");
+        UIButton backupRestoreBtn = UIButton.secondary("Backup/Rollback");
         UIButton softwareBtn = UIButton.secondary("Software update");
         UIButton systemInfoBtn = UIButton.secondary("System Information");
         UIButton uninstallerBtn = UIButton.secondary("Uninstaller");
@@ -108,17 +105,16 @@ public class App extends Application {
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(driversTab); });
-        restoreBtn.setOnAction(e -> { selectTab(restoreBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(restoreTab); restoreTab.refresh(); });
-        sysRestoreBtn.setOnAction(e -> { selectTab(sysRestoreBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(sysRestoreTab); });
-        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(softwareTab); });
-        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(systemInfoTab); });
-        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(uninstallerTab); });
-        startupBtn.setOnAction(e -> { selectTab(startupBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(startupTab); });
-        cleanerBtn.setOnAction(e -> { selectTab(cleanerBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(cleanerTab); });
-        duplicateFilesBtn.setOnAction(e -> { selectTab(duplicateFilesBtn, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(duplicateFilesTab); });
+        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(driversTab); });
+        backupRestoreBtn.setOnAction(e -> { selectTab(backupRestoreBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(backupRestoreTab); });
+        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(softwareTab); });
+        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(systemInfoTab); });
+        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(uninstallerTab); });
+        startupBtn.setOnAction(e -> { selectTab(startupBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(startupTab); });
+        cleanerBtn.setOnAction(e -> { selectTab(cleanerBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(cleanerTab); });
+        duplicateFilesBtn.setOnAction(e -> { selectTab(duplicateFilesBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn); root.setCenter(duplicateFilesTab); });
 
-        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, restoreBtn, sysRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn);
+        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);
@@ -160,7 +156,9 @@ public class App extends Application {
             settingsStore.save(new AppSettings(
                     settings.autoBackupDrivers(),
                     settings.createSystemRestorePoint(),
-                    true
+                    true,
+                    settings.excludedDriverIds(),
+                    settings.skippedSoftwareIds()
             ));
         } catch (IOException e) {
             AppLogger.error("Failed to save EULA acceptance", e);

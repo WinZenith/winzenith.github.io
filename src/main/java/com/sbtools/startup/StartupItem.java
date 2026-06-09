@@ -14,6 +14,7 @@ public class StartupItem {
     private String taskPath;
     private StartupItemType type;
     private String serviceStartType;
+    private double estimatedBootImpactMs;
 
     public StartupItem() {
         this.id = UUID.randomUUID().toString();
@@ -134,5 +135,13 @@ public class StartupItem {
 
     public void setServiceStartType(String serviceStartType) {
         this.serviceStartType = serviceStartType;
+    }
+
+    public double getEstimatedBootImpactMs() {
+        return estimatedBootImpactMs;
+    }
+
+    public void setEstimatedBootImpactMs(double ms) {
+        this.estimatedBootImpactMs = ms;
     }
 }

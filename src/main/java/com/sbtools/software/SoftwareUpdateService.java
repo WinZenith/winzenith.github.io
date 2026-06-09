@@ -288,7 +288,7 @@ public class SoftwareUpdateService {
         String headerLine = null;
         for (int i = 0; i < lines.length; i++) {
             String l = lines[i];
-            if (l.toLowerCase().contains("name") && l.toLowerCase().contains("version")) {
+            if (l.toLowerCase().contains("name") && (l.toLowerCase().contains("version") || l.toLowerCase().contains("installed"))) {
                 headerIdx = i;
                 headerLine = l;
                 break;
@@ -299,8 +299,8 @@ public class SoftwareUpdateService {
         String[] headerTokens = headerLine == null ? new String[0] : headerLine.trim().split("\\s{2,}");
         int idxName = findHeaderIndex(headerTokens, "name");
         int idxId = findHeaderIndex(headerTokens, "id", "identifier", "packageidentifier");
-        int idxVersion = findHeaderIndex(headerTokens, "version", "installedversion");
-        int idxAvailable = findHeaderIndex(headerTokens, "available", "availableversion");
+        int idxVersion = findHeaderIndex(headerTokens, "version", "installedversion", "installed");
+        int idxAvailable = findHeaderIndex(headerTokens, "available", "availableversion", "new");
         int idxSource = findHeaderIndex(headerTokens, "source");
 
         for (int i = start; i < lines.length; i++) {
@@ -324,6 +324,7 @@ public class SoftwareUpdateService {
                 if (id == null && tokens.length > 1) id = tokens[1];
                 if (version == null && tokens.length > 2) version = tokens[2];
                 if (available == null && tokens.length > 3) available = tokens[3];
+                if (source == null && tokens.length > 4) source = tokens[4];
 
                 if (source != null && !source.isBlank() && !source.equalsIgnoreCase("winget")) continue;
                 if (available == null || available.isBlank()) continue;
@@ -343,8 +344,23 @@ public class SoftwareUpdateService {
         List<SoftwareUpdateEntry> results = new ArrayList<>();
         try {
             JsonNode root = JsonMapper.parseTree(stdout);
+            // Handle both flat array and object-wrapped array formats
+            JsonNode arrayNode = null;
             if (root.isArray()) {
-                for (JsonNode el : root) {
+                arrayNode = root;
+            } else if (root.isObject()) {
+                // Look for the first array field (e.g. "upgrades", "results", "data")
+                Iterator<String> fields = root.fieldNames();
+                while (fields.hasNext()) {
+                    JsonNode child = root.get(fields.next());
+                    if (child.isArray()) {
+                        arrayNode = child;
+                        break;
+                    }
+                }
+            }
+            if (arrayNode != null) {
+                for (JsonNode el : arrayNode) {
                     String id = findText(el, "Id", "PackageIdentifier");
                     String name = findText(el, "Name", "PackageName");
                     String version = findText(el, "Version", "InstalledVersion");

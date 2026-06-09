@@ -26,6 +26,7 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 public class CleanerTabView extends BorderPane {
@@ -146,7 +147,15 @@ public class CleanerTabView extends BorderPane {
 
         new Thread(() -> {
             try {
-                List<CleanupRow> results = service.scan(() -> {});
+                int totalCategories = CleanupCategory.values().length;
+                AtomicInteger scanned = new AtomicInteger();
+                List<CleanupRow> results = service.scan(() -> {
+                    int done = scanned.incrementAndGet();
+                    Platform.runLater(() -> {
+                        progressBar.setProgress((double) done / totalCategories);
+                        statusLabel.setText("Scanning: " + done + "/" + totalCategories + "...");
+                    });
+                });
                 Platform.runLater(() -> {
                     rows.setAll(results);
                     long totalBytes = results.stream().mapToLong(CleanupRow::getTotalBytes).sum();

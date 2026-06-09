@@ -1,5 +1,6 @@
 package com.sbtools.settings;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -7,13 +8,15 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.List;
 
 public class SettingsStore {
 
     private static final String DIR = ".basic-s-driver-update";
     private static final String FILE = "settings.json";
 
-    private final ObjectMapper mapper = new ObjectMapper()
+    private static final ObjectMapper mapper = new ObjectMapper()
             .enable(SerializationFeature.INDENT_OUTPUT);
 
     public AppSettings load() {
@@ -24,10 +27,14 @@ public class SettingsStore {
         try {
             JsonNode root = mapper.readTree(p.toFile());
             AppSettings d = AppSettings.defaults();
+            List<String> excludedDrivers = list(root, "excludedDriverIds");
+            List<String> skippedSoftware = list(root, "skippedSoftwareIds");
             return new AppSettings(
                     bool(root, "autoBackupDrivers", d.autoBackupDrivers()),
                     bool(root, "createSystemRestorePoint", d.createSystemRestorePoint()),
-                    bool(root, "eulaAccepted", d.eulaAccepted())
+                    bool(root, "eulaAccepted", d.eulaAccepted()),
+                    excludedDrivers != null ? excludedDrivers : d.excludedDriverIds(),
+                    skippedSoftware != null ? skippedSoftware : d.skippedSoftwareIds()
             );
         } catch (IOException e) {
             return AppSettings.defaults();
@@ -47,5 +54,15 @@ public class SettingsStore {
     private static boolean bool(JsonNode root, String key, boolean fallback) {
         JsonNode n = root.get(key);
         return n != null && n.isBoolean() ? n.asBoolean() : fallback;
+    }
+
+    private static List<String> list(JsonNode root, String key) {
+        JsonNode n = root.get(key);
+        if (n != null && n.isArray()) {
+            try {
+                return mapper.convertValue(n, new TypeReference<List<String>>() {});
+            } catch (Exception ignored) {}
+        }
+        return null;
     }
 }

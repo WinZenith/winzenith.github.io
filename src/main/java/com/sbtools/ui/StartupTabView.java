@@ -2,6 +2,7 @@ package com.sbtools.ui;
 
 import com.sbtools.startup.StartupItem;
 import com.sbtools.startup.StartupItemType;
+import com.sbtools.startup.StartupImpactService;
 import com.sbtools.startup.StartupService;
 import com.sbtools.startup.StartupService.StartupBackupEntry;
 import com.sbtools.util.AppLogger;
@@ -47,6 +48,7 @@ public class StartupTabView extends BorderPane {
     private final SortedList<StartupItem> sortedServices = new SortedList<>(filteredServices);
 
     private final Label statusLabel = new Label("Scan system to list startup items.");
+    private final Label bootDelayLabel = new Label("");
     private final ProgressIndicator progress = new ProgressIndicator();
 
     private final Button scanButton = new Button("Scan");
@@ -115,7 +117,7 @@ public class StartupTabView extends BorderPane {
         HBox top = new HBox(12,
                 scanButton, toggleButton, deleteButton, backupsButton,
                 new Separator(Orientation.VERTICAL),
-                progress, statusLabel
+                progress, statusLabel, bootDelayLabel
         );
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
@@ -138,8 +140,6 @@ public class StartupTabView extends BorderPane {
         if (!AppPaths.isWindows()) {
             scanButton.setDisable(true);
             statusLabel.setText("Startup manager is only available on Windows.");
-        } else {
-            Platform.runLater(this::scan);
         }
     }
 
@@ -201,7 +201,45 @@ public class StartupTabView extends BorderPane {
             }
         });
 
-        table.getColumns().addAll(nameCol, publisherCol, locationCol, pathCol, statusCol);
+        TableColumn<StartupItem, String> impactCol = new TableColumn<>("Boot Impact");
+        impactCol.setCellValueFactory(c -> {
+            double ms = c.getValue().getEstimatedBootImpactMs();
+            String label;
+            if (ms < 100) {
+                label = "Low";
+            } else if (ms <= 300) {
+                label = "Medium";
+            } else {
+                label = "High";
+            }
+            return new SimpleStringProperty(label);
+        });
+        impactCol.setPrefWidth(100);
+        impactCol.setCellFactory(col -> new TableCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                    setGraphic(null);
+                } else {
+                    setText(item);
+                    StartupItem rowItem = getTableView().getItems().get(getIndex());
+                    if (rowItem != null) {
+                        double ms = rowItem.getEstimatedBootImpactMs();
+                        if (ms < 100) {
+                            setStyle("-fx-text-fill: #50fa7b; -fx-font-weight: bold;");
+                        } else if (ms <= 300) {
+                            setStyle("-fx-text-fill: #f1fa8c; -fx-font-weight: bold;");
+                        } else {
+                            setStyle("-fx-text-fill: #ff5555; -fx-font-weight: bold;");
+                        }
+                    }
+                }
+            }
+        });
+
+        table.getColumns().addAll(nameCol, publisherCol, locationCol, pathCol, statusCol, impactCol);
 
         table.setRowFactory(tv -> {
             TableRow<StartupItem> row = new TableRow<>();
@@ -277,6 +315,19 @@ public class StartupTabView extends BorderPane {
                 List<StartupItem> taskItemsResult = service.listScheduledTasks();
                 List<StartupItem> svcItems = service.listWindowsServices();
 
+                for (StartupItem item : regItems) {
+                    item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
+                }
+                for (StartupItem item : taskItemsResult) {
+                    item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
+                }
+                for (StartupItem item : svcItems) {
+                    item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
+                }
+                double totalMs = regItems.stream().mapToDouble(StartupItem::getEstimatedBootImpactMs).sum()
+                    + taskItemsResult.stream().mapToDouble(StartupItem::getEstimatedBootImpactMs).sum()
+                    + svcItems.stream().mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
+                final String formattedTotal = StartupImpactService.formatImpact(totalMs);
                 Platform.runLater(() -> {
                     registryItems.setAll(regItems);
                     taskItems.setAll(taskItemsResult);
@@ -286,6 +337,7 @@ public class StartupTabView extends BorderPane {
                     applyServiceFilter();
                     int total = regItems.size() + taskItemsResult.size() + svcItems.size();
                     statusLabel.setText("Found " + total + " startup item(s).");
+                    bootDelayLabel.setText("Total estimated boot delay: " + formattedTotal);
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to scan startup items", e);

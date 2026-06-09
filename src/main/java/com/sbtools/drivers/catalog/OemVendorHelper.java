@@ -10,7 +10,11 @@ public enum OemVendorHelper {
     REALTEK("VEN_10EC", "10EC", "Realtek"),
     BROADCOM("VEN_14E4", "14E4", "Broadcom"),
     QUALCOMM("VEN_168C", "168C", "Qualcomm"),
-    SYNAPTICS("VEN_06CB", "06CB", "Synaptics");
+    SYNAPTICS("VEN_06CB", "06CB", "Synaptics"),
+    LENOVO("LEN", "LENOVO", "Lenovo"),
+    DELL("DELL", "DELL", "Dell"),
+    HP("HPQ", "HEWLETT", "HP"),
+    ASUS("ASUS", "ATK", "ASUS");
 
     private final String pciPattern;
     private final String venId;
@@ -33,12 +37,14 @@ public enum OemVendorHelper {
         String hw = driver.hardwareIds() != null ? driver.hardwareIds().toUpperCase() : "";
         String name = driver.friendlyName() != null ? driver.friendlyName().toUpperCase() : "";
         String prov = driver.provider() != null ? driver.provider().toUpperCase() : "";
-        
+
         AppLogger.debug("VendorDetect: Driver='" + driver.friendlyName() + "', HW='" + hw + "', Provider='" + prov + "'");
-        
+
         for (OemVendorHelper v : values()) {
-            if (hw.contains(v.pciPattern) || hw.contains(v.venId)
-                    || name.contains(v.label.toUpperCase()) || prov.contains(v.label.toUpperCase())) {
+            if (hw.contains(v.pciPattern)
+                    || (v.venId != null && (hw.contains(v.venId) || name.contains(v.venId) || prov.contains(v.venId)))
+                    || name.contains(v.label.toUpperCase())
+                    || prov.contains(v.label.toUpperCase())) {
                 AppLogger.debug("VendorDetect: Matched vendor " + v.label() + " for driver " + driver.friendlyName());
                 return v;
             }

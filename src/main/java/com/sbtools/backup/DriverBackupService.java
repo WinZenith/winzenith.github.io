@@ -13,15 +13,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 public class DriverBackupService {
-
-    private static final int MAX_BACKUPS_PER_DEVICE = 3;
 
     private final ProcessRunner processRunner = new ProcessRunner(300);
 
@@ -68,7 +65,6 @@ public class DriverBackupService {
         );
         BackupIndex index = loadIndex();
         index.getEntries().add(entry);
-        pruneDeviceBackups(index, driver.deviceId());
         saveIndex(index);
         return entry;
     }
@@ -112,22 +108,6 @@ public class DriverBackupService {
                             AppLogger.warning("Could not delete: " + path, e);
                         }
                     });
-        }
-    }
-
-    private void pruneDeviceBackups(BackupIndex index, String deviceId) {
-        List<DriverBackupEntry> deviceEntries = index.getEntries().stream()
-                .filter(e -> e.deviceId().equals(deviceId))
-                .sorted(Comparator.comparing(DriverBackupEntry::createdAt))
-                .collect(Collectors.toCollection(ArrayList::new));
-        while (deviceEntries.size() > MAX_BACKUPS_PER_DEVICE) {
-            DriverBackupEntry oldest = deviceEntries.remove(0);
-            index.getEntries().removeIf(e -> e.id().equals(oldest.id()));
-            try {
-                Files.deleteIfExists(Path.of(oldest.backupFolder()));
-            } catch (IOException e) {
-                AppLogger.warning("Could not delete old backup folder", e);
-            }
         }
     }
 
