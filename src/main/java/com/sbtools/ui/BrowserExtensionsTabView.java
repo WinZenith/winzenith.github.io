@@ -43,7 +43,6 @@ public class BrowserExtensionsTabView extends BorderPane {
     private final Button scanButton = UIButton.primary("Scan All Browsers");
     private final Button enableSelectedBtn = UIButton.primary("Enable");
     private final Button disableSelectedBtn = UIButton.secondary("Disable");
-    private final Button removeSelectedBtn = UIButton.danger("Remove");
     private final ComboBox<String> browserFilter = new ComboBox<>(
             FXCollections.observableArrayList("All", "Brave", "Chrome", "Edge", "Firefox", "Opera", "Vivaldi"));
     private final ProgressIndicator spinner = new ProgressIndicator();
@@ -57,21 +56,18 @@ public class BrowserExtensionsTabView extends BorderPane {
 
         enableSelectedBtn.setDisable(true);
         disableSelectedBtn.setDisable(true);
-        removeSelectedBtn.setDisable(true);
 
         enableSelectedBtn.getStyleClass().add("success");
         disableSelectedBtn.getStyleClass().add("button-outlined");
-        removeSelectedBtn.getStyleClass().add("danger");
 
         scanButton.setOnAction(e -> startScan());
         enableSelectedBtn.setOnAction(e -> toggleSelected(true));
         disableSelectedBtn.setOnAction(e -> toggleSelected(false));
-        removeSelectedBtn.setOnAction(e -> removeSelected());
 
         browserFilter.getSelectionModel().select(0);
         browserFilter.setOnAction(e -> applyFilter());
 
-        HBox top = new HBox(12, scanButton, enableSelectedBtn, disableSelectedBtn, removeSelectedBtn,
+        HBox top = new HBox(12, scanButton, enableSelectedBtn, disableSelectedBtn,
                 new Label("Filter:"), browserFilter, spinner, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
@@ -102,7 +98,6 @@ public class BrowserExtensionsTabView extends BorderPane {
         boolean disabled = busy.get() || getSelectedCount() == 0;
         enableSelectedBtn.setDisable(disabled);
         disableSelectedBtn.setDisable(disabled);
-        removeSelectedBtn.setDisable(disabled);
     }
 
     private void applyFilter() {
@@ -303,35 +298,5 @@ public class BrowserExtensionsTabView extends BorderPane {
                 }
             });
         }, "browser-extensions-toggle").start();
-    }
-
-    private void removeSelected() {
-        List<BrowserExtensionRow> selected = allRows.stream().filter(BrowserExtensionRow::isSelected).toList();
-        if (selected.isEmpty()) return;
-
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                "Remove " + selected.size() + " extension(s)? This will delete the extension files.");
-        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
-
-        new Thread(() -> {
-            int success = 0;
-            int fail = 0;
-            for (BrowserExtensionRow ext : selected) {
-                if (service.removeExtension(ext)) {
-                    success++;
-                } else {
-                    fail++;
-                }
-            }
-            final int s = success;
-            final int f = fail;
-            Platform.runLater(() -> {
-                allRows.removeAll(selected);
-                statusLabel.setText("Removed " + s + " extension(s)." + (f > 0 ? " " + f + " failed." : ""));
-                if (f > 0) {
-                    new Alert(Alert.AlertType.WARNING, s + " removed, " + f + " failed.").showAndWait();
-                }
-            });
-        }, "browser-extensions-remove").start();
     }
 }

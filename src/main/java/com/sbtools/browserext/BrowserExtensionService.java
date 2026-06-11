@@ -14,7 +14,6 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Stream;
 
 public class BrowserExtensionService {
 
@@ -82,7 +81,12 @@ public class BrowserExtensionService {
             if (!Files.exists(extPath)) return false;
             String browser = ext.getBrowser();
             if ("Chrome".equals(browser) || "Edge".equals(browser) || "Brave".equals(browser) || "Opera".equals(browser) || "Vivaldi".equals(browser)) {
-                Path disabledMarker = extPath.resolve("Disabled");
+                Path extFolder = extPath.resolve(ext.getExtensionId());
+                Path versionDir = Files.list(extFolder)
+                        .filter(Files::isDirectory)
+                        .findFirst().orElse(null);
+                if (versionDir == null) return false;
+                Path disabledMarker = versionDir.resolve("Disabled");
                 if (enable) {
                     Files.deleteIfExists(disabledMarker);
                 } else {
@@ -114,30 +118,6 @@ public class BrowserExtensionService {
             return false;
         } catch (Exception e) {
             AppLogger.warning("Failed to toggle extension: " + e.getMessage());
-            return false;
-        }
-    }
-
-    public boolean removeExtension(BrowserExtensionRow ext) {
-        try {
-            Path extPath = Paths.get(ext.getPath());
-            if (!Files.exists(extPath)) return false;
-            String browser = ext.getBrowser();
-            if ("Firefox".equals(browser)) {
-                Files.deleteIfExists(extPath.resolve(ext.getExtensionId() + ".xpi"));
-                Files.deleteIfExists(extPath.resolve(ext.getExtensionId() + ".xpi.disabled"));
-            } else {
-                Path extFolder = extPath.resolve(ext.getExtensionId());
-                if (Files.exists(extFolder)) {
-                    try (Stream<Path> walk = Files.walk(extFolder)) {
-                        walk.sorted((a, b) -> b.compareTo(a))
-                                .forEach(p -> { try { Files.deleteIfExists(p); } catch (Exception ignored) {} });
-                    }
-                }
-            }
-            return true;
-        } catch (Exception e) {
-            AppLogger.warning("Failed to remove extension: " + e.getMessage());
             return false;
         }
     }

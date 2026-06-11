@@ -32,12 +32,13 @@ if ($Browser -eq "Chrome" -or $Browser -eq "All") {
                             $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
                             if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
                         }
+                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
                         $result += [PSCustomObject]@{
                             id = $extId
                             name = $resolvedName
                             version = if ($m.version) { $m.version } else { "" }
                             description = $resolvedDesc
-                            enabled = $true
+                            enabled = -not (Test-Path $disabledFile)
                             browser = "Chrome"
                             path = $extDir
                             installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
@@ -78,12 +79,13 @@ if ($Browser -eq "Edge" -or $Browser -eq "All") {
                             $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
                             if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
                         }
+                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
                         $result += [PSCustomObject]@{
                             id = $extId
                             name = $resolvedName
                             version = if ($m.version) { $m.version } else { "" }
                             description = $resolvedDesc
-                            enabled = $true
+                            enabled = -not (Test-Path $disabledFile)
                             browser = "Edge"
                             path = $extDir
                             installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
@@ -124,12 +126,13 @@ if ($Browser -eq "Brave" -or $Browser -eq "All") {
                             $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
                             if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
                         }
+                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
                         $result += [PSCustomObject]@{
                             id = $extId
                             name = $resolvedName
                             version = if ($m.version) { $m.version } else { "" }
                             description = $resolvedDesc
-                            enabled = $true
+                            enabled = -not (Test-Path $disabledFile)
                             browser = "Brave"
                             path = $extDir
                             installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
@@ -168,17 +171,18 @@ if ($Browser -eq "Opera" -or $Browser -eq "All") {
                         $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
                         if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
                     }
-                    $result += [PSCustomObject]@{
-                        id = $extId
-                        name = $resolvedName
-                        version = if ($m.version) { $m.version } else { "" }
-                        description = $resolvedDesc
-                        enabled = $true
-                        browser = "Opera"
-                        path = $extDir
-                        installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                        permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
-                    }
+                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
+                        $result += [PSCustomObject]@{
+                            id = $extId
+                            name = $resolvedName
+                            version = if ($m.version) { $m.version } else { "" }
+                            description = $resolvedDesc
+                            enabled = -not (Test-Path $disabledFile)
+                            browser = "Opera"
+                            path = $extDir
+                            installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
+                            permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
+                        }
                 }
             }
         }
@@ -213,12 +217,13 @@ if ($Browser -eq "Vivaldi" -or $Browser -eq "All") {
                             $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
                             if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
                         }
+                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
                         $result += [PSCustomObject]@{
                             id = $extId
                             name = $resolvedName
                             version = if ($m.version) { $m.version } else { "" }
                             description = $resolvedDesc
-                            enabled = $true
+                            enabled = -not (Test-Path $disabledFile)
                             browser = "Vivaldi"
                             path = $extDir
                             installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
