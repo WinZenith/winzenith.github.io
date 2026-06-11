@@ -2,6 +2,7 @@ package com.sbtools.systeminfo;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.sbtools.util.DataSizeFormatter;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record GpuInfo(
@@ -17,10 +18,6 @@ public record GpuInfo(
         @JsonProperty("status") String status
 ) {
     public String formatVram() {
-        if (vramBytes <= 0) return "";
-        double gb = vramBytes / (1024.0 * 1024 * 1024);
-        if (gb >= 1) return String.format("%.0f GB", gb);
-        double mb = vramBytes / (1024.0 * 1024);
-        return String.format("%.0f MB", mb);
+        return DataSizeFormatter.formatBytesRounded(vramBytes);
     }
 }

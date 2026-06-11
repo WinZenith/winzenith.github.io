@@ -2,6 +2,7 @@ package com.sbtools.systeminfo;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.sbtools.util.DataSizeFormatter;
 
 import java.util.List;
 
@@ -21,21 +22,15 @@ public record RamInfo(
             @JsonProperty("memoryType") String memoryType
     ) {
         public String formatCapacity() {
-            if (capacityBytes <= 0) return "";
-            double gb = capacityBytes / (1024.0 * 1024 * 1024);
-            if (gb >= 1) return String.format("%.0f GB", gb);
-            double mb = capacityBytes / (1024.0 * 1024);
-            return String.format("%.0f MB", mb);
+            return DataSizeFormatter.formatBytesRounded(capacityBytes);
         }
 
         public String formatSpeed() {
-            return speedMhz > 0 ? speedMhz + " MHz" : "";
+            return DataSizeFormatter.formatMhz(speedMhz);
         }
     }
 
     public String formatTotal() {
-        if (totalBytes <= 0) return "";
-        double gb = totalBytes / (1024.0 * 1024 * 1024);
-        return String.format("%.1f GB", gb);
+        return DataSizeFormatter.formatBytes(totalBytes);
     }
 }

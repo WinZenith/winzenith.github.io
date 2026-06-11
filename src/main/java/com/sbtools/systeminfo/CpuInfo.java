@@ -2,6 +2,7 @@ package com.sbtools.systeminfo;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.sbtools.util.DataSizeFormatter;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record CpuInfo(
@@ -20,22 +21,18 @@ public record CpuInfo(
         @JsonProperty("voltage") String voltage
 ) {
     public String formatBaseClock() {
-        return baseClockMhz > 0 ? baseClockMhz + " MHz" : "";
+        return DataSizeFormatter.formatMhz(baseClockMhz);
     }
 
     public String formatCurrentClock() {
-        return currentClockMhz > 0 ? currentClockMhz + " MHz" : "";
+        return DataSizeFormatter.formatMhz(currentClockMhz);
     }
 
     public String formatL2Cache() {
-        if (l2CacheKb <= 0) return "";
-        if (l2CacheKb >= 1024) return String.format("%.1f MB", l2CacheKb / 1024.0);
-        return l2CacheKb + " KB";
+        return DataSizeFormatter.formatKb(l2CacheKb);
     }
 
     public String formatL3Cache() {
-        if (l3CacheKb <= 0) return "";
-        if (l3CacheKb >= 1024) return String.format("%.1f MB", l3CacheKb / 1024.0);
-        return l3CacheKb + " KB";
+        return DataSizeFormatter.formatKb(l3CacheKb);
     }
 }

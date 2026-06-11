@@ -2,6 +2,7 @@ package com.sbtools.systeminfo;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.sbtools.util.DataSizeFormatter;
 
 import java.util.List;
 
@@ -22,11 +23,7 @@ public record StorageInfo(
             @JsonProperty("partitions") int partitions
     ) {
         public String formatSize() {
-            if (sizeBytes <= 0) return "";
-            double tb = sizeBytes / (1024.0 * 1024 * 1024 * 1024);
-            if (tb >= 1) return String.format("%.2f TB", tb);
-            double gb = sizeBytes / (1024.0 * 1024 * 1024);
-            return String.format("%.1f GB", gb);
+            return DataSizeFormatter.formatBytes(sizeBytes);
         }
     }
 
@@ -36,24 +33,25 @@ public record StorageInfo(
             @JsonProperty("volumeName") String volumeName,
             @JsonProperty("fsType") String fsType,
             @JsonProperty("sizeBytes") long sizeBytes,
-            @JsonProperty("freeBytes") long freeBytes
+            @JsonProperty("freeBytes") long freeBytes,
+            @JsonProperty("diskIndex") int diskIndex
     ) {
         public String formatSize() {
-            if (sizeBytes <= 0) return "";
-            double gb = sizeBytes / (1024.0 * 1024 * 1024);
-            return String.format("%.1f GB", gb);
+            return DataSizeFormatter.formatBytes(sizeBytes);
         }
 
         public String formatFree() {
-            if (freeBytes <= 0) return "";
-            double gb = freeBytes / (1024.0 * 1024 * 1024);
-            return String.format("%.1f GB", gb);
+            return DataSizeFormatter.formatBytes(freeBytes);
         }
 
         public String formatUsed() {
-            if (sizeBytes <= 0 || freeBytes <= 0) return "";
-            double used = (sizeBytes - freeBytes) / (1024.0 * 1024 * 1024);
-            return String.format("%.1f GB", used);
+            if (sizeBytes <= 0 || freeBytes < 0) return "";
+            return DataSizeFormatter.formatBytes(sizeBytes - freeBytes);
+        }
+
+        public double usagePercent() {
+            if (sizeBytes <= 0) return 0;
+            return (double) (sizeBytes - freeBytes) / sizeBytes * 100;
         }
     }
 

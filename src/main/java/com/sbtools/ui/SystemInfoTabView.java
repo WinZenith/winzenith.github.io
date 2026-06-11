@@ -14,24 +14,35 @@ import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
+import javafx.collections.FXCollections;
+import javafx.collections.ObservableList;
+import javafx.collections.transformation.FilteredList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListCell;
+import javafx.scene.control.ListView;
+import javafx.scene.control.ProgressBar;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
+import javafx.scene.control.TextField;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.ColumnConstraints;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.RowConstraints;
 import javafx.scene.layout.VBox;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.BooleanSupplier;
 
 public class SystemInfoTabView extends BorderPane {
@@ -39,10 +50,17 @@ public class SystemInfoTabView extends BorderPane {
     private final SystemInfoService service = new SystemInfoService();
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
+    private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "system-info");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final Label statusLabel = new Label("Click Load to query system information.");
     private final Button loadButton = new Button("Load System Info");
+    private final Button refreshButton = new Button("Refresh");
     private final ProgressIndicator spinner = new ProgressIndicator();
+    private final ProgressBar progressBar = new ProgressBar(0);
     private final TabPane tabPane = new TabPane();
 
     public SystemInfoTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
@@ -53,9 +71,14 @@ public class SystemInfoTabView extends BorderPane {
         spinner.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
         spinner.setVisible(false);
 
-        loadButton.setOnAction(e -> loadInfo());
+        progressBar.setPrefWidth(200);
+        progressBar.setVisible(false);
 
-        HBox top = new HBox(12, loadButton, spinner, statusLabel);
+        loadButton.setOnAction(e -> loadInfo());
+        refreshButton.setOnAction(e -> { service.invalidateCache(); loadInfo(); });
+        refreshButton.setDisable(true);
+
+        HBox top = new HBox(12, loadButton, refreshButton, spinner, progressBar, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -76,15 +99,25 @@ public class SystemInfoTabView extends BorderPane {
         if (busy.get()) return;
         busy.set(true);
         loadButton.setDisable(true);
+        refreshButton.setDisable(true);
         spinner.setVisible(true);
+        progressBar.setProgress(0);
+        progressBar.setVisible(true);
         statusLabel.setText("Querying system information\u2026");
 
-        new Thread(() -> {
+        executor.submit(() -> {
             try {
-                SystemInfoData data = service.gatherSystemInfo();
+                SystemInfoData data = service.gatherSystemInfo(
+                        (section, progress) -> Platform.runLater(() -> {
+                            statusLabel.setText("Loading " + section + "\u2026");
+                            progressBar.setProgress(progress);
+                        })
+                );
                 Platform.runLater(() -> {
                     buildTabs(data);
                     statusLabel.setText("System information loaded.");
+                    progressBar.setProgress(1);
+                    refreshButton.setDisable(false);
                 });
             } catch (Exception ex) {
                 AppLogger.error("Failed to load system info", ex);
@@ -97,9 +130,10 @@ public class SystemInfoTabView extends BorderPane {
                     busy.set(false);
                     loadButton.setDisable(false);
                     spinner.setVisible(false);
+                    progressBar.setVisible(false);
                 });
             }
-        }, "system-info").start();
+        });
     }
 
     private void buildTabs(SystemInfoData data) {
@@ -158,8 +192,7 @@ public class SystemInfoTabView extends BorderPane {
         for (int i = 0; i < gpus.size(); i++) {
             GpuInfo gpu = gpus.get(i);
             if (gpus.size() > 1) {
-                UILabel header = UILabel.sectionTitle("GPU " + (i + 1));
-                container.getChildren().add(header);
+                container.getChildren().add(UILabel.sectionTitle("GPU " + (i + 1)));
             }
             GridPane grid = createInfoGrid();
             int row = 0;
@@ -196,8 +229,7 @@ public class SystemInfoTabView extends BorderPane {
         if (ram.sticks() != null && !ram.sticks().isEmpty()) {
             for (int i = 0; i < ram.sticks().size(); i++) {
                 RamInfo.RamStick stick = ram.sticks().get(i);
-                UILabel slotHeader = UILabel.sectionTitle("Slot " + (i + 1));
-                container.getChildren().add(slotHeader);
+                container.getChildren().add(UILabel.sectionTitle("Slot " + (i + 1)));
                 GridPane stickGrid = createInfoGrid();
                 int r = 0;
                 r = addRow(stickGrid, r, "Capacity", stick.formatCapacity());
@@ -242,8 +274,7 @@ public class SystemInfoTabView extends BorderPane {
         if (storage.disks() != null && !storage.disks().isEmpty()) {
             for (int i = 0; i < storage.disks().size(); i++) {
                 StorageInfo.Disk disk = storage.disks().get(i);
-                UILabel header = UILabel.sectionTitle("Disk " + (i + 1));
-                container.getChildren().add(header);
+                container.getChildren().add(UILabel.sectionTitle("Disk " + (i + 1)));
                 GridPane grid = createInfoGrid();
                 int row = 0;
                 row = addRow(grid, row, "Model", disk.model());
@@ -254,21 +285,62 @@ public class SystemInfoTabView extends BorderPane {
                 row = addRow(grid, row, "Serial Number", disk.serialNumber());
                 row = addRow(grid, row, "Partitions", String.valueOf(disk.partitions()));
                 container.getChildren().add(wrapGrid(grid));
+
+                // Show partitions belonging to this disk
+                if (storage.partitions() != null) {
+                    final int diskIdx = i;
+                    List<StorageInfo.Partition> diskParts = storage.partitions().stream()
+                            .filter(p -> p.diskIndex() == diskIdx)
+                            .toList();
+                    if (!diskParts.isEmpty()) {
+                        container.getChildren().add(UILabel.sectionTitle("  Partitions on Disk " + (i + 1)));
+                        for (StorageInfo.Partition part : diskParts) {
+                            GridPane partGrid = createInfoGrid();
+                            int r = 0;
+                            r = addRow(partGrid, r, "Drive", part.deviceID());
+                            r = addRow(partGrid, r, "Volume Name", part.volumeName());
+                            r = addRow(partGrid, r, "File System", part.fsType());
+                            r = addRow(partGrid, r, "Total Size", part.formatSize());
+                            r = addRow(partGrid, r, "Used", part.formatUsed());
+                            r = addRow(partGrid, r, "Free", part.formatFree());
+                            r = addUsageRow(partGrid, r, part.usagePercent());
+                            container.getChildren().add(wrapGrid(partGrid));
+                        }
+                    }
+                }
             }
         }
 
+        // Show partitions not assigned to any disk
         if (storage.partitions() != null && !storage.partitions().isEmpty()) {
-            UILabel partHeader = UILabel.sectionTitle("Logical Partitions");
-            container.getChildren().add(partHeader);
-            for (StorageInfo.Partition part : storage.partitions()) {
+            List<StorageInfo.Partition> unassigned = storage.partitions().stream()
+                    .filter(p -> p.diskIndex() < 0)
+                    .toList();
+            if (!unassigned.isEmpty()) {
+                container.getChildren().add(UILabel.sectionTitle("Other Partitions"));
+                for (StorageInfo.Partition part : unassigned) {
+                    GridPane grid = createInfoGrid();
+                    int row = 0;
+                    row = addRow(grid, row, "Drive", part.deviceID());
+                    row = addRow(grid, row, "Volume Name", part.volumeName());
+                    row = addRow(grid, row, "File System", part.fsType());
+                    row = addRow(grid, row, "Total Size", part.formatSize());
+                    row = addRow(grid, row, "Used", part.formatUsed());
+                    row = addRow(grid, row, "Free", part.formatFree());
+                    row = addUsageRow(grid, row, part.usagePercent());
+                    container.getChildren().add(wrapGrid(grid));
+                }
+            }
+        }
+
+        if (storage.nvmes() != null && !storage.nvmes().isEmpty()) {
+            container.getChildren().add(UILabel.sectionTitle("NVMe Drives"));
+            for (StorageInfo.Nvme nvme : storage.nvmes()) {
                 GridPane grid = createInfoGrid();
                 int row = 0;
-                row = addRow(grid, row, "Drive", part.deviceID());
-                row = addRow(grid, row, "Volume Name", part.volumeName());
-                row = addRow(grid, row, "File System", part.fsType());
-                row = addRow(grid, row, "Total Size", part.formatSize());
-                row = addRow(grid, row, "Used", part.formatUsed());
-                row = addRow(grid, row, "Free", part.formatFree());
+                row = addRow(grid, row, "Serial Number", nvme.serialNumber());
+                row = addRow(grid, row, "Media Type", nvme.mediaType());
+                row = addRow(grid, row, "Bus Type", nvme.busType());
                 container.getChildren().add(wrapGrid(grid));
             }
         }
@@ -286,8 +358,7 @@ public class SystemInfoTabView extends BorderPane {
         container.setPadding(new Insets(12));
 
         if (mb != null) {
-            UILabel mbHeader = UILabel.sectionTitle("Motherboard");
-            container.getChildren().add(mbHeader);
+            container.getChildren().add(UILabel.sectionTitle("Motherboard"));
             GridPane grid = createInfoGrid();
             int row = 0;
             row = addRow(grid, row, "Manufacturer", mb.manufacturer());
@@ -300,8 +371,7 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         if (bios != null) {
-            UILabel biosHeader = UILabel.sectionTitle("BIOS");
-            container.getChildren().add(biosHeader);
+            container.getChildren().add(UILabel.sectionTitle("BIOS"));
             GridPane grid = createInfoGrid();
             int row = 0;
             row = addRow(grid, row, "Manufacturer", bios.manufacturer());
@@ -323,24 +393,70 @@ public class SystemInfoTabView extends BorderPane {
         VBox container = new VBox(8);
         container.setPadding(new Insets(12));
 
-        java.util.TreeMap<String, List<OtherDevice>> grouped = new java.util.TreeMap<>();
+        TreeMap<String, List<OtherDevice>> grouped = new TreeMap<>();
         for (OtherDevice dev : devices) {
             String cls = (dev.deviceClass() != null && !dev.deviceClass().isBlank())
                     ? dev.deviceClass() : "Other";
             grouped.computeIfAbsent(cls, k -> new ArrayList<>()).add(dev);
         }
 
-        for (var entry : grouped.entrySet()) {
-            String category = entry.getKey();
-            List<OtherDevice> devs = entry.getValue();
+        ObservableList<String> categories = FXCollections.observableArrayList(grouped.keySet());
+        FilteredList<String> filteredCategories = new FilteredList<>(categories);
 
-            UILabel header = UILabel.sectionTitle(category + " (" + devs.size() + ")");
-            container.getChildren().add(header);
+        TextField searchField = new TextField();
+        searchField.setPromptText("Search devices\u2026");
+        searchField.getStyleClass().add("sysinfo-search");
+        searchField.textProperty().addListener((obs, oldVal, newVal) -> {
+            String lower = newVal == null ? "" : newVal.toLowerCase();
+            filteredCategories.setPredicate(cat -> {
+                if (lower.isEmpty()) return true;
+                List<OtherDevice> devs = grouped.get(cat);
+                if (devs == null) return false;
+                if (cat.toLowerCase().contains(lower)) return true;
+                for (OtherDevice d : devs) {
+                    if ((d.name() != null && d.name().toLowerCase().contains(lower))
+                            || (d.manufacturer() != null && d.manufacturer().toLowerCase().contains(lower))) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+        });
 
+        ListView<String> categoryList = new ListView<>(filteredCategories);
+        categoryList.setPrefHeight(400);
+        categoryList.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                    setGraphic(null);
+                } else {
+                    List<OtherDevice> devs = grouped.get(item);
+                    int count = devs != null ? devs.size() : 0;
+                    setText(item + " (" + count + ")");
+                }
+            }
+        });
+
+        VBox rightPanel = new VBox(8);
+        rightPanel.setPadding(new Insets(0, 0, 0, 12));
+        rightPanel.getChildren().add(new Label("Select a category:"));
+        rightPanel.getChildren().add(categoryList);
+
+        VBox deviceList = new VBox(8);
+        deviceList.setPadding(new Insets(0));
+        ScrollableContainer deviceScroll = new ScrollableContainer(deviceList);
+
+        categoryList.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, cat) -> {
+            deviceList.getChildren().clear();
+            if (cat == null) return;
+            List<OtherDevice> devs = grouped.get(cat);
+            if (devs == null) return;
             GridPane grid = new GridPane();
             grid.setHgap(0);
             grid.setVgap(0);
-            grid.setPadding(new Insets(0));
             ColumnConstraints nameCol = new ColumnConstraints();
             nameCol.setPrefWidth(360);
             nameCol.setMinWidth(200);
@@ -349,14 +465,18 @@ public class SystemInfoTabView extends BorderPane {
             mfrCol.setMinWidth(150);
             mfrCol.setHgrow(Priority.ALWAYS);
             grid.getColumnConstraints().addAll(nameCol, mfrCol);
-            int row = 0;
+            int r = 0;
             for (OtherDevice dev : devs) {
-                row = addRow(grid, row, dev.name(),
+                r = addRow(grid, r, dev.name(),
                         (dev.manufacturer() != null && !dev.manufacturer().isBlank())
                                 ? dev.manufacturer() : dev.status());
             }
-            container.getChildren().add(wrapGrid(grid));
-        }
+            deviceList.getChildren().add(wrapGrid(grid));
+        });
+
+        HBox splitPane = new HBox(0, rightPanel, deviceScroll);
+        HBox.setHgrow(deviceScroll, Priority.ALWAYS);
+        container.getChildren().addAll(searchField, splitPane);
 
         ScrollableContainer scroll = new ScrollableContainer(container);
         Tab tab = new Tab("Others");
@@ -389,11 +509,11 @@ public class SystemInfoTabView extends BorderPane {
         if (value == null || value.isBlank()) return row;
 
         Label keyLabel = new Label(label);
-        keyLabel.setStyle("-fx-text-fill: #6272a4; -fx-font-weight: bold; -fx-padding: 8 12 8 16;");
+        keyLabel.getStyleClass().addAll("label", "sysinfo-label");
         keyLabel.setMaxWidth(Double.MAX_VALUE);
 
         Label valueLabel = new Label(value);
-        valueLabel.setStyle("-fx-text-fill: #f8f8f2; -fx-padding: 8 12 8 16;");
+        valueLabel.getStyleClass().addAll("label", "sysinfo-value");
         valueLabel.setWrapText(true);
         valueLabel.setMaxWidth(Double.MAX_VALUE);
 
@@ -404,17 +524,50 @@ public class SystemInfoTabView extends BorderPane {
         grid.add(keyLabel, 0, row);
         grid.add(valueLabel, 1, row);
 
-        if (row % 2 == 0) {
-            keyLabel.setStyle(keyLabel.getStyle() + " -fx-background-color: #21222c;");
-            valueLabel.setStyle(valueLabel.getStyle() + " -fx-background-color: #21222c;");
+        String bgClass = row % 2 == 0 ? "sysinfo-row-even" : "sysinfo-row-odd";
+        keyLabel.getStyleClass().add(bgClass);
+        valueLabel.getStyleClass().add(bgClass);
+
+        return row + 1;
+    }
+
+    private static int addUsageRow(GridPane grid, int row, double usagePercent) {
+        if (usagePercent <= 0) return row;
+
+        Label keyLabel = new Label("Usage");
+        keyLabel.getStyleClass().addAll("label", "sysinfo-label");
+        keyLabel.setMaxWidth(Double.MAX_VALUE);
+
+        HBox usageBox = new HBox(8);
+        usageBox.setAlignment(Pos.CENTER_LEFT);
+        ProgressBar usageBar = new ProgressBar(usagePercent / 100.0);
+        usageBar.getStyleClass().add("sysinfo-usage-bar");
+        if (usagePercent > 90) {
+            usageBar.getStyleClass().add("sysinfo-usage-danger");
+        } else if (usagePercent > 75) {
+            usageBar.getStyleClass().add("sysinfo-usage-warning");
         }
+        Label pctLabel = new Label(String.format("%.1f%%", usagePercent));
+        pctLabel.getStyleClass().addAll("label", "sysinfo-value");
+        usageBox.getChildren().addAll(usageBar, pctLabel);
+
+        RowConstraints rc = new RowConstraints();
+        rc.setMinHeight(20);
+        grid.getRowConstraints().add(rc);
+
+        grid.add(keyLabel, 0, row);
+        grid.add(usageBox, 1, row);
+
+        String bgClass = row % 2 == 0 ? "sysinfo-row-even" : "sysinfo-row-odd";
+        keyLabel.getStyleClass().add(bgClass);
+        usageBox.getStyleClass().add(bgClass);
 
         return row + 1;
     }
 
     private static VBox wrapGrid(GridPane grid) {
         VBox wrapper = new VBox(grid);
-        wrapper.setStyle("-fx-background-color: #1e1f29; -fx-border-color: #44475a; -fx-border-width: 1; -fx-background-radius: 4; -fx-border-radius: 4;");
+        wrapper.getStyleClass().add("sysinfo-card");
         return wrapper;
     }
 

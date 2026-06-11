@@ -364,3 +364,77 @@
     -fx-border-color: transparent transparent #50fa7b transparent;
     -fx-border-width: 0 0 2 0;
 }
+
+/* --- System Info Tab --- */
+.sysinfo-card {
+    -fx-background-color: #1e1f29;
+    -fx-border-color: #44475a;
+    -fx-border-width: 1;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-padding: 0;
+}
+
+.sysinfo-label {
+    -fx-text-fill: #6272a4;
+    -fx-font-weight: bold;
+    -fx-padding: 8 12 8 16;
+}
+
+.sysinfo-value {
+    -fx-text-fill: #f8f8f2;
+    -fx-padding: 8 12 8 16;
+    -fx-wrap-text: true;
+}
+
+.sysinfo-row-even {
+    -fx-background-color: #21222c;
+}
+
+.sysinfo-row-odd {
+    -fx-background-color: transparent;
+}
+
+.sysinfo-search {
+    -fx-background-color: #282a36;
+    -fx-text-fill: #f8f8f2;
+    -fx-border-color: #44475a;
+    -fx-border-width: 1;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-padding: 8 12 8 12;
+    -fx-prompt-text-fill: #6272a4;
+}
+
+.sysinfo-search:focused {
+    -fx-border-color: #50fa7b;
+}
+
+.sysinfo-usage-bar {
+    -fx-accent: #50fa7b;
+    -fx-background-radius: 3;
+    -fx-pref-width: 120;
+    -fx-pref-height: 8;
+}
+
+.sysinfo-usage-bar .track {
+    -fx-background-color: #282a36;
+    -fx-background-radius: 3;
+}
+
+.sysinfo-usage-bar .bar {
+    -fx-background-radius: 3;
+    -fx-background-insets: 0;
+}
+
+.sysinfo-usage-warning .bar {
+    -fx-background-color: #ffb86c;
+}
+
+.sysinfo-usage-danger .bar {
+    -fx-background-color: #ff5555;
+}
+
+.sysinfo-status {
+    -fx-padding: 4 16 4 0;
+}
