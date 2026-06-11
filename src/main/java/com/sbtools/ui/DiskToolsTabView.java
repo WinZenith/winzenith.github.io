@@ -17,7 +17,6 @@ import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
-import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.Alert;
@@ -35,7 +34,6 @@ import javafx.scene.control.TableView;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
-import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -46,9 +44,11 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
@@ -68,19 +68,21 @@ public class DiskToolsTabView extends BorderPane {
     private final FilteredList<DriveInfo> filteredDrives = new FilteredList<>(allDrives, d -> true);
     private final ComboBox<String> filterCombo = new ComboBox<>(
             FXCollections.observableArrayList("All", "HDD", "SSD"));
-    private final Button analyzeBtn = new Button("Analyze");
-    private final Button trimBtn = new Button("Trim");
-    private final Button fastDefragBtn = new Button("Fast Defrag");
-    private final Button fullDefragBtn = new Button("Full Defrag");
-    private final Button freeSpaceDefragBtn = new Button("Free Space Defrag");
+    private final CheckBox selectAllCheck = new CheckBox();
+    private final Map<String, BooleanProperty> driveSelected = new HashMap<>();
+    private final Button analyzeBtn = new Button("Analyze Selected");
+    private final Button intelligentDefragBtn = new Button("Intelligent Defrag");
     private final Button stopBtn = new Button("Stop");
     private final ProgressBar defragProgress = new ProgressBar(0);
-    private final Label defragStatus = new Label("Select a drive and click Analyze.");
+    private final Label defragStatus = new Label("Select drives and click Analyze Selected.");
     private Thread currentOperationThread;
     private final Canvas blockCanvas = new Canvas(400, 200);
+    private final Label driveAnalysisLabel = new Label();
     private final Label fragCountLabel = new Label();
     private final Label fragPercentLabel = new Label();
+    private final HBox legendBox = new HBox(8);
     private final VBox visualizationPanel = new VBox(8);
+    private final Set<String> analyzedDrives = new HashSet<>();
 
     /* ───── Secure Erase tab components ───── */
     private final TableView<ShredderFileEntry> shredderTable = new TableView<>();
@@ -101,7 +103,6 @@ public class DiskToolsTabView extends BorderPane {
     public DiskToolsTabView(BooleanSupplier adminCheck) {
         this.adminCheck = adminCheck;
 
-        // Clean up any orphaned temp files from previous interrupted wipe sessions
         ShredderService.sweepOrphanedTempFiles();
 
         TabPane tabPane = new TabPane();
@@ -128,28 +129,31 @@ public class DiskToolsTabView extends BorderPane {
         filterCombo.getSelectionModel().select(0);
         filterCombo.setOnAction(e -> applyFilter());
 
-        trimBtn.setDisable(true);
-        fastDefragBtn.setDisable(true);
-        fullDefragBtn.setDisable(true);
-        freeSpaceDefragBtn.setDisable(true);
-        trimBtn.setTooltip(new Tooltip("Trim an SSD drive"));
-        fastDefragBtn.setTooltip(new Tooltip("Quick defrag targeting large fragments"));
-        fullDefragBtn.setTooltip(new Tooltip("Full defragmentation of all files"));
-        freeSpaceDefragBtn.setTooltip(new Tooltip("Consolidate free space"));
+        selectAllCheck.setTooltip(new Tooltip("Select/Deselect all visible drives"));
+        selectAllCheck.setOnAction(e -> {
+            boolean sel = selectAllCheck.isSelected();
+            for (DriveInfo d : filteredDrives) {
+                BooleanProperty prop = driveSelected.computeIfAbsent(d.getDriveLetter(), k -> createDriveSelectedProp(k));
+                prop.set(sel);
+            }
+            driveTable.refresh();
+            updateDefragButtons();
+        });
+
+        analyzeBtn.setDisable(true);
+        intelligentDefragBtn.setDisable(true);
+        intelligentDefragBtn.setTooltip(new Tooltip("Full defrag for HDD, ReTrim for SSD"));
 
         stopBtn.getStyleClass().add("danger");
         stopBtn.setVisible(false);
         stopBtn.setOnAction(e -> stopOperation());
 
         analyzeBtn.setOnAction(e -> startAnalyze());
-        trimBtn.setOnAction(e -> startDefragOrTrim("trim"));
-        fastDefragBtn.setOnAction(e -> startDefragOrTrim("fast"));
-        fullDefragBtn.setOnAction(e -> startDefragOrTrim("full"));
-        freeSpaceDefragBtn.setOnAction(e -> startDefragOrTrim("freespace"));
+        intelligentDefragBtn.setOnAction(e -> startIntelligentDefrag());
 
         HBox defragToolbar = new HBox(8,
-                new Label("Filter:"), filterCombo,
-                analyzeBtn, trimBtn, fastDefragBtn, fullDefragBtn, freeSpaceDefragBtn,
+                selectAllCheck, new Label("Filter:"), filterCombo,
+                analyzeBtn, intelligentDefragBtn,
                 stopBtn, defragProgress, defragStatus);
         defragToolbar.setAlignment(Pos.CENTER_LEFT);
         defragToolbar.setPadding(new Insets(12, 16, 12, 16));
@@ -163,44 +167,27 @@ public class DiskToolsTabView extends BorderPane {
         visualizationPanel.setPadding(new Insets(4, 16, 12, 16));
         visualizationPanel.setVisible(false);
 
+        driveAnalysisLabel.getStyleClass().addAll("label", "accent");
+
         HBox blockBox = new HBox(blockCanvas);
         blockBox.setAlignment(Pos.CENTER);
 
         HBox statsBox = new HBox(24, fragCountLabel, fragPercentLabel);
         statsBox.setAlignment(Pos.CENTER);
 
-        HBox legendBox = new HBox(8);
         legendBox.setAlignment(Pos.CENTER);
-        legendBox.setId("defrag-legend");
 
-        visualizationPanel.getChildren().addAll(blockBox, legendBox, statsBox);
+        visualizationPanel.getChildren().addAll(driveAnalysisLabel, blockBox, legendBox, statsBox);
 
         busy.addListener((obs, oldVal, newVal) -> {
-            analyzeBtn.setDisable(newVal);
-            trimBtn.setDisable(newVal);
-            fastDefragBtn.setDisable(newVal);
-            fullDefragBtn.setDisable(newVal);
-            freeSpaceDefragBtn.setDisable(newVal);
             stopBtn.setVisible(newVal);
-            if (!newVal) {
+            if (newVal) {
+                analyzeBtn.setDisable(true);
+                intelligentDefragBtn.setDisable(true);
+            } else {
                 defragProgress.setProgress(0);
                 stopBtn.setDisable(false);
-            }
-        });
-
-        driveTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
-            boolean hasSelection = sel != null && !busy.get();
-            if (hasSelection) {
-                boolean isSsd = sel.isSsd();
-                trimBtn.setDisable(!isSsd);
-                fastDefragBtn.setDisable(isSsd);
-                fullDefragBtn.setDisable(isSsd);
-                freeSpaceDefragBtn.setDisable(isSsd);
-            } else {
-                trimBtn.setDisable(true);
-                fastDefragBtn.setDisable(true);
-                fullDefragBtn.setDisable(true);
-                freeSpaceDefragBtn.setDisable(true);
+                updateDefragButtons();
             }
         });
 
@@ -212,6 +199,35 @@ public class DiskToolsTabView extends BorderPane {
     private void buildDriveTable() {
         driveTable.setItems(filteredDrives);
         driveTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+
+        TableColumn<DriveInfo, DriveInfo> checkCol = new TableColumn<>(" ");
+        checkCol.setPrefWidth(40);
+        checkCol.setMinWidth(40);
+        checkCol.setMaxWidth(40);
+        checkCol.setResizable(false);
+        checkCol.setSortable(false);
+        checkCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue()));
+        checkCol.setCellFactory(col -> new TableCell<>() {
+            private final CheckBox cb = new CheckBox();
+            private BooleanProperty prevProp;
+            @Override
+            protected void updateItem(DriveInfo item, boolean empty) {
+                super.updateItem(item, empty);
+                if (prevProp != null) {
+                    cb.selectedProperty().unbindBidirectional(prevProp);
+                    prevProp = null;
+                }
+                if (empty || item == null) {
+                    setGraphic(null);
+                } else {
+                    String key = item.getDriveLetter();
+                    BooleanProperty prop = driveSelected.computeIfAbsent(key, k -> createDriveSelectedProp(k));
+                    cb.selectedProperty().bindBidirectional(prop);
+                    prevProp = prop;
+                    setGraphic(cb);
+                }
+            }
+        });
 
         TableColumn<DriveInfo, String> letterCol = new TableColumn<>("Drive");
         letterCol.setCellValueFactory(c -> c.getValue().driveLetterProperty());
@@ -252,7 +268,9 @@ public class DiskToolsTabView extends BorderPane {
             @Override
             protected void updateItem(Number item, boolean empty) {
                 super.updateItem(item, empty);
-                if (empty || item == null || item.longValue() == 0) {
+                if (empty) {
+                    setText(null);
+                } else if (item == null || item.longValue() == 0) {
                     setText("-");
                 } else {
                     setText(item.longValue() + "%");
@@ -260,34 +278,24 @@ public class DiskToolsTabView extends BorderPane {
             }
         });
 
-        driveTable.getColumns().addAll(letterCol, labelCol, typeCol, fsCol, sizeCol, freeCol, fragCol, fragPctCol);
+        driveTable.getColumns().addAll(checkCol, letterCol, labelCol, typeCol, fsCol, sizeCol, freeCol, fragCol, fragPctCol);
 
         driveTable.setFixedCellSize(32);
 
-        driveTable.setRowFactory(tv -> {
-            javafx.scene.control.TableRow<DriveInfo> row = new javafx.scene.control.TableRow<>() {
-                @Override
-                protected void updateItem(DriveInfo item, boolean empty) {
-                    super.updateItem(item, empty);
-                    if (empty || item == null) {
-                        setStyle("");
-                    } else if (item.isSummaryRow()) {
-                        setStyle("-fx-background-color: #282a36; -fx-border-color: #44475a transparent transparent transparent; "
-                                + "-fx-font-weight: bold; -fx-text-fill: #8be9fd;");
-                    } else {
-                        setStyle("");
-                    }
-                }
-            };
-            return row;
-        });
-
         updateTableHeight();
         filteredDrives.addListener((javafx.collections.ListChangeListener<DriveInfo>) c -> updateTableHeight());
+
+        driveTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
+            if (sel != null && analyzedDrives.contains(sel.getDriveLetter())) {
+                updateRichBlockVisualization(sel);
+            } else {
+                visualizationPanel.setVisible(false);
+            }
+        });
     }
 
     private void updateTableHeight() {
-        int rows = filteredDrives.size();
+        int rows = Math.max(filteredDrives.size(), 6);
         double header = 28;
         double rowH = driveTable.getFixedCellSize();
         driveTable.setPrefHeight(header + rows * rowH + 4);
@@ -303,17 +311,18 @@ public class DiskToolsTabView extends BorderPane {
         }
     }
 
-    private void updateSummaryRows() {
-        // Remove old summary rows
-        allDrives.removeIf(DriveInfo::isSummaryRow);
+    private BooleanProperty createDriveSelectedProp(String driveLetter) {
+        BooleanProperty prop = new SimpleBooleanProperty(false);
+        prop.addListener((obs, oldVal, newVal) -> updateDefragButtons());
+        return prop;
+    }
 
-        DriveInfo hddSum = DriveInfo.createHddSummary(allDrives);
-        DriveInfo ssdSum = DriveInfo.createSsdSummary(allDrives);
-
-        if (hddSum != null) allDrives.add(hddSum);
-        if (ssdSum != null) allDrives.add(ssdSum);
-
-        applyFilter();
+    private void updateDefragButtons() {
+        boolean anySelected = allDrives.stream()
+                .anyMatch(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get());
+        boolean isBusy = busy.get();
+        analyzeBtn.setDisable(isBusy || !anySelected);
+        intelligentDefragBtn.setDisable(isBusy || !anySelected);
     }
 
     private void loadDrives() {
@@ -321,10 +330,10 @@ public class DiskToolsTabView extends BorderPane {
             try {
                 List<DriveInfo> drives = defragService.getDrives();
                 Platform.runLater(() -> {
+                    analyzedDrives.clear();
                     allDrives.setAll(drives);
                     wipeDrives.setAll(drives);
-                    updateSummaryRows();
-                    defragStatus.setText("Found " + drives.size() + " drive(s). Select one and click Analyze.");
+                    defragStatus.setText("Found " + drives.size() + " drive(s). Select drives and click Analyze Selected.");
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to load drives", e);
@@ -347,28 +356,40 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void startAnalyze() {
-        DriveInfo selected = driveTable.getSelectionModel().getSelectedItem();
-        if (selected == null || busy.get()) return;
+        List<DriveInfo> selected = allDrives.stream()
+                .filter(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get())
+                .toList();
+        if (selected.isEmpty() || busy.get()) return;
         busy.set(true);
         cancelled.set(false);
-        defragStatus.setText("Analyzing " + selected.getDriveLetter() + "...");
         defragProgress.setProgress(-1);
         defragProgress.setVisible(true);
+        defragStatus.setText("Analyzing " + selected.size() + " drive(s)...");
 
-        DriveInfo driveCopy = selected;
         currentOperationThread = new Thread(() -> {
             try {
-                defragService.analyze(driveCopy, msg -> Platform.runLater(() -> {
-                    defragStatus.setText(msg);
-                }), cancelled);
-                Platform.runLater(() -> {
-                    driveTable.refresh();
-                    updateRichBlockVisualization(driveCopy);
-                    updateSummaryRows();
-                    defragStatus.setText("Analysis complete - "
-                            + driveCopy.getFragmentsFormatted() + " fragments, "
-                            + driveCopy.getFragmentationPercent() + "% fragmentation.");
-                });
+                for (int i = 0; i < selected.size(); i++) {
+                    DriveInfo driveCopy = selected.get(i);
+                    String letter = driveCopy.getDriveLetter();
+                    int driveIndex = i;
+                    if (cancelled.get()) break;
+
+                    Platform.runLater(() -> defragStatus.setText("Analyzing " + letter + "... (" + (driveIndex + 1) + "/" + selected.size() + ")"));
+
+                    defragService.analyze(driveCopy, msg -> Platform.runLater(() -> {
+                        defragStatus.setText(msg);
+                    }), cancelled);
+
+                    analyzedDrives.add(letter);
+
+                    Platform.runLater(() -> {
+                        driveTable.refresh();
+                        defragStatus.setText("Analysis complete - "
+                                + driveCopy.getFragmentsFormatted() + " fragments, "
+                                + driveCopy.getFragmentationPercent() + "% fragmentation on " + letter);
+                        updateRichBlockVisualization(driveCopy);
+                    });
+                }
             } catch (Exception e) {
                 Platform.runLater(() -> {
                     String msg = e.getMessage() != null ? e.getMessage() : "Analysis failed.";
@@ -385,8 +406,88 @@ public class DiskToolsTabView extends BorderPane {
         currentOperationThread.start();
     }
 
+    private void startIntelligentDefrag() {
+        List<DriveInfo> selected = allDrives.stream()
+                .filter(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get())
+                .toList();
+        if (selected.isEmpty() || busy.get()) return;
+
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING, "Defrag operations require administrator rights.").showAndWait();
+            return;
+        }
+
+        StringBuilder drivesList = new StringBuilder();
+        for (DriveInfo d : selected) {
+            drivesList.append(d.getDriveLetter()).append(" ");
+        }
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Intelligent Defrag on " + drivesList.toString().trim() + "?");
+        confirm.setHeaderText("Confirm Intelligent Defrag");
+        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+
+        busy.set(true);
+        cancelled.set(false);
+        defragProgress.setProgress(0);
+        defragProgress.setVisible(true);
+
+        currentOperationThread = new Thread(() -> {
+            try {
+                for (int i = 0; i < selected.size(); i++) {
+                    DriveInfo driveCopy = selected.get(i);
+                    String letter = driveCopy.getDriveLetter();
+                    int driveIndex = i;
+                    if (cancelled.get()) break;
+
+                    String modeLabel = driveCopy.isSsd() ? "Trim" : "Full Defrag";
+                    Platform.runLater(() -> defragStatus.setText(modeLabel + " in progress on " + letter + "... (" + (driveIndex + 1) + "/" + selected.size() + ")"));
+
+                    if (driveCopy.isSsd()) {
+                        defragService.trim(driveCopy,
+                                msg -> Platform.runLater(() -> defragStatus.setText(msg)),
+                                pct -> Platform.runLater(() -> {
+                                    defragProgress.setProgress(pct);
+                                    defragStatus.setText("Trim " + letter + " " + Math.round(pct * 100) + "%");
+                                }),
+                                cancelled);
+                    } else {
+                        defragService.defrag(driveCopy, DefragService.DefragOption.FULL,
+                                msg -> Platform.runLater(() -> defragStatus.setText(msg)),
+                                pct -> Platform.runLater(() -> {
+                                    defragProgress.setProgress(pct);
+                                    defragStatus.setText("Full Defrag " + letter + " " + Math.round(pct * 100) + "%");
+                                }),
+                                cancelled);
+                    }
+                }
+                Platform.runLater(() -> {
+                    defragProgress.setProgress(1);
+                    defragStatus.setText("Intelligent Defrag completed.");
+                    new Alert(Alert.AlertType.INFORMATION, "Intelligent Defrag completed successfully.").showAndWait();
+                });
+            } catch (java.util.concurrent.CancellationException e) {
+                Platform.runLater(() -> {
+                    defragStatus.setText("Intelligent Defrag cancelled.");
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    defragStatus.setText("Intelligent Defrag failed.");
+                    new Alert(Alert.AlertType.ERROR, "Intelligent Defrag failed:\n" + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> {
+                    busy.set(false);
+                    defragProgress.setVisible(false);
+                });
+            }
+        }, "intelligent-defrag");
+        currentOperationThread.start();
+    }
+
     private void updateRichBlockVisualization(DriveInfo drive) {
         visualizationPanel.setVisible(true);
+        driveAnalysisLabel.setText("Analysis: " + drive.getDriveLetter() + " (" + drive.getVolumeLabel() + ")");
+
         GraphicsContext gc = blockCanvas.getGraphicsContext2D();
         gc.clearRect(0, 0, blockCanvas.getWidth(), blockCanvas.getHeight());
 
@@ -405,15 +506,14 @@ public class DiskToolsTabView extends BorderPane {
         long frequentlyUsedBytes = (long) (remainingUsed * 0.10);
         long normalBytes = Math.max(0, remainingUsed - frequentlyUsedBytes);
 
-        // Color palette (Dracula-themed)
-        Color colSys       = Color.rgb(139, 233, 253);  // cyan - System/MFT
-        Color colDir       = Color.rgb(189, 147, 249);  // purple - Directories
-        Color colFreq      = Color.rgb(241, 250, 140);  // yellow - Frequently Used
-        Color colNormal    = Color.rgb(80, 250, 123);   // green - Normal Files
-        Color colFrag      = Color.rgb(255, 85, 85);    // red - Fragmented
-        Color colPage      = Color.rgb(255, 184, 108);  // orange - Page/Hibernation
-        Color colFree      = Color.rgb(68, 71, 90);     // gray - Free Space
-        Color colBg        = Color.rgb(40, 42, 54);     // dark bg
+        Color colSys       = Color.rgb(139, 233, 253);
+        Color colDir       = Color.rgb(189, 147, 249);
+        Color colFreq      = Color.rgb(241, 250, 140);
+        Color colNormal    = Color.rgb(80, 250, 123);
+        Color colFrag      = Color.rgb(255, 85, 85);
+        Color colPage      = Color.rgb(255, 184, 108);
+        Color colFree      = Color.rgb(68, 71, 90);
+        Color colBg        = Color.rgb(40, 42, 54);
 
         int cols = 50;
         int rows = 16;
@@ -421,7 +521,6 @@ public class DiskToolsTabView extends BorderPane {
         double cellW = blockCanvas.getWidth() / cols;
         double cellH = blockCanvas.getHeight() / rows;
 
-        // Estimate cell counts per category based on byte proportions
         int usedCells = (int) Math.round(totalCells * usedRatio);
         int freeCells = totalCells - usedCells;
 
@@ -431,7 +530,6 @@ public class DiskToolsTabView extends BorderPane {
         int fragCells = bytesToCells(fragBytes, total, totalCells);
         int freqCells = bytesToCells(frequentlyUsedBytes, total, totalCells);
 
-        // Clamp: special categories cannot exceed used cells
         int totalSpecial = mftCells + pageCells + dirCells + fragCells + freqCells;
         if (totalSpecial > usedCells && totalSpecial > 0) {
             double scale = (double) usedCells / totalSpecial;
@@ -443,7 +541,6 @@ public class DiskToolsTabView extends BorderPane {
         }
         int normalCells = Math.max(0, usedCells - (mftCells + pageCells + dirCells + fragCells + freqCells));
 
-        // Build grid filled with free space
         Color[][] grid = new Color[rows][cols];
         for (int r = 0; r < rows; r++) {
             for (int c = 0; c < cols; c++) {
@@ -453,14 +550,12 @@ public class DiskToolsTabView extends BorderPane {
 
         Random rng = new Random(drive.getDriveLetter().hashCode());
 
-        // Phase 1: Place MFT/System blocks at start (first 1-2 columns)
         for (int i = 0; i < mftCells; i++) {
             int r = i % rows;
             int c = i / rows;
             if (c < cols) grid[r][c] = colSys;
         }
 
-        // Phase 2: Place directory blocks right after system area
         for (int i = 0; i < dirCells; i++) {
             int idx = (mftCells + i);
             int r = idx % rows;
@@ -468,7 +563,6 @@ public class DiskToolsTabView extends BorderPane {
             if (c < cols && grid[r][c] == colFree) grid[r][c] = colDir;
         }
 
-        // Phase 3: Place page/hibernation as contiguous block(s)
         if (pageCells > 0) {
             int pr = rows / 4 + rng.nextInt(rows / 2);
             int pc = cols / 3 + rng.nextInt(cols / 3);
@@ -485,7 +579,6 @@ public class DiskToolsTabView extends BorderPane {
             }
         }
 
-        // Build list of all used cell positions (non-free)
         List<int[]> usedPositions = new ArrayList<>();
         for (int r = 0; r < rows; r++) {
             for (int c = 0; c < cols; c++) {
@@ -495,7 +588,6 @@ public class DiskToolsTabView extends BorderPane {
             }
         }
 
-        // Build list of available (free) positions for remaining categories
         List<int[]> availablePositions = new ArrayList<>();
         for (int r = 0; r < rows; r++) {
             for (int c = 0; c < cols; c++) {
@@ -505,23 +597,19 @@ public class DiskToolsTabView extends BorderPane {
             }
         }
 
-        // Shuffle available positions for pseudo-random placement
         Collections.shuffle(availablePositions, rng);
 
-        // Phase 4: Place fragmented blocks scattered randomly
         int availIdx = 0;
         for (int i = 0; i < fragCells && availIdx < availablePositions.size(); i++) {
             int[] pos = availablePositions.get(availIdx++);
             grid[pos[0]][pos[1]] = colFrag;
         }
 
-        // Phase 5: Place frequently-used blocks scattered
         for (int i = 0; i < freqCells && availIdx < availablePositions.size(); i++) {
             int[] pos = availablePositions.get(availIdx++);
             grid[pos[0]][pos[1]] = colFreq;
         }
 
-        // Phase 6: Place normal files fill remaining used area
         int normalPlaced = 0;
         while (normalPlaced < normalCells && availIdx < availablePositions.size()) {
             int[] pos = availablePositions.get(availIdx++);
@@ -529,9 +617,6 @@ public class DiskToolsTabView extends BorderPane {
             normalPlaced++;
         }
 
-        // Remaining availablePositions stay as Free
-
-        // ── Render grid ──
         gc.setStroke(colBg);
         gc.setLineWidth(1);
 
@@ -542,19 +627,16 @@ public class DiskToolsTabView extends BorderPane {
             }
         }
 
-        // Summary bar below the grid
         int barY = rows * (int) cellH + 8;
         int barH = 10;
         int barW = (int) blockCanvas.getWidth();
         int barX = 0;
 
-        // Calculate total used cell count for bar (match displayed)
         int displayedUsed = mftCells + dirCells + pageCells + fragCells + freqCells + normalCells;
         double displayUsedRatio = totalCells > 0 ? (double) displayedUsed / totalCells : 0;
         double displayFragRatio = totalCells > 0 ? (double) fragCells / totalCells : 0;
         double displayFreeRatio = 1.0 - displayUsedRatio;
 
-        // Bar: segments proportionally by category
         int barFragW  = (int) (barW * displayFragRatio);
         int barFreqW  = (int) (barW * (totalCells > 0 ? (double) freqCells / totalCells : 0));
         int barSysW   = (int) (barW * (totalCells > 0 ? (double) mftCells / totalCells : 0));
@@ -576,7 +658,6 @@ public class DiskToolsTabView extends BorderPane {
         gc.setLineWidth(1);
         gc.strokeRect(barX, barY, barW, barH);
 
-        // ── Update stats labels ──
         fragCountLabel.setText("Fragments: " + drive.getFragmentsFormatted()
                 + "  |  Fragmented files: " + drive.getFragmentedFileCount()
                 + "  |  Total files: " + drive.getTotalFileCount());
@@ -585,19 +666,15 @@ public class DiskToolsTabView extends BorderPane {
                 + "  |  Avg fragments/file: " + String.format("%.1f", drive.getAverageFragmentsPerFile()));
         fragPercentLabel.getStyleClass().addAll("label", drive.getFragmentationPercent() > 20 ? "danger" : "success");
 
-        // ── Update legend dynamically ──
-        HBox legendBox = (HBox) visualizationPanel.lookup("#defrag-legend");
-        if (legendBox != null) {
-            legendBox.getChildren().setAll(
-                    createLegendItem(colSys, "System/MFT"),
-                    createLegendItem(colDir, "Directories"),
-                    createLegendItem(colFreq, "Frequently Used"),
-                    createLegendItem(colNormal, "Normal"),
-                    createLegendItem(colFrag, "Fragmented"),
-                    createLegendItem(colPage, "Page/Hibernation"),
-                    createLegendItem(colFree, "Free")
-            );
-        }
+        legendBox.getChildren().setAll(
+                createLegendItem(colSys, "System/MFT"),
+                createLegendItem(colDir, "Directories"),
+                createLegendItem(colFreq, "Frequently Used"),
+                createLegendItem(colNormal, "Normal"),
+                createLegendItem(colFrag, "Fragmented"),
+                createLegendItem(colPage, "Page/Hibernation"),
+                createLegendItem(colFree, "Free")
+        );
     }
 
     private int bytesToCells(long bytes, long totalBytes, int totalCells) {
@@ -610,91 +687,13 @@ public class DiskToolsTabView extends BorderPane {
         colorBox.setStyle(String.format("-fx-background-color: #%02x%02x%02x; "
                 + "-fx-min-width: 12px; -fx-min-height: 12px; "
                 + "-fx-max-width: 12px; -fx-max-height: 12px; "
-                + "-fx-border-color: #6272a4; -fx-border-width: 1;", 
+                + "-fx-border-color: #6272a4; -fx-border-width: 1;",
                 (int)(color.getRed()*255), (int)(color.getGreen()*255), (int)(color.getBlue()*255)));
         Label text = new Label(label);
         text.setStyle("-fx-text-fill: #f8f8f2; -fx-font-size: 11px;");
         HBox item = new HBox(4, colorBox, text);
         item.setAlignment(Pos.CENTER);
         return item;
-    }
-
-    private void startDefragOrTrim(String mode) {
-        DriveInfo selected = driveTable.getSelectionModel().getSelectedItem();
-        if (selected == null || busy.get()) return;
-
-        if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING, "Defrag/Trim operations require administrator rights.").showAndWait();
-            return;
-        }
-
-        String modeLabel = switch (mode) {
-            case "trim" -> "Trim";
-            case "fast" -> "Fast Defrag";
-            case "full" -> "Full Defrag";
-            case "freespace" -> "Free Space Defrag";
-            default -> "Operation";
-        };
-
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                modeLabel + " on " + selected.getDriveLetter() + "?");
-        confirm.setHeaderText("Confirm " + modeLabel);
-        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
-
-        busy.set(true);
-        cancelled.set(false);
-        defragStatus.setText(modeLabel + " in progress on " + selected.getDriveLetter() + "...");
-        defragProgress.setProgress(0);
-        defragProgress.setVisible(true);
-
-        DriveInfo driveCopy = selected;
-        currentOperationThread = new Thread(() -> {
-            try {
-                if ("trim".equals(mode)) {
-                    defragService.trim(driveCopy,
-                            msg -> Platform.runLater(() -> defragStatus.setText(msg)),
-                            pct -> Platform.runLater(() -> {
-                                defragProgress.setProgress(pct);
-                                defragStatus.setText(modeLabel + " " + Math.round(pct * 100) + "%");
-                            }),
-                            cancelled);
-                } else {
-                    DefragService.DefragOption option = switch (mode) {
-                        case "fast" -> DefragService.DefragOption.FAST;
-                        case "full" -> DefragService.DefragOption.FULL;
-                        case "freespace" -> DefragService.DefragOption.FREE_SPACE;
-                        default -> DefragService.DefragOption.FULL;
-                    };
-                    defragService.defrag(driveCopy, option,
-                            msg -> Platform.runLater(() -> defragStatus.setText(msg)),
-                            pct -> Platform.runLater(() -> {
-                                defragProgress.setProgress(pct);
-                                defragStatus.setText(modeLabel + " " + Math.round(pct * 100) + "%");
-                            }),
-                            cancelled);
-                }
-                Platform.runLater(() -> {
-                    defragProgress.setProgress(1);
-                    defragStatus.setText(modeLabel + " completed on " + driveCopy.getDriveLetter());
-                    new Alert(Alert.AlertType.INFORMATION, modeLabel + " completed successfully.").showAndWait();
-                });
-            } catch (java.util.concurrent.CancellationException e) {
-                Platform.runLater(() -> {
-                    defragStatus.setText(modeLabel + " cancelled.");
-                });
-            } catch (Exception e) {
-                Platform.runLater(() -> {
-                    defragStatus.setText(modeLabel + " failed.");
-                    new Alert(Alert.AlertType.ERROR, modeLabel + " failed:\n" + e.getMessage()).showAndWait();
-                });
-            } finally {
-                Platform.runLater(() -> {
-                    busy.set(false);
-                    defragProgress.setVisible(false);
-                });
-            }
-        }, "defrag-" + mode);
-        currentOperationThread.start();
     }
 
     /* ===================================================================

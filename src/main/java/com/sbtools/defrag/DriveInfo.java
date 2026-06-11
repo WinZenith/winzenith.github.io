@@ -1,18 +1,13 @@
 package com.sbtools.defrag;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.LongProperty;
-import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.property.SimpleDoubleProperty;
 import javafx.beans.property.SimpleLongProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
-
-import java.util.List;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class DriveInfo {
@@ -35,9 +30,6 @@ public class DriveInfo {
     private final LongProperty hiberFileSizeBytes = new SimpleLongProperty(0);
     private final LongProperty swapFileSizeBytes = new SimpleLongProperty(0);
     private final LongProperty totalDirectories = new SimpleLongProperty(0);
-
-    private final BooleanProperty summaryRow = new SimpleBooleanProperty(false);
-    private final StringProperty summaryLabel = new SimpleStringProperty("");
 
     public DriveInfo() {}
 
@@ -128,18 +120,6 @@ public class DriveInfo {
     public LongProperty totalDirectoriesProperty() { return totalDirectories; }
     public void setTotalDirectories(long v) { totalDirectories.set(v); }
 
-    /* ── Summary row fields ── */
-
-    @JsonIgnore
-    public boolean isSummaryRow() { return summaryRow.get(); }
-    public BooleanProperty summaryRowProperty() { return summaryRow; }
-    public void setSummaryRow(boolean v) { summaryRow.set(v); }
-
-    @JsonIgnore
-    public String getSummaryLabel() { return summaryLabel.get(); }
-    public StringProperty summaryLabelProperty() { return summaryLabel; }
-    public void setSummaryLabel(String v) { summaryLabel.set(v); }
-
     /* ── Formatting utilities ── */
 
     public String getSizeFormatted() {
@@ -170,75 +150,4 @@ public class DriveInfo {
         return String.format("%.1f TB", bytes / (1024.0 * 1024 * 1024 * 1024));
     }
 
-    /* ── Summary row factory ── */
-
-    private static DriveInfo createSummaryRow(String label, String mediaTypeFilter, List<DriveInfo> drives) {
-        DriveInfo summary = new DriveInfo();
-        summary.setSummaryRow(true);
-        summary.setSummaryLabel(label);
-        summary.setDriveLetter(label);
-        summary.setMediaType(mediaTypeFilter);
-
-        long totalSize = 0;
-        long totalFree = 0;
-        long totalFragments = 0;
-        long totalFragPct = 0;
-        long totalFragFiles = 0;
-        long totalFiles = 0;
-        double totalAvgFrag = 0;
-        long totalMft = 0;
-        long totalPage = 0;
-        long totalHiber = 0;
-        long totalSwap = 0;
-        long totalDirs = 0;
-        int count = 0;
-
-        for (DriveInfo d : drives) {
-            if (!d.isSummaryRow() && d.getMediaType().equalsIgnoreCase(mediaTypeFilter)) {
-                totalSize += d.getSizeBytes();
-                totalFree += d.getFreeBytes();
-                totalFragments += d.getFragmentsFound();
-                totalFragPct += d.getFragmentationPercent();
-                totalFragFiles += d.getFragmentedFileCount();
-                totalFiles += d.getTotalFileCount();
-                totalAvgFrag += d.getAverageFragmentsPerFile();
-                totalMft += d.getMftSizeBytes();
-                totalPage += d.getPageFileSizeBytes();
-                totalHiber += d.getHiberFileSizeBytes();
-                totalSwap += d.getSwapFileSizeBytes();
-                totalDirs += d.getTotalDirectories();
-                count++;
-            }
-        }
-
-        if (count == 0) return null;
-
-        summary.setSizeBytes(totalSize);
-        summary.setFreeBytes(totalFree);
-        summary.setFragmentsFound(totalFragments);
-        summary.setFragmentationPercent(count > 0 ? totalFragPct / count : 0);
-        summary.setFragmentedFileCount(totalFragFiles);
-        summary.setTotalFileCount(totalFiles);
-        summary.setAverageFragmentsPerFile(count > 0 ? totalAvgFrag / count : 0);
-        summary.setMftSizeBytes(totalMft);
-        summary.setPageFileSizeBytes(totalPage);
-        summary.setHiberFileSizeBytes(totalHiber);
-        summary.setSwapFileSizeBytes(totalSwap);
-        summary.setTotalDirectories(totalDirs);
-        summary.setVolumeLabel(count + " drive(s)");
-
-        return summary;
-    }
-
-    public static DriveInfo createHddSummary(List<DriveInfo> drives) {
-        DriveInfo s = createSummaryRow("HDD Summary", "HDD", drives);
-        if (s != null) s.setMediaType("HDD");
-        return s;
-    }
-
-    public static DriveInfo createSsdSummary(List<DriveInfo> drives) {
-        DriveInfo s = createSummaryRow("SSD Summary", "SSD", drives);
-        if (s != null) s.setMediaType("SSD");
-        return s;
-    }
 }
