@@ -35,6 +35,18 @@ public class SoftwareUpdateEntry {
         return id;
     }
 
+    public String source() {
+        return source;
+    }
+
+    public String updateId() {
+        return updateId;
+    }
+
+    public long sizeBytes() {
+        return sizeBytes;
+    }
+
     public StringProperty nameProperty() {
         return name;
     }
@@ -51,16 +63,27 @@ public class SoftwareUpdateEntry {
         return selected;
     }
 
-    public String source() {
-        return source;
-    }
-
-    public String updateId() {
-        return updateId;
+    public StringProperty sourceProperty() {
+        return new SimpleStringProperty(source);
     }
 
     public String getName() {
         return name.get();
     }
 
+    public String getCurrentVersion() {
+        return currentVersion.get();
+    }
+
+    public String getAvailableVersion() {
+        return availableVersion.get();
+    }
+
+    public boolean isSelected() {
+        return selected.get();
+    }
+
+    public void setSelected(boolean value) {
+        selected.set(value);
+    }
 }
