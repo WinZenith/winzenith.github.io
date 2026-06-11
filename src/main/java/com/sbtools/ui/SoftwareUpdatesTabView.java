@@ -593,7 +593,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 current.createSystemRestorePoint(),
                 current.eulaAccepted(),
                 current.excludedDriverIds(),
-                skipped
+                skipped,
+                current.networkOptimizationPreset()
             );
             settingsStore.save(updated);
         } catch (Exception ex) {
@@ -637,7 +638,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
                         current.createSystemRestorePoint(),
                         current.eulaAccepted(),
                         current.excludedDriverIds(),
-                        new java.util.ArrayList<>(skippedIds)
+                        new java.util.ArrayList<>(skippedIds),
+                        current.networkOptimizationPreset()
                     );
                     settingsStore.save(updated);
                 } catch (Exception ex) {

@@ -186,7 +186,8 @@ public class DriversTabView extends BorderPane {
                             current.createSystemRestorePoint(),
                             current.eulaAccepted(),
                             excluded,
-                            current.skippedSoftwareIds()
+                            current.skippedSoftwareIds(),
+                            current.networkOptimizationPreset()
                         );
                         try {
                             settingsStore.save(updated);
@@ -316,7 +317,8 @@ public class DriversTabView extends BorderPane {
                             current.createSystemRestorePoint(),
                             current.eulaAccepted(),
                             excluded,
-                            current.skippedSoftwareIds()
+                            current.skippedSoftwareIds(),
+                            current.networkOptimizationPreset()
                         );
                         try {
                             settingsStore.save(updated);
@@ -530,7 +532,8 @@ public class DriversTabView extends BorderPane {
                         current.createSystemRestorePoint(),
                         current.eulaAccepted(),
                         new java.util.ArrayList<>(excludedIds),
-                        current.skippedSoftwareIds()
+                        current.skippedSoftwareIds(),
+                        current.networkOptimizationPreset()
                     );
                     settingsStore.save(updated);
                 } catch (IOException ex) {

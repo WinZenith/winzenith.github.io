@@ -29,12 +29,14 @@ public class SettingsStore {
             AppSettings d = AppSettings.defaults();
             List<String> excludedDrivers = list(root, "excludedDriverIds");
             List<String> skippedSoftware = list(root, "skippedSoftwareIds");
+            String netPreset = str(root, "networkOptimizationPreset");
             return new AppSettings(
                     bool(root, "autoBackupDrivers", d.autoBackupDrivers()),
                     bool(root, "createSystemRestorePoint", d.createSystemRestorePoint()),
                     bool(root, "eulaAccepted", d.eulaAccepted()),
                     excludedDrivers != null ? excludedDrivers : d.excludedDriverIds(),
-                    skippedSoftware != null ? skippedSoftware : d.skippedSoftwareIds()
+                    skippedSoftware != null ? skippedSoftware : d.skippedSoftwareIds(),
+                    netPreset != null ? netPreset : d.networkOptimizationPreset()
             );
         } catch (IOException e) {
             return AppSettings.defaults();
@@ -54,6 +56,11 @@ public class SettingsStore {
     private static boolean bool(JsonNode root, String key, boolean fallback) {
         JsonNode n = root.get(key);
         return n != null && n.isBoolean() ? n.asBoolean() : fallback;
+    }
+
+    private static String str(JsonNode root, String key) {
+        JsonNode n = root.get(key);
+        return n != null && n.isTextual() ? n.asText() : null;
     }
 
     private static List<String> list(JsonNode root, String key) {

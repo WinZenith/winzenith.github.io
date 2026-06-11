@@ -1,0 +1,27 @@
+{
+  "models": [
+    {
+      "title": "LM Studio (Autodetect)",
+      "provider": "lmstudio",
+      "model": "AUTODETECT",
+      "apiBase": "http://127.0.0.1:1234/v1"
+    },
+    {
+      "title": "LM Studio - Qwen3",
+      "provider": "lmstudio",
+      "model": "qwen3-4b-thinking-2507-mimo-v2-flash-distill",
+      "apiBase": "http://127.0.0.1:1234/v1"
+    }
+  ],
+  "tabAutocompleteModel": {
+    "title": "LM Studio Tab",
+    "provider": "lmstudio",
+    "model": "qwen3-4b-thinking-2507-mimo-v2-flash-distill",
+    "apiBase": "http://127.0.0.1:1234/v1"
+  },
+  "embeddingsProvider": {
+    "provider": "lmstudio",
+    "model": "text-embedding-nomic-embed-text-v1.5",
+    "apiBase": "http://127.0.0.1:1234/v1"
+  }
+}

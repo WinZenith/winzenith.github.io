@@ -12,6 +12,8 @@ import com.sbtools.ui.CleanerTabView;
 import com.sbtools.ui.DiskToolsTabView;
 import com.sbtools.ui.DuplicateFilesTabView;
 import com.sbtools.ui.UIButton;
+import com.sbtools.ui.BrowserExtensionsTabView;
+import com.sbtools.ui.NetworkOptimizerTabView;
 
 import atlantafx.base.theme.Dracula;
 import javafx.geometry.Pos;
@@ -76,6 +78,8 @@ public class App extends Application {
         CleanerTabView cleanerTab = new CleanerTabView(busy, AdminCheck::isRunningAsAdmin);
         DuplicateFilesTabView duplicateFilesTab = new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin);
         DiskToolsTabView diskToolsTab = new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
+        BrowserExtensionsTabView browserExtensionsTab = new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin);
+        NetworkOptimizerTabView networkOptimizerTab = new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin);
 
         BorderPane root = new BorderPane();
 
@@ -104,21 +108,27 @@ public class App extends Application {
         UIButton cleanerBtn = UIButton.secondary("System cleanup");
         UIButton duplicateFilesBtn = UIButton.secondary("Duplicate Files");
         UIButton diskToolsBtn = UIButton.secondary("Disk Tools");
+        UIButton browserExtensionsBtn = UIButton.secondary("Browser Extensions");
+        UIButton networkOptimizerBtn = UIButton.secondary("Network Optimizer");
 
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        driversBtn.setOnAction(e -> { selectTab(driversBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(driversTab); });
-        backupRestoreBtn.setOnAction(e -> { selectTab(backupRestoreBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(backupRestoreTab); });
-        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(softwareTab); });
-        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(systemInfoTab); });
-        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(uninstallerTab); });
-        startupBtn.setOnAction(e -> { selectTab(startupBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(startupTab); });
-        cleanerBtn.setOnAction(e -> { selectTab(cleanerBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(cleanerTab); });
-        duplicateFilesBtn.setOnAction(e -> { selectTab(duplicateFilesBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(duplicateFilesTab); });
-        diskToolsBtn.setOnAction(e -> { selectTab(diskToolsBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn); root.setCenter(diskToolsTab); });
+        UIButton[] allButtons = new UIButton[]{driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn, browserExtensionsBtn, networkOptimizerBtn};
 
-        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn);
+        driversBtn.setOnAction(e -> { selectTab(driversBtn, allButtons); root.setCenter(driversTab); });
+        backupRestoreBtn.setOnAction(e -> { selectTab(backupRestoreBtn, allButtons); root.setCenter(backupRestoreTab); });
+        softwareBtn.setOnAction(e -> { selectTab(softwareBtn, allButtons); root.setCenter(softwareTab); });
+        systemInfoBtn.setOnAction(e -> { selectTab(systemInfoBtn, allButtons); root.setCenter(systemInfoTab); });
+        uninstallerBtn.setOnAction(e -> { selectTab(uninstallerBtn, allButtons); root.setCenter(uninstallerTab); });
+        startupBtn.setOnAction(e -> { selectTab(startupBtn, allButtons); root.setCenter(startupTab); });
+        cleanerBtn.setOnAction(e -> { selectTab(cleanerBtn, allButtons); root.setCenter(cleanerTab); });
+        duplicateFilesBtn.setOnAction(e -> { selectTab(duplicateFilesBtn, allButtons); root.setCenter(duplicateFilesTab); });
+        diskToolsBtn.setOnAction(e -> { selectTab(diskToolsBtn, allButtons); root.setCenter(diskToolsTab); });
+        browserExtensionsBtn.setOnAction(e -> { selectTab(browserExtensionsBtn, allButtons); root.setCenter(browserExtensionsTab); });
+        networkOptimizerBtn.setOnAction(e -> { selectTab(networkOptimizerBtn, allButtons); root.setCenter(networkOptimizerTab); });
+
+        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn, browserExtensionsBtn, networkOptimizerBtn);
 
         root.setLeft(sidebar);
         root.setCenter(driversTab);
@@ -162,7 +172,8 @@ public class App extends Application {
                     settings.createSystemRestorePoint(),
                     true,
                     settings.excludedDriverIds(),
-                    settings.skippedSoftwareIds()
+                    settings.skippedSoftwareIds(),
+                    settings.networkOptimizationPreset()
             ));
         } catch (IOException e) {
             AppLogger.error("Failed to save EULA acceptance", e);

@@ -1,12 +1,17 @@
 package com.sbtools.util;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 public class ProcessRunner {
 
@@ -47,12 +52,68 @@ public class ProcessRunner {
         return new ProcessResult(process.exitValue(), stdout, stderr);
     }
 
+    /**
+     * Runs a command, reading stdout line by line in real-time.
+     * Each line is passed to lineCallback. If a line is valid JSON with a "progress" (0-100)
+     * field, it is also passed to progressCallback as a 0.0-1.0 double.
+     * Checks cancelled between lines; if true, destroys the process and throws CancellationException.
+     */
+    public void runStreaming(List<String> command, Consumer<String> lineCallback,
+                             Consumer<Double> progressCallback, AtomicBoolean cancelled)
+            throws IOException, CancellationException {
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(true);
+        AppLogger.info("Running (streaming): " + String.join(" ", command));
+        Process process = pb.start();
+
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (cancelled != null && cancelled.get()) {
+                    process.destroyForcibly();
+                    throw new CancellationException("Operation cancelled by user");
+                }
+                if (lineCallback != null) {
+                    lineCallback.accept(line);
+                }
+                if (progressCallback != null) {
+                    try {
+                        var tree = JsonMapper.mapper().readTree(line);
+                        if (tree.has("progress")) {
+                            double pct = tree.get("progress").asDouble(0);
+                            progressCallback.accept(Math.min(1.0, Math.max(0, pct / 100.0)));
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        } catch (IOException e) {
+            if (cancelled != null && cancelled.get()) {
+                process.destroyForcibly();
+                throw new CancellationException("Operation cancelled by user");
+            }
+            throw e;
+        }
+
+        try {
+            boolean finished = process.waitFor(defaultTimeoutSeconds, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                throw new IOException("Process timed out after " + defaultTimeoutSeconds + "s");
+            }
+        } catch (InterruptedException e) {
+            process.destroyForcibly();
+            Thread.currentThread().interrupt();
+            throw new CancellationException("Operation cancelled by user");
+        }
+    }
+
     private static Thread startStreamReader(InputStream stream, ByteArrayOutputStream target) {
         Thread reader = new Thread(() -> {
             try {
                 stream.transferTo(target);
             } catch (IOException ignored) {
-                // Process may be destroyed while streams are still open.
             }
         }, "process-stream-reader");
         reader.setDaemon(true);

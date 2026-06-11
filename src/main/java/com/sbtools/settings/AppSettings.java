@@ -11,9 +11,10 @@ public record AppSettings(
         boolean createSystemRestorePoint,
         boolean eulaAccepted,
         List<String> excludedDriverIds,
-        List<String> skippedSoftwareIds
+        List<String> skippedSoftwareIds,
+        String networkOptimizationPreset
 ) {
     public static AppSettings defaults() {
-        return new AppSettings(true, true, false, Collections.emptyList(), Collections.emptyList());
+        return new AppSettings(true, true, false, Collections.emptyList(), Collections.emptyList(), "DEFAULT");
     }
 }

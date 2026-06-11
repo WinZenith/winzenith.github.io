@@ -67,6 +67,25 @@ public class DefragService {
             long percent = parsed.get("fragmentationPercent").asLong(0);
             drive.setFragmentsFound(fragments);
             drive.setFragmentationPercent(percent);
+
+            long fragFiles = parsed.has("fragmentedFileCount") ? parsed.get("fragmentedFileCount").asLong(0) : 0;
+            long totalFiles = parsed.has("totalFileCount") ? parsed.get("totalFileCount").asLong(0) : 0;
+            double avgFrag = parsed.has("averageFragmentsPerFile") ? parsed.get("averageFragmentsPerFile").asDouble(0) : 0;
+            long mftSize = parsed.has("mftSizeBytes") ? parsed.get("mftSizeBytes").asLong(0) : 0;
+            long pageSize = parsed.has("pageFileSizeBytes") ? parsed.get("pageFileSizeBytes").asLong(0) : 0;
+            long hiberSize = parsed.has("hiberFileSizeBytes") ? parsed.get("hiberFileSizeBytes").asLong(0) : 0;
+            long swapSize = parsed.has("swapFileSizeBytes") ? parsed.get("swapFileSizeBytes").asLong(0) : 0;
+            long totalDirs = parsed.has("totalDirectories") ? parsed.get("totalDirectories").asLong(0) : 0;
+
+            drive.setFragmentedFileCount(fragFiles);
+            drive.setTotalFileCount(totalFiles);
+            drive.setAverageFragmentsPerFile(avgFrag);
+            drive.setMftSizeBytes(mftSize);
+            drive.setPageFileSizeBytes(pageSize);
+            drive.setHiberFileSizeBytes(hiberSize);
+            drive.setSwapFileSizeBytes(swapSize);
+            drive.setTotalDirectories(totalDirs);
+
             if (progressCallback != null) {
                 progressCallback.accept("Analysis complete - " + fragments + " fragments, " + percent + "% fragmented");
             }
@@ -76,8 +95,9 @@ public class DefragService {
         }
     }
 
-    public void defrag(DriveInfo drive, DefragOption option, Consumer<String> progressCallback,
-                       AtomicBoolean cancelled) throws IOException, InterruptedException, CancellationException {
+    public void defrag(DriveInfo drive, DefragOption option, Consumer<String> statusCallback,
+                       Consumer<Double> progressCallback, AtomicBoolean cancelled)
+            throws IOException, CancellationException {
         if (!AppPaths.isWindows()) return;
         String letter = drive.getDriveLetter().replace(":", "");
         String mode = switch (option) {
@@ -86,30 +106,19 @@ public class DefragService {
             case FREE_SPACE -> "FREE_SPACE";
         };
         Path script = PowerShellScripts.resolve("optimize-volume.ps1");
-        ProcessResult result = processRunner.run(
-                ProcessRunner.powershellScript(script.toString(), letter, mode));
-
-        if (cancelled != null && cancelled.get()) throw new CancellationException("Defrag cancelled");
-
-        if (progressCallback != null) {
-            String msg = result.success() ? result.stdout() : result.combinedOutput();
-            progressCallback.accept(msg);
-        }
+        processRunner.runStreaming(
+                ProcessRunner.powershellScript(script.toString(), letter, mode),
+                statusCallback, progressCallback, cancelled);
     }
 
-    public void trim(DriveInfo drive, Consumer<String> progressCallback, AtomicBoolean cancelled)
-            throws IOException, InterruptedException, CancellationException {
+    public void trim(DriveInfo drive, Consumer<String> statusCallback,
+                     Consumer<Double> progressCallback, AtomicBoolean cancelled)
+            throws IOException, CancellationException {
         if (!AppPaths.isWindows()) return;
         String letter = drive.getDriveLetter().replace(":", "");
         Path script = PowerShellScripts.resolve("optimize-volume.ps1");
-        ProcessResult result = processRunner.run(
-                ProcessRunner.powershellScript(script.toString(), letter, "TRIM"));
-
-        if (cancelled != null && cancelled.get()) throw new CancellationException("Trim cancelled");
-
-        if (progressCallback != null) {
-            String msg = result.success() ? result.stdout() : result.combinedOutput();
-            progressCallback.accept(msg);
-        }
+        processRunner.runStreaming(
+                ProcessRunner.powershellScript(script.toString(), letter, "TRIM"),
+                statusCallback, progressCallback, cancelled);
     }
 }
