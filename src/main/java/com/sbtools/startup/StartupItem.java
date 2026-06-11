@@ -1,42 +1,24 @@
 package com.sbtools.startup;
 
-import java.util.UUID;
+import java.util.List;
 
 public class StartupItem {
-    private String id;
-    private String name;
-    private String publisher;
-    private String path;
+    private final String name;
+    private final String publisher;
+    private final String path;
     private boolean enabled;
     private String location;
-    private String registryValueName;
-    private String filePath;
-    private String taskPath;
-    private StartupItemType type;
+    private final String registryValueName;
+    private final String filePath;
+    private final String taskPath;
+    private final StartupItemType type;
     private String serviceStartType;
     private double estimatedBootImpactMs;
-
-    public StartupItem() {
-        this.id = UUID.randomUUID().toString();
-    }
-
-    public StartupItem(String name, String publisher, String path, boolean enabled, String location,
-                       String registryValueName, String filePath, String taskPath) {
-        this.id = UUID.randomUUID().toString();
-        this.name = name;
-        this.publisher = publisher;
-        this.path = path;
-        this.enabled = enabled;
-        this.location = location;
-        this.registryValueName = registryValueName;
-        this.filePath = filePath;
-        this.taskPath = taskPath;
-    }
+    private List<String> dependencies;
 
     public StartupItem(String name, String publisher, String path, boolean enabled, String location,
                        String registryValueName, String filePath, String taskPath,
                        StartupItemType type, String serviceStartType) {
-        this.id = UUID.randomUUID().toString();
         this.name = name;
         this.publisher = publisher;
         this.path = path;
@@ -47,10 +29,6 @@ public class StartupItem {
         this.taskPath = taskPath;
         this.type = type;
         this.serviceStartType = serviceStartType;
-    }
-
-    public String getId() {
-        return id;
     }
 
     public String getName() {
@@ -85,24 +63,12 @@ public class StartupItem {
         return registryValueName;
     }
 
-    public void setRegistryValueName(String registryValueName) {
-        this.registryValueName = registryValueName;
-    }
-
     public String getTaskPath() {
         return taskPath;
     }
 
-    public void setTaskPath(String taskPath) {
-        this.taskPath = taskPath;
-    }
-
     public StartupItemType getType() {
         return type;
-    }
-
-    public void setType(StartupItemType type) {
-        this.type = type;
     }
 
     public String getServiceStartType() {
@@ -119,5 +85,13 @@ public class StartupItem {
 
     public void setEstimatedBootImpactMs(double ms) {
         this.estimatedBootImpactMs = ms;
+    }
+
+    public List<String> getDependencies() {
+        return dependencies;
+    }
+
+    public void setDependencies(List<String> dependencies) {
+        this.dependencies = dependencies;
     }
 }

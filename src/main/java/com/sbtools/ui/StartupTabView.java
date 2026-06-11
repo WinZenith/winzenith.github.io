@@ -27,6 +27,8 @@ import javafx.stage.Modality;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.BooleanSupplier;
 
 public class StartupTabView extends BorderPane {
@@ -34,6 +36,11 @@ public class StartupTabView extends BorderPane {
     private final StartupService service = new StartupService();
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
+    private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "startup-worker");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final ObservableList<StartupItem> registryItems = FXCollections.observableArrayList();
     private final ObservableList<StartupItem> taskItems = FXCollections.observableArrayList();
@@ -309,7 +316,7 @@ public class StartupTabView extends BorderPane {
         taskItems.clear();
         serviceItems.clear();
 
-        new Thread(() -> {
+        executor.execute(() -> {
             try {
                 List<StartupItem> regItems = service.listRegistryApps();
                 List<StartupItem> taskItemsResult = service.listScheduledTasks();
@@ -351,7 +358,7 @@ public class StartupTabView extends BorderPane {
                     progress.setVisible(false);
                 });
             }
-        }, "startup-scan").start();
+        });
     }
 
     private void triggerToggle() {
@@ -363,7 +370,7 @@ public class StartupTabView extends BorderPane {
         String actionName = selected.isEnabled() ? "Disabling" : "Enabling";
         statusLabel.setText(actionName + " " + selected.getName() + "...");
 
-        new Thread(() -> {
+        executor.execute(() -> {
             try {
                 service.toggleStatus(selected);
                 Platform.runLater(() -> {
@@ -382,7 +389,7 @@ public class StartupTabView extends BorderPane {
                     progress.setVisible(false);
                 });
             }
-        }, "startup-toggle").start();
+        });
     }
 
     private void triggerDelete() {
@@ -401,7 +408,7 @@ public class StartupTabView extends BorderPane {
             progress.setVisible(true);
             statusLabel.setText("Deleting " + selected.getName() + "...");
 
-            new Thread(() -> {
+            executor.execute(() -> {
                 try {
                     service.deleteItem(selected);
                     Platform.runLater(() -> {
@@ -427,7 +434,7 @@ public class StartupTabView extends BorderPane {
                         progress.setVisible(false);
                     });
                 }
-            }, "startup-delete").start();
+            });
         }
     }
 

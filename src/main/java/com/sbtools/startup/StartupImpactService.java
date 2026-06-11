@@ -1,74 +1,122 @@
 package com.sbtools.startup;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.util.Set;
 
 public class StartupImpactService {
 
+    private static final Set<String> HEAVY_SERVICE_NAMES = Set.of(
+            "wuauserv",      // Windows Update
+            "WinDefend",     // Windows Defender
+            "Spooler",       // Print Spooler
+            "bits",          // Background Intelligent Transfer
+            "Schedule",      // Task Scheduler
+            "TrustedInstaller",
+            "cryptsvc",
+            "EventLog",
+            "Dhcp",
+            "Dnscache"
+    );
+
+    private static final String[] HEAVY_NAME_PATTERNS = {
+            "antivirus", "avast", "avg", "norton", "defender", "mcafee", "kaspersky", "bitdefender",
+            "onedrive", "dropbox", "google drive", "icloud", "sync",
+            "update", "auto_update", "autoupdate"
+    };
+
     public static double estimateBootImpactMs(StartupItem item) {
-        switch (item.getType()) {
-            case REGISTRY:
-                return estimateRegistryImpact(item);
-            case TASK:
-                return estimateTaskImpact(item);
-            case SERVICE:
-                return estimateServiceImpact(item);
-            default:
-                return 50;
-        }
+        return switch (item.getType()) {
+            case REGISTRY -> estimateRegistryImpact(item);
+            case TASK -> estimateTaskImpact(item);
+            case SERVICE -> estimateServiceImpact(item);
+            default -> 50;
+        };
     }
 
     private static double estimateRegistryImpact(StartupItem item) {
-        double base = 50.0;
-        if (item.getPath() != null && !item.getPath().isEmpty()) {
-            try {
-                Path p = Paths.get(item.getPath());
-                if (Files.exists(p)) {
-                    long size = Files.size(p);
-                    base += (size / (1024.0 * 1024.0)) * 10;
-                    base = Math.min(base, 500);
+        double score = 30.0;
+        String nameLower = lower(item.getName());
+        String pathLower = lower(item.getPath());
+
+        for (String pattern : HEAVY_NAME_PATTERNS) {
+            if (nameLower.contains(pattern) || pathLower.contains(pattern)) {
+                if (pattern.contains("antivirus") || pattern.contains("avast")
+                        || pattern.contains("avg") || pattern.contains("norton")
+                        || pattern.contains("defender") || pattern.contains("mcafee")
+                        || pattern.contains("kaspersky") || pattern.contains("bitdefender")) {
+                    score += 200;
+                } else if (pattern.contains("onedrive") || pattern.contains("dropbox")
+                        || pattern.contains("google drive") || pattern.contains("icloud")
+                        || pattern.contains("sync")) {
+                    score += 150;
+                } else {
+                    score += 100;
                 }
-            } catch (Exception ignored) {}
+                break;
+            }
         }
-        return base;
+
+        if ("Unknown".equals(item.getPublisher())) {
+            score += 30;
+        }
+
+        return Math.min(score, 500);
     }
 
     private static double estimateTaskImpact(StartupItem item) {
-        double base = 100.0;
-        if (item.getPath() != null && !item.getPath().isEmpty()) {
-            try {
-                Path p = Paths.get(item.getPath());
-                if (Files.exists(p)) {
-                    long size = Files.size(p);
-                    base += (size / (1024.0 * 1024.0)) * 15;
-                    base = Math.min(base, 2000);
-                }
-            } catch (Exception ignored) {}
+        double score = 60.0;
+        String nameLower = lower(item.getName());
+        String pathLower = lower(item.getPath());
+
+        for (String pattern : HEAVY_NAME_PATTERNS) {
+            if (nameLower.contains(pattern) || pathLower.contains(pattern)) {
+                score += 100;
+                break;
+            }
         }
-        return base;
+
+        if (pathLower.contains("system32") || pathLower.contains("syswow64")) {
+            score += 50;
+        }
+
+        return Math.min(score, 1500);
     }
 
     private static double estimateServiceImpact(StartupItem item) {
-        double base = 200.0;
-        if ("Automatic".equalsIgnoreCase(item.getServiceStartType())) {
-            base += 100;
+        double score = 50.0;
+
+        String startType = item.getServiceStartType();
+        if ("Automatic".equalsIgnoreCase(startType)) {
+            score *= 2;
+        } else if ("Disabled".equalsIgnoreCase(startType)) {
+            return 0;
         }
-        if (item.getPath() != null && !item.getPath().isEmpty()) {
-            try {
-                Path p = Paths.get(item.getPath());
-                if (Files.exists(p)) {
-                    long size = Files.size(p);
-                    base += (size / (1024.0 * 1024.0)) * 20;
-                    base = Math.min(base, 5000);
+
+        String nameLower = lower(item.getName());
+        if (HEAVY_SERVICE_NAMES.contains(item.getName())) {
+            score += 300;
+        } else {
+            for (String heavy : HEAVY_SERVICE_NAMES) {
+                if (nameLower.contains(heavy.toLowerCase())) {
+                    score += 200;
+                    break;
                 }
-            } catch (Exception ignored) {}
+            }
         }
-        return base;
+
+        // Dependency awareness: each dependency adds latency
+        if (item.getDependencies() != null) {
+            score += item.getDependencies().size() * 100;
+        }
+
+        return Math.min(score, 3000);
     }
 
     public static String formatImpact(double ms) {
         if (ms < 1000) return String.format("%.0f ms", ms);
         return String.format("%.1f s", ms / 1000.0);
+    }
+
+    private static String lower(String s) {
+        return s == null ? "" : s.toLowerCase();
     }
 }

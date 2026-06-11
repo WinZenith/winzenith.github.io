@@ -28,6 +28,9 @@ public class StartupService {
 
     private final ProcessRunner processRunner = new ProcessRunner(60);
 
+    private volatile long lastScanTime = 0;
+    private volatile List<StartupItem> cachedItems = null;
+
     public static class StartupBackupEntry {
         private String id;
         private String name;
@@ -91,6 +94,22 @@ public class StartupService {
 
         items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
         return items;
+    }
+
+    public List<StartupItem> listAllCached(long maxAgeMs) {
+        List<StartupItem> snap = cachedItems;
+        if (snap != null && (System.currentTimeMillis() - lastScanTime) < maxAgeMs) {
+            return new ArrayList<>(snap);
+        }
+        List<StartupItem> fresh = listAll();
+        cachedItems = fresh;
+        lastScanTime = System.currentTimeMillis();
+        return new ArrayList<>(fresh);
+    }
+
+    public void invalidateCache() {
+        cachedItems = null;
+        lastScanTime = 0;
     }
 
     public List<StartupItem> listRegistryApps() {
@@ -304,36 +323,48 @@ public class StartupService {
         if (!AppPaths.isWindows()) return items;
 
         try {
-            ProcessResult result = processRunner.run(List.of("sc.exe", "query", "type=", "service", "state=", "all"),
-                    30);
-            if (!result.success() || result.stdout() == null) {
-                AppLogger.warning("Failed to query services: " + result.combinedOutput());
+            Path script = PowerShellScripts.resolve("get-windows-services.ps1");
+            ProcessResult result = processRunner.run(ProcessRunner.powershellScript(script.toString()), 30);
+            if (!result.success() || result.stdout() == null || result.stdout().isBlank()) {
+                AppLogger.warning("Failed to query services via WMI: " + result.combinedOutput());
                 return items;
             }
 
-            List<String[]> services = parseScQueryOutput(result.stdout());
-            for (String[] svc : services) {
-                String serviceName = svc[0];
-                String displayName = svc[1];
+            JsonNode root = JsonMapper.parseTree(result.stdout());
+            JsonNode servicesNode = root.path("Services");
+            if (servicesNode.isArray()) {
+                for (JsonNode node : servicesNode) {
+                    String serviceName = node.path("Name").asText("");
+                    String displayName = node.path("DisplayName").asText("");
+                    String binaryPath = node.path("BinaryPath").asText("");
+                    String startType = node.path("StartType").asText("Manual");
+                    boolean enabled = !"Disabled".equals(startType);
 
-                String startType = queryServiceStartType(serviceName);
-                if (startType == null) continue;
+                    List<String> deps = new ArrayList<>();
+                    JsonNode depsNode = node.path("Dependencies");
+                    if (depsNode.isArray()) {
+                        for (JsonNode dep : depsNode) {
+                            deps.add(dep.asText(""));
+                        }
+                    }
 
-                String binaryPath = queryServiceBinaryPath(serviceName);
-                boolean enabled = !"Disabled".equals(startType);
-
-                items.add(new StartupItem(
-                        serviceName,
-                        displayName.isEmpty() ? "Unknown" : displayName,
-                        binaryPath,
-                        enabled,
-                        "Start Type: " + startType,
-                        "",
-                        "",
-                        "",
-                        StartupItemType.SERVICE,
-                        startType
-                ));
+                    StartupItem item = new StartupItem(
+                            serviceName,
+                            displayName.isEmpty() ? "Unknown" : displayName,
+                            binaryPath,
+                            enabled,
+                            "Start Type: " + startType,
+                            "",
+                            "",
+                            "",
+                            StartupItemType.SERVICE,
+                            startType
+                    );
+                    if (!deps.isEmpty()) {
+                        item.setDependencies(deps);
+                    }
+                    items.add(item);
+                }
             }
         } catch (Exception e) {
             AppLogger.warning("Failed to enumerate Windows services: " + e.getMessage());
@@ -341,64 +372,6 @@ public class StartupService {
 
         items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
         return items;
-    }
-
-    private List<String[]> parseScQueryOutput(String output) {
-        List<String[]> services = new ArrayList<>();
-        String currentServiceName = "";
-        String currentDisplayName = "";
-
-        for (String line : output.split("\\r?\\n")) {
-            String trimmed = line.trim();
-            if (trimmed.startsWith("SERVICE_NAME:")) {
-                if (!currentServiceName.isEmpty()) {
-                    services.add(new String[]{currentServiceName, currentDisplayName});
-                }
-                currentServiceName = trimmed.substring("SERVICE_NAME:".length()).trim();
-                currentDisplayName = "";
-            } else if (trimmed.startsWith("DISPLAY_NAME:")) {
-                currentDisplayName = trimmed.substring("DISPLAY_NAME:".length()).trim();
-            }
-        }
-        if (!currentServiceName.isEmpty()) {
-            services.add(new String[]{currentServiceName, currentDisplayName});
-        }
-        return services;
-    }
-
-    private String queryServiceStartType(String serviceName) {
-        try {
-            ProcessResult result = processRunner.run(List.of("sc.exe", "qc", serviceName), 10);
-            if (!result.success() || result.stdout() == null) return null;
-
-            for (String line : result.stdout().split("\\r?\\n")) {
-                String trimmed = line.trim();
-                String upper = trimmed.toUpperCase();
-                if (upper.contains("START_TYPE") && upper.contains(":")) {
-                    String afterColon = trimmed.substring(trimmed.indexOf(':') + 1).trim();
-                    String upperVal = afterColon.toUpperCase();
-                    if (upperVal.contains("AUTO_START")) return "Automatic";
-                    if (upperVal.contains("DEMAND_START")) return "Manual";
-                    if (upperVal.contains("DISABLED")) return "Disabled";
-                }
-            }
-        } catch (Exception ignored) {}
-        return null;
-    }
-
-    private String queryServiceBinaryPath(String serviceName) {
-        try {
-            ProcessResult result = processRunner.run(List.of("sc.exe", "qc", serviceName), 10);
-            if (!result.success() || result.stdout() == null) return "";
-
-            for (String line : result.stdout().split("\\r?\\n")) {
-                String trimmed = line.trim();
-                if (trimmed.toUpperCase().contains("BINARY_PATH_NAME") && trimmed.contains(":")) {
-                    return trimmed.substring(trimmed.indexOf(':') + 1).trim();
-                }
-            }
-        } catch (Exception ignored) {}
-        return "";
     }
 
     private void scanRegistry(HKEY hive, String locationLabel, String keyPath, boolean active, List<StartupItem> items) {
@@ -439,7 +412,7 @@ public class StartupService {
         if (item.getType() == StartupItemType.TASK) {
             String cmd = item.isEnabled() ? "Disable-ScheduledTask" : "Enable-ScheduledTask";
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
-                    cmd + " -TaskName '" + item.getName() + "' -TaskPath '" + item.getTaskPath() + "'"));
+                    cmd + " -TaskName '" + escapePowerShellSingleQuote(item.getName()) + "' -TaskPath '" + escapePowerShellSingleQuote(item.getTaskPath()) + "'"));
             if (!result.success()) {
                 throw new IOException("Failed to toggle Scheduled Task: " + result.combinedOutput());
             }
@@ -465,10 +438,15 @@ public class StartupService {
         } else if (item.getType() == StartupItemType.SERVICE) {
             String serviceName = item.getName();
             String scConfigArg;
+            String newStartType;
             if (item.isEnabled()) {
                 scConfigArg = "start= disabled";
+                newStartType = "Disabled";
             } else {
-                scConfigArg = "start= demand";
+                // Restore to original start type
+                String original = item.getServiceStartType();
+                scConfigArg = "start= " + startTypeToScArg(original);
+                newStartType = original;
             }
 
             ProcessResult result = processRunner.run(List.of("sc.exe", "config", serviceName, scConfigArg));
@@ -476,18 +454,22 @@ public class StartupService {
                 throw new IOException("Failed to toggle service start type: " + result.combinedOutput());
             }
 
-            item.setServiceStartType(item.isEnabled() ? "Disabled" : "Manual");
-            item.setLocation("Start Type: " + item.getServiceStartType());
+            item.setServiceStartType(newStartType);
+            item.setLocation("Start Type: " + newStartType);
             item.setEnabled(!item.isEnabled());
         }
+        invalidateCache();
     }
 
     public void deleteItem(StartupItem item) throws Exception {
+        if (item.getType() == StartupItemType.SERVICE) {
+            throw new UnsupportedOperationException("Windows services cannot be deleted.");
+        }
         createBackup(item);
 
         if (item.getType() == StartupItemType.TASK) {
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
-                    "Unregister-ScheduledTask -TaskName '" + item.getName() + "' -TaskPath '" + item.getTaskPath() + "' -Confirm:$false"));
+                    "Unregister-ScheduledTask -TaskName '" + escapePowerShellSingleQuote(item.getName()) + "' -TaskPath '" + escapePowerShellSingleQuote(item.getTaskPath()) + "' -Confirm:$false"));
             if (!result.success()) {
                 throw new IOException("Failed to delete Scheduled Task: " + result.combinedOutput());
             }
@@ -500,6 +482,7 @@ public class StartupService {
                 Advapi32Util.registryDeleteValue(hive, keyPath, item.getRegistryValueName());
             }
         }
+        invalidateCache();
     }
 
     // ── Backup / Restore Mechanism ────────────────────────────────────────────
@@ -549,7 +532,7 @@ public class StartupService {
 
             Path xmlPath = backupFolder.resolve("task.xml");
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
-                    "Export-ScheduledTask -TaskName '" + item.getName() + "' -TaskPath '" + item.getTaskPath() + "' | Out-File -FilePath '" + xmlPath.toAbsolutePath().toString() + "' -Encoding utf8"));
+                    "Export-ScheduledTask -TaskName '" + escapePowerShellSingleQuote(item.getName()) + "' -TaskPath '" + escapePowerShellSingleQuote(item.getTaskPath()) + "' | Out-File -FilePath '" + xmlPath.toAbsolutePath().toString() + "' -Encoding utf8"));
             if (!result.success()) {
                 throw new IOException("Failed to export Scheduled Task configuration: " + result.combinedOutput());
             }
@@ -582,7 +565,7 @@ public class StartupService {
             }
 
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
-                    "Register-ScheduledTask -Xml (Get-Content '" + xmlPath.toAbsolutePath().toString() + "' -Raw) -TaskName '" + entry.getName() + "' -TaskPath '" + entry.getTaskPath() + "' -Force"));
+                    "Register-ScheduledTask -Xml (Get-Content '" + xmlPath.toAbsolutePath().toString() + "' -Raw) -TaskName '" + escapePowerShellSingleQuote(entry.getName()) + "' -TaskPath '" + escapePowerShellSingleQuote(entry.getTaskPath()) + "' -Force"));
             if (!result.success()) {
                 throw new IOException("Failed to restore Scheduled Task: " + result.combinedOutput());
             }
@@ -618,17 +601,44 @@ public class StartupService {
 
     // ── Helper Utilities ──────────────────────────────────────────────────────
 
+    private static String escapePowerShellSingleQuote(String s) {
+        if (s == null) return "";
+        return s.replace("'", "''");
+    }
+
+    private static String startTypeToScArg(String startType) {
+        if (startType == null) return "demand";
+        return switch (startType.toLowerCase()) {
+            case "automatic" -> "auto";
+            case "manual" -> "demand";
+            case "disabled" -> "disabled";
+            default -> "demand";
+        };
+    }
+
     public static String extractExecutablePath(String command) {
         if (command == null || command.isBlank()) {
             return "";
         }
         String trimmed = command.trim();
+
+        // Quoted path: extract content between first pair of quotes
         if (trimmed.startsWith("\"")) {
             int closingQuote = trimmed.indexOf("\"", 1);
             if (closingQuote > 0) {
                 return trimmed.substring(1, closingQuote);
             }
         }
+
+        // Try regex: match up to first .exe/.dll/.com/.bat extension (case-insensitive)
+        java.util.regex.Matcher extMatcher = java.util.regex.Pattern
+                .compile("^([^\"]*?\\.(exe|dll|com|bat|cmd))", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(trimmed);
+        if (extMatcher.find()) {
+            return extMatcher.group(1).trim();
+        }
+
+        // Fallback: split on spaces, check file existence (original heuristic)
         int spaceIdx = trimmed.indexOf(' ');
         if (spaceIdx == -1) {
             return trimmed;
@@ -680,7 +690,7 @@ public class StartupService {
                     return companyNamePointer.getWideString(0);
                 }
             }
-        } catch (Throwable ignored) {}
+        } catch (Exception ignored) {}
         return "";
     }
 }
