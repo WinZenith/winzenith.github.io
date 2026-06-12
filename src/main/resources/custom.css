@@ -204,6 +204,20 @@
     -fx-text-fill: #50fa7b;
 }
 
+/* --- Duplicate group alternating tint --- */
+.table-view .table-row-cell.group-even {
+    -fx-background-color: #22232e;
+}
+.table-view .table-row-cell.group-even:odd {
+    -fx-background-color: #22232e;
+}
+.table-view .table-row-cell.group-odd {
+    -fx-background-color: #1e1f29;
+}
+.table-view .table-row-cell.group-odd:odd {
+    -fx-background-color: #21222c;
+}
+
 /* --- Labels --- */
 .label {
     -fx-text-fill: #f8f8f2;

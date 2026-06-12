@@ -23,20 +23,36 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
 public class DuplicateFinderService {
 
+    /**
+     * Scans for duplicate files under {@code root}.
+     *
+     * @param progress  callback(progress, total) — during Phase 1 total is -1 (indeterminate);
+     *                  during Phase 2/3 total is the combined hash count.
+     * @param phaseLabel called with "Phase 1/3 — Enumerating…", "Phase 2/3 — Quick hashing…", etc.
+     * @param cancelled checked frequently to allow early abort
+     */
     public List<DuplicateFileRow> scan(Path root, BiConsumer<Integer, Integer> progress,
+                                       java.util.function.Consumer<String> phaseLabel,
                                        AtomicBoolean cancelled) {
         List<DuplicateFileRow> result = new ArrayList<>();
+        ExecutorService executor = null;
 
-        // Phase 1: walk file tree via FileVisitor — skip junk dirs, cancellable
-        Map<Long, List<Path>> bySize = new HashMap<>();
-        Set<Object> seenFileKeys = new HashSet<>();
-        long[] fileCount = {0};
         try {
+            // ── Phase 1: walk file tree, bucket by size ────────────────────
+            if (phaseLabel != null) phaseLabel.accept("Phase 1/3 — Enumerating files…");
+
+            Map<Long, List<Path>> bySize = new HashMap<>();
+            Set<Object> seenFileKeys = new HashSet<>();
+            long[] fileCount = {0};
+
             Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
@@ -73,7 +89,7 @@ public class DuplicateFinderService {
                         bySize.computeIfAbsent(attrs.size(), k -> new ArrayList<>()).add(file);
                         fileCount[0]++;
                         if (fileCount[0] % 500 == 0 && progress != null) {
-                            progress.accept((int) fileCount[0], 0);
+                            progress.accept((int) fileCount[0], -1);
                         }
                     }
                     return FileVisitResult.CONTINUE;
@@ -84,132 +100,181 @@ public class DuplicateFinderService {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
             });
-        } catch (Exception e) {
-            AppLogger.warning("Duplicate scan enumeration failed: " + e.getMessage());
-            return result;
-        }
 
-        if (cancelled.get()) return result;
-
-        // Collect files that have at least one same-size sibling
-        List<Path> toHash = new ArrayList<>();
-        for (List<Path> paths : bySize.values()) {
-            if (paths.size() >= 2) {
-                toHash.addAll(paths);
-            }
-        }
-        if (toHash.isEmpty()) return result;
-
-        MessageDigest md;
-        try {
-            md = MessageDigest.getInstance("MD5");
-        } catch (Exception e) {
-            AppLogger.warning("MD5 not available: " + e.getMessage());
-            return result;
-        }
-
-        HexFormat hex = HexFormat.of();
-        byte[] buf = new byte[8192];
-
-        // Phase 2: quick-hash first 8KB of every candidate file
-        // key = size + ":" + hex(md5(first 8KB))
-        Map<String, List<Path>> quickGroups = new HashMap<>();
-        int quickTotal = toHash.size();
-        int[] quickProcessed = {0};
-
-        for (Path p : toHash) {
             if (cancelled.get()) return result;
-            try (InputStream is = Files.newInputStream(p)) {
-                int read = is.read(buf);
-                md.reset();
-                md.update(buf, 0, Math.max(read, 0));
-                String key = Files.size(p) + ":" + hex.formatHex(md.digest());
-                quickGroups.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
-            } catch (Exception ignored) {}
-            quickProcessed[0]++;
-            if (progress != null) progress.accept(quickProcessed[0], quickTotal);
-        }
 
-        if (cancelled.get()) return result;
-
-        // Phase 3: full MD5 for groups still having 2+ files
-        List<Path> toFullHash = new ArrayList<>();
-        for (List<Path> group : quickGroups.values()) {
-            if (group.size() >= 2) {
-                toFullHash.addAll(group);
+            // Collect files that have at least one same-size sibling
+            List<Path> toHash = new ArrayList<>();
+            for (List<Path> paths : bySize.values()) {
+                if (paths.size() >= 2) {
+                    toHash.addAll(paths);
+                }
             }
-        }
-        int fullTotal = toFullHash.size();
-        int combinedTotal = quickTotal + fullTotal;
-        int[] combinedProcessed = {quickTotal};
-        Map<String, List<Path>> hashGroups = new HashMap<>();
+            if (toHash.isEmpty()) return result;
 
-        for (Path p : toFullHash) {
-            if (cancelled.get()) return result;
+            // Release Phase 1 data — no longer needed
+            bySize.clear();
+
+            MessageDigest md;
             try {
-                md.reset();
-                try (InputStream is = Files.newInputStream(p)) {
-                    int read;
-                    while ((read = is.read(buf)) != -1) {
-                        md.update(buf, 0, read);
+                md = MessageDigest.getInstance("MD5");
+            } catch (Exception e) {
+                AppLogger.warning("MD5 not available: " + e.getMessage());
+                return result;
+            }
+
+            HexFormat hex = HexFormat.of();
+            byte[] buf = new byte[8192];
+            int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 8);
+            executor = Executors.newFixedThreadPool(threadCount);
+
+            // ── Phase 2: quick-hash first 8KB (parallel) ───────────────────
+            if (phaseLabel != null) phaseLabel.accept("Phase 2/3 — Quick hashing…");
+
+            int quickTotal = toHash.size();
+            List<Future<Map.Entry<String, Path>>> quickFutures = new ArrayList<>(quickTotal);
+
+            for (Path p : toHash) {
+                if (cancelled.get()) return result;
+                quickFutures.add(executor.submit(() -> {
+                    if (cancelled.get()) return null;
+                    byte[] localBuf = new byte[8192];
+                    MessageDigest localMd = MessageDigest.getInstance("MD5");
+                    try (InputStream is = Files.newInputStream(p)) {
+                        int read = is.read(localBuf);
+                        localMd.update(localBuf, 0, Math.max(read, 0));
+                        String key = Files.size(p) + ":" + hex.formatHex(localMd.digest());
+                        return Map.entry(key, p);
+                    } catch (Exception e) {
+                        return null;
+                    }
+                }));
+            }
+
+            Map<String, List<Path>> quickGroups = new HashMap<>();
+            int quickProcessed = 0;
+            for (Future<Map.Entry<String, Path>> future : quickFutures) {
+                if (cancelled.get()) return result;
+                try {
+                    Map.Entry<String, Path> entry = future.get();
+                    if (entry != null) {
+                        quickGroups.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
+                                .add(entry.getValue());
+                    }
+                } catch (Exception ignored) {}
+                quickProcessed++;
+                if (progress != null) progress.accept(quickProcessed, quickTotal);
+            }
+
+            if (cancelled.get()) return result;
+
+            // ── Phase 3: full MD5 for groups still having 2+ files (parallel) ──
+            if (phaseLabel != null) phaseLabel.accept("Phase 3/3 — Full hashing…");
+
+            List<Path> toFullHash = new ArrayList<>();
+            for (List<Path> group : quickGroups.values()) {
+                if (group.size() >= 2) {
+                    toFullHash.addAll(group);
+                }
+            }
+
+            // Release Phase 2 data
+            quickGroups.clear();
+
+            int fullTotal = toFullHash.size();
+            int combinedTotal = quickTotal + fullTotal;
+            List<Future<Map.Entry<String, Path>>> fullFutures = new ArrayList<>(fullTotal);
+
+            for (Path p : toFullHash) {
+                if (cancelled.get()) return result;
+                fullFutures.add(executor.submit(() -> {
+                    if (cancelled.get()) return null;
+                    byte[] localBuf = new byte[8192];
+                    MessageDigest localMd = MessageDigest.getInstance("MD5");
+                    try (InputStream is = Files.newInputStream(p)) {
+                        int read;
+                        while ((read = is.read(localBuf)) != -1) {
+                            localMd.update(localBuf, 0, read);
+                        }
+                        return Map.entry(hex.formatHex(localMd.digest()), p);
+                    } catch (Exception e) {
+                        return null;
+                    }
+                }));
+            }
+
+            Map<String, List<Path>> hashGroups = new HashMap<>();
+            int combinedProcessed = quickTotal;
+            for (Future<Map.Entry<String, Path>> future : fullFutures) {
+                if (cancelled.get()) return result;
+                try {
+                    Map.Entry<String, Path> entry = future.get();
+                    if (entry != null) {
+                        hashGroups.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
+                                .add(entry.getValue());
+                    }
+                } catch (Exception ignored) {}
+                combinedProcessed++;
+                if (progress != null) {
+                    progress.accept(combinedProcessed, combinedTotal);
+                }
+            }
+
+            if (cancelled.get()) return result;
+
+            // ── Build result rows — keep newest file per group ─────────────
+            for (Map.Entry<String, List<Path>> entry : hashGroups.entrySet()) {
+                List<Path> group = entry.getValue();
+                String hash = entry.getKey();
+                if (group.size() < 2) continue;
+
+                Path keeper = group.get(0);
+                FileTime newestTime;
+                try {
+                    newestTime = Files.getLastModifiedTime(keeper);
+                } catch (Exception e) {
+                    continue;
+                }
+                for (int i = 1; i < group.size(); i++) {
+                    Path p = group.get(i);
+                    try {
+                        FileTime ft = Files.getLastModifiedTime(p);
+                        if (ft.compareTo(newestTime) > 0) {
+                            newestTime = ft;
+                            keeper = p;
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                List<String> deletablePaths = new ArrayList<>();
+                for (Path p : group) {
+                    if (!p.equals(keeper)) {
+                        deletablePaths.add(p.toAbsolutePath().toString());
                     }
                 }
-                hashGroups.computeIfAbsent(hex.formatHex(md.digest()), k -> new ArrayList<>()).add(p);
-            } catch (Exception ignored) {}
-            combinedProcessed[0]++;
-            if (progress != null) {
-                progress.accept(combinedProcessed[0], combinedTotal);
-            }
-        }
 
-        if (cancelled.get()) return result;
-
-        // Build one row per group — keep the newest file, mark others for deletion
-        for (Map.Entry<String, List<Path>> entry : hashGroups.entrySet()) {
-            List<Path> group = entry.getValue();
-            String hash = entry.getKey();
-            if (group.size() < 2) continue;
-
-            // Find the newest file by last modified time
-            Path keeper = group.get(0);
-            FileTime newestTime;
-            try {
-                newestTime = Files.getLastModifiedTime(keeper);
-            } catch (Exception e) {
-                continue;
-            }
-            for (int i = 1; i < group.size(); i++) {
-                Path p = group.get(i);
                 try {
-                    FileTime ft = Files.getLastModifiedTime(p);
-                    if (ft.compareTo(newestTime) > 0) {
-                        newestTime = ft;
-                        keeper = p;
-                    }
+                    long size = Files.size(keeper);
+                    result.add(new DuplicateFileRow(
+                            keeper.getFileName().toString(),
+                            keeper.toAbsolutePath().toString(),
+                            size,
+                            hash,
+                            group.size(),
+                            deletablePaths
+                    ));
                 } catch (Exception ignored) {}
             }
 
-            List<String> deletablePaths = new ArrayList<>();
-            for (Path p : group) {
-                if (!p.equals(keeper)) {
-                    deletablePaths.add(p.toAbsolutePath().toString());
-                }
+            return result;
+        } catch (Exception e) {
+            AppLogger.warning("Duplicate scan failed: " + e.getMessage());
+            return result;
+        } finally {
+            if (executor != null) {
+                executor.shutdownNow();
             }
-
-            try {
-                long size = Files.size(keeper);
-                result.add(new DuplicateFileRow(
-                        keeper.getFileName().toString(),
-                        keeper.toAbsolutePath().toString(),
-                        size,
-                        hash,
-                        group.size(),
-                        deletablePaths
-                ));
-            } catch (Exception ignored) {}
         }
-
-        return result;
     }
 
     public CleanResult clean(List<DuplicateFileRow> selectedRows) {
