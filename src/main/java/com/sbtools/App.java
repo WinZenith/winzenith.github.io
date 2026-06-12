@@ -79,7 +79,7 @@ public class App extends Application {
         DuplicateFilesTabView duplicateFilesTab = new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin);
         DiskToolsTabView diskToolsTab = new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
         BrowserExtensionsTabView browserExtensionsTab = new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin);
-        NetworkOptimizerTabView networkOptimizerTab = new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin);
+        NetworkOptimizerTabView networkOptimizerTab = new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, settings);
 
         BorderPane root = new BorderPane();
 

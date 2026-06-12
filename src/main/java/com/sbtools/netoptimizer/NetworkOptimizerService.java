@@ -11,10 +11,26 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 public class NetworkOptimizerService {
 
     private final ObjectMapper mapper = new ObjectMapper();
+    private static final Pattern SAFE_NAME = Pattern.compile("^[a-zA-Z0-9 _\\-().]+$");
+
+    private static List<String> powershellCommand(String command) {
+        return List.of("powershell", "-NoProfile", "-Command", command);
+    }
+
+    private String sanitizeName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("Adapter name is required");
+        }
+        if (!SAFE_NAME.matcher(name).matches()) {
+            throw new IllegalArgumentException("Invalid adapter name: " + name);
+        }
+        return name;
+    }
 
     public List<NetworkAdapterRow> listAdapters() {
         List<NetworkAdapterRow> adapters = new ArrayList<>();
@@ -48,20 +64,25 @@ public class NetworkOptimizerService {
         return adapters;
     }
 
-    public boolean applyOptimization(OptimizationPreset preset) {
+    public OperationResult applyOptimization(OptimizationPreset preset) {
         try {
             Path script = PowerShellScripts.resolve("net-optimize.ps1");
             String presetArg = preset.name();
             ProcessResult pr = new ProcessRunner(60).run(
                     ProcessRunner.powershellScript(script.toString(), "-Preset", presetArg));
-            return pr.exitCode() == 0;
+            if (pr.exitCode() != 0) {
+                return OperationResult.fail("Optimization failed with exit code " + pr.exitCode(),
+                        pr.combinedOutput());
+            }
+            return OperationResult.ok(preset.getDisplayName() + " applied successfully.",
+                    pr.stdout().trim());
         } catch (Exception e) {
             AppLogger.warning("Failed to apply optimization: " + e.getMessage());
-            return false;
+            return OperationResult.fail("Failed to apply optimization: " + e.getMessage());
         }
     }
 
-    public boolean flushDnsCache() {
+    public OperationResult flushDnsCache() {
         try {
             Path script = PowerShellScripts.resolve("net-dns-flush.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
@@ -71,16 +92,20 @@ public class NetworkOptimizerService {
                 Map<String, Object> result = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 Object success = result.get("success");
-                return success instanceof Boolean && (Boolean) success;
+                boolean ok = success instanceof Boolean && (Boolean) success;
+                String msg = str(result, "message");
+                return ok ? OperationResult.ok(msg) : OperationResult.fail(msg);
             }
-            return pr.exitCode() == 0;
+            return pr.exitCode() == 0
+                    ? OperationResult.ok("DNS cache flushed.")
+                    : OperationResult.fail("Flush failed with exit code " + pr.exitCode());
         } catch (Exception e) {
             AppLogger.warning("Failed to flush DNS: " + e.getMessage());
-            return false;
+            return OperationResult.fail("Failed to flush DNS: " + e.getMessage());
         }
     }
 
-    public boolean resetNetworkStack() {
+    public OperationResult resetNetworkStack() {
         try {
             Path script = PowerShellScripts.resolve("net-reset.ps1");
             ProcessResult pr = new ProcessRunner(60).run(
@@ -90,71 +115,177 @@ public class NetworkOptimizerService {
                 Map<String, Object> result = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 Object success = result.get("success");
-                return success instanceof Boolean && (Boolean) success;
+                boolean ok = success instanceof Boolean && (Boolean) success;
+                return ok
+                        ? OperationResult.ok("Network stack reset. Reboot required.", stdout)
+                        : OperationResult.fail("Network stack reset failed.", stdout);
             }
-            return pr.exitCode() == 0;
+            return pr.exitCode() == 0
+                    ? OperationResult.ok("Network stack reset. Reboot required.")
+                    : OperationResult.fail("Reset failed with exit code " + pr.exitCode());
         } catch (Exception e) {
             AppLogger.warning("Failed to reset network stack: " + e.getMessage());
-            return false;
+            return OperationResult.fail("Failed to reset network stack: " + e.getMessage());
         }
     }
 
-    public boolean resetWinsock() {
+    public OperationResult resetWinsock() {
         try {
-            ProcessBuilder pb = new ProcessBuilder("netsh", "winsock", "reset");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            p.waitFor();
-            return p.exitValue() == 0;
+            ProcessResult pr = new ProcessRunner(60).run(powershellCommand("netsh winsock reset"));
+            return pr.exitCode() == 0
+                    ? OperationResult.ok("Winsock reset. Reboot recommended.")
+                    : OperationResult.fail("Winsock reset failed.", pr.combinedOutput());
         } catch (Exception e) {
             AppLogger.warning("Failed to reset winsock: " + e.getMessage());
-            return false;
+            return OperationResult.fail("Failed to reset winsock: " + e.getMessage());
         }
     }
 
-    public boolean renewIp(String adapterName) {
+    public OperationResult renewIp(String adapterName) {
+        sanitizeName(adapterName);
         try {
-            ProcessBuilder release = new ProcessBuilder("ipconfig", "/release", adapterName);
-            release.redirectErrorStream(true);
-            Process p1 = release.start();
-            p1.waitFor();
-            ProcessBuilder renew = new ProcessBuilder("ipconfig", "/renew", adapterName);
-            renew.redirectErrorStream(true);
-            Process p2 = renew.start();
-            p2.waitFor();
-            return true;
+            ProcessResult release = new ProcessRunner(30).run(
+                    powershellCommand("ipconfig /release \"" + adapterName + "\""));
+            if (release.exitCode() != 0) {
+                AppLogger.warning("ipconfig /release failed: " + release.combinedOutput());
+            }
+            ProcessResult renew = new ProcessRunner(30).run(
+                    powershellCommand("ipconfig /renew \"" + adapterName + "\""));
+            if (renew.exitCode() != 0) {
+                return OperationResult.fail("IP renewal failed.",
+                        "release: " + release.combinedOutput() + "\nrenew: " + renew.combinedOutput());
+            }
+            return OperationResult.ok("IP address renewed for " + adapterName + ".");
         } catch (Exception e) {
             AppLogger.warning("Failed to renew IP: " + e.getMessage());
-            return false;
+            return OperationResult.fail("Failed to renew IP: " + e.getMessage());
         }
     }
 
-    public boolean setAdapterState(String adapterName, boolean enable) {
+    public OperationResult setAdapterState(String adapterName, boolean enable) {
+        sanitizeName(adapterName);
         try {
             String cmd = enable ? "Enable-NetAdapter" : "Disable-NetAdapter";
-            ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile",
-                    "-Command", cmd + " -Name '" + adapterName + "' -Confirm:$false");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            p.waitFor();
-            return p.exitValue() == 0;
+            ProcessResult pr = new ProcessRunner(30).run(
+                    powershellCommand(cmd + " -Name '" + adapterName + "' -Confirm:$false"));
+            if (pr.exitCode() != 0) {
+                return OperationResult.fail("Failed to " + (enable ? "enable" : "disable") + " adapter.",
+                        pr.combinedOutput());
+            }
+            return OperationResult.ok((enable ? "Enabled" : "Disabled") + " " + adapterName + ".");
         } catch (Exception e) {
             AppLogger.warning("Failed to set adapter state: " + e.getMessage());
-            return false;
+            return OperationResult.fail("Failed to set adapter state: " + e.getMessage());
         }
     }
 
     public String getIpConfigAll() {
         try {
-            ProcessBuilder pb = new ProcessBuilder("ipconfig", "/all");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String out = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-            p.waitFor();
-            return out;
+            ProcessResult pr = new ProcessRunner(30).run(
+                    powershellCommand("ipconfig /all"));
+            return pr.exitCode() == 0 ? pr.stdout() : "Failed to retrieve network information.";
         } catch (Exception e) {
             AppLogger.warning("Failed to get ipconfig: " + e.getMessage());
             return "Failed to retrieve network information.";
+        }
+    }
+
+    public TcpSettings getCurrentTcpSettings() {
+        try {
+            ProcessResult pr = new ProcessRunner(30).run(
+                    powershellCommand("netsh int tcp show global"));
+            return TcpSettings.parse(pr.stdout());
+        } catch (Exception e) {
+            AppLogger.warning("Failed to get TCP settings: " + e.getMessage());
+            return new TcpSettings(Map.of());
+        }
+    }
+
+    public AdapterStatistics getAdapterStatistics(String adapterName) {
+        sanitizeName(adapterName);
+        try {
+            Path script = PowerShellScripts.resolve("net-adapter-stats.ps1");
+            ProcessResult pr = new ProcessRunner(30).run(
+                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", adapterName));
+            String stdout = pr.stdout().trim();
+            if (!stdout.isEmpty()) {
+                Map<String, Object> data = mapper.readValue(stdout,
+                        new TypeReference<Map<String, Object>>() {});
+                return new AdapterStatistics(
+                        adapterName,
+                        longVal(data, "bytesSent"),
+                        longVal(data, "bytesReceived"),
+                        longVal(data, "unicastPacketsSent"),
+                        longVal(data, "unicastPacketsReceived"),
+                        longVal(data, "multicastPacketsSent"),
+                        longVal(data, "multicastPacketsReceived"),
+                        longVal(data, "broadcastPacketsSent"),
+                        longVal(data, "broadcastPacketsReceived"),
+                        longVal(data, "discardedPackets"),
+                        longVal(data, "errorPackets")
+                );
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to get adapter statistics: " + e.getMessage());
+        }
+        return AdapterStatistics.empty(adapterName);
+    }
+
+    public List<String> getCurrentDnsServers(String adapterName) {
+        sanitizeName(adapterName);
+        try {
+            Path script = PowerShellScripts.resolve("net-dns-get.ps1");
+            ProcessResult pr = new ProcessRunner(30).run(
+                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", adapterName));
+            String stdout = pr.stdout().trim();
+            if (!stdout.isEmpty()) {
+                Map<String, Object> data = mapper.readValue(stdout,
+                        new TypeReference<Map<String, Object>>() {});
+                Object dnsObj = data.get("dnsServers");
+                if (dnsObj instanceof List<?> list) {
+                    return list.stream().map(Object::toString).toList();
+                }
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to get DNS servers: " + e.getMessage());
+        }
+        return List.of();
+    }
+
+    public OperationResult setDnsServers(String adapterName, String primaryDns, String secondaryDns) {
+        sanitizeName(adapterName);
+        try {
+            Path script = PowerShellScripts.resolve("net-dns-set.ps1");
+            ProcessResult pr = new ProcessRunner(30).run(
+                    ProcessRunner.powershellScript(script.toString(),
+                            "-AdapterName", adapterName,
+                            "-PrimaryDNS", primaryDns != null ? primaryDns : "",
+                            "-SecondaryDNS", secondaryDns != null ? secondaryDns : ""));
+            String stdout = pr.stdout().trim();
+            if (!stdout.isEmpty()) {
+                Map<String, Object> data = mapper.readValue(stdout,
+                        new TypeReference<Map<String, Object>>() {});
+                Object success = data.get("success");
+                boolean ok = success instanceof Boolean && (Boolean) success;
+                String msg = str(data, "message");
+                return ok ? OperationResult.ok(msg) : OperationResult.fail(msg);
+            }
+            return pr.exitCode() == 0
+                    ? OperationResult.ok("DNS servers updated.")
+                    : OperationResult.fail("DNS update failed with exit code " + pr.exitCode());
+        } catch (Exception e) {
+            AppLogger.warning("Failed to set DNS servers: " + e.getMessage());
+            return OperationResult.fail("Failed to set DNS servers: " + e.getMessage());
+        }
+    }
+
+    private long longVal(Map<String, Object> map, String key) {
+        Object v = map.get(key);
+        if (v instanceof Number n) return n.longValue();
+        try {
+            return Long.parseLong(v != null ? v.toString() : "0");
+        } catch (NumberFormatException e) {
+            return 0;
         }
     }
 
