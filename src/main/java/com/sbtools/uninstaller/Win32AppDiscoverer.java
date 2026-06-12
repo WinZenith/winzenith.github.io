@@ -106,9 +106,11 @@ public class Win32AppDiscoverer {
     private boolean isMicrosoftOrWindows(String publisher, String displayName) {
         String lowerPub = publisher != null ? publisher.toLowerCase() : "";
         String lowerName = displayName != null ? displayName.toLowerCase() : "";
-        return lowerPub.contains("microsoft")
-                || lowerName.contains("microsoft")
-                || lowerName.contains("windows");
+        boolean isMicrosoftPublisher = lowerPub.contains("microsoft");
+        boolean isMicrosoftOrWindowsName = lowerName.startsWith("microsoft ")
+                || lowerName.equals("microsoft windows")
+                || lowerName.matches("(?i)microsoft windows .*");
+        return isMicrosoftPublisher || isMicrosoftOrWindowsName;
     }
 
     private static String getStringValue(HKEY hive, String keyPath, String valueName) {

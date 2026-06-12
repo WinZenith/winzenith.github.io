@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 public class UninstallerService {
 
@@ -346,6 +347,149 @@ public class UninstallerService {
             AppLogger.info("Deleted registry leftover key: " + keyPath);
         } catch (Exception e) {
             AppLogger.warning("Failed to delete registry key: " + keyPath + " - " + e.getMessage());
+        }
+    }
+
+    public record ForceUninstallResult(List<String> summary, List<String> errors) {}
+
+    /**
+     * Forcefully removes an application by killing its processes, deleting install directories,
+     * removing registry entries, and cleaning Start Menu shortcuts — without running the standard uninstaller.
+     */
+    public ForceUninstallResult forceUninstall(InstalledApp app) {
+        List<String> summary = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        String appName = app.getName();
+        String lowerAppName = appName.toLowerCase();
+
+        // Kill all processes matching app name
+        try {
+            Process taskKill = new ProcessBuilder("taskkill", "/f", "/im", appName + ".exe")
+                    .redirectErrorStream(true)
+                    .start();
+            taskKill.waitFor(5, TimeUnit.SECONDS);
+            summary.add("Attempted to kill processes for: " + appName);
+        } catch (Exception e) {
+            errors.add("Failed to kill processes for " + appName + ": " + e.getMessage());
+        }
+
+        // Delete the install directory
+        String installLoc = app.getInstallLocation();
+        if (installLoc != null && !installLoc.isBlank()) {
+            File dir = new File(installLoc);
+            if (dir.exists()) {
+                if (NativeFileHelper.deleteOrQueue(dir)) {
+                    summary.add("Deleted directory: " + installLoc);
+                } else {
+                    errors.add("Scheduled for reboot deletion: " + installLoc);
+                }
+            }
+        }
+
+        // If installLocation is empty, search common directories
+        if (installLoc == null || installLoc.isBlank()) {
+            List<String> roots = new ArrayList<>();
+            addIfNotNull(roots, System.getenv("ProgramFiles"));
+            addIfNotNull(roots, System.getenv("ProgramFiles(x86)"));
+            addIfNotNull(roots, System.getenv("AppData"));
+            addIfNotNull(roots, System.getenv("LocalAppData"));
+
+            for (String root : roots) {
+                File rootDir = new File(root);
+                if (!rootDir.exists() || !rootDir.isDirectory()) continue;
+                File[] children = rootDir.listFiles(File::isDirectory);
+                if (children == null) continue;
+                for (File child : children) {
+                    if (child.getName().toLowerCase().contains(lowerAppName)) {
+                        if (NativeFileHelper.deleteOrQueue(child)) {
+                            summary.add("Deleted directory: " + child.getAbsolutePath());
+                        } else {
+                            errors.add("Scheduled for reboot deletion: " + child.getAbsolutePath());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Delete the registry key at the app's registryKeyPath
+        if (app.isWin32() && !app.getRegistryKeyPath().isEmpty()) {
+            HKEY hive = "HKLM".equalsIgnoreCase(app.getRegistryHive())
+                    ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
+            try {
+                if (Advapi32Util.registryKeyExists(hive, app.getRegistryKeyPath())) {
+                    Advapi32Util.registryDeleteKey(hive, app.getRegistryKeyPath());
+                    summary.add("Deleted registry key: " + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
+                }
+            } catch (Exception e) {
+                errors.add("Failed to delete registry key for " + appName + ": " + e.getMessage());
+            }
+        }
+
+        // Search and delete registry keys under Uninstall paths that contain the app name
+        String[][] uninstallPaths = {
+                {"HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"},
+                {"HKLM", "SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"},
+                {"HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"}
+        };
+
+        for (String[] pathInfo : uninstallPaths) {
+            String hiveLabel = pathInfo[0];
+            String keyPath = pathInfo[1];
+            HKEY hive = "HKLM".equals(hiveLabel) ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
+
+            try {
+                if (!Advapi32Util.registryKeyExists(hive, keyPath)) continue;
+                String[] subkeys = Advapi32Util.registryGetKeys(hive, keyPath);
+                if (subkeys == null) continue;
+
+                for (String subkey : subkeys) {
+                    if (subkey.toLowerCase().contains(lowerAppName)) {
+                        String fullSubKey = keyPath + "\\" + subkey;
+                        String formatted = hiveLabel + "\\" + fullSubKey;
+                        try {
+                            Advapi32Util.registryDeleteKey(hive, fullSubKey);
+                            summary.add("Deleted registry key: " + formatted);
+                        } catch (Exception ex) {
+                            deleteRegistryKeyRecursively(hive, fullSubKey);
+                            summary.add("Deleted registry key: " + formatted);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                errors.add("Failed to scan registry Uninstall path " + hiveLabel + "\\" + keyPath + ": " + e.getMessage());
+            }
+        }
+
+        // Delete Start Menu shortcuts
+        String[] startMenuRoots = {
+                System.getenv("ProgramData") + "\\Microsoft\\Windows\\Start Menu",
+                System.getenv("AppData") + "\\Microsoft\\Windows\\Start Menu"
+        };
+
+        for (String root : startMenuRoots) {
+            if (root == null || root.isBlank()) continue;
+            File startMenuDir = new File(root);
+            if (startMenuDir.exists() && startMenuDir.isDirectory()) {
+                deleteMatchingFiles(startMenuDir, lowerAppName, summary, errors);
+            }
+        }
+
+        return new ForceUninstallResult(summary, errors);
+    }
+
+    private void deleteMatchingFiles(File dir, String lowerName, List<String> summary, List<String> errors) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File file : files) {
+            if (file.getName().toLowerCase().contains(lowerName)) {
+                if (NativeFileHelper.deleteOrQueue(file)) {
+                    summary.add("Deleted: " + file.getAbsolutePath());
+                } else {
+                    errors.add("Scheduled for reboot deletion: " + file.getAbsolutePath());
+                }
+            } else if (file.isDirectory()) {
+                deleteMatchingFiles(file, lowerName, summary, errors);
+            }
         }
     }
 }

@@ -348,6 +348,32 @@
     -fx-font-size: 12px;
 }
 
+/* --- Context Menu --- */
+.context-menu {
+    -fx-background-color: #282a36;
+    -fx-border-color: #44475a;
+    -fx-border-width: 1;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-padding: 4 0 4 0;
+}
+
+.context-menu .menu-item {
+    -fx-padding: 8 16 8 16;
+}
+
+.context-menu .menu-item .label {
+    -fx-text-fill: #f8f8f2;
+}
+
+.context-menu .menu-item:hover {
+    -fx-background-color: #44475a;
+}
+
+.context-menu .menu-item.danger-menu-item .label {
+    -fx-text-fill: #ff5555;
+}
+
 /* --- Tab Pane (if used) --- */
 .tab-pane .tab-header-background {
     -fx-background-color: #1e1f29;

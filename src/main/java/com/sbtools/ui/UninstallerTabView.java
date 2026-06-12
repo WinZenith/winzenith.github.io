@@ -1,20 +1,17 @@
 package com.sbtools.ui;
 
 import com.sbtools.uninstaller.InstalledApp;
-import com.sbtools.uninstaller.NativeFileHelper;
+import com.sbtools.uninstaller.LeftoverItem;
 import com.sbtools.uninstaller.UninstallerService;
+import com.sbtools.util.AppIconResolver;
 import com.sbtools.util.AppLogger;
-import com.sbtools.util.ProcessResult;
 import com.sbtools.util.AppPaths;
-import com.sun.jna.platform.win32.Advapi32Util;
-import com.sun.jna.platform.win32.WinReg;
-import com.sun.jna.platform.win32.WinReg.HKEY;
+import com.sbtools.util.FormatUtils;
+import com.sbtools.util.ProcessResult;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
 import javafx.beans.property.BooleanProperty;
-import javafx.beans.property.SimpleBooleanProperty;
-import javafx.beans.value.ChangeListener;
 import javafx.collections.FXCollections;
-import javafx.collections.ListChangeListener;
 import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
 import javafx.collections.transformation.SortedList;
@@ -23,16 +20,13 @@ import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
-import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.Modality;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
-import java.util.stream.Collectors;
 
 public class UninstallerTabView extends BorderPane {
 
@@ -47,7 +41,7 @@ public class UninstallerTabView extends BorderPane {
     private final Label statusLabel = new Label("Scan system to list installed software.");
     private final ProgressIndicator progress = new ProgressIndicator();
     private final Button scanButton = new Button("Scan");
-    private final Button uninstallButton = new Button("Uninstall Selected");
+    private final Button uninstallButton = new Button("Uninstall");
     private final Button forceUninstallButton = new Button("Force Uninstall");
     private final TextField searchField = new TextField();
 
@@ -57,8 +51,6 @@ public class UninstallerTabView extends BorderPane {
 
     private final TableView<InstalledApp> table = new TableView<>(sortedApps);
 
-    private final ChangeListener<Boolean> checkboxListener = (obs, oldVal, newVal) -> updateButtonStates();
-
     public UninstallerTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
         this.adminCheck = adminCheck;
@@ -66,25 +58,26 @@ public class UninstallerTabView extends BorderPane {
         progress.setVisible(false);
         progress.setMaxSize(24, 24);
 
-        // Scan button
         scanButton.setOnAction(e -> scan());
 
-        // Uninstall button
-        uninstallButton.setOnAction(e -> triggerUninstall());
+        uninstallButton.setOnAction(e -> {
+            InstalledApp selected = table.getSelectionModel().getSelectedItem();
+            if (selected != null) uninstallSingleApp(selected);
+        });
         uninstallButton.setDisable(true);
         uninstallButton.setStyle("-fx-background-color: #2e7d32; -fx-text-fill: white;");
 
-        // Force Uninstall button
-        forceUninstallButton.setOnAction(e -> triggerForceUninstall());
+        forceUninstallButton.setOnAction(e -> {
+            InstalledApp selected = table.getSelectionModel().getSelectedItem();
+            if (selected != null) triggerForceUninstallForApp(selected);
+        });
         forceUninstallButton.setDisable(true);
         forceUninstallButton.getStyleClass().add("danger");
 
-        // Search field
         searchField.setPromptText("Search apps...");
         searchField.setPrefWidth(220);
         searchField.textProperty().addListener((obs, oldVal, newVal) -> applyFilter());
 
-        // Mode toggles
         win32Toggle.setToggleGroup(modeGroup);
         win32Toggle.setSelected(true);
         appxToggle.setToggleGroup(modeGroup);
@@ -98,7 +91,6 @@ public class UninstallerTabView extends BorderPane {
             statusLabel.setText("Scan system to list installed software.");
         });
 
-        // Top toolbar
         HBox top = new HBox(12,
                 win32Toggle, appxToggle,
                 new Separator(javafx.geometry.Orientation.VERTICAL),
@@ -109,29 +101,13 @@ public class UninstallerTabView extends BorderPane {
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
 
-        // Build TableView
         buildTable();
         sortedApps.comparatorProperty().bind(table.comparatorProperty());
 
         setTop(top);
         setCenter(table);
 
-        // Listen for checkbox state changes via list modifications
-        allApps.addListener((ListChangeListener<InstalledApp>) change -> {
-            while (change.next()) {
-                if (change.wasRemoved()) {
-                    for (InstalledApp app : change.getRemoved()) {
-                        app.selectedProperty().removeListener(checkboxListener);
-                    }
-                }
-                if (change.wasAdded()) {
-                    for (InstalledApp app : change.getAddedSubList()) {
-                        app.selectedProperty().addListener(checkboxListener);
-                    }
-                }
-            }
-            updateButtonStates();
-        });
+        table.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> updateButtonStates());
 
         busy.addListener((obs, oldVal, newVal) -> {
             scanButton.setDisable(newVal);
@@ -151,44 +127,6 @@ public class UninstallerTabView extends BorderPane {
 
     private void buildTable() {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-
-        // Checkbox column
-        TableColumn<InstalledApp, InstalledApp> checkCol = new TableColumn<>(" ");
-        checkCol.setPrefWidth(40);
-        checkCol.setMinWidth(40);
-        checkCol.setMaxWidth(40);
-        checkCol.setResizable(false);
-        checkCol.setSortable(false);
-        checkCol.setCellValueFactory(c -> new javafx.beans.property.SimpleObjectProperty<>(c.getValue()));
-        checkCol.setCellFactory(col -> new TableCell<>() {
-            private final CheckBox checkBox = new CheckBox();
-            private InstalledApp previousItem;
-            {
-                checkBox.setStyle("-fx-text-fill: #f8f8f2;");
-            }
-            @Override
-            protected void updateItem(InstalledApp item, boolean empty) {
-                super.updateItem(item, empty);
-                if (empty || item == null) {
-                    if (previousItem != null) {
-                        checkBox.selectedProperty().unbindBidirectional(previousItem.selectedProperty());
-                        previousItem = null;
-                    }
-                    setGraphic(null);
-                    setText(null);
-                } else {
-                    if (previousItem != null && previousItem != item) {
-                        checkBox.selectedProperty().unbindBidirectional(previousItem.selectedProperty());
-                    }
-                    if (checkBox.selectedProperty().isBound()) {
-                        checkBox.selectedProperty().unbind();
-                    }
-                    checkBox.selectedProperty().bindBidirectional(item.selectedProperty());
-                    previousItem = item;
-                    setGraphic(checkBox);
-                }
-            }
-        });
 
         TableColumn<InstalledApp, String> iconCol = new TableColumn<>(" ");
         iconCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(""));
@@ -220,7 +158,7 @@ public class UninstallerTabView extends BorderPane {
                 } else {
                     InstalledApp app = getTableRow().getItem();
                     imageView.setImage(null);
-                    String loc = resolveAppIconPath(app);
+                    String loc = AppIconResolver.resolveAppIconPath(app);
                     if (loc != null) {
                         imageView.setImage(com.sbtools.util.IconExtractor.extractIcon(loc));
                     }
@@ -247,7 +185,7 @@ public class UninstallerTabView extends BorderPane {
         nameCol.setCellFactory(textCellFactory);
 
         TableColumn<InstalledApp, String> sizeCol = new TableColumn<>("Size");
-        sizeCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(formatSize(c.getValue().getEstimatedSize())));
+        sizeCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(FormatUtils.formatSize(c.getValue().getEstimatedSize())));
         sizeCol.setPrefWidth(100);
         sizeCol.setCellFactory(textCellFactory);
 
@@ -262,7 +200,7 @@ public class UninstallerTabView extends BorderPane {
         typeCol.setCellFactory(textCellFactory);
 
         TableColumn<InstalledApp, String> dateCol = new TableColumn<>("Install Date");
-        dateCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(formatDate(c.getValue().getInstallDate())));
+        dateCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(FormatUtils.formatDate(c.getValue().getInstallDate())));
         dateCol.setPrefWidth(140);
         dateCol.setCellFactory(textCellFactory);
 
@@ -271,103 +209,30 @@ public class UninstallerTabView extends BorderPane {
         publisherCol.setPrefWidth(200);
         publisherCol.setCellFactory(textCellFactory);
 
-        table.getColumns().addAll(checkCol, iconCol, nameCol, sizeCol, versionCol, typeCol, dateCol, publisherCol);
+        table.getColumns().addAll(iconCol, nameCol, sizeCol, versionCol, typeCol, dateCol, publisherCol);
 
         table.setRowFactory(tv -> {
             TableRow<InstalledApp> row = new TableRow<>();
             row.setMinHeight(28);
             row.setPrefHeight(28);
-            row.setOnMouseClicked(event -> {
-                if (event.getClickCount() == 2 && (!row.isEmpty())) {
-                    uninstallSingleApp(row.getItem());
-                }
-            });
+
+            MenuItem uninstallItem = new MenuItem("Uninstall");
+            uninstallItem.setOnAction(e -> uninstallSingleApp(row.getItem()));
+
+            MenuItem forceUninstallItem = new MenuItem("Force Uninstall");
+            forceUninstallItem.getStyleClass().add("danger-menu-item");
+            forceUninstallItem.setOnAction(e -> triggerForceUninstallForApp(row.getItem()));
+
+            ContextMenu contextMenu = new ContextMenu(uninstallItem, forceUninstallItem);
+
+            row.contextMenuProperty().bind(
+                    Bindings.when(row.emptyProperty())
+                            .then((ContextMenu) null)
+                            .otherwise(contextMenu)
+            );
+
             return row;
         });
-    }
-
-    private static String resolveAppIconPath(InstalledApp app) {
-        String loc = app.getInstallLocation();
-        if (loc != null && !loc.isBlank()) {
-            File file = new File(loc);
-            if (file.isDirectory()) {
-                String exe = findFirstExe(file);
-                if (exe != null) return exe;
-            } else if (file.isFile() && loc.toLowerCase().endsWith(".exe")) {
-                return loc;
-            }
-        }
-        if (app.isWin32()) {
-            String uninstallStr = app.getUninstallString();
-            if (uninstallStr != null && !uninstallStr.isBlank()) {
-                String exePath = extractExeFromUninstallString(uninstallStr);
-                if (exePath != null) return exePath;
-            }
-        }
-        return null;
-    }
-
-    private static String findFirstExe(File dir) {
-        File[] topExes = dir.listFiles(f -> f.isFile() && f.getName().toLowerCase().endsWith(".exe"));
-        if (topExes != null && topExes.length > 0) {
-            return topExes[0].getAbsolutePath();
-        }
-        File[] subDirs = dir.listFiles(File::isDirectory);
-        if (subDirs != null) {
-            for (File subDir : subDirs) {
-                File[] subExes = subDir.listFiles(f -> f.isFile() && f.getName().toLowerCase().endsWith(".exe"));
-                if (subExes != null && subExes.length > 0) {
-                    return subExes[0].getAbsolutePath();
-                }
-            }
-        }
-        return null;
-    }
-
-    private static String extractExeFromUninstallString(String uninstallStr) {
-        String path = uninstallStr.trim();
-        if (path.startsWith("\"")) {
-            int end = path.indexOf("\"", 1);
-            if (end > 1) {
-                path = path.substring(1, end);
-            }
-        } else {
-            int space = path.indexOf(' ');
-            if (space > 0) {
-                path = path.substring(0, space);
-            }
-        }
-        if (path.toLowerCase().endsWith(".exe")) {
-            File f = new File(path);
-            if (f.isFile()) return f.getAbsolutePath();
-        }
-        return null;
-    }
-
-    private String formatSize(int sizeKB) {
-        if (sizeKB <= 0) return "";
-        if (sizeKB >= 1024 * 1024) {
-            return String.format("%.2f GB", sizeKB / (1024.0 * 1024.0));
-        } else if (sizeKB >= 1024) {
-            return String.format("%.2f MB", sizeKB / 1024.0);
-        } else {
-            return sizeKB + " KB";
-        }
-    }
-
-    private String formatDate(String dateStr) {
-        if (dateStr == null || dateStr.length() < 8) return "";
-        try {
-            String year = dateStr.substring(0, 4);
-            String month = dateStr.substring(4, 6);
-            String day = dateStr.substring(6, 8);
-            String time = dateStr.length() >= 14
-                    ? " " + dateStr.substring(8, 10) + ":" + dateStr.substring(10, 12) + ":" + dateStr.substring(12, 14)
-                    : "";
-            return year + "-" + month + "-" + day + time;
-        } catch (Exception e) {
-            return dateStr;
-        }
     }
 
     private void applyFilter() {
@@ -424,7 +289,7 @@ public class UninstallerTabView extends BorderPane {
     }
 
     private void updateButtonStates() {
-        boolean hasSelection = allApps.stream().anyMatch(InstalledApp::isSelected);
+        boolean hasSelection = table.getSelectionModel().getSelectedItem() != null;
         boolean isBusy = busy.get();
         uninstallButton.setDisable(!hasSelection || isBusy);
         forceUninstallButton.setDisable(!hasSelection || isBusy);
@@ -452,87 +317,6 @@ public class UninstallerTabView extends BorderPane {
                 runUninstallWizard(selected);
             }
         }
-    }
-
-    private void triggerUninstall() {
-        List<InstalledApp> checked = allApps.stream()
-                .filter(InstalledApp::isSelected).collect(Collectors.toList());
-        if (checked.isEmpty() || busy.get()) return;
-
-        if (checked.size() == 1) {
-            uninstallSingleApp(checked.get(0));
-            return;
-        }
-
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle("Confirm Bulk Uninstall");
-        confirm.setHeaderText("Uninstall " + checked.size() + " applications?");
-        StringBuilder sb = new StringBuilder();
-        for (InstalledApp app : checked) {
-            sb.append("- ").append(app.getName()).append("\n");
-        }
-        confirm.setContentText("The following applications will be uninstalled:\n\n" + sb.toString());
-        confirm.initModality(Modality.APPLICATION_MODAL);
-        if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
-
-        Alert restorePointDialog = new Alert(Alert.AlertType.CONFIRMATION);
-        restorePointDialog.setTitle("System Restore Point");
-        restorePointDialog.setHeaderText("Create a restore point?");
-        restorePointDialog.setContentText("Would you like to create a System Restore Point before uninstalling?");
-        restorePointDialog.initModality(Modality.APPLICATION_MODAL);
-
-        boolean createRp = restorePointDialog.showAndWait().orElse(null) == ButtonType.OK;
-        runBulkUninstall(checked, createRp);
-    }
-
-    private void runBulkUninstall(List<InstalledApp> apps, boolean createRestorePoint) {
-        busy.set(true);
-        progress.setVisible(true);
-        statusLabel.setText("Starting bulk uninstall...");
-
-        new Thread(() -> {
-            try {
-                if (createRestorePoint) {
-                    new com.sbtools.util.ProcessRunner(120).run(
-                            List.of("powershell.exe", "-Command",
-                                    "Checkpoint-Computer -Description 'Before bulk uninstall' -RestorePointType MODIFY_SETTINGS"));
-                }
-
-                for (int i = 0; i < apps.size(); i++) {
-                    InstalledApp app = apps.get(i);
-                    final int idx = i;
-                    final int total = apps.size();
-
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Uninstalling (" + (idx + 1) + "/" + total + "): " + app.getName());
-                    });
-
-                    try {
-                        AppLogger.info("Starting uninstaller for: " + app.getName());
-                        ProcessResult result = service.runUninstaller(app);
-                        AppLogger.info("Uninstaller completed with exit code: " + result.exitCode());
-                    } catch (Exception e) {
-                        AppLogger.error("Failed to uninstall " + app.getName(), e);
-                    }
-                }
-
-                Platform.runLater(() -> {
-                    statusLabel.setText("Bulk uninstall completed.");
-                    new Alert(Alert.AlertType.INFORMATION, "Bulk uninstall completed for " + apps.size() + " application(s).").showAndWait();
-                });
-            } catch (Exception e) {
-                AppLogger.error("Bulk uninstall failed", e);
-                Platform.runLater(() -> {
-                    new Alert(Alert.AlertType.ERROR, "Bulk uninstall failed:\n" + e.getMessage()).showAndWait();
-                });
-            } finally {
-                Platform.runLater(() -> {
-                    busy.set(false);
-                    progress.setVisible(false);
-                    scan();
-                });
-            }
-        }, "bulk-uninstall").start();
     }
 
     private void runUninstallWithRestorePoint(InstalledApp app) {
@@ -793,256 +577,63 @@ public class UninstallerTabView extends BorderPane {
         return listView;
     }
 
-    private void triggerForceUninstall() {
-        List<InstalledApp> selected = allApps.stream()
-                .filter(InstalledApp::isSelected).collect(Collectors.toList());
-        if (selected.isEmpty() || busy.get()) return;
+    private void triggerForceUninstallForApp(InstalledApp app) {
+        if (app == null || busy.get()) return;
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Confirm Force Uninstall");
-        confirm.setHeaderText("Force remove " + selected.size() + " app(s)?");
-        StringBuilder sb = new StringBuilder();
-        for (InstalledApp app : selected) {
-            sb.append("- ").append(app.getName()).append("\n");
-        }
-        confirm.setContentText("This will forcefully remove all traces of the selected applications without running the standard uninstaller.\n\n" +
+        confirm.setHeaderText("Force remove " + app.getName() + "?");
+        confirm.setContentText("This will forcefully remove all traces of " + app.getName() + " without running the standard uninstaller.\n\n" +
                 "This includes: killing processes, deleting files, removing registry entries, and deleting Start Menu shortcuts.\n\n" +
-                "This action cannot be undone!\n\n" + sb.toString());
+                "This action cannot be undone!");
         confirm.initModality(Modality.APPLICATION_MODAL);
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
 
         busy.set(true);
         progress.setVisible(true);
-        statusLabel.setText("Force uninstalling...");
+        statusLabel.setText("Force uninstalling " + app.getName() + "...");
 
         new Thread(() -> {
-            List<String> summary = new ArrayList<>();
-            List<String> errors = new ArrayList<>();
-
-            for (InstalledApp app : selected) {
-                try {
-                    forceUninstallApp(app, summary, errors);
-                } catch (Exception e) {
-                    errors.add(app.getName() + ": " + e.getMessage());
-                }
+            UninstallerService.ForceUninstallResult result;
+            try {
+                result = service.forceUninstall(app);
+            } catch (Exception e) {
+                result = new UninstallerService.ForceUninstallResult(List.of(), List.of(app.getName() + ": " + e.getMessage()));
             }
-
+            final UninstallerService.ForceUninstallResult finalResult = result;
             Platform.runLater(() -> {
                 busy.set(false);
                 progress.setVisible(false);
-                showForceUninstallSummary(summary, errors);
+                showForceUninstallSummary(finalResult);
                 scan();
             });
         }, "force-uninstall").start();
     }
 
-    private void forceUninstallApp(InstalledApp app, List<String> summary, List<String> errors) {
-        String appName = app.getName();
-        String lowerAppName = appName.toLowerCase();
-
-        // a. Kill all processes matching app name
-        try {
-            Process taskKill = new ProcessBuilder("taskkill", "/f", "/im", appName + ".exe")
-                    .redirectErrorStream(true)
-                    .start();
-            taskKill.waitFor(5, TimeUnit.SECONDS);
-            summary.add("Attempted to kill processes for: " + appName);
-        } catch (Exception e) {
-            errors.add("Failed to kill processes for " + appName + ": " + e.getMessage());
-        }
-
-        // b. Delete the install directory
-        String installLoc = app.getInstallLocation();
-        if (installLoc != null && !installLoc.isBlank()) {
-            File dir = new File(installLoc);
-            if (dir.exists()) {
-                if (NativeFileHelper.deleteOrQueue(dir)) {
-                    summary.add("Deleted directory: " + installLoc);
-                } else {
-                    errors.add("Failed to delete directory: " + installLoc);
-                }
-            }
-        }
-
-        // c. If installLocation is empty, search common directories
-        if (installLoc == null || installLoc.isBlank()) {
-            List<String> roots = new ArrayList<>();
-            addIfNotNull(roots, System.getenv("ProgramFiles"));
-            addIfNotNull(roots, System.getenv("ProgramFiles(x86)"));
-            addIfNotNull(roots, System.getenv("AppData"));
-            addIfNotNull(roots, System.getenv("LocalAppData"));
-
-            for (String root : roots) {
-                File rootDir = new File(root);
-                if (!rootDir.exists() || !rootDir.isDirectory()) continue;
-                File[] children = rootDir.listFiles(File::isDirectory);
-                if (children == null) continue;
-                for (File child : children) {
-                    if (child.getName().toLowerCase().contains(lowerAppName)) {
-                        if (NativeFileHelper.deleteOrQueue(child)) {
-                            summary.add("Deleted directory: " + child.getAbsolutePath());
-                        } else {
-                            errors.add("Failed to delete: " + child.getAbsolutePath());
-                        }
-                    }
-                }
-            }
-        }
-
-        // d. Delete the registry key at the app's registryKeyPath
-        if (app.isWin32() && !app.getRegistryKeyPath().isEmpty()) {
-            HKEY hive = "HKLM".equalsIgnoreCase(app.getRegistryHive())
-                    ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
-            try {
-                if (Advapi32Util.registryKeyExists(hive, app.getRegistryKeyPath())) {
-                    Advapi32Util.registryDeleteKey(hive, app.getRegistryKeyPath());
-                    summary.add("Deleted registry key: " + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
-                }
-            } catch (Exception e) {
-                errors.add("Failed to delete registry key for " + appName + ": " + e.getMessage());
-            }
-        }
-
-        // e. Search and delete registry keys under Uninstall paths that contain the app name
-        String[][] uninstallPaths = {
-                {"HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"},
-                {"HKLM", "SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"},
-                {"HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"}
-        };
-
-        for (String[] pathInfo : uninstallPaths) {
-            String hiveLabel = pathInfo[0];
-            String keyPath = pathInfo[1];
-            HKEY hive = "HKLM".equals(hiveLabel) ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
-
-            try {
-                if (!Advapi32Util.registryKeyExists(hive, keyPath)) continue;
-                String[] subkeys = Advapi32Util.registryGetKeys(hive, keyPath);
-                if (subkeys == null) continue;
-
-                for (String subkey : subkeys) {
-                    if (subkey.toLowerCase().contains(lowerAppName)) {
-                        String fullSubKey = keyPath + "\\" + subkey;
-                        String formatted = hiveLabel + "\\" + fullSubKey;
-                        try {
-                            Advapi32Util.registryDeleteKey(hive, fullSubKey);
-                            summary.add("Deleted registry key: " + formatted);
-                        } catch (Exception ex) {
-                            // Key may have subkeys; try recursive deletion
-                            deleteRegistryKeyRecursively(hive, fullSubKey, summary, errors);
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                errors.add("Failed to scan registry Uninstall path " + hiveLabel + "\\" + keyPath + ": " + e.getMessage());
-            }
-        }
-
-        // f. Delete Start Menu shortcuts
-        String[] startMenuRoots = {
-                System.getenv("ProgramData") + "\\Microsoft\\Windows\\Start Menu",
-                System.getenv("AppData") + "\\Microsoft\\Windows\\Start Menu"
-        };
-
-        for (String root : startMenuRoots) {
-            if (root == null || root.isBlank()) continue;
-            File startMenuDir = new File(root);
-            if (startMenuDir.exists() && startMenuDir.isDirectory()) {
-                deleteMatchingFiles(startMenuDir, lowerAppName, summary, errors);
-            }
-        }
-    }
-
-    private void deleteMatchingFiles(File dir, String lowerName, List<String> summary, List<String> errors) {
-        File[] files = dir.listFiles();
-        if (files == null) return;
-        for (File file : files) {
-            if (file.getName().toLowerCase().contains(lowerName)) {
-                if (NativeFileHelper.deleteOrQueue(file)) {
-                    summary.add("Deleted: " + file.getAbsolutePath());
-                } else {
-                    errors.add("Failed to delete: " + file.getAbsolutePath());
-                }
-            } else if (file.isDirectory()) {
-                deleteMatchingFiles(file, lowerName, summary, errors);
-            }
-        }
-    }
-
-    private void deleteRegistryKeyRecursively(HKEY hive, String keyPath, List<String> summary, List<String> errors) {
-        try {
-            if (!Advapi32Util.registryKeyExists(hive, keyPath)) return;
-            String[] subkeys = Advapi32Util.registryGetKeys(hive, keyPath);
-            if (subkeys != null) {
-                for (String subkey : subkeys) {
-                    deleteRegistryKeyRecursively(hive, keyPath + "\\" + subkey, summary, errors);
-                }
-            }
-            Advapi32Util.registryDeleteKey(hive, keyPath);
-            summary.add("Deleted registry key: " + keyPath);
-        } catch (Exception e) {
-            errors.add("Failed to delete registry key: " + keyPath + " - " + e.getMessage());
-        }
-    }
-
-    private void showForceUninstallSummary(List<String> summary, List<String> errors) {
-        String title = "Force Uninstall Summary";
+    private void showForceUninstallSummary(UninstallerService.ForceUninstallResult result) {
         StringBuilder content = new StringBuilder();
 
-        if (!summary.isEmpty()) {
+        if (!result.summary().isEmpty()) {
             content.append("Actions completed:\n");
-            for (String s : summary) {
+            for (String s : result.summary()) {
                 content.append("  \u2022 ").append(s).append("\n");
             }
         }
 
-        if (!errors.isEmpty()) {
+        if (!result.errors().isEmpty()) {
             if (!content.isEmpty()) content.append("\n");
             content.append("Errors:\n");
-            for (String e : errors) {
+            for (String e : result.errors()) {
                 content.append("  \u2022 ").append(e).append("\n");
             }
         }
 
-        Alert alert = new Alert(errors.isEmpty() ? Alert.AlertType.INFORMATION : Alert.AlertType.WARNING);
-        alert.setTitle(title);
+        Alert alert = new Alert(result.errors().isEmpty() ? Alert.AlertType.INFORMATION : Alert.AlertType.WARNING);
+        alert.setTitle("Force Uninstall Summary");
         alert.setHeaderText("Force uninstall completed.");
         alert.setContentText(content.toString());
         alert.initModality(Modality.APPLICATION_MODAL);
         alert.getDialogPane().setPrefWidth(600);
         alert.showAndWait();
-    }
-
-    private void addIfNotNull(List<String> list, String value) {
-        if (value != null && !value.isBlank()) {
-            list.add(value);
-        }
-    }
-
-    public static class LeftoverItem {
-        private final BooleanProperty selected = new SimpleBooleanProperty(true);
-        private final String path;
-        private final boolean registry;
-
-        public LeftoverItem(String path, boolean registry) {
-            this.path = path;
-            this.registry = registry;
-        }
-
-        public BooleanProperty selectedProperty() {
-            return selected;
-        }
-
-        public boolean isSelected() {
-            return selected.get();
-        }
-
-        public String getPath() {
-            return path;
-        }
-
-        public boolean isRegistry() {
-            return registry;
-        }
     }
 }
