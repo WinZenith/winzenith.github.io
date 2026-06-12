@@ -18,30 +18,22 @@ $optOut = & Optimize-Volume -DriveLetter $drive -Analyze 4>$null 2>&1
 foreach ($line in $optOut) {
     if ($line -isnot [string]) { continue }
     if ($line -match 'Total fragmented space\s*:\s*([\d,]+)\s*(KB|MB|GB|Bytes)') {
-        $val = $matches[1] -replace ',', ''
-        $unit = $matches[2]
-        switch ($unit) {
-            'Bytes' { $fragmentsFound = [long]$val }
-            'KB'    { $fragmentsFound = [long]$val * 1024 }
-            'MB'    { $fragmentsFound = [long]$val * 1024 * 1024 }
-            'GB'    { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
-        }
-    }
-    if ($line -match 'Total fragmentation\s*:\s*([\d,]+)\s*(KB|MB|GB|Bytes)') {
-        $val = $matches[1] -replace ',', ''
-        $unit = $matches[2]
-        switch ($unit) {
-            'Bytes' { $fragmentsFound = [long]$val }
-            'KB'    { $fragmentsFound = [long]$val * 1024 }
-            'MB'    { $fragmentsFound = [long]$val * 1024 * 1024 }
-            'GB'    { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
+        if ($fragmentsFound -eq 0) {
+            $val = $matches[1] -replace ',', ''
+            $unit = $matches[2]
+            switch ($unit) {
+                'Bytes' { $fragmentsFound = [long]$val }
+                'KB'    { $fragmentsFound = [long]$val * 1024 }
+                'MB'    { $fragmentsFound = [long]$val * 1024 * 1024 }
+                'GB'    { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
+            }
         }
     }
     if ($line -match 'Fragmentation percentage\s*:\s*([\d]+)') {
-        $fragmentationPercent = [int]$matches[1]
+        if ($fragmentationPercent -eq 0) { $fragmentationPercent = [int]$matches[1] }
     }
     if ($line -match 'Fragmentation\s*:\s*([\d]+)\s*%') {
-        $fragmentationPercent = [int]$matches[1]
+        if ($fragmentationPercent -eq 0) { $fragmentationPercent = [int]$matches[1] }
     }
     if ($line -match 'Fragmented files\s*:\s*([\d]+)') {
         $fragmentedFileCount = [int]$matches[1]
@@ -61,7 +53,7 @@ foreach ($line in $optOut) {
 $defragOut = & defrag ${drive}: /A 2>&1 | Out-String
 if ($defragOut) {
     # Parse "Total fragmented space" alternative format
-    if ($defragOut -match 'Fragmented space\s*:\s*([\d,]+)\s*(bytes|KB|MB|GB)') {
+    if ($fragmentsFound -eq 0 -and $defragOut -match 'Fragmented space\s*:\s*([\d,]+)\s*(bytes|KB|MB|GB)') {
         $val = $matches[1] -replace ',', ''
         $unit = $matches[2]
         switch ($unit) {
@@ -71,7 +63,7 @@ if ($defragOut) {
             'GB'    { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
         }
     }
-    if ($defragOut -match 'Fragmentation\s*:\s*([\d]+)\s*%') {
+    if ($fragmentationPercent -eq 0 -and $defragOut -match 'Fragmentation\s*:\s*([\d]+)\s*%') {
         $fragmentationPercent = [int]$matches[1]
     }
     if ($fragmentationPercent -eq 0 -and $defragOut -match '\((\d+)\s*%\)') {

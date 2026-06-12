@@ -20,7 +20,7 @@ function SelectAction {
     param([string]$m)
     switch ($m.ToUpper()) {
         'TRIM'       { return @{ Cmd = "Optimize-Volume -DriveLetter $drive -ReTrim -Verbose"; Phases = 1 } }
-        'FAST'       { return @{ Cmd = "Optimize-Volume -DriveLetter $drive -Defrag -GaringFlags 1 -Verbose"; Phases = 2 } }
+        'FAST'       { return @{ Cmd = "Optimize-Volume -DriveLetter $drive -Defrag -ReGatheringFlags 1 -Verbose"; Phases = 2 } }
         'FULL'       { return @{ Cmd = "Optimize-Volume -DriveLetter $drive -Defrag -Verbose"; Phases = 3 } }
         'FREE_SPACE' { return @{ Cmd = "Optimize-Volume -DriveLetter $drive -FreeSpace -Verbose"; Phases = 1 } }
         default { throw "Unknown mode: $m" }
