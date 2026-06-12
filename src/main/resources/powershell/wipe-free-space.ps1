@@ -1,4 +1,4 @@
-param([string[]]$DriveLetters, [string]$StopFlagPath = "")
+param([string[]]$DriveLetters, [string]$StopFlagPath = "", [int]$PassCount = 3)
 $ErrorActionPreference = 'Continue'
 $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 $tempFiles = @()
@@ -42,7 +42,7 @@ foreach ($driveLetter in $DriveLetters) {
 
     $volume = Get-PSDrive -Name $drive -ErrorAction SilentlyContinue
     if (-not $volume) {
-        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses 3 -done $true -message "Drive not found: $driveLetter"
+        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -message "Drive not found: $driveLetter"
         continue
     }
 
@@ -50,7 +50,7 @@ foreach ($driveLetter in $DriveLetters) {
     $totalToWrite = [Math]::Max(0, [Math]::Min(($freeBytes - $reserveBytes), $maxWriteBytes))
 
     if ($totalToWrite -le 0) {
-        Write-ProgressJson -driveLetter $driveLetter -percent 100 -pass 3 -totalPasses 3 -done $true -message "Insufficient free space on $driveLetter"
+        Write-ProgressJson -driveLetter $driveLetter -percent 100 -pass $PassCount -totalPasses $PassCount -done $true -message "Insufficient free space on $driveLetter"
         continue
     }
 
@@ -58,12 +58,12 @@ foreach ($driveLetter in $DriveLetters) {
     $tempFiles += $tempFile
     $stream = $null
 
-    Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses 3 -tempFile $tempFile
+    Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -tempFile $tempFile
 
     try {
         $stream = [System.IO.File]::OpenWrite($tempFile)
 
-        for ($pass = 1; $pass -le 3; $pass++) {
+        for ($pass = 1; $pass -le $PassCount; $pass++) {
             if (Test-ShouldStop) { break }
             $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
             $remaining = $totalToWrite
@@ -75,10 +75,13 @@ foreach ($driveLetter in $DriveLetters) {
                 $chunk = $buffer
                 if ($chunkSize -lt $bufferSize) { $chunk = New-Object byte[] $chunkSize }
 
-                if ($pass -eq 2) {
+                $passType = ($pass - 1) % 3
+                if ($passType -eq 1) {
                     for ($i = 0; $i -lt $chunkSize; $i++) { $chunk[$i] = 0xFF }
-                } elseif ($pass -eq 3) {
+                } elseif ($passType -eq 2) {
                     $rng.GetBytes($chunk)
+                } else {
+                    [Array]::Clear($chunk, 0, $chunkSize)
                 }
 
                 $stream.Write($chunk, 0, $chunkSize)
@@ -86,27 +89,27 @@ foreach ($driveLetter in $DriveLetters) {
                 $remaining -= $chunkSize
                 $written += $chunkSize
                 $percent = [int](($written * 100) / $totalToWrite)
-                Write-ProgressJson -driveLetter $driveLetter -percent $percent -pass $pass -totalPasses 3 -tempFile $tempFile
+                Write-ProgressJson -driveLetter $driveLetter -percent $percent -pass $pass -totalPasses $PassCount -tempFile $tempFile
             }
 
             if (-not (Test-ShouldStop)) {
-                Write-ProgressJson -driveLetter $driveLetter -percent 100 -pass $pass -totalPasses 3 -tempFile $tempFile
+                Write-ProgressJson -driveLetter $driveLetter -percent 100 -pass $pass -totalPasses $PassCount -tempFile $tempFile
             }
         }
 
         $stream.Close(); $stream = $null
     } catch {
-        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses 3 -done $true -tempFile $tempFile -message $_.Exception.Message
+        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -tempFile $tempFile -message $_.Exception.Message
     } finally {
         if ($stream) { try { $stream.Close() } catch {} }
     }
 
     if (-not (Test-ShouldStop)) {
         Cleanup-TempFiles
-        Write-ProgressJson -driveLetter $driveLetter -percent 100 -pass 3 -totalPasses 3 -done $true -tempFile $tempFile -message "Wipe completed on $driveLetter"
+        Write-ProgressJson -driveLetter $driveLetter -percent 100 -pass $PassCount -totalPasses $PassCount -done $true -tempFile $tempFile -message "Wipe completed on $driveLetter"
     } else {
         Cleanup-TempFiles
-        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses 3 -done $true -tempFile $tempFile -message "Stopped by user on $driveLetter"
+        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -tempFile $tempFile -message "Stopped by user on $driveLetter"
     }
 }
 

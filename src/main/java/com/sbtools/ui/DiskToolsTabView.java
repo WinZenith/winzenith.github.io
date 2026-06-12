@@ -7,6 +7,7 @@ import com.sbtools.shredder.ShredderResult;
 import com.sbtools.shredder.ShredderService;
 import com.sbtools.shredder.WipeProgress;
 import com.sbtools.util.AppLogger;
+import com.sbtools.util.AppPaths;
 
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
@@ -92,7 +93,13 @@ public class DiskToolsTabView extends BorderPane {
     private final ObservableList<ShredderFileEntry> shredderEntries = FXCollections.observableArrayList();
     private final TextField filePathField = new TextField();
     private final Button browseBtn = new Button("Browse...");
+    private final Button addFilesBtn = new Button("Add Files");
     private final Button secureDeleteBtn = new Button("Secure Delete");
+    private final Button deleteAllBtn = new Button("Delete All");
+    private final ProgressBar secureDeleteProgress = new ProgressBar(0);
+    private final Label secureDeleteStatus = new Label();
+    private final ComboBox<String> overwritePresetCombo = new ComboBox<>(
+            FXCollections.observableArrayList("Quick (1 pass)", "Standard (3 passes)", "Deep (7 passes)"));
 
     private final TableView<DriveInfo> wipeDriveTable = new TableView<>();
     private final ObservableList<DriveInfo> wipeDrives = FXCollections.observableArrayList();
@@ -661,6 +668,16 @@ public class DiskToolsTabView extends BorderPane {
         warning.setStyle("-fx-font-weight: bold; -fx-font-size: 13px; -fx-background-color: #ff555522; "
                 + "-fx-border-color: #ff5555; -fx-border-width: 1; -fx-background-radius: 4; -fx-border-radius: 4;");
 
+        if (!AppPaths.isWindows()) {
+            Label notAvailable = new Label("Secure Erase is only available on Windows.");
+            notAvailable.getStyleClass().addAll("label", "text-muted");
+            notAvailable.setWrapText(true);
+            notAvailable.setPadding(new Insets(20));
+            VBox content = new VBox(12, warning, notAvailable);
+            content.setPadding(new Insets(0));
+            return content;
+        }
+
         VBox fileSection = buildFileDeletionSection();
         VBox wipeSection = buildFreeSpaceWipeSection();
 
@@ -684,19 +701,72 @@ public class DiskToolsTabView extends BorderPane {
         browseBtn.setOnAction(e -> {
             FileChooser fc = new FileChooser();
             fc.setTitle("Select file to securely delete");
+            fc.getExtensionFilters().addAll(
+                    new FileChooser.ExtensionFilter("All Files", "*.*"),
+                    new FileChooser.ExtensionFilter("Documents", "*.pdf", "*.doc", "*.docx", "*.txt", "*.rtf", "*.odt"),
+                    new FileChooser.ExtensionFilter("Images", "*.jpg", "*.jpeg", "*.png", "*.gif", "*.bmp", "*.tiff"),
+                    new FileChooser.ExtensionFilter("Archives", "*.zip", "*.rar", "*.7z", "*.tar", "*.gz"),
+                    new FileChooser.ExtensionFilter("Executables", "*.exe", "*.msi", "*.bat", "*.cmd", "*.ps1")
+            );
             File f = fc.showOpenDialog(getScene() != null ? getScene().getWindow() : null);
             if (f != null) {
                 filePathField.setText(f.getAbsolutePath());
                 secureDeleteBtn.setDisable(false);
             }
         });
+        browseBtn.setTooltip(new Tooltip("Browse for a single file to securely delete"));
+
+        addFilesBtn.setOnAction(e -> {
+            FileChooser fc = new FileChooser();
+            fc.setTitle("Select files to securely delete");
+            fc.getExtensionFilters().addAll(
+                    new FileChooser.ExtensionFilter("All Files", "*.*"),
+                    new FileChooser.ExtensionFilter("Documents", "*.pdf", "*.doc", "*.docx", "*.txt", "*.rtf", "*.odt"),
+                    new FileChooser.ExtensionFilter("Images", "*.jpg", "*.jpeg", "*.png", "*.gif", "*.bmp", "*.tiff"),
+                    new FileChooser.ExtensionFilter("Archives", "*.zip", "*.rar", "*.7z", "*.tar", "*.gz"),
+                    new FileChooser.ExtensionFilter("Executables", "*.exe", "*.msi", "*.bat", "*.cmd", "*.ps1")
+            );
+            List<File> files = fc.showOpenMultipleDialog(getScene() != null ? getScene().getWindow() : null);
+            if (files != null && !files.isEmpty()) {
+                for (File file : files) {
+                    boolean exists = shredderEntries.stream()
+                            .anyMatch(e2 -> e2.getFilePath().equals(file.getAbsolutePath()));
+                    if (!exists) {
+                        ShredderFileEntry entry = new ShredderFileEntry(file.getAbsolutePath(), file.length());
+                        entry.setStatusEnum(ShredderFileEntry.Status.PENDING);
+                        shredderEntries.add(entry);
+                    }
+                }
+                updateDeleteButtons();
+            }
+        });
+        addFilesBtn.setTooltip(new Tooltip("Add multiple files for batch secure deletion"));
 
         secureDeleteBtn.setDisable(true);
         secureDeleteBtn.getStyleClass().add("danger");
         secureDeleteBtn.setOnAction(e -> startSecureDelete());
+        secureDeleteBtn.setTooltip(new Tooltip("Securely delete the selected file with multiple overwrite passes"));
 
-        HBox row = new HBox(8, filePathField, browseBtn, secureDeleteBtn);
+        deleteAllBtn.setDisable(true);
+        deleteAllBtn.getStyleClass().add("danger");
+        deleteAllBtn.setOnAction(e -> startBatchDelete());
+        deleteAllBtn.setTooltip(new Tooltip("Securely delete all pending files in the list"));
+
+        secureDeleteProgress.setVisible(false);
+        secureDeleteProgress.setPrefWidth(150);
+        secureDeleteStatus.getStyleClass().add("text-muted");
+
+        overwritePresetCombo.getSelectionModel().select(1);
+        overwritePresetCombo.setTooltip(new Tooltip("Select overwrite intensity: Quick (1 pass), Standard (3 passes DoD), or Deep (7 passes)"));
+
+        HBox row = new HBox(8, filePathField, browseBtn, addFilesBtn, secureDeleteBtn, deleteAllBtn);
         row.setAlignment(Pos.CENTER_LEFT);
+
+        HBox presetRow = new HBox(8, new Label("Overwrite:"), overwritePresetCombo);
+        presetRow.setAlignment(Pos.CENTER_LEFT);
+
+        HBox progressRow = new HBox(8, secureDeleteProgress, secureDeleteStatus);
+        progressRow.setAlignment(Pos.CENTER_LEFT);
 
         shredderTable.setItems(shredderEntries);
         shredderTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
@@ -713,10 +783,28 @@ public class DiskToolsTabView extends BorderPane {
         TableColumn<ShredderFileEntry, String> statusCol = new TableColumn<>("Status");
         statusCol.setCellValueFactory(c -> c.getValue().statusProperty());
         statusCol.setPrefWidth(160);
+        statusCol.setCellFactory(col -> new TableCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setGraphic(null);
+                    setStyle("");
+                } else {
+                    setText(item);
+                    switch (item) {
+                        case "DELETED" -> setStyle("-fx-text-fill: #50fa7b;");
+                        case "SCHEDULED_FOR_REBOOT" -> setStyle("-fx-text-fill: #f1fa8c;");
+                        case "FAILED" -> setStyle("-fx-text-fill: #ff5555;");
+                        default -> setStyle("-fx-text-fill: #bd93f9;");
+                    }
+                }
+            }
+        });
 
         shredderTable.getColumns().addAll(pathCol, sizeCol, statusCol);
 
-        VBox section = new VBox(8, header, row, shredderTable);
+        VBox section = new VBox(8, header, row, presetRow, progressRow, shredderTable);
         section.setPadding(new Insets(8, 16, 8, 16));
         return section;
     }
@@ -731,8 +819,18 @@ public class DiskToolsTabView extends BorderPane {
             return;
         }
 
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Are you sure you want to securely delete this file?\n\n"
+                        + filePath + "\n\n"
+                        + "This action is irreversible. The file will be overwritten multiple times and cannot be recovered.");
+        confirm.setHeaderText("Confirm Secure Delete");
+        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+
         busy.set(true);
         secureDeleteBtn.setDisable(true);
+        secureDeleteProgress.setProgress(-1);
+        secureDeleteProgress.setVisible(true);
+        secureDeleteStatus.setText("Securely deleting file...");
 
         ShredderFileEntry entry = new ShredderFileEntry(filePath, f.length());
         entry.setStatusEnum(ShredderFileEntry.Status.PENDING);
@@ -740,11 +838,12 @@ public class DiskToolsTabView extends BorderPane {
 
         new Thread(() -> {
             try {
-                ShredderResult result = shredderService.secureDelete(filePath);
+                int passCount = getSelectedPassCount();
+                ShredderResult result = shredderService.secureDelete(filePath, passCount);
                 Platform.runLater(() -> {
                     if (result.isSuccess() && result.isDeleted()) {
                         entry.setStatusEnum(ShredderFileEntry.Status.DELETED);
-                        defragStatus.setText("File securely deleted.");
+                        secureDeleteStatus.setText("File securely deleted.");
                         new Alert(Alert.AlertType.INFORMATION, "File securely deleted:\n" + filePath).showAndWait();
                     } else if (result.isScheduledForReboot()) {
                         handleScheduleForReboot(entry, filePath, result);
@@ -753,6 +852,7 @@ public class DiskToolsTabView extends BorderPane {
                         String msg = result.getMessage() != null ? result.getMessage() : "Unknown error";
                         new Alert(Alert.AlertType.ERROR, "Failed to delete file:\n" + msg).showAndWait();
                     }
+                    updateDeleteButtons();
                 });
             } catch (Exception e) {
                 String errMsg = e.getMessage() != null ? e.getMessage() : "";
@@ -760,21 +860,119 @@ public class DiskToolsTabView extends BorderPane {
                         || errMsg.toLowerCase().contains("unauthorized")) {
                     ShredderResult fakeResult = new ShredderResult(filePath, false, false, true,
                             "File is in use. Scheduling for deletion on next reboot.");
-                    Platform.runLater(() -> handleScheduleForReboot(entry, filePath, fakeResult));
+                    Platform.runLater(() -> {
+                        handleScheduleForReboot(entry, filePath, fakeResult);
+                        updateDeleteButtons();
+                    });
                 } else {
                     Platform.runLater(() -> {
                         entry.setStatusEnum(ShredderFileEntry.Status.FAILED);
                         new Alert(Alert.AlertType.ERROR, "Secure delete failed:\n" + e.getMessage()).showAndWait();
+                        updateDeleteButtons();
                     });
                 }
             } finally {
                 Platform.runLater(() -> {
                     busy.set(false);
                     secureDeleteBtn.setDisable(false);
+                    secureDeleteProgress.setVisible(false);
                     filePathField.clear();
+                    updateDeleteButtons();
                 });
             }
         }, "secure-delete").start();
+    }
+
+    private void startBatchDelete() {
+        List<ShredderFileEntry> pendingEntries = shredderEntries.stream()
+                .filter(e -> e.getStatusEnum() == ShredderFileEntry.Status.PENDING)
+                .toList();
+        if (pendingEntries.isEmpty()) return;
+
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Are you sure you want to securely delete " + pendingEntries.size() + " file(s)?\n\n"
+                        + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
+        confirm.setHeaderText("Confirm Batch Secure Delete");
+        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+
+        busy.set(true);
+        secureDeleteBtn.setDisable(true);
+        deleteAllBtn.setDisable(true);
+        secureDeleteProgress.setProgress(-1);
+        secureDeleteProgress.setVisible(true);
+        secureDeleteStatus.setText("Securely deleting files...");
+
+        new Thread(() -> {
+            int deleted = 0;
+            int failed = 0;
+            int passCount = getSelectedPassCount();
+            for (ShredderFileEntry entry : pendingEntries) {
+                String filePath = entry.getFilePath();
+                try {
+                    ShredderResult result = shredderService.secureDelete(filePath, passCount);
+                    Platform.runLater(() -> {
+                        if (result.isSuccess() && result.isDeleted()) {
+                            entry.setStatusEnum(ShredderFileEntry.Status.DELETED);
+                        } else if (result.isScheduledForReboot()) {
+                            handleScheduleForReboot(entry, filePath, result);
+                        } else {
+                            entry.setStatusEnum(ShredderFileEntry.Status.FAILED);
+                        }
+                    });
+                    if (result.isSuccess() && result.isDeleted()) {
+                        deleted++;
+                    } else {
+                        failed++;
+                    }
+                } catch (Exception e) {
+                    String errMsg = e.getMessage() != null ? e.getMessage() : "";
+                    if (errMsg.toLowerCase().contains("in use") || errMsg.toLowerCase().contains("access denied")
+                            || errMsg.toLowerCase().contains("unauthorized")) {
+                        ShredderResult fakeResult = new ShredderResult(filePath, false, false, true,
+                                "File is in use. Scheduling for deletion on next reboot.");
+                        Platform.runLater(() -> handleScheduleForReboot(entry, filePath, fakeResult));
+                        failed++;
+                    } else {
+                        Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.FAILED));
+                        failed++;
+                    }
+                }
+            }
+            int finalDeleted = deleted;
+            int finalFailed = failed;
+            Platform.runLater(() -> {
+                busy.set(false);
+                secureDeleteBtn.setDisable(false);
+                secureDeleteProgress.setVisible(false);
+                String msg = "Batch delete completed: " + finalDeleted + " deleted, " + finalFailed + " failed.";
+                secureDeleteStatus.setText(msg);
+                new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
+                updateDeleteButtons();
+            });
+        }, "batch-secure-delete").start();
+    }
+
+    private void updateDeleteButtons() {
+        boolean hasPending = shredderEntries.stream()
+                .anyMatch(e -> e.getStatusEnum() == ShredderFileEntry.Status.PENDING);
+        deleteAllBtn.setDisable(busy.get() || !hasPending);
+        secureDeleteBtn.setDisable(busy.get() || (filePathField.getText() == null || filePathField.getText().isBlank()));
+    }
+
+    private int getSelectedPassCount() {
+        String selected = overwritePresetCombo.getSelectionModel().getSelectedItem();
+        if (selected == null) return 3;
+        if (selected.startsWith("Quick")) return 1;
+        if (selected.startsWith("Deep")) return 7;
+        return 3;
+    }
+
+    private int getSelectedWipePassCount() {
+        String selected = wipePresetCombo.getSelectionModel().getSelectedItem();
+        if (selected == null) return 3;
+        if (selected.startsWith("Quick")) return 1;
+        if (selected.startsWith("Deep")) return 7;
+        return 3;
     }
 
     private void handleScheduleForReboot(ShredderFileEntry entry, String filePath, ShredderResult result) {
@@ -806,6 +1004,9 @@ public class DiskToolsTabView extends BorderPane {
 
     /* ── Free Space Wiping ── */
 
+    private final ComboBox<String> wipePresetCombo = new ComboBox<>(
+            FXCollections.observableArrayList("Quick (1 pass)", "Standard (3 passes)", "Deep (7 passes)"));
+
     @SuppressWarnings("unchecked")
     private VBox buildFreeSpaceWipeSection() {
         Label header = new Label("Free Space Wiping");
@@ -813,6 +1014,15 @@ public class DiskToolsTabView extends BorderPane {
 
         Label desc = new Label("Overwrite free space to remove remnants of deleted files.");
         desc.getStyleClass().add("text-muted");
+
+        Label capWarning = new Label("Note: Free space wiping is capped at ~512 MB per drive to prevent excessive wear. "
+                + "Only remnants within this range will be overwritten.");
+        capWarning.getStyleClass().add("text-muted");
+        capWarning.setWrapText(true);
+        capWarning.setStyle("-fx-font-size: 11px;");
+
+        wipePresetCombo.getSelectionModel().select(1);
+        wipePresetCombo.setTooltip(new Tooltip("Select overwrite intensity: Quick (1 pass), Standard (3 passes DoD), or Deep (7 passes)"));
 
         wipeProgress.setVisible(false);
         wipeProgress.setPrefWidth(200);
@@ -822,11 +1032,13 @@ public class DiskToolsTabView extends BorderPane {
         stopWipeBtn.setDisable(true);
 
         startWipeBtn.setOnAction(e -> startWipeFreeSpace());
+        startWipeBtn.setTooltip(new Tooltip("Start wiping free space on selected drives (requires admin rights)"));
         stopWipeBtn.setOnAction(e -> {
             wipeCancelled.set(true);
             stopWipeBtn.setDisable(true);
             wipeStatus.setText("Stopping...");
         });
+        stopWipeBtn.setTooltip(new Tooltip("Stop the free space wipe operation"));
 
         selectAllWipeCheck.setOnAction(e -> {
             boolean sel = selectAllWipeCheck.isSelected();
@@ -837,6 +1049,9 @@ public class DiskToolsTabView extends BorderPane {
             wipeDriveTable.refresh();
             updateWipeStartButton();
         });
+
+        HBox presetRow = new HBox(8, new Label("Overwrite:"), wipePresetCombo);
+        presetRow.setAlignment(Pos.CENTER_LEFT);
 
         HBox controls = new HBox(8,
                 selectAllWipeCheck, startWipeBtn, stopWipeBtn, wipeProgress, wipeStatus);
@@ -896,7 +1111,7 @@ public class DiskToolsTabView extends BorderPane {
         wipeDriveTable.getColumns().addAll(checkCol, dlCol, vlCol, szCol, frCol);
         wipeDriveTable.setPrefHeight(180);
 
-        VBox section = new VBox(8, header, desc, controls, wipeDriveTable);
+        VBox section = new VBox(8, header, desc, capWarning, presetRow, controls, wipeDriveTable);
         section.setPadding(new Insets(8, 16, 12, 16));
         VBox.setVgrow(wipeDriveTable, Priority.ALWAYS);
         return section;
@@ -927,16 +1142,25 @@ public class DiskToolsTabView extends BorderPane {
         wipeProgress.setVisible(true);
         wipeStatus.setText("Wiping free space on " + driveLetters.size() + " drive(s)...");
 
+        Map<String, Integer> driveProgressMap = new HashMap<>();
+
         new Thread(() -> {
             try {
+                int passCount = getSelectedWipePassCount();
                 shredderService.wipeFreeSpace(driveLetters, prog -> {
                     Platform.runLater(() -> {
-                        int total = driveLetters.size();
-                        int overall = (int) (((prog.getPass() - 1) * 100.0 / prog.getTotalPasses()
-                                + prog.getPercent() / (double) prog.getTotalPasses()) / total);
-                        wipeProgress.setProgress(Math.min(1.0, overall / 100.0));
-                        String status = "Drive " + prog.getDrive() + " - Pass " + prog.getPass()
-                                + "/" + prog.getTotalPasses() + " - " + prog.getPercent() + "%";
+                        int totalPasses = prog.getTotalPasses();
+                        int pass = prog.getPass();
+                        int percent = prog.getPercent();
+                        int driveProgress = (pass - 1) * 100 / totalPasses + percent / totalPasses;
+                        driveProgressMap.put(prog.getDrive(), driveProgress);
+
+                        double overallProgress = driveProgressMap.values().stream()
+                                .mapToInt(Integer::intValue).average().orElse(0.0) / 100.0;
+                        wipeProgress.setProgress(Math.min(1.0, overallProgress));
+
+                        String status = "Drive " + prog.getDrive() + " - Pass " + pass
+                                + "/" + totalPasses + " - " + percent + "%";
                         if (prog.isDone()) {
                             status = prog.getMessage();
                         }

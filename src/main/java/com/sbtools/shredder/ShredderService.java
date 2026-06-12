@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -24,15 +25,19 @@ public class ShredderService {
 
     private static final long TIMEOUT_SECONDS = 3600;
     private final ProcessRunner processRunner = new ProcessRunner(TIMEOUT_SECONDS);
-    private final List<String> knownTempFiles = new ArrayList<>();
+    private final List<String> knownTempFiles = new CopyOnWriteArrayList<>();
 
     public ShredderResult secureDelete(String filePath) throws IOException, InterruptedException {
+        return secureDelete(filePath, 3);
+    }
+
+    public ShredderResult secureDelete(String filePath, int passCount) throws IOException, InterruptedException {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Secure erase is only available on Windows.");
         }
         Path script = PowerShellScripts.resolve("secure-delete.ps1");
         ProcessResult result = processRunner.run(
-                ProcessRunner.powershellScript(script.toString(), filePath));
+                ProcessRunner.powershellScript(script.toString(), filePath, String.valueOf(passCount)));
         return parseResult(result, filePath);
     }
 
@@ -48,6 +53,11 @@ public class ShredderService {
 
     public void wipeFreeSpace(List<String> driveLetters, Consumer<WipeProgress> progressCallback,
                               AtomicBoolean cancelled) throws IOException {
+        wipeFreeSpace(driveLetters, progressCallback, cancelled, 3);
+    }
+
+    public void wipeFreeSpace(List<String> driveLetters, Consumer<WipeProgress> progressCallback,
+                              AtomicBoolean cancelled, int passCount) throws IOException {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Free space wiping is only available on Windows.");
         }
@@ -57,18 +67,12 @@ public class ShredderService {
         File stopFlag = File.createTempFile("sbtools-wipe-stop-", ".flag");
         stopFlag.deleteOnExit();
 
-        List<String> cmd = new ArrayList<>();
-        cmd.add("powershell");
-        cmd.add("-NoProfile");
-        cmd.add("-ExecutionPolicy");
-        cmd.add("Bypass");
-        cmd.add("-File");
-        cmd.add(script.toString());
+        List<String> cmd = new ArrayList<>(ProcessRunner.powershellScript(script.toString()));
         cmd.addAll(driveLetters);
         cmd.add("-StopFlagPath");
         cmd.add(stopFlag.getAbsolutePath());
-
-        AppLogger.info("Running: " + String.join(" ", cmd));
+        cmd.add("-PassCount");
+        cmd.add(String.valueOf(passCount));
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
@@ -167,10 +171,12 @@ public class ShredderService {
                             if (callback != null) {
                                 callback.accept(prog);
                             }
-                        } catch (Exception ignored) {
+                        } catch (Exception e) {
+                            AppLogger.error("Failed to parse wipe progress JSON: " + line, e);
                         }
                     }
-                } catch (IOException ignored) {
+                } catch (IOException e) {
+                    AppLogger.error("Error reading wipe process output stream", e);
                 }
             }, "wipe-stream-reader");
             t.setDaemon(true);

@@ -37,6 +37,14 @@ public class ShredderFileEntry {
     public StringProperty statusProperty() { return status; }
     public void setStatus(String v) { status.set(v); }
 
+    public Status getStatusEnum() {
+        try {
+            return Status.valueOf(status.get());
+        } catch (Exception e) {
+            return Status.PENDING;
+        }
+    }
+
     public void setStatusEnum(Status s) { status.set(s.name()); }
 
     public String getSizeFormatted() {
