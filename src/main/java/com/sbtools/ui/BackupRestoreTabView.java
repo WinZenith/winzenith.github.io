@@ -35,7 +35,6 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.Modality;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -53,6 +52,10 @@ public class BackupRestoreTabView extends BorderPane {
     private final BooleanSupplier adminCheck;
     private final TabPane tabPane = new TabPane();
 
+    private DriverBackupService rollbackBackupService;
+    private ObservableList<RestoreRow> rollbackRows;
+    private Label rollbackStatusLabel;
+
     public BackupRestoreTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
         this.adminCheck = adminCheck;
@@ -67,30 +70,34 @@ public class BackupRestoreTabView extends BorderPane {
         setCenter(tabPane);
     }
 
-    // ── Rollback drivers tab (from RestoreTabView) ───────────────────────────
+    // ── Rollback drivers tab ───────────────────────────────────────────────
 
     private Tab buildRollbackTab() {
-        DriverBackupService backupService = new DriverBackupService();
-        ObservableList<RestoreRow> rows = FXCollections.observableArrayList();
-        Label statusLabel = new Label("Driver backups appear here (up to 3 versions per device).");
+        rollbackBackupService = new DriverBackupService();
+        rollbackRows = FXCollections.observableArrayList();
+        rollbackStatusLabel = new Label("Driver backups appear here. Backups are created automatically before driver updates.");
         Button refreshButton = new Button("Refresh");
+        Button deleteAllButton = new Button("Delete All");
+        deleteAllButton.getStyleClass().add("danger");
 
-        refreshButton.setOnAction(e -> refreshRollback(backupService, rows, statusLabel));
+        refreshButton.setOnAction(e -> refreshRollback());
+        deleteAllButton.setOnAction(e -> deleteAllBackups());
 
-        HBox top = new HBox(12, refreshButton, statusLabel);
+        HBox top = new HBox(12, refreshButton, deleteAllButton, rollbackStatusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
 
-        TableView<RestoreRow> table = buildRollbackTable(rows);
+        TableView<RestoreRow> table = buildRollbackTable(rollbackRows);
         BorderPane pane = new BorderPane();
         pane.setTop(top);
         pane.setCenter(table);
 
         if (AppPaths.isWindows()) {
-            refreshRollback(backupService, rows, statusLabel);
+            refreshRollback();
         } else {
             refreshButton.setDisable(true);
+            deleteAllButton.setDisable(true);
         }
 
         Tab tab = new Tab("Rollback drivers");
@@ -113,6 +120,10 @@ public class BackupRestoreTabView extends BorderPane {
         TableColumn<RestoreRow, String> dateCol = new TableColumn<>("Backed up");
         dateCol.setCellValueFactory(c -> c.getValue().backedUpAtProperty());
         dateCol.setPrefWidth(140);
+
+        TableColumn<RestoreRow, String> sizeCol = new TableColumn<>("Size");
+        sizeCol.setCellValueFactory(c -> c.getValue().sizeProperty());
+        sizeCol.setPrefWidth(80);
 
         TableColumn<RestoreRow, Void> actionCol = new TableColumn<>("Action");
         actionCol.setPrefWidth(90);
@@ -140,27 +151,28 @@ public class BackupRestoreTabView extends BorderPane {
             }
         });
 
-        table.getColumns().addAll(deviceCol, versionCol, dateCol, actionCol);
+        table.getColumns().addAll(deviceCol, versionCol, dateCol, sizeCol, actionCol);
         return table;
     }
 
-    private void refreshRollback(DriverBackupService backupService,
-                                  ObservableList<RestoreRow> rows, Label statusLabel) {
+    private void refreshRollback() {
         new Thread(() -> {
             try {
-                var entries = backupService.listAll();
+                var entries = rollbackBackupService.listAll();
+                long totalBytes = rollbackBackupService.getTotalSize();
                 ObservableList<RestoreRow> newRows = FXCollections.observableArrayList();
                 for (var e : entries) {
                     newRows.add(new RestoreRow(e));
                 }
+                String sizeStr = RestoreRow.formatFileSize(totalBytes);
                 Platform.runLater(() -> {
-                    rows.setAll(newRows);
-                    statusLabel.setText(entries.isEmpty()
+                    rollbackRows.setAll(newRows);
+                    rollbackStatusLabel.setText(entries.isEmpty()
                             ? "No backups yet. Backups are created automatically before driver updates."
-                            : entries.size() + " backup(s) available.");
+                            : entries.size() + " backup(s) available \u2014 " + sizeStr + " total");
                 });
             } catch (Exception ex) {
-                Platform.runLater(() -> statusLabel.setText("Failed to load backups: " + ex.getMessage()));
+                Platform.runLater(() -> rollbackStatusLabel.setText("Failed to load backups: " + ex.getMessage()));
             }
         }, "restore-refresh").start();
     }
@@ -175,27 +187,51 @@ public class BackupRestoreTabView extends BorderPane {
                 "Revert driver for:\n" + row.entry().friendlyName()
                         + "\n\nTo version: " + row.entry().version()
                         + "\n\nBacked up: " + row.backedUpAtProperty().get());
-        if (confirm.showAndWait().orElse(null) != javafx.scene.control.ButtonType.OK) {
+        if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
             return;
         }
-        DriverBackupService backupService = new DriverBackupService();
         busy.set(true);
         new Thread(() -> {
             try {
-                backupService.revert(row.entry());
+                rollbackBackupService.revert(row.entry());
                 Platform.runLater(() -> {
-                    Label label = new Label("Reverted " + row.entry().friendlyName());
-                    new Alert(Alert.AlertType.INFORMATION, "Driver reverted. Restart if devices do not work correctly.").showAndWait();
+                    new Alert(Alert.AlertType.INFORMATION,
+                            "Driver reverted. Restart if devices do not work correctly.").showAndWait();
+                    refreshRollback();
                 });
             } catch (Exception ex) {
-                Platform.runLater(() -> new Alert(Alert.AlertType.ERROR, "Revert failed:\n" + ex.getMessage()).showAndWait());
+                Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
+                        "Revert failed:\n" + ex.getMessage()).showAndWait());
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
         }, "driver-revert").start();
     }
 
-    // ── System restore tab (from SystemRestoreTabView) ───────────────────────
+    private void deleteAllBackups() {
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Delete all driver backups?\n\nThis will permanently remove all backup data.");
+        if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
+            return;
+        }
+        busy.set(true);
+        new Thread(() -> {
+            try {
+                rollbackBackupService.removeAll();
+                Platform.runLater(() -> {
+                    new Alert(Alert.AlertType.INFORMATION, "All driver backups deleted.").showAndWait();
+                    refreshRollback();
+                });
+            } catch (Exception ex) {
+                Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
+                        "Failed to delete backups:\n" + ex.getMessage()).showAndWait());
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
+        }, "delete-all-backups").start();
+    }
+
+    // ── System restore tab ─────────────────────────────────────────────────
 
     private Tab buildSystemRestoreTab() {
         SystemRestoreService service = new SystemRestoreService();
@@ -404,7 +440,7 @@ public class BackupRestoreTabView extends BorderPane {
         }
     }
 
-    // ── Registry backup tab (new) ────────────────────────────────────────────
+    // ── Registry backup tab ────────────────────────────────────────────────
 
     private Tab buildRegistryBackupTab() {
         ObservableList<RegistryBackupRow> rows = FXCollections.observableArrayList();
@@ -482,7 +518,7 @@ public class BackupRestoreTabView extends BorderPane {
                 }
                 List<RegistryBackupRow> results = new ArrayList<>();
                 SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-                try (var stream = Files.list(backupsDir)) {
+                try (var stream = Files.walk(backupsDir)) {
                     stream.filter(p -> p.toString().toLowerCase().endsWith(".reg"))
                             .sorted((a, b) -> {
                                 try {
@@ -494,7 +530,7 @@ public class BackupRestoreTabView extends BorderPane {
                             .forEach(p -> {
                                 try {
                                     BasicFileAttributes attrs = Files.readAttributes(p, BasicFileAttributes.class);
-                                    String filename = p.getFileName().toString();
+                                    String filename = backupsDir.relativize(p).toString().replace('\\', '/');
                                     String date = sdf.format(new Date(attrs.lastModifiedTime().to(TimeUnit.MILLISECONDS)));
                                     String size = formatFileSize(attrs.size());
                                     results.add(new RegistryBackupRow(filename, date, size));
@@ -569,35 +605,44 @@ public class BackupRestoreTabView extends BorderPane {
                 Files.createDirectories(backupsDir);
 
                 String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
-                Path outputFile = backupsDir.resolve("registry_backup_" + timestamp + ".reg");
+                Path backupDir = backupsDir.resolve("registry_backup_" + timestamp);
+                Files.createDirectories(backupDir);
 
-                List<String> exportArgs = new ArrayList<>();
-                exportArgs.add("reg");
-                exportArgs.add("export");
-
+                int failedCount = 0;
+                List<String> exportedFiles = new ArrayList<>();
                 for (String area : selected) {
-                    exportArgs.add(area);
+                    String safeName = area.replace('\\', '_').replace(':', '_');
+                    Path outputFile = backupDir.resolve(safeName + ".reg");
+                    List<String> exportArgs = new ArrayList<>(
+                            List.of("reg", "export", area, outputFile.toString(), "/y"));
+                    ProcessBuilder pb = new ProcessBuilder(exportArgs);
+                    pb.redirectErrorStream(true);
+                    Process process = pb.start();
+                    int exitCode = process.waitFor();
+                    if (exitCode == 0) {
+                        exportedFiles.add(outputFile.getFileName().toString());
+                    } else {
+                        failedCount++;
+                        AppLogger.warning("reg export failed for " + area + " (exit=" + exitCode + ")");
+                    }
                 }
-                exportArgs.add(outputFile.toString());
-                exportArgs.add("/y");
 
-                ProcessBuilder pb = new ProcessBuilder(exportArgs);
-                pb.redirectErrorStream(true);
-                Process process = pb.start();
-                int exitCode = process.waitFor();
-
-                if (exitCode == 0) {
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Registry backup created.");
-                        new Alert(Alert.AlertType.INFORMATION,
-                                "Registry exported to:\n" + outputFile.toString()).showAndWait();
-                        refreshRegistryBackups(rows, statusLabel);
-                    });
-                } else {
+                if (failedCount == selected.size()) {
+                    Files.deleteIfExists(backupDir);
                     Platform.runLater(() -> {
                         statusLabel.setText("Backup failed.");
                         new Alert(Alert.AlertType.ERROR,
-                                "reg export exited with code " + exitCode).showAndWait();
+                                "Failed to export any registry areas.").showAndWait();
+                    });
+                } else {
+                    String msg = failedCount == 0
+                            ? "Registry exported to:\n" + backupDir
+                            : "Partial backup: " + (selected.size() - failedCount) + "/" + selected.size()
+                                    + " areas exported to:\n" + backupDir;
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Registry backup created.");
+                        new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
+                        refreshRegistryBackups(rows, statusLabel);
                     });
                 }
             } catch (Exception e) {
@@ -695,7 +740,7 @@ public class BackupRestoreTabView extends BorderPane {
         return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
     }
 
-    // ── Registry backup row model ────────────────────────────────────────────
+    // ── Registry backup row model ──────────────────────────────────────────
 
     public static class RegistryBackupRow {
         private final StringProperty filename;

@@ -18,6 +18,11 @@ public class SystemRestoreService {
         try {
             Path script = PowerShellScripts.resolve("checkpoint-restore.ps1");
             ProcessResult r = runner.run(ProcessRunner.powershellScript(script.toString(), description));
+            if (r.success()) {
+                AppLogger.info("System restore point created: " + description);
+            } else {
+                AppLogger.warning("System restore point creation failed: " + r.combinedOutput());
+            }
             return r.success();
         } catch (Exception e) {
             AppLogger.warning("Failed to create restore point: " + e.getMessage());
@@ -58,7 +63,14 @@ public class SystemRestoreService {
         try {
             Path script = PowerShellScripts.resolve("delete-restore-point.ps1");
             ProcessResult r = runner.run(ProcessRunner.powershellScript(script.toString(), String.valueOf(sequenceNumber)));
-            return r.success() && r.stdout().contains("\"deleted\": true");
+            boolean deleted = r.success();
+            if (!deleted) {
+                AppLogger.warning("Delete restore point " + sequenceNumber
+                        + " failed (exit=" + r.exitCode() + "): " + r.combinedOutput());
+            } else {
+                AppLogger.info("Restore point " + sequenceNumber + " deleted");
+            }
+            return deleted;
         } catch (Exception e) {
             AppLogger.warning("Failed to delete restore point " + sequenceNumber + ": " + e.getMessage());
             return false;
@@ -66,10 +78,11 @@ public class SystemRestoreService {
     }
 
     public void launchSystemRestore() throws IOException {
+        AppLogger.info("Launching Windows System Restore (rstrui.exe)");
         new ProcessBuilder("rstrui.exe").start();
     }
 
-    private static SystemRestoreRow parseCsvLine(String line) {
+    static SystemRestoreRow parseCsvLine(String line) {
         try {
             String[] parts = splitCsv(line);
             if (parts.length < 4) return null;
@@ -84,7 +97,7 @@ public class SystemRestoreService {
         }
     }
 
-    private static String[] splitCsv(String line) {
+    static String[] splitCsv(String line) {
         List<String> fields = new ArrayList<>();
         boolean inQuotes = false;
         StringBuilder current = new StringBuilder();
@@ -103,7 +116,7 @@ public class SystemRestoreService {
         return fields.toArray(new String[0]);
     }
 
-    private static String unquote(String s) {
+    static String unquote(String s) {
         if (s == null) return "";
         s = s.trim();
         if (s.startsWith("\"") && s.endsWith("\"") && s.length() >= 2) {

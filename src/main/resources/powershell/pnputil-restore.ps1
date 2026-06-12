@@ -1,4 +1,4 @@
-# Restore driver from backup folder.
+# Restore driver from backup folder. Installs all INF files found in the backup.
 param(
     [Parameter(Mandatory = $true)][string]$BackupFolder
 )
@@ -8,7 +8,10 @@ if (-not $infs) {
     Write-Error "No INF files in $BackupFolder"
     exit 1
 }
-$infPath = $infs[0].FullName
-& pnputil.exe /add-driver $infPath /install
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-@{ success = $true } | ConvertTo-Json -Compress
+$failed = 0
+foreach ($inf in $infs) {
+    & pnputil.exe /add-driver $inf.FullName /install
+    if ($LASTEXITCODE -ne 0) { $failed++ }
+}
+if ($failed -eq $infs.Count) { exit 1 }
+@{ success = $true; installed = ($infs.Count - $failed); failed = $failed } | ConvertTo-Json -Compress

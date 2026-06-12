@@ -44,6 +44,10 @@ public class SystemRestoreRow {
         return eventType;
     }
 
+    public int sequenceNumber() {
+        return sequenceNumber;
+    }
+
     static String formatEventType(int code) {
         return switch (code) {
             case 0 -> "Application Install";
