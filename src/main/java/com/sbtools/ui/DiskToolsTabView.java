@@ -819,6 +819,16 @@ public class DiskToolsTabView extends BorderPane {
             return;
         }
 
+        if (isCriticalSystemFile(filePath)) {
+            Alert warning = new Alert(Alert.AlertType.WARNING,
+                    "WARNING: This is a critical system file:\n\n"
+                            + filePath + "\n\n"
+                            + "Deleting this file may cause system instability or prevent Windows from starting.\n"
+                            + "Are you absolutely sure you want to proceed?");
+            warning.setHeaderText("Critical System File Detected");
+            if (warning.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        }
+
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Are you sure you want to securely delete this file?\n\n"
                         + filePath + "\n\n"
@@ -889,6 +899,20 @@ public class DiskToolsTabView extends BorderPane {
                 .toList();
         if (pendingEntries.isEmpty()) return;
 
+        List<String> criticalFiles = pendingEntries.stream()
+                .map(ShredderFileEntry::getFilePath)
+                .filter(this::isCriticalSystemFile)
+                .toList();
+        if (!criticalFiles.isEmpty()) {
+            Alert warning = new Alert(Alert.AlertType.WARNING,
+                    "WARNING: The following critical system files are in the list:\n\n"
+                            + String.join("\n", criticalFiles) + "\n\n"
+                            + "Deleting these files may cause system instability or prevent Windows from starting.\n"
+                            + "Are you absolutely sure you want to proceed?");
+            warning.setHeaderText("Critical System Files Detected");
+            if (warning.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        }
+
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Are you sure you want to securely delete " + pendingEntries.size() + " file(s)?\n\n"
                         + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
@@ -957,6 +981,33 @@ public class DiskToolsTabView extends BorderPane {
                 .anyMatch(e -> e.getStatusEnum() == ShredderFileEntry.Status.PENDING);
         deleteAllBtn.setDisable(busy.get() || !hasPending);
         secureDeleteBtn.setDisable(busy.get() || (filePathField.getText() == null || filePathField.getText().isBlank()));
+    }
+
+    private static final Set<String> CRITICAL_SYSTEM_PATHS = Set.of(
+            "\\windows\\system32\\",
+            "\\windows\\syswow64\\",
+            "\\windows\\winsxs\\",
+            "\\windows\\servicing\\",
+            "\\windows\\installer\\"
+    );
+
+    private static final Set<String> CRITICAL_SYSTEM_FILES = Set.of(
+            "explorer.exe", "ntoskrnl.exe", "hal.dll", "ntdll.dll", "kernel32.dll",
+            "kernelbase.dll", "advapi32.dll", "user32.dll", "gdi32.dll", "shell32.dll",
+            "comctl32.dll", "msvcrt.dll", "rpcrt4.dll", "ole32.dll", "oleaut32.dll",
+            "wininit.exe", "smss.exe", "csrss.exe", "lsass.exe", "services.exe",
+            "svchost.exe", "winlogon.exe", "dwm.exe", "taskhostw.exe", "conhost.exe",
+            "bootmgr", "ntldr", "boot.ini", "bcd", "winload.exe", "winresume.exe"
+    );
+
+    private boolean isCriticalSystemFile(String filePath) {
+        if (filePath == null) return false;
+        String lower = filePath.toLowerCase().replace('/', '\\');
+        for (String path : CRITICAL_SYSTEM_PATHS) {
+            if (lower.contains(path)) return true;
+        }
+        String fileName = lower.substring(lower.lastIndexOf('\\') + 1);
+        return CRITICAL_SYSTEM_FILES.contains(fileName);
     }
 
     private int getSelectedPassCount() {
