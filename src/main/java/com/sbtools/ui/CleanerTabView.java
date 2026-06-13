@@ -196,10 +196,13 @@ public class CleanerTabView extends BorderPane {
         List<CleanupRow> selected = rows.stream().filter(CleanupRow::isSelected).toList();
         if (selected.isEmpty()) return;
 
+        busy.set(true);
+
         if (!adminCheck.getAsBoolean()) {
             Alert a = new Alert(Alert.AlertType.WARNING,
                     "Some cleanup operations (registry, system files) require administrator rights.");
             a.showAndWait();
+            busy.set(false);
             return;
         }
 
@@ -217,28 +220,50 @@ public class CleanerTabView extends BorderPane {
             ButtonType noBtn = new ButtonType("No, delete directly");
             backupPrompt.getButtonTypes().setAll(yesBtn, noBtn, ButtonType.CANCEL);
             var result = backupPrompt.showAndWait().orElse(ButtonType.CANCEL);
-            if (result == ButtonType.CANCEL) return;
+            if (result == ButtonType.CANCEL) {
+                busy.set(false);
+                return;
+            }
             registryBackup = result == yesBtn;
         }
 
-        busy.set(true);
         statusLabel.setText("Cleaning...");
         cleanButton.setDisable(true);
         progressBar.setProgress(0);
         progressBar.setVisible(true);
 
         final boolean finalRegistryBackup = registryBackup;
+        int totalCategories = selected.size();
         new Thread(() -> {
             try {
-                service.clean(selected, finalRegistryBackup, () -> {});
+                AtomicInteger cleaned = new AtomicInteger();
+                CleanupService.CleanSummary summary = service.clean(selected, finalRegistryBackup, () -> {
+                    int done = cleaned.incrementAndGet();
+                    Platform.runLater(() -> {
+                        progressBar.setProgress((double) done / totalCategories);
+                        statusLabel.setText("Cleaning: " + done + "/" + totalCategories + "...");
+                    });
+                });
                 Platform.runLater(() -> {
-                    statusLabel.setText("Cleanup completed");
-                    new Alert(Alert.AlertType.INFORMATION, "Cleanup completed").showAndWait();
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("Cleanup completed.\n\n");
+                    sb.append("Total freed: ").append(CleanupService.formatBytes(summary.getTotalBytes()));
+                    sb.append(" (").append(summary.getTotalItems()).append(" items)\n");
+                    if (!summary.getPerCategory().isEmpty()) {
+                        sb.append("\nPer-category breakdown:\n");
+                        summary.getPerCategory().forEach((cat, bytes) ->
+                                sb.append("  \u2022 ").append(cat.getDisplayName()).append(": ")
+                                        .append(CleanupService.formatBytes(bytes)).append("\n"));
+                    }
+                    statusLabel.setText("Cleanup completed \u2014 " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
+                    progressBar.setVisible(false);
+                    new Alert(Alert.AlertType.INFORMATION, sb.toString()).showAndWait();
                 });
             } catch (Exception e) {
                 AppLogger.error("Cleanup failed", e);
                 Platform.runLater(() -> {
                     statusLabel.setText("Cleanup failed.");
+                    progressBar.setVisible(false);
                     new Alert(Alert.AlertType.ERROR, "Cleanup failed:\n" + e.getMessage()).showAndWait();
                 });
             } finally {

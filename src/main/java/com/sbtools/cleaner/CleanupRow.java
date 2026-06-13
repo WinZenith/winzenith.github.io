@@ -11,8 +11,8 @@ public class CleanupRow {
     private final BooleanProperty selected = new SimpleBooleanProperty(true);
     private final StringProperty categoryName = new SimpleStringProperty();
     private final StringProperty sizeOrCountText = new SimpleStringProperty("Pending...");
-    private long totalBytes;
-    private int itemCount;
+    private volatile long totalBytes;
+    private volatile int itemCount;
 
     public CleanupRow(CleanupCategory category) {
         this.category = category;

@@ -36,4 +36,8 @@ public enum CleanupCategory {
         return displayName;
     }
 
+    public String getDescription() {
+        return description;
+    }
+
 }

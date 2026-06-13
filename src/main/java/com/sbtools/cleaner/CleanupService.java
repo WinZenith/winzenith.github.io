@@ -17,6 +17,9 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Stream;
 
 public class CleanupService {
@@ -38,14 +41,28 @@ public class CleanupService {
     }
 
     public List<CleanupRow> scan(Runnable onProgress) {
-        List<CleanupRow> rows = new ArrayList<>();
-        for (CleanupCategory cat : CleanupCategory.values()) {
-            CleanupRow row = new CleanupRow(cat);
-            scanCategory(row);
-            if (onProgress != null) onProgress.run();
-            rows.add(row);
+        CleanupCategory[] categories = CleanupCategory.values();
+        CleanupRow[] rows = new CleanupRow[categories.length];
+        for (int i = 0; i < categories.length; i++) {
+            rows[i] = new CleanupRow(categories[i]);
         }
-        return rows;
+
+        int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 6);
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        try {
+            CompletableFuture<?>[] futures = new CompletableFuture[categories.length];
+            for (int i = 0; i < categories.length; i++) {
+                final CleanupRow row = rows[i];
+                futures[i] = CompletableFuture.runAsync(() -> {
+                    scanCategory(row);
+                    if (onProgress != null) onProgress.run();
+                }, executor);
+            }
+            CompletableFuture.allOf(futures).join();
+        } finally {
+            executor.shutdown();
+        }
+        return List.of(rows);
     }
 
     private void scanCategory(CleanupRow row) {
@@ -149,7 +166,7 @@ public class CleanupService {
 
     private long cleanRegistryDefrag() {
         RegistryDefragService.DefragResult result = RegistryDefragService.defrag();
-        return result.defraggedCount() > 0 ? 1 : 0;
+        return result.defraggedCount() > 0 ? RegistryDefragService.estimateSize() : 0;
     }
 
     private void scanRegistry(CleanupRow row) {
@@ -448,7 +465,7 @@ public class CleanupService {
                         Files.createDirectories(regBackup.getParent());
                         try {
                             new ProcessBuilder("reg", "export",
-                                    hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU" + "\\" + keyPath,
+                                    (hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") + "\\" + keyPath,
                                     regBackup.toString(), "/y")
                                     .inheritIO().start().waitFor();
                         } catch (Exception ignored) {}
@@ -759,6 +776,17 @@ public class CleanupService {
     }
 
     private long cleanRecycleBin() {
+        long size = 0;
+        try {
+            Path recycleBin = Paths.get(System.getenv("SYSTEMDRIVE") + "\\$Recycle.Bin");
+            if (Files.isDirectory(recycleBin)) {
+                try (Stream<Path> walk = Files.walk(recycleBin)) {
+                    size = walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length())
+                            .sum();
+                }
+            }
+        } catch (Exception ignored) {}
         try {
             ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
                     "rd", "/s", "/q", System.getenv("SYSTEMDRIVE") + "\\$Recycle.Bin");
@@ -766,7 +794,7 @@ public class CleanupService {
         } catch (Exception ex) {
             AppLogger.warning("Failed to empty Recycle Bin: " + ex.getMessage());
         }
-        return 0;
+        return size;
     }
 
     // ── Junk Files ────────────────────────────────────────────────────────
@@ -802,20 +830,9 @@ public class CleanupService {
             } catch (Exception ignored) {}
         }
 
-        scanRegistryPrefetch(row);
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
         row.setSizeOrCountText(itemCount + " item" + (itemCount == 1 ? "" : "s") + " / " + formatBytes(totalSize));
-    }
-
-    private void scanRegistryPrefetch(CleanupRow row) {
-        try {
-            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER,
-                    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU")) {
-                Map<String, Object> values = Advapi32Util.registryGetValues(WinReg.HKEY_CURRENT_USER,
-                        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU");
-            }
-        } catch (Exception ignored) {}
     }
 
     private long cleanPrivacyTraces() {
@@ -1175,6 +1192,26 @@ public class CleanupService {
     private long cleanInstallerFiles() {
         long cleaned = 0;
 
+        String windir = System.getenv("WINDIR");
+        if (windir != null) {
+            Path winInstaller = Paths.get(windir + "\\Installer");
+            if (Files.isDirectory(winInstaller)) {
+                try (Stream<Path> walk = Files.walk(winInstaller)) {
+                    List<Path> toDelete = walk.filter(Files::isRegularFile)
+                            .filter(p -> {
+                                String name = p.getFileName().toString().toLowerCase();
+                                return name.endsWith(".msi") || name.contains(".cab");
+                            })
+                            .toList();
+                    for (Path f : toDelete) {
+                        long size = f.toFile().length();
+                        deletePermanently(f);
+                        cleaned += size;
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
         Path tempDir = Paths.get(System.getenv("TEMP"));
         if (Files.isDirectory(tempDir)) {
             try (Stream<Path> files = Files.list(tempDir)) {
@@ -1295,6 +1332,7 @@ public class CleanupService {
         long cleaned = 0;
         List<Path> dirs = new ArrayList<>();
         addPath(dirs, System.getenv("WINDIR") + "\\Minidump");
+        String windir = System.getenv("WINDIR");
         String sysdrive = System.getenv("SYSTEMDRIVE");
         if (sysdrive != null) {
             Path rootDump = Paths.get(sysdrive + "\\memory.dmp");
@@ -1308,6 +1346,20 @@ public class CleanupService {
                 long size = swaDump.toFile().length();
                 deletePermanently(swaDump);
                 cleaned += size;
+            }
+        }
+        if (windir != null) {
+            Path windirPath = Paths.get(windir);
+            if (Files.isDirectory(windirPath)) {
+                try (Stream<Path> files = Files.list(windirPath)) {
+                    for (Path f : (Iterable<Path>) files::iterator) {
+                        if (Files.isRegularFile(f) && f.getFileName().toString().toLowerCase().endsWith(".dmp")) {
+                            long size = Files.size(f);
+                            deletePermanently(f);
+                            cleaned += size;
+                        }
+                    }
+                } catch (Exception ignored) {}
             }
         }
         for (Path dir : dirs) {
@@ -1507,7 +1559,6 @@ public class CleanupService {
     }
 
     private long cleanEmptyFolders() {
-        long cleaned = 0;
         List<Path> roots = new ArrayList<>();
         String userHome = System.getenv("USERPROFILE");
         if (userHome != null) {
@@ -1529,13 +1580,12 @@ public class CleanupService {
                     for (Path dir : emptyDirs) {
                         try {
                             Files.deleteIfExists(dir);
-                            cleaned++;
                         } catch (Exception ignored) {}
                     }
                 } catch (Exception ignored) {}
             }
         }
-        return cleaned;
+        return 0;
     }
 
     // ── Notification History ──────────────────────────────────────────────
@@ -1695,15 +1745,6 @@ public class CleanupService {
             }
         }
         return cleaned;
-    }
-
-    private List<Path> getLogDirs() {
-        List<Path> dirs = new ArrayList<>();
-        String windir = System.getenv("WINDIR");
-        if (windir != null) {
-            addPath(dirs, windir + "\\Logs");
-        }
-        return dirs;
     }
 
     // ── Windows Store Cache ───────────────────────────────────────────────
@@ -2070,29 +2111,21 @@ public class CleanupService {
 
     private void scanOtherProgramsCache(CleanupRow row) {
         long totalSize = 0;
-        int totalItems = 0;
         CleanupRow temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanDiscordCache(temp);
         totalSize += temp.getTotalBytes();
-        totalItems += temp.getItemCount();
         scanVscodeCache(temp);
         totalSize += temp.getTotalBytes();
-        totalItems += temp.getItemCount();
         scanAdobeCache(temp);
         totalSize += temp.getTotalBytes();
-        totalItems += temp.getItemCount();
         scanSteamCache(temp);
         totalSize += temp.getTotalBytes();
-        totalItems += temp.getItemCount();
         scanSlackCache(temp);
         totalSize += temp.getTotalBytes();
-        totalItems += temp.getItemCount();
         scanZoomCache(temp);
         totalSize += temp.getTotalBytes();
-        totalItems += temp.getItemCount();
         scanTeamsCache(temp);
         totalSize += temp.getTotalBytes();
-        totalItems += temp.getItemCount();
         row.setTotalBytes(totalSize);
         row.setSizeOrCountText(formatBytes(totalSize));
     }
@@ -2180,6 +2213,7 @@ public class CleanupService {
         try {
             Files.deleteIfExists(source);
         } catch (IOException e) {
+            AppLogger.warning("Could not delete " + source + ": " + e.getMessage());
             try {
                 source.toFile().deleteOnExit();
             } catch (Exception ignored) {}

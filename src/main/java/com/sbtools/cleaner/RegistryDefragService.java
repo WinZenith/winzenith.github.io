@@ -138,13 +138,28 @@ public class RegistryDefragService {
                 ProcessBuilder pb = new ProcessBuilder("reg", "query", hive, "/s");
                 pb.redirectErrorStream(true);
                 Process p = pb.start();
-                String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-                p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
 
-                long valueCount = output.lines()
-                        .filter(l -> l.contains("REG_"))
-                        .count();
-                totalBytes += valueCount * 512;
+                long[] valueCount = {0};
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+                Thread reader = new Thread(() -> {
+                    try (java.io.BufferedReader br = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                        String line;
+                        while ((line = br.readLine()) != null) {
+                            if (line.contains("REG_")) valueCount[0]++;
+                        }
+                    } catch (Exception ignored) {}
+                }, "reg-query-reader");
+                reader.setDaemon(true);
+                reader.start();
+
+                boolean finished = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
+                if (!finished) {
+                    p.destroyForcibly();
+                }
+                reader.join(2000);
+
+                totalBytes += valueCount[0] * 512;
             } catch (Exception ignored) {}
         }
         return totalBytes;
