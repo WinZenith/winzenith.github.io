@@ -9,7 +9,6 @@ public final class SystemManufacturer {
     }
 
     private static volatile Manufacturer cached;
-    private static volatile String cachedName;
 
     private SystemManufacturer() {
     }
@@ -23,18 +22,8 @@ public final class SystemManufacturer {
         }
     }
 
-    public static String getName() {
-        if (cachedName != null) return cachedName;
-        synchronized (SystemManufacturer.class) {
-            if (cachedName != null) return cachedName;
-            get();
-            return cachedName;
-        }
-    }
-
     private static Manufacturer detect() {
         String raw = queryWmi();
-        cachedName = raw;
         if (raw == null || raw.isBlank()) return Manufacturer.GENERIC;
         String lower = raw.toLowerCase(Locale.ROOT);
         if (lower.contains("lenovo")) return Manufacturer.LENOVO;

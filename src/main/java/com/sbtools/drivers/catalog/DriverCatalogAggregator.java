@@ -39,22 +39,6 @@ public class DriverCatalogAggregator {
         ));
     }
 
-    public static DriverCatalogAggregator createWithoutWindowsUpdate() {
-        return new DriverCatalogAggregator(List.of(
-                new OemNvidiaCatalogProvider(),
-                new OemAmdCatalogProvider(),
-                new OemIntelCatalogProvider(),
-                new OemRealtekCatalogProvider(),
-                new OemBroadcomCatalogProvider(),
-                new OemQualcommCatalogProvider(),
-                new OemSynapticsCatalogProvider(),
-                new OemLenovoCatalogProvider(),
-                new OemDellCatalogProvider(),
-                new OemHpCatalogProvider(),
-                new OemAsusCatalogProvider()
-        ));
-    }
-
     public int providerCount() {
         return providers.size();
     }

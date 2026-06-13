@@ -40,10 +40,4 @@ public final class DataSizeFormatter {
         if (kb >= 1024) return String.format("%.1f MB", kb / 1024.0);
         return kb + " KB";
     }
-
-    public static String formatUsagePercent(long totalBytes, long usedBytes) {
-        if (totalBytes <= 0 || usedBytes < 0) return "";
-        double pct = (double) usedBytes / totalBytes * 100;
-        return String.format("%.1f%%", pct);
-    }
 }
