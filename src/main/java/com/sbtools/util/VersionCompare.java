@@ -13,8 +13,10 @@ public final class VersionCompare {
         if (b == null || b.isBlank()) {
             return 1;
         }
-        String[] pa = a.replace(',', '.').split("\\.");
-        String[] pb = b.replace(',', '.').split("\\.");
+        String na = normalizeVersion(a);
+        String nb = normalizeVersion(b);
+        String[] pa = na.split("\\.");
+        String[] pb = nb.split("\\.");
         int len = Math.max(pa.length, pb.length);
         for (int i = 0; i < len; i++) {
             long va = parsePart(i < pa.length ? pa[i] : "0");
@@ -23,7 +25,16 @@ public final class VersionCompare {
                 return Long.compare(va, vb);
             }
         }
-        return a.compareToIgnoreCase(b);
+        return na.compareToIgnoreCase(nb);
+    }
+
+    private static String normalizeVersion(String version) {
+        String v = version.replace(',', '.');
+        int dashIdx = v.indexOf('-');
+        if (dashIdx > 0) {
+            v = v.substring(0, dashIdx);
+        }
+        return v;
     }
 
     private static long parsePart(String part) {

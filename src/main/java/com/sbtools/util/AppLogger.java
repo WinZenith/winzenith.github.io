@@ -45,7 +45,7 @@ public final class AppLogger {
 
     public static void debug(String msg) {
         init();
-        LOG.info(msg);
+        LOG.log(Level.FINE, msg);
     }
 
     public static void warning(String msg, Throwable t) {

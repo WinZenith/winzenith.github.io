@@ -96,31 +96,39 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
     private static boolean matchesDriver(InstalledDriver driver, WuDriverOffer offer) {
         String title = offer.title.toLowerCase(Locale.ROOT);
         String name = driver.friendlyName().toLowerCase(Locale.ROOT);
+
         if (!name.isBlank() && title.contains(name)) {
             return true;
         }
-        if (driver.provider() != null && !driver.provider().isBlank()) {
-            String prov = driver.provider().toLowerCase(Locale.ROOT);
-            if (title.contains(prov)) {
+
+        String inf = driver.infName();
+        if (inf != null && !inf.isBlank()) {
+            String infBase = inf.replace(".inf", "").toLowerCase(Locale.ROOT);
+            if (infBase.length() >= 4 && title.contains(infBase)) {
                 return true;
             }
         }
-        String inf = driver.infName();
-        if (inf != null && !inf.isBlank() && title.contains(inf.replace(".inf", "").toLowerCase(Locale.ROOT))) {
-            return true;
-        }
+
         if (!name.isBlank()) {
             String[] tokens = name.split("[\\s,\\-()]+");
             int matched = 0;
             for (String token : tokens) {
-                if (token.length() >= 3 && title.contains(token)) {
+                if (token.length() >= 4 && title.contains(token)) {
                     matched++;
                 }
             }
-            if (matched >= 2) {
+            if (matched >= 3) {
                 return true;
             }
         }
+
+        if (driver.provider() != null && !driver.provider().isBlank()) {
+            String prov = driver.provider().toLowerCase(Locale.ROOT);
+            if (!name.isBlank() && title.contains(prov) && title.contains(name)) {
+                return true;
+            }
+        }
+
         return false;
     }
 

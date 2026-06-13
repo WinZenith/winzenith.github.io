@@ -12,9 +12,11 @@ public record AppSettings(
         boolean eulaAccepted,
         List<String> excludedDriverIds,
         List<String> skippedSoftwareIds,
-        String networkOptimizationPreset
+        String networkOptimizationPreset,
+        String downloadDirectory
 ) {
     public static AppSettings defaults() {
-        return new AppSettings(true, true, false, Collections.emptyList(), Collections.emptyList(), "DEFAULT");
+        return new AppSettings(true, true, false, Collections.emptyList(), Collections.emptyList(),
+                "DEFAULT", System.getProperty("user.home") + "\\Downloads");
     }
 }

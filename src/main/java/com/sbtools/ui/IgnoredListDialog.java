@@ -86,7 +86,8 @@ public class IgnoredListDialog {
                         current.eulaAccepted(),
                         current.excludedDriverIds(),
                         updated,
-                        current.networkOptimizationPreset()
+                        current.networkOptimizationPreset(),
+                        current.downloadDirectory()
                 );
                 store.save(updated_);
             } catch (IOException ex) {

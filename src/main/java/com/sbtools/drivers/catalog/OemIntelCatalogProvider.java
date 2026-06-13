@@ -3,6 +3,7 @@ package com.sbtools.drivers.catalog;
 import com.sbtools.drivers.model.InstalledDriver;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.JsonMapper;
+import com.sbtools.util.SystemManufacturer;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -33,16 +34,21 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
     private static final long CACHE_TTL_MS = 3600_000;
 
     private static final Map<String, String> CATEGORY_DSA_NAMES = new HashMap<>();
-    private static final Map<String, String> KNOWN_DOWNLOAD_URLS = new HashMap<>();
+    private static final Map<String, String> GRAPHICS_DOWNLOAD_PAGES = new HashMap<>();
+    private static final Map<String, String> GRAPHICS_DIRECT_URLS = new HashMap<>();
 
     static {
         CATEGORY_DSA_NAMES.put("bluetooth", "Bluetooth");
         CATEGORY_DSA_NAMES.put("wifi", "Wi-Fi");
         CATEGORY_DSA_NAMES.put("graphics", "Graphics");
 
-        KNOWN_DOWNLOAD_URLS.put("wifi", "https://downloadmirror.intel.com/918236/WiFi-24.40.0-Driver64-Win10-Win11.zip");
-        KNOWN_DOWNLOAD_URLS.put("bluetooth", "https://downloadmirror.intel.com/92640/Intel-Wireless-Bluetooth-Win10-Win11-24.40.0-Driver64-1.exe");
-        KNOWN_DOWNLOAD_URLS.put("graphics", "https://downloadmirror.intel.com/829279/igfx_win_101.5768.exe");
+        GRAPHICS_DIRECT_URLS.put("uhd630", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
+        GRAPHICS_DIRECT_URLS.put("uhd620", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
+        GRAPHICS_DIRECT_URLS.put("uhd", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
+        GRAPHICS_DIRECT_URLS.put("iris", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
+        GRAPHICS_DIRECT_URLS.put("arc", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
+        GRAPHICS_DIRECT_URLS.put("hd530", "https://downloadmirror.intel.com/764512/gfx_win_101.2115.exe");
+        GRAPHICS_DIRECT_URLS.put("hd630", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
     }
 
     public OemIntelCatalogProvider() {
@@ -80,7 +86,7 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
         return switch (category) {
             case "bluetooth" -> "https://www.intel.com/content/www/us/en/download/18649/intel-wireless-bluetooth-for-windows-10-and-windows-11.html";
             case "wifi" -> DSA_PRODUCT_URL;
-            case "graphics" -> "https://www.intel.com/content/www/us/en/download/19344/intel-graphics-windows-dch-drivers.html";
+            case "graphics" -> "https://www.intel.com/content/www/us/en/support/products/126790/graphics/processor-graphics/intel-uhd-graphics-family/intel-uhd-graphics-630.html";
             default -> "https://www.intel.com/content/www/us/en/download-center/home.html";
         };
     }
@@ -88,25 +94,131 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
     @Override
     protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
         AppLogger.info("Intel: Resolving direct download URL for " + driver.friendlyName());
-        try {
-            String[] info = resolveDriverInfo(driver);
-            if (info != null && info.length >= 2 && info[1] != null) {
-                AppLogger.info("Intel: Resolved direct download URL: " + info[1]);
-                return info[1];
-            }
-        } catch (Exception e) {
-            AppLogger.warning("Intel: Error resolving download URL from DSA: " + e.getMessage());
+
+        String[] info = resolveDriverInfo(driver);
+        if (info != null && info.length >= 2 && info[1] != null) {
+            AppLogger.info("Intel: Resolved direct download URL: " + info[1]);
+            return info[1];
         }
 
         String category = detectCategory(driver);
-        String knownUrl = KNOWN_DOWNLOAD_URLS.get(category);
-        if (knownUrl != null) {
-            AppLogger.info("Intel: Using known download URL for " + category + ": " + knownUrl);
-            return knownUrl;
+        if ("graphics".equals(category)) {
+            String directUrl = getGraphicsDirectUrl(driver);
+            if (directUrl != null) {
+                AppLogger.info("Intel: Using direct graphics download URL: " + directUrl);
+                return directUrl;
+            }
         }
 
         AppLogger.info("Intel: Falling back to page scraping for " + vendorPageUrl);
-        return scrapeIntelDownloadPage(vendorPageUrl);
+        String scrapedUrl = scrapeIntelDownloadPage(vendorPageUrl);
+        if (scrapedUrl != null) {
+            return scrapedUrl;
+        }
+
+        AppLogger.info("Intel: Trying OEM support site fallback");
+        return tryOemDownloadFallback(driver);
+    }
+
+    private String tryOemDownloadFallback(InstalledDriver driver) {
+        SystemManufacturer.Manufacturer mfr = SystemManufacturer.get();
+        if (mfr == SystemManufacturer.Manufacturer.GENERIC) {
+            AppLogger.debug("Intel: Unknown manufacturer, skipping OEM fallback");
+            return null;
+        }
+
+        AppLogger.info("Intel: System manufacturer is " + mfr + ", trying OEM support site");
+        return tryOemSearchPage(mfr, driver);
+    }
+
+    private String mapLenovoCategory(String category) {
+        return switch (category) {
+            case "bluetooth" -> "Bluetooth";
+            case "wifi" -> "Networking:Wireless LAN";
+            case "graphics" -> "Display and Video Graphics";
+            default -> "All";
+        };
+    }
+
+    private String tryOemSearchPage(SystemManufacturer.Manufacturer mfr, InstalledDriver driver) {
+        String deviceName = driver.friendlyName() != null ? driver.friendlyName() : "";
+        String searchQuery = deviceName.replaceAll("[^a-zA-Z0-9 ]", "").trim().replace(" ", "+");
+        if (searchQuery.isEmpty()) return null;
+
+        String searchUrl = switch (mfr) {
+            case LENOVO -> "https://pcsupport.lenovo.com/us/en/api/v4/downloads/drivers?q=" + searchQuery + "&type=managed";
+            case DELL -> "https://www.dell.com/support/driver/en-us/ips/api/driverlist/getdriversbyproduct?productcode=" + searchQuery;
+            case HP -> "https://support.hp.com/us-en/driversapi?keyword=" + searchQuery;
+            default -> null;
+        };
+
+        if (searchUrl == null) return null;
+
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(searchUrl))
+                    .timeout(Duration.ofSeconds(20))
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .header("Accept", "application/json, text/html, */*")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+                return null;
+            }
+
+            String body = resp.body();
+
+            Pattern jsonUrlPattern = Pattern.compile("\"(?:download[Uu]rl|Url|url)\"\\s*:\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"", Pattern.CASE_INSENSITIVE);
+            Matcher m = jsonUrlPattern.matcher(body);
+            if (m.find()) {
+                String url = m.group(1);
+                AppLogger.info("Intel: Found download URL in OEM JSON response: " + url);
+                return url;
+            }
+
+            Pattern hrefPattern = Pattern.compile("href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"", Pattern.CASE_INSENSITIVE);
+            m = hrefPattern.matcher(body);
+            while (m.find()) {
+                String url = m.group(1);
+                if (url.contains("intel") || url.contains("gfx") || url.contains("driver") || url.contains(".exe")) {
+                    AppLogger.info("Intel: Found download URL in OEM HTML response: " + url);
+                    return url;
+                }
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Intel: OEM search failed for " + mfr + ": " + e.getMessage());
+        }
+        return null;
+    }
+
+    private String getGraphicsDirectUrl(InstalledDriver driver) {
+        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
+        
+        if (name.contains("uhd graphics 630") || name.contains("uhd 630")) {
+            return GRAPHICS_DIRECT_URLS.get("uhd630");
+        }
+        if (name.contains("uhd graphics 620") || name.contains("uhd 620")) {
+            return GRAPHICS_DIRECT_URLS.get("uhd620");
+        }
+        if (name.contains("uhd") || name.contains("uhd graphics")) {
+            return GRAPHICS_DIRECT_URLS.get("uhd");
+        }
+        if (name.contains("iris")) {
+            return GRAPHICS_DIRECT_URLS.get("iris");
+        }
+        if (name.contains("arc")) {
+            return GRAPHICS_DIRECT_URLS.get("arc");
+        }
+        if (name.contains("hd graphics 530") || name.contains("hd 530")) {
+            return GRAPHICS_DIRECT_URLS.get("hd530");
+        }
+        if (name.contains("hd graphics 630") || name.contains("hd 630")) {
+            return GRAPHICS_DIRECT_URLS.get("hd630");
+        }
+        
+        return GRAPHICS_DIRECT_URLS.get("uhd");
     }
 
     private String scrapeIntelDownloadPage(String pageUrl) {
@@ -128,24 +240,53 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             }
 
             String html = resp.body();
+            
             Pattern p = Pattern.compile(
                     "data-href\\s*=\\s*\"(https?://[^\"]+downloadmirror\\.intel\\.com[^\"]+)\"",
                     Pattern.CASE_INSENSITIVE);
             Matcher m = p.matcher(html);
             if (m.find()) {
                 String url = decodeHtmlEntities(m.group(1));
-                AppLogger.info("Intel: Scraped download URL from page: " + url);
-                return url;
+                if (isDirectDownloadUrl(url)) {
+                    AppLogger.info("Intel: Scraped download URL from page: " + url);
+                    return url;
+                }
             }
 
             p = Pattern.compile(
-                    "data-href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"",
+                    "href\\s*=\\s*\"(https?://[^\"]*download\\.intel\\.com[^\"]+)\"",
+                    Pattern.CASE_INSENSITIVE);
+            m = p.matcher(html);
+            while (m.find()) {
+                String url = decodeHtmlEntities(m.group(1));
+                if (isDirectDownloadUrl(url)) {
+                    AppLogger.info("Intel: Scraped download URL from page: " + url);
+                    return url;
+                }
+            }
+
+            p = Pattern.compile(
+                    "href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"",
+                    Pattern.CASE_INSENSITIVE);
+            m = p.matcher(html);
+            while (m.find()) {
+                String url = decodeHtmlEntities(m.group(1));
+                if (isDirectDownloadUrl(url) && !url.contains("intel.com/content/www")) {
+                    AppLogger.info("Intel: Scraped download URL from page: " + url);
+                    return url;
+                }
+            }
+
+            p = Pattern.compile(
+                    "\"downloadUrl\"\\s*:\\s*\"(https?://[^\"]+)\"",
                     Pattern.CASE_INSENSITIVE);
             m = p.matcher(html);
             if (m.find()) {
                 String url = decodeHtmlEntities(m.group(1));
-                AppLogger.info("Intel: Scraped download URL from page: " + url);
-                return url;
+                if (isDirectDownloadUrl(url)) {
+                    AppLogger.info("Intel: Found downloadUrl in JSON: " + url);
+                    return url;
+                }
             }
 
             AppLogger.warning("Intel: No download link found on page " + pageUrl);
@@ -153,6 +294,13 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             AppLogger.warning("Intel: Error scraping download page: " + e.getMessage());
         }
         return null;
+    }
+
+    private boolean isDirectDownloadUrl(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase();
+        return (lower.endsWith(".exe") || lower.endsWith(".zip") || lower.endsWith(".msi"))
+                && !lower.endsWith(".html") && !lower.endsWith(".htm");
     }
 
     private String[] resolveDriverInfo(InstalledDriver driver) {

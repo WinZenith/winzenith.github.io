@@ -611,7 +611,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 current.eulaAccepted(),
                 current.excludedDriverIds(),
                 skipped,
-                current.networkOptimizationPreset()
+                current.networkOptimizationPreset(),
+                current.downloadDirectory()
             );
             settingsStore.save(updated);
         } catch (Exception ex) {
@@ -664,7 +665,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     curr.eulaAccepted(),
                     curr.excludedDriverIds(),
                     updated,
-                    curr.networkOptimizationPreset()
+                    curr.networkOptimizationPreset(),
+                    curr.downloadDirectory()
                 );
                 settingsStore.save(saved);
             } catch (Exception ex) {

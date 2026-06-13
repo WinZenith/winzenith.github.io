@@ -173,7 +173,8 @@ public class App extends Application {
                     true,
                     settings.excludedDriverIds(),
                     settings.skippedSoftwareIds(),
-                    settings.networkOptimizationPreset()
+                    settings.networkOptimizationPreset(),
+                    settings.downloadDirectory()
             ));
         } catch (IOException e) {
             AppLogger.error("Failed to save EULA acceptance", e);

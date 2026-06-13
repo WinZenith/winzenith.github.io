@@ -3,6 +3,7 @@ package com.sbtools.drivers;
 import com.sbtools.backup.DriverBackupService;
 import com.sbtools.backup.SystemRestoreService;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
+import com.sbtools.drivers.model.InstallStatus;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.PowerShellScripts;
@@ -41,6 +42,7 @@ public class DriverInstallService {
 
     private final DriverBackupService backupService = new DriverBackupService();
     private final SystemRestoreService restoreService = new SystemRestoreService();
+    private final DriverVerificationService verificationService = new DriverVerificationService();
     private final ProcessRunner processRunner = new ProcessRunner(900);
     private final AtomicBoolean cancellationFlag = new AtomicBoolean(false);
     private volatile ProgressCallback progressCallback;
@@ -76,7 +78,8 @@ public class DriverInstallService {
         String availVer = candidate.availableVersion();
         if (availVer != null && availVer.matches("(?i).*\\b(alpha|beta|rc|preview|test)\\b.*")) {
             removeBackupIfPresent(backupEntry);
-            return new InstallResult(false, false, "Blocked: candidate appears to be a pre-release (alpha/beta/rc/preview). Only stable releases are installed.");
+            return new InstallResult(InstallStatus.BLOCKED_PRE_RELEASE, false,
+                    "Blocked: candidate appears to be a pre-release (alpha/beta/rc/preview). Only stable releases are installed.");
         }
 
         if ("WindowsUpdate".equals(candidate.source()) && candidate.packageId() != null && !candidate.packageId().isBlank()) {
@@ -86,13 +89,14 @@ public class DriverInstallService {
                         script.toString(), candidate.packageId()));
                 if (!result.success()) {
                     removeBackupIfPresent(backupEntry);
-                    throw new IOException("Windows Update install failed: " + result.combinedOutput());
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                            "Windows Update install failed: " + result.combinedOutput());
                 }
                 boolean reboot = result.stdout() != null && result.stdout().contains("\"rebootRequired\":true");
-                return new InstallResult(true, reboot, result.stdout());
+                return new InstallResult(InstallStatus.SUCCESS, reboot, result.stdout());
             } catch (Exception e) {
                 removeBackupIfPresent(backupEntry);
-                throw e;
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
         }
 
@@ -100,22 +104,23 @@ public class DriverInstallService {
             String downloadUrl = candidate.downloadUrl();
             if (!isTrustedSource(downloadUrl, candidate.source())) {
                 removeBackupIfPresent(backupEntry);
-                return new InstallResult(false, false, "Blocked: download URL is not from a trusted vendor. URL: " + downloadUrl);
+                return new InstallResult(InstallStatus.BLOCKED_UNTRUSTED, false,
+                        "Blocked: download URL is not from a trusted vendor. URL: " + downloadUrl);
             }
             try {
-                InstallResult result = downloadAndInstallDriver(candidate);
-                if (result.installed()) {
+                InstallResult result = downloadAndInstallDriver(candidate, settings);
+                if (result.status().isSuccess()) {
                     removeBackupIfPresent(backupEntry);
                 }
                 return result;
             } catch (Exception e) {
                 removeBackupIfPresent(backupEntry);
-                throw e;
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
         }
 
         removeBackupIfPresent(backupEntry);
-        return new InstallResult(false, false,
+        return new InstallResult(InstallStatus.NO_DOWNLOAD_URL, false,
                 "No download URL available for " + candidate.source() + ". Check vendor website manually.");
     }
 
@@ -129,9 +134,12 @@ public class DriverInstallService {
         }
     }
 
-    private InstallResult downloadAndInstallDriver(DriverUpdateCandidate candidate) {
+    private InstallResult downloadAndInstallDriver(DriverUpdateCandidate candidate, AppSettings settings) {
         try {
-            Path downloadsDir = Paths.get(System.getProperty("user.home"), "Downloads");
+            String configuredDir = settings.downloadDirectory();
+            Path downloadsDir = (configuredDir != null && !configuredDir.isBlank())
+                    ? Path.of(configuredDir)
+                    : Paths.get(System.getProperty("user.home"), "Downloads");
             Files.createDirectories(downloadsDir);
             String downloadUrl = candidate.downloadUrl();
             String filename = extractFilename(downloadUrl);
@@ -139,21 +147,50 @@ public class DriverInstallService {
 
             AppLogger.info("Downloading driver from: " + downloadUrl);
             reportProgress(0, 0, 0);
-            driverFile = downloadFileWithProgress(downloadUrl, driverFile);
+            
+            try {
+                driverFile = downloadFileWithProgress(downloadUrl, driverFile);
+            } catch (IOException e) {
+                if (e.getMessage() != null && e.getMessage().contains("HTML page")) {
+                    AppLogger.info("Download returned HTML, attempting to scrape actual download URL from: " + downloadUrl);
+                    String scrapedUrl = scrapeDownloadUrlFromPage(downloadUrl);
+                    if (scrapedUrl != null && !scrapedUrl.equals(downloadUrl)) {
+                        AppLogger.info("Found alternative download URL: " + scrapedUrl);
+                        filename = extractFilename(scrapedUrl);
+                        driverFile = downloadsDir.resolve(filename);
+                        driverFile = downloadFileWithProgress(scrapedUrl, driverFile);
+                    } else {
+                        throw e;
+                    }
+                } else {
+                    throw e;
+                }
+            }
 
             if (!Files.exists(driverFile) || Files.size(driverFile) == 0) {
                 String vendorUrl = candidate.vendorPageUrl();
                 if (vendorUrl != null && !vendorUrl.isBlank()) {
-                    return new InstallResult(false, false,
+                    return new InstallResult(InstallStatus.DOWNLOAD_FAILED, false,
                             "Download failed: received empty file from " + downloadUrl
                             + "\nYou can try downloading manually from: " + vendorUrl);
                 }
-                return new InstallResult(false, false, "Download failed: received empty file from " + downloadUrl);
+                return new InstallResult(InstallStatus.DOWNLOAD_FAILED, false,
+                        "Download failed: received empty file from " + downloadUrl);
             }
 
             long fileSize = Files.size(driverFile);
             AppLogger.info("Driver downloaded (" + fileSize + " bytes) to: " + driverFile);
             reportProgress(fileSize, fileSize, 1.0);
+            reportStatus("Verifying driver signature…");
+
+            DriverVerificationService.VerificationResult sigResult = verificationService.verifyAuthenticode(driverFile);
+            if (!sigResult.verified()) {
+                AppLogger.warning("Authenticode verification failed: " + sigResult.message());
+                cleanupTempFiles(driverFile);
+                return new InstallResult(InstallStatus.VERIFICATION_FAILED, false,
+                        "Signature verification failed: " + sigResult.message());
+            }
+
             reportStatus("Installing driver. Please wait…");
 
             String lowerName = driverFile.getFileName().toString().toLowerCase();
@@ -167,7 +204,8 @@ public class DriverInstallService {
                             "msiexec.exe", "/i", msiFile.toString(), "/qn", "/norestart"
                     ).command().toArray(new String[0])));
                     if (result.success()) {
-                        return new InstallResult(true, false, "Driver installed silently via MSI.");
+                        cleanupTempFiles(driverFile);
+                        return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed silently via MSI.");
                     }
                     AppLogger.warning("MSI install failed, falling back to EXE: " + result.combinedOutput());
                 }
@@ -176,23 +214,81 @@ public class DriverInstallService {
                         driverFile.toString(), "/quiet", "/norestart"
                 ).command().toArray(new String[0])));
                 if (result.success()) {
-                    return new InstallResult(true, false, "Driver installed silently.");
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed silently.");
                 }
 
                 AppLogger.warning("EXE /quiet failed, trying /S: " + result.combinedOutput());
                 new ProcessBuilder(driverFile.toString(), "/S").start();
-                return new InstallResult(true, false, "Silent installation started in the background.");
+                return new InstallResult(InstallStatus.SUCCESS, false, "Silent installation started in the background.");
             }
 
             ProcessResult installResult = installDriverFile(driverFile, candidate);
             if (!installResult.success()) {
-                return new InstallResult(false, false, "Installation failed: " + installResult.combinedOutput());
+                cleanupTempFiles(driverFile);
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                        "Installation failed: " + installResult.combinedOutput());
             }
             AppLogger.info("Driver installed successfully from: " + driverFile);
-            return new InstallResult(true, false, "Driver installed from " + driverFile.toString());
+            cleanupTempFiles(driverFile);
+            return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed from " + driverFile.toString());
         } catch (Exception e) {
             AppLogger.warning("Error during download and install: " + e.getMessage());
-            return new InstallResult(false, false, "Error: " + e.getMessage());
+            return new InstallResult(InstallStatus.UNKNOWN_ERROR, false, "Error: " + e.getMessage());
+        }
+    }
+
+    private String scrapeDownloadUrlFromPage(String pageUrl) {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(pageUrl))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+                return null;
+            }
+
+            String html = resp.body();
+            java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                    "href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"",
+                    java.util.regex.Pattern.CASE_INSENSITIVE);
+            java.util.regex.Matcher m = p.matcher(html);
+            while (m.find()) {
+                String url = m.group(1);
+                if (url.contains("downloadmirror.intel.com") || url.contains("download.intel.com")) {
+                    return url;
+                }
+            }
+            m = p.matcher(html);
+            if (m.find()) {
+                return m.group(1);
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Error scraping download page: " + e.getMessage());
+        }
+        return null;
+    }
+
+    private void cleanupTempFiles(Path driverFile) {
+        try {
+            String name = driverFile.getFileName().toString();
+            Path extractDir = driverFile.getParent().resolve(
+                    name.replaceFirst("\\.(?:zip|cab)(?:\\.exe)?$", "_extracted"));
+            if (Files.isDirectory(extractDir)) {
+                Files.walk(extractDir)
+                        .sorted((a, b) -> -a.compareTo(b))
+                        .forEach(p -> {
+                            try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                        });
+            }
+        } catch (Exception e) {
+            AppLogger.debug("Could not clean up temp files: " + e.getMessage());
         }
     }
 
@@ -444,6 +540,11 @@ public class DriverInstallService {
                 case "Realtek" -> host.contains("realtek.com");
                 case "Broadcom" -> host.contains("broadcom.com");
                 case "Qualcomm" -> host.contains("qualcomm.com");
+                case "Synaptics" -> host.contains("synaptics.com");
+                case "Lenovo" -> host.contains("lenovo.com") || host.contains("lenovo-images.com");
+                case "Dell" -> host.contains("dell.com") || host.contains("dellcdn.com");
+                case "HP" -> host.contains("hp.com") || host.contains("hp.com") || host.contains("hpe.com");
+                case "ASUS" -> host.contains("asus.com") || host.contains("asusnet.net");
                 case "WindowsUpdate" -> host.contains("microsoft.com") || host.contains("windowsupdate.com")
                         || host.contains("download.microsoft.com") || host.contains("catalog.update.microsoft.com")
                         || host.contains("catalog.s.download.windowsupdate.com");
@@ -466,6 +567,9 @@ public class DriverInstallService {
         return cancellationFlag.get();
     }
 
-    public record InstallResult(boolean installed, boolean rebootRequired, String message) {
+    public record InstallResult(InstallStatus status, boolean rebootRequired, String message) {
+        public boolean installed() {
+            return status.isSuccess();
+        }
     }
 }

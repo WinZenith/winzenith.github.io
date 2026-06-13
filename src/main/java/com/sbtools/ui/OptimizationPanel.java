@@ -141,7 +141,8 @@ class OptimizationPanel extends VBox {
                     currentSettings.eulaAccepted(),
                     currentSettings.excludedDriverIds(),
                     currentSettings.skippedSoftwareIds(),
-                    preset.name()
+                    preset.name(),
+                    currentSettings.downloadDirectory()
             ));
         } catch (IOException e) {
             AppLogger.warning("Failed to save optimization preset: " + e.getMessage());

@@ -30,13 +30,15 @@ public class SettingsStore {
             List<String> excludedDrivers = list(root, "excludedDriverIds");
             List<String> skippedSoftware = list(root, "skippedSoftwareIds");
             String netPreset = str(root, "networkOptimizationPreset");
+            String downloadDir = str(root, "downloadDirectory");
             return new AppSettings(
                     bool(root, "autoBackupDrivers", d.autoBackupDrivers()),
                     bool(root, "createSystemRestorePoint", d.createSystemRestorePoint()),
                     bool(root, "eulaAccepted", d.eulaAccepted()),
                     excludedDrivers != null ? excludedDrivers : d.excludedDriverIds(),
                     skippedSoftware != null ? skippedSoftware : d.skippedSoftwareIds(),
-                    netPreset != null ? netPreset : d.networkOptimizationPreset()
+                    netPreset != null ? netPreset : d.networkOptimizationPreset(),
+                    downloadDir != null ? downloadDir : d.downloadDirectory()
             );
         } catch (IOException e) {
             return AppSettings.defaults();
