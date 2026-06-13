@@ -3,6 +3,7 @@ package com.sbtools;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
 import com.sbtools.ui.BackupRestoreTabView;
+import com.sbtools.ui.DashboardTabView;
 import com.sbtools.ui.DriversTabView;
 import com.sbtools.ui.SoftwareUpdatesTabView;
 import com.sbtools.ui.SystemInfoTabView;
@@ -69,6 +70,7 @@ public class App extends Application {
         }
 
         // Modern left sidebar with theme toggle
+        DashboardTabView dashboardTab = new DashboardTabView(busy, AdminCheck::isRunningAsAdmin);
         DriversTabView driversTab = new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
         BackupRestoreTabView backupRestoreTab = new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdmin);
         SoftwareUpdatesTabView softwareTab = new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
@@ -99,7 +101,8 @@ public class App extends Application {
         sidebar.getStyleClass().add("sidebar");
         sidebar.setAlignment(Pos.TOP_LEFT);
 
-        UIButton driversBtn = UIButton.primary("Drivers");
+        UIButton dashboardBtn = UIButton.primary("Dashboard");
+        UIButton driversBtn = UIButton.secondary("Drivers");
         UIButton backupRestoreBtn = UIButton.secondary("Backup/Rollback");
         UIButton softwareBtn = UIButton.secondary("Software update");
         UIButton systemInfoBtn = UIButton.secondary("System Information");
@@ -114,8 +117,9 @@ public class App extends Application {
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        UIButton[] allButtons = new UIButton[]{driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn, browserExtensionsBtn, networkOptimizerBtn};
+        UIButton[] allButtons = new UIButton[]{dashboardBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn, browserExtensionsBtn, networkOptimizerBtn};
 
+        dashboardBtn.setOnAction(e -> { selectTab(dashboardBtn, allButtons); root.setCenter(dashboardTab); });
         driversBtn.setOnAction(e -> { selectTab(driversBtn, allButtons); root.setCenter(driversTab); });
         backupRestoreBtn.setOnAction(e -> { selectTab(backupRestoreBtn, allButtons); root.setCenter(backupRestoreTab); });
         softwareBtn.setOnAction(e -> { selectTab(softwareBtn, allButtons); root.setCenter(softwareTab); });
@@ -128,10 +132,10 @@ public class App extends Application {
         browserExtensionsBtn.setOnAction(e -> { selectTab(browserExtensionsBtn, allButtons); root.setCenter(browserExtensionsTab); });
         networkOptimizerBtn.setOnAction(e -> { selectTab(networkOptimizerBtn, allButtons); root.setCenter(networkOptimizerTab); });
 
-        sidebar.getChildren().addAll(logoView, appTitle, sep, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn, browserExtensionsBtn, networkOptimizerBtn);
+        sidebar.getChildren().addAll(logoView, appTitle, sep, dashboardBtn, driversBtn, backupRestoreBtn, softwareBtn, systemInfoBtn, uninstallerBtn, startupBtn, cleanerBtn, duplicateFilesBtn, diskToolsBtn, browserExtensionsBtn, networkOptimizerBtn);
 
         root.setLeft(sidebar);
-        root.setCenter(driversTab);
+        root.setCenter(dashboardTab);
 
         if (!AppPaths.isWindows()) {
             new Alert(Alert.AlertType.WARNING,
