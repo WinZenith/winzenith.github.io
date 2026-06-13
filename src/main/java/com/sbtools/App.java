@@ -85,6 +85,7 @@ public class App extends Application {
 
         BorderPane root = new BorderPane();
 
+
         // Load logo icon
         Image logoImage = new Image(getClass().getResourceAsStream("/logo-ico.png"));
         ImageView logoView = new ImageView(logoImage);
