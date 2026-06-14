@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>com.sbtools</groupId>
-  <artifactId>sb-tools</artifactId>
-  <name>SB Tools</name>
-  <version>1.0-SNAPSHOT</version>
-  <description>Windows driver scan, update, restore, and Windows Update management</description>
+  <groupId>com.winzenith</groupId>
+  <artifactId>win-zenith</artifactId>
+  <name>WinZenith</name>
+  <version>1.0.0</version>
+  <description>Windows driver scan, update, restore, and system optimization</description>
   <build>
     <plugins>
       <plugin>
@@ -72,9 +72,9 @@
             </goals>
             <configuration>
               <headerType>gui</headerType>
-              <outfile>target/SBTools.exe</outfile>
+              <outfile>target/WinZenith.exe</outfile>
               <jar>target/${project.artifactId}-${project.version}-shaded.jar</jar>
-              <errTitle>SBTools Error</errTitle>
+              <errTitle>WinZenith Error</errTitle>
               <icon>src/main/resources/app.ico</icon>
               <classPath>
                 <mainClass>com.sbtools.App</mainClass>
@@ -89,14 +89,14 @@
               <versionInfo>
                 <fileVersion>1.0.0.0</fileVersion>
                 <txtFileVersion>1.0.0.0</txtFileVersion>
-                <fileDescription>SBTools - Windows Driver Update Tool</fileDescription>
-                <copyright>2024</copyright>
+                <fileDescription>WinZenith - Windows System Optimizer</fileDescription>
+                <copyright>2026</copyright>
                 <productVersion>1.0.0.0</productVersion>
                 <txtProductVersion>1.0.0.0</txtProductVersion>
-                <productName>SBTools</productName>
+                <productName>WinZenith</productName>
                 <companyName />
-                <internalName>sbtools</internalName>
-                <originalFilename>SBTools.exe</originalFilename>
+                <internalName>winzenith</internalName>
+                <originalFilename>WinZenith.exe</originalFilename>
               </versionInfo>
             </configuration>
           </execution>

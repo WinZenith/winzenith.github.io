@@ -26,8 +26,24 @@ New-Item -ItemType Directory -Force -Path $dest | Out-Null
 $iconPath = Join-Path $root "src\main\resources\app.ico"
 $licensePath = Join-Path $root "LICENSE.txt"
 
+$jpackage = $null
+$jpackagePaths = @(
+    "jpackage",
+    "C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot\bin\jpackage.exe"
+)
+foreach ($p in $jpackagePaths) {
+    if (Get-Command $p -ErrorAction SilentlyContinue) {
+        $jpackage = $p
+        break
+    }
+}
+if (-not $jpackage) {
+    Write-Error "jpackage not found. Requires JDK 14+ with jpackage."
+    exit 1
+}
+
 # Common jpackage arguments
-commonArgs = @(
+$commonArgs = @(
     "--name", "WinZenith",
     "--input", (Join-Path $root "target"),
     "--main-jar", $jarName,
@@ -51,7 +67,7 @@ $commonArgs += "https://winzenith.github.io"
 
 if ($All -or (-not $Msi)) {
     Write-Host "Building app-image..."
-    & jpackage --type app-image @commonArgs
+    & $jpackage --type app-image @commonArgs
     $appImageRoot = Join-Path $dest "WinZenith"
     if (Test-Path $appImageRoot) {
         Write-Host "App image created at: $appImageRoot"
@@ -71,7 +87,7 @@ if ($All -or $Msi) {
         "--win-per-user-install",
         "--win-dir-chooser"
     )
-    & jpackage @msiArgs
+    & $jpackage @msiArgs
     $msiFile = Join-Path $dest "WinZenith-$version.msi"
     if (Test-Path $msiFile) {
         Write-Host "MSI installer created at: $msiFile"
