@@ -4,12 +4,12 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.sbtools</groupId>
-    <artifactId>sb-tools</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <groupId>com.winzenith</groupId>
+    <artifactId>win-zenith</artifactId>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
-    <name>SB Tools</name>
-    <description>Windows driver scan, update, restore, and Windows Update management</description>
+    <name>WinZenith</name>
+    <description>Windows driver scan, update, restore, and system optimization</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -172,9 +172,9 @@
                         </goals>
                         <configuration>
                             <headerType>gui</headerType>
-                            <outfile>target/SBTools.exe</outfile>
+                            <outfile>target/WinZenith.exe</outfile>
                             <jar>target/${project.artifactId}-${project.version}-shaded.jar</jar>
-                            <errTitle>SBTools Error</errTitle>
+                            <errTitle>WinZenith Error</errTitle>
                             <icon>src/main/resources/app.ico</icon>
                             <classPath>
                                 <mainClass>com.sbtools.App</mainClass>
@@ -189,14 +189,14 @@
                             <versionInfo>
                                 <fileVersion>1.0.0.0</fileVersion>
                                 <txtFileVersion>1.0.0.0</txtFileVersion>
-                                <fileDescription>SBTools - Windows Driver Update Tool</fileDescription>
-                                <copyright>2024</copyright>
+                                <fileDescription>WinZenith - Windows System Optimizer</fileDescription>
+                                <copyright>2026</copyright>
                                 <productVersion>1.0.0.0</productVersion>
                                 <txtProductVersion>1.0.0.0</txtProductVersion>
-                                <productName>SBTools</productName>
+                                <productName>WinZenith</productName>
                                 <companyName></companyName>
-                                <internalName>sbtools</internalName>
-                                <originalFilename>SBTools.exe</originalFilename>
+                                <internalName>winzenith</internalName>
+                                <originalFilename>WinZenith.exe</originalFilename>
                             </versionInfo>
                         </configuration>
                     </execution>

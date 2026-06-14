@@ -589,7 +589,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Would you like to create a System Restore Point before proceeding with the updates?");
             confirm.setHeaderText(AppInfo.DISPLAY_NAME);
             if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
-                boolean created = restoreService.createRestorePoint("SB Tools software update");
+                boolean created = restoreService.createRestorePoint("WinZenith software update");
                 if (!created) {
                     AppLogger.warning("Restore point creation failed or skipped.");
                 }
@@ -612,7 +612,18 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 current.excludedDriverIds(),
                 skipped,
                 current.networkOptimizationPreset(),
-                current.downloadDirectory()
+                current.downloadDirectory(),
+                current.licenseKey(),
+                current.minimizeToTray(),
+                current.startMinimized(),
+                current.scanOnStartup(),
+                current.notifyOnDriverUpdate(),
+                current.backupDirectory(),
+                current.powerShellPath(),
+                current.windowWidth(),
+                current.windowHeight(),
+                current.windowMaximized(),
+                current.autoCheckForUpdates()
             );
             settingsStore.save(updated);
         } catch (Exception ex) {
@@ -666,7 +677,18 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     curr.excludedDriverIds(),
                     updated,
                     curr.networkOptimizationPreset(),
-                    curr.downloadDirectory()
+                    curr.downloadDirectory(),
+                    curr.licenseKey(),
+                    curr.minimizeToTray(),
+                    curr.startMinimized(),
+                    curr.scanOnStartup(),
+                    curr.notifyOnDriverUpdate(),
+                    curr.backupDirectory(),
+                    curr.powerShellPath(),
+                    curr.windowWidth(),
+                    curr.windowHeight(),
+                    curr.windowMaximized(),
+                    curr.autoCheckForUpdates()
                 );
                 settingsStore.save(saved);
             } catch (Exception ex) {

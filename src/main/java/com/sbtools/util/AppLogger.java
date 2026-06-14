@@ -11,7 +11,7 @@ import java.util.logging.SimpleFormatter;
 
 public final class AppLogger {
 
-    private static final Logger LOG = Logger.getLogger("BasicSDriverUpdate");
+    private static final Logger LOG = Logger.getLogger("WinZenith");
     private static volatile boolean initialized;
 
     private AppLogger() {

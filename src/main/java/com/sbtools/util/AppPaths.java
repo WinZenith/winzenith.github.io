@@ -4,7 +4,7 @@ import java.nio.file.Path;
 
 public final class AppPaths {
 
-    private static final String APP_DIR = "BasicSDriverUpdate";
+    private static final String APP_DIR = "WinZenith";
 
     private AppPaths() {
     }

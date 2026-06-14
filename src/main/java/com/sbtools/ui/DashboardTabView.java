@@ -155,6 +155,21 @@ public class DashboardTabView extends BorderPane {
 
                 Platform.runLater(() -> {
                     if (scanCancelled) return;
+
+                    IssueCategory driversEntry = null;
+                    IssueCategory softwareEntry = null;
+                    for (IssueCategory ic : issues) {
+                        if ("Outdated Drivers".equals(ic.categoryProperty().get())) {
+                            driversEntry = ic;
+                        } else if ("Outdated Software".equals(ic.categoryProperty().get())) {
+                            softwareEntry = ic;
+                        }
+                    }
+                    issues.remove(driversEntry);
+                    issues.remove(softwareEntry);
+                    if (driversEntry != null) issues.add(0, driversEntry);
+                    if (softwareEntry != null) issues.add(driversEntry != null ? 1 : 0, softwareEntry);
+
                     if (issues.isEmpty()) {
                         statusLabel.setText("No issues found. Your system looks healthy!");
                     } else {

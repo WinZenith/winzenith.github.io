@@ -16,7 +16,7 @@ import java.util.List;
 
 public class UpdateHistoryStore {
 
-    private static final String DIR = ".basic-s-driver-update";
+    private static final String DIR = ".winzenith";
     private static final String FILE = "update-history.json";
     private static final ObjectMapper mapper = new ObjectMapper()
             .enable(SerializationFeature.INDENT_OUTPUT);

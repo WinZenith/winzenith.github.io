@@ -64,7 +64,7 @@ public class ShredderService {
         knownTempFiles.clear();
         Path script = PowerShellScripts.resolve("wipe-free-space.ps1");
 
-        File stopFlag = File.createTempFile("sbtools-wipe-stop-", ".flag");
+        File stopFlag = File.createTempFile("winzenith-wipe-stop-", ".flag");
         stopFlag.deleteOnExit();
 
         List<String> cmd = new ArrayList<>(ProcessRunner.powershellScript(script.toString()));
@@ -121,7 +121,7 @@ public class ShredderService {
         try {
             for (File root : File.listRoots()) {
                 File[] orphans = root.listFiles((dir, name) ->
-                        name.startsWith("~sbtools-wipe-") && name.endsWith(".tmp"));
+                        name.startsWith("~winzenith-wipe-") && name.endsWith(".tmp"));
                 if (orphans != null) {
                     for (File f : orphans) {
                         if (f.delete()) {

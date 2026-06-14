@@ -13,10 +13,24 @@ public record AppSettings(
         List<String> excludedDriverIds,
         List<String> skippedSoftwareIds,
         String networkOptimizationPreset,
-        String downloadDirectory
+        String downloadDirectory,
+        String licenseKey,
+        boolean minimizeToTray,
+        boolean startMinimized,
+        boolean scanOnStartup,
+        boolean notifyOnDriverUpdate,
+        String backupDirectory,
+        String powerShellPath,
+        int windowWidth,
+        int windowHeight,
+        boolean windowMaximized,
+        boolean autoCheckForUpdates
 ) {
     public static AppSettings defaults() {
-        return new AppSettings(true, true, false, Collections.emptyList(), Collections.emptyList(),
-                "DEFAULT", System.getProperty("user.home") + "\\Downloads");
+        return new AppSettings(true, true, false,
+                Collections.emptyList(), Collections.emptyList(),
+                "DEFAULT", System.getProperty("user.home") + "\\Downloads", "",
+                false, false, false, true,
+                "", "powershell", 960, 600, true, true);
     }
 }

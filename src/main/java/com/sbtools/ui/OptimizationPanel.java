@@ -142,7 +142,18 @@ class OptimizationPanel extends VBox {
                     currentSettings.excludedDriverIds(),
                     currentSettings.skippedSoftwareIds(),
                     preset.name(),
-                    currentSettings.downloadDirectory()
+                    currentSettings.downloadDirectory(),
+                    currentSettings.licenseKey(),
+                    currentSettings.minimizeToTray(),
+                    currentSettings.startMinimized(),
+                    currentSettings.scanOnStartup(),
+                    currentSettings.notifyOnDriverUpdate(),
+                    currentSettings.backupDirectory(),
+                    currentSettings.powerShellPath(),
+                    currentSettings.windowWidth(),
+                    currentSettings.windowHeight(),
+                    currentSettings.windowMaximized(),
+                    currentSettings.autoCheckForUpdates()
             ));
         } catch (IOException e) {
             AppLogger.warning("Failed to save optimization preset: " + e.getMessage());

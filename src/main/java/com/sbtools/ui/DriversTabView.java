@@ -521,7 +521,18 @@ public class DriversTabView extends BorderPane {
                         new java.util.ArrayList<>(excludedIds),
                         current.skippedSoftwareIds(),
                         current.networkOptimizationPreset(),
-                        current.downloadDirectory()
+                        current.downloadDirectory(),
+                        current.licenseKey(),
+                        current.minimizeToTray(),
+                        current.startMinimized(),
+                        current.scanOnStartup(),
+                        current.notifyOnDriverUpdate(),
+                        current.backupDirectory(),
+                        current.powerShellPath(),
+                        current.windowWidth(),
+                        current.windowHeight(),
+                        current.windowMaximized(),
+                        current.autoCheckForUpdates()
                     );
                     settingsStore.save(updated);
                 } catch (IOException ex) {
@@ -810,7 +821,18 @@ public class DriversTabView extends BorderPane {
                 excluded,
                 current.skippedSoftwareIds(),
                 current.networkOptimizationPreset(),
-                current.downloadDirectory()
+                current.downloadDirectory(),
+                current.licenseKey(),
+                current.minimizeToTray(),
+                current.startMinimized(),
+                current.scanOnStartup(),
+                current.notifyOnDriverUpdate(),
+                current.backupDirectory(),
+                current.powerShellPath(),
+                current.windowWidth(),
+                current.windowHeight(),
+                current.windowMaximized(),
+                current.autoCheckForUpdates()
         );
         try {
             settingsStore.save(updated);

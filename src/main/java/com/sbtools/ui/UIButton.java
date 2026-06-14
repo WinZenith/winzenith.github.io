@@ -9,7 +9,8 @@ public class UIButton extends Button {
         SECONDARY,
         SUCCESS,
         DANGER,
-        SMALL
+        SMALL,
+        LOCKED
     }
 
     public UIButton(String text) {
@@ -29,6 +30,7 @@ public class UIButton extends Button {
             case SUCCESS -> getStyleClass().add("success");
             case DANGER -> getStyleClass().add("danger");
             case SMALL -> getStyleClass().add("small");
+            case LOCKED -> getStyleClass().add("button-locked");
         }
     }
 
@@ -53,7 +55,7 @@ public class UIButton extends Button {
     }
 
     public void setStyleType(ButtonStyle style) {
-        getStyleClass().removeAll("button", "accent", "button-outlined", "success", "danger", "small");
+        getStyleClass().removeAll("button", "accent", "button-outlined", "success", "danger", "small", "button-locked");
         getStyleClass().add("button");
         applyStyle(style);
     }

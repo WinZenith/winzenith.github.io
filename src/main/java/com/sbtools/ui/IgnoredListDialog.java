@@ -87,7 +87,18 @@ public class IgnoredListDialog {
                         current.excludedDriverIds(),
                         updated,
                         current.networkOptimizationPreset(),
-                        current.downloadDirectory()
+                        current.downloadDirectory(),
+                        current.licenseKey(),
+                        current.minimizeToTray(),
+                        current.startMinimized(),
+                        current.scanOnStartup(),
+                        current.notifyOnDriverUpdate(),
+                        current.backupDirectory(),
+                        current.powerShellPath(),
+                        current.windowWidth(),
+                        current.windowHeight(),
+                        current.windowMaximized(),
+                        current.autoCheckForUpdates()
                 );
                 store.save(updated_);
             } catch (IOException ex) {

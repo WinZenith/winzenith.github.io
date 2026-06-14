@@ -54,7 +54,7 @@ foreach ($driveLetter in $DriveLetters) {
         continue
     }
 
-    $tempFile = "$drive`:\\~sbtools-wipe-$([System.IO.Path]::GetRandomFileName()).tmp"
+    $tempFile = "$drive`:\\~winzenith-wipe-$([System.IO.Path]::GetRandomFileName()).tmp"
     $tempFiles += $tempFile
     $stream = $null
 
