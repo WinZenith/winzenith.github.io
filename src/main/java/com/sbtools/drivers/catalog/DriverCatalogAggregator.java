@@ -45,8 +45,30 @@ public class DriverCatalogAggregator {
 
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed) {
         AppLogger.debug("CatalogAggregator: Scanning " + installed.size() + " installed drivers");
-        Map<String, DriverUpdateCandidate> byDevice = new HashMap<>();
-        mergeProviderResults(byDevice, installed);
+        Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
+        int poolSize = Math.min(providers.size(), 8);
+        ExecutorService pool = Executors.newFixedThreadPool(poolSize);
+        try {
+            var futures = providers.stream()
+                    .map(provider -> pool.submit(() -> {
+                        for (DriverUpdateCandidate c : provider.findUpdates(installed)) {
+                            byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
+                        }
+                        return null;
+                    }))
+                    .toList();
+            for (var future : futures) {
+                try {
+                    future.get();
+                } catch (Exception e) {
+                    if (e.getCause() instanceof InterruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        } finally {
+            pool.shutdown();
+        }
         AppLogger.debug("CatalogAggregator: Found " + byDevice.size() + " driver update candidates");
         return new ArrayList<>(byDevice.values());
     }
@@ -59,7 +81,7 @@ public class DriverCatalogAggregator {
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderFinished) {
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
-        int poolSize = Math.min(providers.size(), 4);
+        int poolSize = Math.min(providers.size(), 8);
         ExecutorService pool = Executors.newFixedThreadPool(poolSize);
         try {
             var futures = providers.stream()
@@ -87,14 +109,6 @@ public class DriverCatalogAggregator {
             }
         } finally {
             pool.shutdown();
-        }
-    }
-
-    private void mergeProviderResults(Map<String, DriverUpdateCandidate> byDevice, List<InstalledDriver> installed) {
-        for (DriverCatalogProvider provider : providers) {
-            for (DriverUpdateCandidate c : provider.findUpdates(installed)) {
-                byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
-            }
         }
     }
 

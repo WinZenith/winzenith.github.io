@@ -219,8 +219,14 @@ public class DriverInstallService {
                 }
 
                 AppLogger.warning("EXE /quiet failed, trying /S: " + result.combinedOutput());
-                new ProcessBuilder(driverFile.toString(), "/S").start();
-                return new InstallResult(InstallStatus.SUCCESS, false, "Silent installation started in the background.");
+                ProcessResult fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
+                        driverFile.toString(), "/S"
+                ).command().toArray(new String[0])));
+                if (fallbackResult.success()) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed silently via fallback installer.");
+                }
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Silent installation failed: " + fallbackResult.combinedOutput());
             }
 
             ProcessResult installResult = installDriverFile(driverFile, candidate);
@@ -293,6 +299,25 @@ public class DriverInstallService {
     }
 
     private Path downloadFileWithProgress(String url, Path destination) throws IOException, InterruptedException {
+        int maxRetries = 3;
+        int attempt = 0;
+        long backoffMs = 1000;
+        while (true) {
+            attempt++;
+            try {
+                return downloadFileWithProgressOnce(url, destination);
+            } catch (IOException e) {
+                if (attempt >= maxRetries || cancellationFlag.get() || "Download cancelled".equals(e.getMessage())) {
+                    throw e;
+                }
+                AppLogger.warning("Download attempt " + attempt + " failed for " + url + ": " + e.getMessage() + ". Retrying in " + backoffMs + "ms...");
+                Thread.sleep(backoffMs);
+                backoffMs *= 2;
+            }
+        }
+    }
+
+    private Path downloadFileWithProgressOnce(String url, Path destination) throws IOException, InterruptedException {
         HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(Duration.ofMinutes(10))
@@ -328,7 +353,7 @@ public class DriverInstallService {
         long totalBytes = response.headers().firstValueAsLong("Content-Length").orElse(-1);
         try (InputStream in = response.body();
              OutputStream out = Files.newOutputStream(finalDest)) {
-            byte[] buffer = new byte[8192];
+            byte[] buffer = new byte[65536];
             long bytesReceived = 0;
             int read;
             while ((read = in.read(buffer)) != -1) {

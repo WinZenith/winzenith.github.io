@@ -93,6 +93,10 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
         return candidates;
     }
 
+    private static final java.util.Set<String> GENERIC_WORDS = java.util.Set.of(
+            "driver", "device", "controller", "adapter", "software", "component", "extension", "generic"
+    );
+
     private static boolean matchesDriver(InstalledDriver driver, WuDriverOffer offer) {
         String title = offer.title.toLowerCase(Locale.ROOT);
         String name = driver.friendlyName().toLowerCase(Locale.ROOT);
@@ -111,11 +115,18 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
 
         if (!name.isBlank()) {
             String[] tokens = name.split("[\\s,\\-()]+");
+            int validTokensCount = 0;
             int matched = 0;
             for (String token : tokens) {
-                if (token.length() >= 4 && title.contains(token)) {
-                    matched++;
+                if (token.length() >= 3 && !GENERIC_WORDS.contains(token)) {
+                    validTokensCount++;
+                    if (title.contains(token)) {
+                        matched++;
+                    }
                 }
+            }
+            if (validTokensCount > 0 && matched == validTokensCount) {
+                return true;
             }
             if (matched >= 3) {
                 return true;
