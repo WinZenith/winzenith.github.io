@@ -1,6 +1,5 @@
 package com.sbtools.ui;
 
-import com.sbtools.netoptimizer.AdapterStatistics;
 import com.sbtools.netoptimizer.NetworkAdapterRow;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
 import com.sbtools.util.AppLogger;
@@ -12,8 +11,6 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
-import javafx.scene.control.ButtonType;
-import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
@@ -23,8 +20,6 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
 import java.util.List;
-import java.util.Timer;
-import java.util.TimerTask;
 
 class AdaptersPanel extends VBox {
 
@@ -71,25 +66,21 @@ class AdaptersPanel extends VBox {
         Button enableBtn = UIButton.success("Enable");
         Button disableBtn = UIButton.secondary("Disable");
         Button renewIpBtn = UIButton.primary("Renew IP");
-        Button statsBtn = UIButton.secondary("Statistics");
 
         enableBtn.setDisable(true);
         disableBtn.setDisable(true);
         renewIpBtn.setDisable(true);
-        statsBtn.setDisable(true);
 
         refreshBtn.setOnAction(e -> loadAdapters());
         enableBtn.setOnAction(e -> setAdapterState(true));
         disableBtn.setOnAction(e -> setAdapterState(false));
         renewIpBtn.setOnAction(e -> renewSelectedIp());
-        statsBtn.setOnAction(e -> showStatistics());
 
         adapterTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             boolean hasSel = sel != null && !busy.get();
             enableBtn.setDisable(!hasSel);
             disableBtn.setDisable(!hasSel);
             renewIpBtn.setDisable(!hasSel);
-            statsBtn.setDisable(!hasSel);
         });
 
         busy.addListener((obs, old, nv) -> {
@@ -98,10 +89,9 @@ class AdaptersPanel extends VBox {
             enableBtn.setDisable(notBusy || adapterTable.getSelectionModel().getSelectedItem() == null);
             disableBtn.setDisable(notBusy || adapterTable.getSelectionModel().getSelectedItem() == null);
             renewIpBtn.setDisable(notBusy || adapterTable.getSelectionModel().getSelectedItem() == null);
-            statsBtn.setDisable(notBusy || adapterTable.getSelectionModel().getSelectedItem() == null);
         });
 
-        HBox toolbar = new HBox(12, refreshBtn, enableBtn, disableBtn, renewIpBtn, statsBtn, statusLabel);
+        HBox toolbar = new HBox(12, refreshBtn, enableBtn, disableBtn, renewIpBtn, statusLabel);
         toolbar.setAlignment(Pos.CENTER_LEFT);
         toolbar.setPadding(new Insets(12, 16, 12, 16));
         toolbar.getStyleClass().add("toolbar");
@@ -192,61 +182,5 @@ class AdaptersPanel extends VBox {
                 busy.set(false);
             });
         }, "net-renew-ip").start();
-    }
-
-    private void showStatistics() {
-        NetworkAdapterRow selected = adapterTable.getSelectionModel().getSelectedItem();
-        if (selected == null) return;
-
-        Dialog<Void> dialog = new Dialog<>();
-        dialog.setTitle("Adapter Statistics");
-        dialog.setHeaderText("Statistics for " + selected.getName());
-
-        Label content = new Label("Loading statistics...");
-        content.setStyle("-fx-font-family: 'Consolas', monospace; -fx-padding: 16;");
-        dialog.getDialogPane().setContent(content);
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
-        dialog.setResizable(true);
-
-        Timer refreshTimer = new Timer(true);
-        refreshTimer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                if (!dialog.isShowing()) {
-                    refreshTimer.cancel();
-                    return;
-                }
-                AdapterStatistics stats = service.getAdapterStatistics(selected.getName());
-                Platform.runLater(() -> content.setText(formatStats(stats)));
-            }
-        }, 0, 5000);
-
-        dialog.setOnCloseRequest(e -> refreshTimer.cancel());
-        dialog.show();
-    }
-
-    private String formatStats(AdapterStatistics s) {
-        return String.format(
-                "Bytes Sent:     %s\n" +
-                "Bytes Received: %s\n" +
-                "Unicast Sent:   %d\n" +
-                "Unicast Recv:   %d\n" +
-                "Multicast Sent: %d\n" +
-                "Multicast Recv: %d\n" +
-                "Broadcast Sent: %d\n" +
-                "Broadcast Recv: %d\n" +
-                "Discarded:      %d\n" +
-                "Errors:         %d",
-                AdapterStatistics.formatBytes(s.bytesSent()),
-                AdapterStatistics.formatBytes(s.bytesReceived()),
-                s.unicastPacketsSent(),
-                s.unicastPacketsReceived(),
-                s.multicastPacketsSent(),
-                s.multicastPacketsReceived(),
-                s.broadcastPacketsSent(),
-                s.broadcastPacketsReceived(),
-                s.discardedPackets(),
-                s.errorPackets()
-        );
     }
 }

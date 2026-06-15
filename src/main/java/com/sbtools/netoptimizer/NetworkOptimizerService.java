@@ -201,36 +201,6 @@ public class NetworkOptimizerService {
         }
     }
 
-    public AdapterStatistics getAdapterStatistics(String adapterName) {
-        sanitizeName(adapterName);
-        try {
-            Path script = PowerShellScripts.resolve("net-adapter-stats.ps1");
-            ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", adapterName));
-            String stdout = pr.stdout().trim();
-            if (!stdout.isEmpty()) {
-                Map<String, Object> data = mapper.readValue(stdout,
-                        new TypeReference<Map<String, Object>>() {});
-                return new AdapterStatistics(
-                        adapterName,
-                        longVal(data, "bytesSent"),
-                        longVal(data, "bytesReceived"),
-                        longVal(data, "unicastPacketsSent"),
-                        longVal(data, "unicastPacketsReceived"),
-                        longVal(data, "multicastPacketsSent"),
-                        longVal(data, "multicastPacketsReceived"),
-                        longVal(data, "broadcastPacketsSent"),
-                        longVal(data, "broadcastPacketsReceived"),
-                        longVal(data, "discardedPackets"),
-                        longVal(data, "errorPackets")
-                );
-            }
-        } catch (Exception e) {
-            AppLogger.warning("Failed to get adapter statistics: " + e.getMessage());
-        }
-        return AdapterStatistics.empty(adapterName);
-    }
-
     public List<String> getCurrentDnsServers(String adapterName) {
         sanitizeName(adapterName);
         try {
@@ -276,16 +246,6 @@ public class NetworkOptimizerService {
         } catch (Exception e) {
             AppLogger.warning("Failed to set DNS servers: " + e.getMessage());
             return OperationResult.fail("Failed to set DNS servers: " + e.getMessage());
-        }
-    }
-
-    private long longVal(Map<String, Object> map, String key) {
-        Object v = map.get(key);
-        if (v instanceof Number n) return n.longValue();
-        try {
-            return Long.parseLong(v != null ? v.toString() : "0");
-        } catch (NumberFormatException e) {
-            return 0;
         }
     }
 

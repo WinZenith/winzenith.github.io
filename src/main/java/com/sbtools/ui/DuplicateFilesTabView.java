@@ -70,7 +70,7 @@ public class DuplicateFilesTabView extends BorderPane {
 
     public DuplicateFilesTabView(BooleanSupplier adminCheck) {
         this.adminCheck = adminCheck;
-        this.scanRoot = Paths.get(System.getProperty("user.home"));
+        this.scanRoot = Paths.get(System.getenv("SystemDrive") + "\\");
         scanPathLabel.setText(truncatePath(scanRoot.toString()));
         scanPathLabel.getStyleClass().add("label.text-muted");
         scanPathLabel.setTooltip(new Tooltip(scanRoot.toString()));
