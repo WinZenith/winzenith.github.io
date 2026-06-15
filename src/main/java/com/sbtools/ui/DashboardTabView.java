@@ -145,11 +145,11 @@ public class DashboardTabView extends BorderPane {
             int totalScans = 3;
             try {
                 CompletableFuture<Void> driverScan = CompletableFuture.runAsync(
-                        () -> scanDrivers(scansComplete, totalScans), executor);
+                        () -> scanDrivers(scansComplete, totalScans));
                 CompletableFuture<Void> softwareScan = CompletableFuture.runAsync(
-                        () -> scanSoftware(scansComplete, totalScans), executor);
+                        () -> scanSoftware(scansComplete, totalScans));
                 CompletableFuture<Void> cleanupScan = CompletableFuture.runAsync(
-                        () -> scanCleanup(scansComplete, totalScans), executor);
+                        () -> scanCleanup(scansComplete, totalScans));
 
                 CompletableFuture.allOf(driverScan, softwareScan, cleanupScan).join();
 
@@ -250,14 +250,14 @@ public class DashboardTabView extends BorderPane {
             if (scanCancelled) return;
             for (CleanupRow row : results) {
                 if (scanCancelled) return;
-                if (row.getItemCount() > 0 || row.getTotalBytes() > 0) {
-                    String sizeText = row.getTotalBytes() > 0 ? formatBytes(row.getTotalBytes()) : row.getItemCount() + " item(s)";
-                    Platform.runLater(() -> issues.add(new IssueCategory(
-                            row.getCategory().getDisplayName(),
-                            row.getItemCount(),
-                            row.getTotalBytes(),
-                            "Cleanup")));
-                }
+                String detailText = row.sizeOrCountTextProperty().get();
+                String sizeText = row.getTotalBytes() > 0 ? formatBytes(row.getTotalBytes()) : "";
+                Platform.runLater(() -> issues.add(new IssueCategory(
+                        row.getCategory().getDisplayName(),
+                        detailText,
+                        sizeText,
+                        "Cleanup",
+                        row.getTotalBytes())));
             }
         } catch (Exception ex) {
             AppLogger.warning("Dashboard cleanup scan failed: " + ex.getMessage());
@@ -304,6 +304,15 @@ public class DashboardTabView extends BorderPane {
             this.sizeBytes = sizeBytes;
             this.countText = new SimpleStringProperty(count + " issue" + (count == 1 ? "" : "s"));
             this.sizeText = new SimpleStringProperty(sizeBytes > 0 ? formatBytes(sizeBytes) : "");
+            this.source = new SimpleStringProperty(source);
+        }
+
+        public IssueCategory(String category, String detailText, String sizeText, String source, long sizeBytes) {
+            this.category = new SimpleStringProperty(category);
+            this.count = 0;
+            this.sizeBytes = sizeBytes;
+            this.countText = new SimpleStringProperty(detailText);
+            this.sizeText = new SimpleStringProperty(sizeText);
             this.source = new SimpleStringProperty(source);
         }
 

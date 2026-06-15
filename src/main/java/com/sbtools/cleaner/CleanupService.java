@@ -2111,21 +2111,35 @@ public class CleanupService {
 
     private void scanOtherProgramsCache(CleanupRow row) {
         long totalSize = 0;
+
         CleanupRow temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanDiscordCache(temp);
         totalSize += temp.getTotalBytes();
+
+        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanVscodeCache(temp);
         totalSize += temp.getTotalBytes();
+
+        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanAdobeCache(temp);
         totalSize += temp.getTotalBytes();
+
+        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanSteamCache(temp);
         totalSize += temp.getTotalBytes();
+
+        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanSlackCache(temp);
         totalSize += temp.getTotalBytes();
+
+        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanZoomCache(temp);
         totalSize += temp.getTotalBytes();
+
+        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanTeamsCache(temp);
         totalSize += temp.getTotalBytes();
+
         row.setTotalBytes(totalSize);
         row.setSizeOrCountText(formatBytes(totalSize));
     }
