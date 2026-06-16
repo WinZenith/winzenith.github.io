@@ -47,9 +47,7 @@ public class App extends Application {
     private VBox sidebar;
     private Node[] tabViews;
     private UIButton[] tabButtons;
-    private UIButton settingsBtn;
     private UIButton helpBtn;
-    private SettingsTabView settingsTab;
     private HelpTabView helpTab;
     private Image logoImage;
     private int selectedTab = 0;
@@ -101,7 +99,6 @@ public class App extends Application {
         sidebar.getStyleClass().add("sidebar");
         sidebar.setAlignment(Pos.TOP_LEFT);
 
-        settingsTab = new SettingsTabView(settingsStore);
         helpTab = new HelpTabView();
 
         buildSidebar();
@@ -159,12 +156,6 @@ public class App extends Application {
             });
         }
 
-        settingsBtn = UIButton.secondary("\u2699 Settings");
-        settingsBtn.setOnAction(e -> {
-            selectTab(settingsBtn);
-            root.setCenter(settingsTab);
-        });
-
         helpBtn = UIButton.secondary("\u2753 Help");
         helpBtn.setOnAction(e -> {
             selectTab(helpBtn);
@@ -177,7 +168,6 @@ public class App extends Application {
         sidebar.getChildren().addAll(tabButtons);
         sidebar.getChildren().addAll(
                 new Separator(),
-                settingsBtn,
                 helpBtn
         );
 
@@ -197,7 +187,6 @@ public class App extends Application {
         for (UIButton btn : tabButtons) {
             btn.setStyleType(UIButton.ButtonStyle.SECONDARY);
         }
-        settingsBtn.setStyleType(UIButton.ButtonStyle.SECONDARY);
         helpBtn.setStyleType(UIButton.ButtonStyle.SECONDARY);
         selected.setStyleType(UIButton.ButtonStyle.PRIMARY);
     }
