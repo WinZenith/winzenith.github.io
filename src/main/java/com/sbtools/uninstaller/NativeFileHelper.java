@@ -5,7 +5,6 @@ import com.sun.jna.platform.win32.WinDef.DWORD;
 import com.sbtools.util.AppLogger;
 
 import java.io.File;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 

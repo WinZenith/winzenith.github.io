@@ -135,14 +135,14 @@ public class DriveInfo {
         return formatFragmentSize(f);
     }
 
-    public static String formatFragmentSize(long f) {
+    private static String formatFragmentSize(long f) {
         if (f < 1024) return f + " B";
         if (f < 1024 * 1024) return String.format("%.1f KB", f / 1024.0);
         if (f < 1024L * 1024 * 1024) return String.format("%.1f MB", f / (1024.0 * 1024));
         return String.format("%.1f GB", f / (1024.0 * 1024 * 1024));
     }
 
-    public static String formatBytes(long bytes) {
+    private static String formatBytes(long bytes) {
         if (bytes < 1024) return bytes + " B";
         if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
         if (bytes < 1024L * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));

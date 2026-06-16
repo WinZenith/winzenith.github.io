@@ -2,7 +2,6 @@ package com.sbtools.license;
 
 import com.sbtools.util.AppInfo;
 import javafx.geometry.Insets;
-import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;

@@ -2,9 +2,7 @@ package com.sbtools.update;
 
 import com.sbtools.util.AppInfo;
 import javafx.geometry.Insets;
-import javafx.geometry.Pos;
 import javafx.scene.control.*;
-import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 
 import java.awt.Desktop;

@@ -1,7 +1,6 @@
 package com.sbtools.util;
 
 import com.sun.jna.Memory;
-import com.sun.jna.Pointer;
 import com.sun.jna.platform.win32.GDI32;
 import com.sun.jna.platform.win32.Shell32;
 import com.sun.jna.platform.win32.User32;
