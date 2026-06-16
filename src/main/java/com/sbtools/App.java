@@ -60,8 +60,8 @@ public class App extends Application {
     private Node[] tabViews;
     private UIButton[] tabButtons;
     private UIButton activateBtn;
-    private UIButton settingsBtn;
-    private SettingsTabView settingsTab;
+    private UIButton helpBtn;
+    private HelpTabView helpTab;
     private Image logoImage;
     private int selectedTab = 0;
 
@@ -81,10 +81,11 @@ public class App extends Application {
 
         boolean admin = AdminCheck.isRunningAsAdmin();
         if (!admin && AppPaths.isWindows()) {
+            AppLogger.info("Requesting administrator privileges...");
             try {
                 AdminCheck.requestElevation();
-            } catch (IOException e) {
-                new Alert(Alert.AlertType.ERROR, "Could not request elevation: " + e.getMessage()).showAndWait();
+            } catch (IOException ex) {
+                AppLogger.warning("Failed to request elevation: " + ex.getMessage());
             }
             Platform.exit();
             return;
@@ -113,7 +114,7 @@ public class App extends Application {
         sidebar.getStyleClass().add("sidebar");
         sidebar.setAlignment(Pos.TOP_LEFT);
 
-        settingsTab = new SettingsTabView(settingsStore, licenseValidator);
+        helpTab = new HelpTabView();
 
         buildSidebar();
 
@@ -180,10 +181,10 @@ public class App extends Application {
         activateBtn.setStyle("-fx-text-fill: #ffb86c; -fx-border-color: #ffb86c;");
         activateBtn.setOnAction(e -> showLicenseDialog());
 
-        settingsBtn = UIButton.secondary("\u2699 Settings");
-        settingsBtn.setOnAction(e -> {
-            selectTab(settingsBtn);
-            root.setCenter(settingsTab);
+        helpBtn = UIButton.secondary("\u2753 Help");
+        helpBtn.setOnAction(e -> {
+            selectTab(helpBtn);
+            root.setCenter(helpTab);
         });
 
         sidebar.getChildren().addAll(
@@ -193,7 +194,7 @@ public class App extends Application {
         sidebar.getChildren().addAll(
                 new Separator(),
                 activateBtn,
-                settingsBtn
+                helpBtn
         );
 
         if (tabButtons.length > 0) {
@@ -235,6 +236,7 @@ public class App extends Application {
                 btn.setStyleType(UIButton.ButtonStyle.SECONDARY);
             }
         }
+        helpBtn.setStyleType(UIButton.ButtonStyle.SECONDARY);
         if (!isLocked(selected)) {
             selected.setStyleType(UIButton.ButtonStyle.PRIMARY);
         }
