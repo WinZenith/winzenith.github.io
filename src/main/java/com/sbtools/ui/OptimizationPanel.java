@@ -143,7 +143,6 @@ class OptimizationPanel extends VBox {
                     currentSettings.skippedSoftwareIds(),
                     preset.name(),
                     currentSettings.downloadDirectory(),
-                    currentSettings.licenseKey(),
                     currentSettings.minimizeToTray(),
                     currentSettings.startMinimized(),
                     currentSettings.scanOnStartup(),

@@ -14,7 +14,6 @@ public record AppSettings(
         List<String> skippedSoftwareIds,
         String networkOptimizationPreset,
         String downloadDirectory,
-        String licenseKey,
         boolean minimizeToTray,
         boolean startMinimized,
         boolean scanOnStartup,
@@ -29,7 +28,7 @@ public record AppSettings(
     public static AppSettings defaults() {
         return new AppSettings(true, true, false,
                 Collections.emptyList(), Collections.emptyList(),
-                "DEFAULT", System.getProperty("user.home") + "\\Downloads", "",
+                "DEFAULT", System.getProperty("user.home") + "\\Downloads",
                 false, false, false, true,
                 "", "powershell", 960, 600, true, true);
     }

@@ -30,7 +30,6 @@ public class SettingsStore {
             List<String> skippedSoftware = list(root, "skippedSoftwareIds");
             String netPreset = str(root, "networkOptimizationPreset");
             String downloadDir = str(root, "downloadDirectory");
-            String licenseKey = str(root, "licenseKey");
             String backupDir = str(root, "backupDirectory");
             String psPath = str(root, "powerShellPath");
             return new AppSettings(
@@ -41,7 +40,6 @@ public class SettingsStore {
                     skippedSoftware != null ? skippedSoftware : d.skippedSoftwareIds(),
                     netPreset != null ? netPreset : d.networkOptimizationPreset(),
                     downloadDir != null ? downloadDir : d.downloadDirectory(),
-                    licenseKey != null ? licenseKey : d.licenseKey(),
                     bool(root, "minimizeToTray", d.minimizeToTray()),
                     bool(root, "startMinimized", d.startMinimized()),
                     bool(root, "scanOnStartup", d.scanOnStartup()),

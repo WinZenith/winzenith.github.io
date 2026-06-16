@@ -88,7 +88,6 @@ public class IgnoredListDialog {
                         updated,
                         current.networkOptimizationPreset(),
                         current.downloadDirectory(),
-                        current.licenseKey(),
                         current.minimizeToTray(),
                         current.startMinimized(),
                         current.scanOnStartup(),

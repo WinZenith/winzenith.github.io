@@ -1,8 +1,6 @@
 package com.sbtools;
 
 import com.sbtools.license.EulaDialog;
-import com.sbtools.license.LicenseDialog;
-import com.sbtools.license.LicenseValidator;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
 import com.sbtools.ui.*;
@@ -31,22 +29,12 @@ import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 
 import java.io.IOException;
-import java.util.Set;
 
 public class App extends Application {
 
     private final SettingsStore settingsStore = new SettingsStore();
-    private final LicenseValidator licenseValidator = new LicenseValidator();
     private final UpdateChecker updateChecker = new UpdateChecker();
     private final BooleanProperty busy = new SimpleBooleanProperty(false);
-
-    private static final Set<String> FREE_TABS = Set.of(
-            "Dashboard",
-            "System Information",
-            "Disk Tools",
-            "Browser Extensions",
-            "Network Optimizer"
-    );
 
     private static final String[] TAB_NAMES = {
             "Dashboard", "Drivers", "Backup/Rollback", "Software update",
@@ -59,8 +47,9 @@ public class App extends Application {
     private VBox sidebar;
     private Node[] tabViews;
     private UIButton[] tabButtons;
-    private UIButton activateBtn;
+    private UIButton settingsBtn;
     private UIButton helpBtn;
+    private SettingsTabView settingsTab;
     private HelpTabView helpTab;
     private Image logoImage;
     private int selectedTab = 0;
@@ -72,8 +61,6 @@ public class App extends Application {
         AppLogger.init();
         DataMigration.migrateIfNeeded();
         AppSettings settings = settingsStore.load();
-
-        licenseValidator.check();
 
         if (!settings.eulaAccepted()) {
             showEula(settings);
@@ -114,6 +101,7 @@ public class App extends Application {
         sidebar.getStyleClass().add("sidebar");
         sidebar.setAlignment(Pos.TOP_LEFT);
 
+        settingsTab = new SettingsTabView(settingsStore);
         helpTab = new HelpTabView();
 
         buildSidebar();
@@ -160,26 +148,22 @@ public class App extends Application {
         Separator sep = new Separator();
         sep.setStyle("-fx-padding: 4 0 4 0;");
 
-        boolean licenseActive = licenseValidator.isLicenseActive();
-
         tabButtons = new UIButton[TAB_NAMES.length];
         for (int i = 0; i < TAB_NAMES.length; i++) {
-            tabButtons[i] = createTabButton(TAB_NAMES[i], licenseActive);
+            tabButtons[i] = createTabButton(TAB_NAMES[i]);
             final int idx = i;
             tabButtons[i].setOnAction(e -> {
-                if (isLocked(tabButtons[idx]) && !licenseValidator.isLicenseActive()) {
-                    showLicenseDialog();
-                    return;
-                }
                 selectedTab = idx;
                 selectTab(tabButtons[idx]);
                 root.setCenter(tabViews[idx]);
             });
         }
 
-        activateBtn = UIButton.secondary("Activate Pro");
-        activateBtn.setStyle("-fx-text-fill: #ffb86c; -fx-border-color: #ffb86c;");
-        activateBtn.setOnAction(e -> showLicenseDialog());
+        settingsBtn = UIButton.secondary("\u2699 Settings");
+        settingsBtn.setOnAction(e -> {
+            selectTab(settingsBtn);
+            root.setCenter(settingsTab);
+        });
 
         helpBtn = UIButton.secondary("\u2753 Help");
         helpBtn.setOnAction(e -> {
@@ -193,7 +177,7 @@ public class App extends Application {
         sidebar.getChildren().addAll(tabButtons);
         sidebar.getChildren().addAll(
                 new Separator(),
-                activateBtn,
+                settingsBtn,
                 helpBtn
         );
 
@@ -202,44 +186,20 @@ public class App extends Application {
         }
     }
 
-    private UIButton createTabButton(String name, boolean licenseActive) {
-        if (FREE_TABS.contains(name) || licenseActive) {
-            if ("Dashboard".equals(name)) {
-                return UIButton.primary(name);
-            }
-            return UIButton.secondary(name);
+    private UIButton createTabButton(String name) {
+        if ("Dashboard".equals(name)) {
+            return UIButton.primary(name);
         }
-        return new UIButton("\uD83D\uDD12 " + name, UIButton.ButtonStyle.LOCKED);
-    }
-
-    private boolean isLocked(UIButton button) {
-        return button.getStyleClass().contains("button-locked");
-    }
-
-    private void showLicenseDialog() {
-        LicenseDialog dialog = new LicenseDialog();
-        boolean activated = dialog.show(licenseValidator);
-        AppLogger.info("License dialog closed. activated=" + activated + ", licenseActive=" + licenseValidator.isLicenseActive());
-
-        if (activated || licenseValidator.isLicenseActive()) {
-            AppLogger.info("Rebuilding sidebar after license activation");
-            licenseValidator.check();
-            buildSidebar();
-            root.setCenter(tabViews[0]);
-            selectedTab = 0;
-        }
+        return UIButton.secondary(name);
     }
 
     private void selectTab(UIButton selected) {
         for (UIButton btn : tabButtons) {
-            if (!isLocked(btn)) {
-                btn.setStyleType(UIButton.ButtonStyle.SECONDARY);
-            }
+            btn.setStyleType(UIButton.ButtonStyle.SECONDARY);
         }
+        settingsBtn.setStyleType(UIButton.ButtonStyle.SECONDARY);
         helpBtn.setStyleType(UIButton.ButtonStyle.SECONDARY);
-        if (!isLocked(selected)) {
-            selected.setStyleType(UIButton.ButtonStyle.PRIMARY);
-        }
+        selected.setStyleType(UIButton.ButtonStyle.PRIMARY);
     }
 
     private void showEula(AppSettings settings) {
@@ -257,7 +217,6 @@ public class App extends Application {
                     settings.skippedSoftwareIds(),
                     settings.networkOptimizationPreset(),
                     settings.downloadDirectory(),
-                    settings.licenseKey(),
                     settings.minimizeToTray(),
                     settings.startMinimized(),
                     settings.scanOnStartup(),
