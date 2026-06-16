@@ -318,6 +318,26 @@ img {
     font-size: 15px;
 }
 
+/* --- SmartScreen Note --- */
+.smartscreen-note {
+    margin-top: 24px;
+    padding: 16px 20px;
+    background-color: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.6;
+    max-width: 500px;
+    margin-left: auto;
+    margin-right: auto;
+    text-align: left;
+}
+
+.smartscreen-note strong {
+    color: var(--warning);
+}
+
 /* --- Footer --- */
 .footer {
     background-color: var(--bg-surface);
