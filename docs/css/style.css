@@ -299,6 +299,30 @@ img {
     line-height: 1.5;
 }
 
+/* --- Highlights List --- */
+.highlights-list {
+    list-style: none;
+    max-width: 700px;
+    margin: 32px auto 0;
+    padding: 0;
+    text-align: center;
+}
+
+.highlights-list li {
+    position: relative;
+    padding: 8px 0 8px 24px;
+    font-size: 15px;
+    color: var(--text-primary);
+}
+
+.highlights-list li::before {
+    content: "\2713";
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+    font-weight: bold;
+}
+
 /* --- Download CTA Section --- */
 .download-cta {
     text-align: center;
