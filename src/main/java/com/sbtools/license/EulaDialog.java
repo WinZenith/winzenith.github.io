@@ -15,6 +15,8 @@ import java.util.stream.Collectors;
 
 public class EulaDialog extends Dialog<ButtonType> {
 
+    public static final ButtonType ACCEPT = new ButtonType("I Accept", ButtonBar.ButtonData.OK_DONE);
+
     public EulaDialog() {
         setTitle(AppInfo.DISPLAY_NAME + " - License Agreement");
         setHeaderText("Please read and accept the End User License Agreement");
@@ -37,16 +39,15 @@ public class EulaDialog extends Dialog<ButtonType> {
         consentLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #6272a4; -fx-padding: 8 0 0 0;");
         consentLabel.setWrapText(true);
 
-        ButtonType acceptBtn = new ButtonType("I Accept", ButtonBar.ButtonData.OK_DONE);
         ButtonType declineBtn = new ButtonType("Decline", ButtonBar.ButtonData.CANCEL_CLOSE);
-        getDialogPane().getButtonTypes().addAll(acceptBtn, declineBtn);
+        getDialogPane().getButtonTypes().addAll(ACCEPT, declineBtn);
 
         VBox content = new VBox(10);
         content.setPadding(new Insets(16));
         content.getChildren().addAll(scrollPane, consentLabel);
         getDialogPane().setContent(content);
 
-        Button acceptButton = (Button) getDialogPane().lookupButton(acceptBtn);
+        Button acceptButton = (Button) getDialogPane().lookupButton(ACCEPT);
         acceptButton.setDefaultButton(true);
 
         Button declineButton = (Button) getDialogPane().lookupButton(declineBtn);

@@ -13,7 +13,6 @@ import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
-import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.Separator;
 import javafx.scene.image.Image;
@@ -193,7 +192,7 @@ public class App extends Application {
 
     private void showEula(AppSettings settings) {
         EulaDialog eula = new EulaDialog();
-        if (eula.showAndWait().orElse(null) != ButtonType.OK) {
+        if (eula.showAndWait().orElse(null) != EulaDialog.ACCEPT) {
             Platform.exit();
             return;
         }
