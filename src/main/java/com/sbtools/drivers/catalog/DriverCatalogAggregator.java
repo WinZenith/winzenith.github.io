@@ -3,12 +3,13 @@ package com.sbtools.drivers.catalog;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
 import com.sbtools.drivers.model.InstalledDriver;
 import com.sbtools.util.AppLogger;
+import com.sbtools.util.CancellationToken;
 import com.sbtools.util.VersionCompare;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -17,9 +18,15 @@ import java.util.function.Consumer;
 public class DriverCatalogAggregator {
 
     private final List<DriverCatalogProvider> providers;
+    private final ProviderCache cache;
 
     public DriverCatalogAggregator(List<DriverCatalogProvider> providers) {
+        this(providers, new ProviderCache());
+    }
+
+    public DriverCatalogAggregator(List<DriverCatalogProvider> providers, ProviderCache cache) {
         this.providers = List.copyOf(providers);
+        this.cache = cache;
     }
 
     public static DriverCatalogAggregator createDefault() {
@@ -44,31 +51,17 @@ public class DriverCatalogAggregator {
     }
 
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed) {
+        return findUpdates(installed, CancellationToken.NONE);
+    }
+
+    public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed, CancellationToken token) {
         AppLogger.debug("CatalogAggregator: Scanning " + installed.size() + " installed drivers");
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
-        int poolSize = Math.min(providers.size(), 8);
-        ExecutorService pool = Executors.newFixedThreadPool(poolSize);
-        try {
-            var futures = providers.stream()
-                    .map(provider -> pool.submit(() -> {
-                        for (DriverUpdateCandidate c : provider.findUpdates(installed)) {
-                            byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
-                        }
-                        return null;
-                    }))
-                    .toList();
-            for (var future : futures) {
-                try {
-                    future.get();
-                } catch (Exception e) {
-                    if (e.getCause() instanceof InterruptedException) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
+        runProviders(installed, token, null, providerResults -> {
+            for (DriverUpdateCandidate c : providerResults) {
+                byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
             }
-        } finally {
-            pool.shutdown();
-        }
+        });
         AppLogger.debug("CatalogAggregator: Found " + byDevice.size() + " driver update candidates");
         return new ArrayList<>(byDevice.values());
     }
@@ -80,25 +73,73 @@ public class DriverCatalogAggregator {
             List<InstalledDriver> installed,
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderFinished) {
+        findUpdates(installed, CancellationToken.NONE, onProviderStarted, onProviderFinished);
+    }
+
+    /**
+     * Cancellation-aware streaming variant. Runs every provider on a per-call
+     * virtual-thread executor (efficient for I/O-bound HTTP/PowerShell work),
+     * consults the on-disk {@link ProviderCache} before invoking a provider,
+     * and writes fresh results back to the cache.
+     */
+    public void findUpdates(
+            List<InstalledDriver> installed,
+            CancellationToken token,
+            Consumer<String> onProviderStarted,
+            Consumer<List<DriverUpdateCandidate>> onProviderFinished) {
+        final CancellationToken effectiveToken = token != null ? token : CancellationToken.NONE;
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
-        int poolSize = Math.min(providers.size(), 8);
-        ExecutorService pool = Executors.newFixedThreadPool(poolSize);
+        runProviders(installed, effectiveToken, onProviderStarted, providerResults -> {
+            if (effectiveToken.isCancelled()) {
+                return;
+            }
+            for (DriverUpdateCandidate c : providerResults) {
+                byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
+            }
+            if (onProviderFinished != null) {
+                onProviderFinished.accept(List.copyOf(byDevice.values()));
+            }
+        });
+    }
+
+    private void runProviders(
+            List<InstalledDriver> installed,
+            CancellationToken token,
+            Consumer<String> onProviderStarted,
+            Consumer<List<DriverUpdateCandidate>> onProviderResult) {
+        // We'd prefer virtual threads here (JDK 21+), but the project targets an older JDK.
+        // A cached thread pool sized to provider count still gives us full provider fan-out
+        // for I/O-bound work without the fixed-size bottleneck of the previous implementation.
+        int poolSize = Math.max(1, Math.min(providers.size(), 16));
+        ExecutorService pool = Executors.newFixedThreadPool(poolSize, r -> {
+            Thread t = new Thread(r, "catalog-provider");
+            t.setDaemon(true);
+            return t;
+        });
         try {
             var futures = providers.stream()
                     .map(provider -> pool.submit(() -> {
+                        if (token.isCancelled()) {
+                            return null;
+                        }
                         if (onProviderStarted != null) {
-                            onProviderStarted.accept(provider.id());
+                            try { onProviderStarted.accept(provider.id()); } catch (Exception ignored) { }
                         }
-                        for (DriverUpdateCandidate c : provider.findUpdates(installed)) {
-                            byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
+                        List<DriverUpdateCandidate> results = queryProvider(provider, installed, token);
+                        if (token.isCancelled()) {
+                            return null;
                         }
-                        if (onProviderFinished != null) {
-                            onProviderFinished.accept(List.copyOf(byDevice.values()));
+                        if (onProviderResult != null) {
+                            try { onProviderResult.accept(results); } catch (Exception ignored) { }
                         }
                         return null;
                     }))
                     .toList();
             for (var future : futures) {
+                if (token.isCancelled()) {
+                    future.cancel(true);
+                    continue;
+                }
                 try {
                     future.get();
                 } catch (Exception e) {
@@ -110,6 +151,34 @@ public class DriverCatalogAggregator {
         } finally {
             pool.shutdown();
         }
+    }
+
+    private List<DriverUpdateCandidate> queryProvider(
+            DriverCatalogProvider provider, List<InstalledDriver> installed, CancellationToken token) {
+        if (cache != null) {
+            Optional<List<DriverUpdateCandidate>> cached = cache.read(provider.id(), installed);
+            if (cached.isPresent()) {
+                AppLogger.debug("CatalogAggregator: cache hit for " + provider.id());
+                return cached.get();
+            }
+        }
+        if (token.isCancelled()) {
+            return List.of();
+        }
+        List<DriverUpdateCandidate> fresh;
+        try {
+            fresh = provider.findUpdates(installed);
+        } catch (Exception e) {
+            AppLogger.warning("Provider " + provider.id() + " failed: " + e.getMessage());
+            return List.of();
+        }
+        if (fresh == null) {
+            fresh = List.of();
+        }
+        if (cache != null && !token.isCancelled()) {
+            cache.write(provider.id(), installed, fresh);
+        }
+        return fresh;
     }
 
     private static DriverUpdateCandidate pickBetter(DriverUpdateCandidate existing, DriverUpdateCandidate incoming) {
