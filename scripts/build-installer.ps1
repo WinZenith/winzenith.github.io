@@ -59,4 +59,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "=== Build Complete ===" -ForegroundColor Green
-Write-Host "MSI installer: dist\WinZenith-1.0.6.msi"
+Write-Host "MSI installer: dist\WinZenith-1.0.7.msi"

@@ -374,11 +374,6 @@ public class BackupRestoreTabView extends BorderPane {
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING,
                     "Creating system restore points requires administrator rights.").showAndWait();
-            try {
-                AdminCheck.requestElevation();
-            } catch (java.io.IOException ex) {
-                AppLogger.warning("Failed to request elevation: " + ex.getMessage());
-            }
             return;
         }
 

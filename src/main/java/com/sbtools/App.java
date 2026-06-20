@@ -63,6 +63,18 @@ public class App extends Application {
             showEula(settings);
         }
 
+        boolean admin = AdminCheck.isRunningAsAdmin();
+        if (!admin && AppPaths.isWindows()) {
+            AppLogger.info("Requesting administrator privileges...");
+            try {
+                AdminCheck.requestElevation();
+            } catch (IOException ex) {
+                AppLogger.warning("Failed to request elevation: " + ex.getMessage());
+            }
+            Platform.exit();
+            return;
+        }
+
         logoImage = new Image(getClass().getResourceAsStream("/logo-ico.png"));
 
         tabViews = new Node[]{
