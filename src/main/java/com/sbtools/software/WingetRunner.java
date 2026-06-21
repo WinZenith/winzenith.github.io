@@ -11,6 +11,8 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * Thread-safe utility for resolving the winget executable path and building
@@ -188,6 +190,39 @@ public class WingetRunner {
             }
         }
         return lastResult;
+    }
+
+    /**
+     * Runs a winget command in streaming mode with automatic fallback across candidates.
+     * Calls lineCallback for each output line and progressCallback for progress updates.
+     * Returns the first successful result, or the last failed result.
+     */
+    public ProcessResult runWithFallbackStreaming(Consumer<String> lineCallback,
+                                                  Consumer<Double> progressCallback,
+                                                  AtomicBoolean cancelled,
+                                                  String... args) throws java.io.IOException, java.util.concurrent.CancellationException {
+        List<List<String>> candidates = buildCandidates(args);
+        ProcessResult lastResult = null;
+        Exception lastEx = null;
+        for (List<String> candidate : candidates) {
+            try {
+                ProcessResult r = runner.runStreaming(candidate, lineCallback, progressCallback, cancelled);
+                if (r.success() || (r.stdout() != null && !r.stdout().isBlank())) {
+                    if (!r.success()) {
+                        AppLogger.warning("winget returned non-zero: " + r.exitCode() + " output: " + r.combinedOutput());
+                    }
+                    return r;
+                }
+                lastResult = r;
+            } catch (java.util.concurrent.CancellationException cex) {
+                throw cex;
+            } catch (Exception ex) {
+                lastEx = ex;
+            }
+        }
+        if (lastResult != null) return lastResult;
+        if (lastEx != null) throw new java.io.IOException("Streaming failed", lastEx);
+        return new ProcessResult(-1, "", "No candidates");
     }
 
     /**

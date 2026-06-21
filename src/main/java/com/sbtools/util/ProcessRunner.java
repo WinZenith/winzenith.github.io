@@ -58,14 +58,14 @@ public class ProcessRunner {
      * field, it is also passed to progressCallback as a 0.0-1.0 double.
      * Checks cancelled between lines; if true, destroys the process and throws CancellationException.
      */
-    public void runStreaming(List<String> command, Consumer<String> lineCallback,
+    public ProcessResult runStreaming(List<String> command, Consumer<String> lineCallback,
                              Consumer<Double> progressCallback, AtomicBoolean cancelled)
             throws IOException, CancellationException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
         AppLogger.info("Running (streaming): " + String.join(" ", command));
         Process process = pb.start();
-
+        StringBuilder outBuf = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
@@ -77,6 +77,7 @@ public class ProcessRunner {
                 if (lineCallback != null) {
                     lineCallback.accept(line);
                 }
+                outBuf.append(line).append(System.lineSeparator());
                 if (progressCallback != null) {
                     try {
                         var tree = JsonMapper.mapper().readTree(line);
@@ -107,6 +108,8 @@ public class ProcessRunner {
             Thread.currentThread().interrupt();
             throw new CancellationException("Operation cancelled by user");
         }
+
+        return new ProcessResult(process.exitValue(), outBuf.toString(), "");
     }
 
     private static Thread startStreamReader(InputStream stream, ByteArrayOutputStream target) {

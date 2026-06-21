@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CancellationException;
 
 public class SoftwareUpdateService {
 
@@ -375,6 +376,46 @@ public class SoftwareUpdateService {
         if (r != null && r.success()) return r;
         if (r != null) return r;
         throw new IOException("Failed to run winget upgrade");
+    }
+
+    /**
+     * Attempts to upgrade a package while streaming output and progress updates to the provided entry.
+     * This will update entry.status and entry.progress as lines/progress are received.
+     */
+    public ProcessResult updatePackageWithStreaming(String packageId, boolean silent, long timeoutSeconds,
+                                                    SoftwareUpdateEntry entry, AtomicBoolean cancelled)
+            throws IOException, CancellationException {
+        List<String> args = new ArrayList<>(List.of(
+                "upgrade", "--id", packageId, "--accept-source-agreements", "--accept-package-agreements"));
+        if (silent) args.add("--silent");
+
+        try {
+            ProcessResult r = winget.runWithFallbackStreaming(
+                    line -> {
+                        try {
+                            if (entry != null) entry.setStatus(line == null ? "" : line);
+                        } catch (Exception ignored) {}
+                    },
+                    pct -> {
+                        try {
+                            if (entry != null) entry.setProgress(pct);
+                        } catch (Exception ignored) {}
+                    },
+                    cancelled,
+                    args.toArray(new String[0])
+            );
+            if (r.success()) return r;
+            if (isInstallTechnologyMismatch(r)) {
+                throw new IOException("INSTALL_TECHNOLOGY_MISMATCH");
+            }
+            return r;
+        } catch (CancellationException cex) {
+            throw cex;
+        } catch (IOException ioe) {
+            throw ioe;
+        } catch (Exception ex) {
+            throw new IOException("Failed to run winget streaming", ex);
+        }
     }
 
     /**

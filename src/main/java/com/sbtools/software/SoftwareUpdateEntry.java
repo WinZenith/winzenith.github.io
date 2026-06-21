@@ -1,10 +1,16 @@
 package com.sbtools.software;
 
 import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleBooleanProperty;
+import javafx.beans.property.SimpleDoubleProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
 
+/**
+ * Model representing a discovered software update. Extended with runtime
+ * properties so the UI can bind per-item progress and status messages.
+ */
 public class SoftwareUpdateEntry {
 
     private final String id;
@@ -15,6 +21,10 @@ public class SoftwareUpdateEntry {
     private final StringProperty currentVersion = new SimpleStringProperty();
     private final StringProperty availableVersion = new SimpleStringProperty();
     private final BooleanProperty selected = new SimpleBooleanProperty(false);
+
+    // Runtime UI state
+    private final DoubleProperty progress = new SimpleDoubleProperty(0.0); // -1 = indeterminate
+    private final StringProperty status = new SimpleStringProperty("");
 
     public SoftwareUpdateEntry(String id, String name, String currentVersion, String availableVersion) {
         this(id, name, currentVersion, availableVersion, "winget", null, 0);
@@ -65,6 +75,33 @@ public class SoftwareUpdateEntry {
 
     public StringProperty sourceProperty() {
         return new SimpleStringProperty(source);
+    }
+
+    /**
+     * Progress property (0.0 - 1.0). Use -1.0 for indeterminate.
+     */
+    public DoubleProperty progressProperty() {
+        return progress;
+    }
+
+    public StringProperty statusProperty() {
+        return status;
+    }
+
+    public double getProgress() {
+        return progress.get();
+    }
+
+    public void setProgress(double v) {
+        this.progress.set(v);
+    }
+
+    public String getStatus() {
+        return status.get();
+    }
+
+    public void setStatus(String s) {
+        this.status.set(s == null ? "" : s);
     }
 
     public String getName() {

@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
@@ -54,8 +55,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private final SettingsStore settingsStore = new SettingsStore();
 
     private final AtomicBoolean scanCancelled = new AtomicBoolean(false);
-    private volatile Thread scanThread;
+    private volatile Future<?> scanFuture;
     private final AtomicBoolean installCancelled = new AtomicBoolean(false);
+    private final ExecutorService executor = Executors.newCachedThreadPool();
 
     public SoftwareUpdatesTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -142,6 +144,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
             private final Label sizeLabel = new Label("Installing...");
             private final Label installingLabel = new Label("Installing update. Please wait...");
             private final ProgressIndicator spinner = new ProgressIndicator();
+            // Track the entry currently bound to this cell so we can unbind listeners when reused
+            private SoftwareUpdateEntry boundEntry = null;
+            private javafx.beans.value.ChangeListener<String> statusListener = null;
 
             {
                 spinner.setPrefSize(48, 48);
@@ -177,18 +182,67 @@ public class SoftwareUpdatesTabView extends BorderPane {
             @Override
             protected void updateItem(Void item, boolean empty) {
                 super.updateItem(item, empty);
+                // Unbind previous entry listeners when cell is cleared or reused
                 if (empty) {
+                    if (boundEntry != null) {
+                        try {
+                            downloadProgress.progressProperty().unbind();
+                        } catch (Exception ignored) {}
+                        if (statusListener != null) {
+                            try { boundEntry.statusProperty().removeListener(statusListener); } catch (Exception ignored) {}
+                            statusListener = null;
+                        }
+                        boundEntry = null;
+                    }
                     setGraphic(null);
-                } else {
-                    SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
-                    boolean disabled = entry == null || busy.get();
-                    updateBtn.setDisable(disabled);
-                    ignoreBtn.setDisable(disabled);
-                    stopBtn.setDisable(true);
-                    HBox container = new HBox(6, updateBtn, ignoreBtn, stopBtn, sizeLabel, downloadProgress, installingLabel, spinner);
-                    container.setAlignment(Pos.CENTER_LEFT);
-                    setGraphic(container);
+                    return;
                 }
+
+                SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
+                boolean disabled = entry == null || busy.get();
+                updateBtn.setDisable(disabled);
+                ignoreBtn.setDisable(disabled);
+                stopBtn.setDisable(true);
+
+                // If the cell is switching to a different entry, unbind old listeners
+                if (boundEntry != null && boundEntry != entry) {
+                    try { downloadProgress.progressProperty().unbind(); } catch (Exception ignored) {}
+                    if (statusListener != null) {
+                        try { boundEntry.statusProperty().removeListener(statusListener); } catch (Exception ignored) {}
+                        statusListener = null;
+                    }
+                }
+
+                boundEntry = entry;
+                if (entry != null) {
+                    // bind progress
+                    try {
+                        downloadProgress.progressProperty().bind(entry.progressProperty());
+                    } catch (Exception ignored) {}
+
+                    // bind status text and show/hide progress when status changes
+                    installingLabel.textProperty().bind(entry.statusProperty());
+                    statusListener = (obs, oldVal, newVal) -> Platform.runLater(() -> {
+                        boolean show = newVal != null && !newVal.isBlank();
+                        downloadProgress.setVisible(show);
+                        installingLabel.setVisible(show);
+                        sizeLabel.setVisible(show);
+                    });
+                    entry.statusProperty().addListener(statusListener);
+
+                    boolean showNow = entry.getStatus() != null && !entry.getStatus().isBlank();
+                    downloadProgress.setVisible(showNow);
+                    installingLabel.setVisible(showNow);
+                    sizeLabel.setVisible(showNow);
+                } else {
+                    downloadProgress.setVisible(false);
+                    installingLabel.setVisible(false);
+                    sizeLabel.setVisible(false);
+                }
+
+                HBox container = new HBox(6, updateBtn, ignoreBtn, stopBtn, sizeLabel, downloadProgress, installingLabel, spinner);
+                container.setAlignment(Pos.CENTER_LEFT);
+                setGraphic(container);
             }
 
             private void showInstallingState() {
@@ -291,9 +345,12 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
     private void stopScan() {
         scanCancelled.set(true);
-        if (scanThread != null) {
-            scanThread.interrupt();
-            scanThread = null;
+        if (scanFuture != null) {
+            try {
+                scanFuture.cancel(true);
+            } catch (Exception ignored) {
+            }
+            scanFuture = null;
         }
         busy.set(false);
         progress.setVisible(false);
@@ -310,8 +367,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         scanButton.setDisable(true);
         stopScanButton.setDisable(false);
         statusLabel.setText("Scanning for updates...");
-        new Thread(() -> {
-            scanThread = Thread.currentThread();
+        scanFuture = executor.submit(() -> {
             try {
                 // Show winget-not-available dialog if needed (runs on scan thread, posts to FX)
                 boolean wingetAvailable = service.isWingetAvailable();
@@ -363,7 +419,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     });
                 }
             } finally {
-                scanThread = null;
+                scanFuture = null;
                 Platform.runLater(() -> {
                     busy.set(false);
                     progress.setVisible(false);
@@ -371,7 +427,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     stopScanButton.setDisable(true);
                 });
             }
-        }, "software-scan").start();
+        });
     }
 
     private void showWingetNotAvailableDialog(String diagnostics) {
@@ -444,7 +500,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
             updateSelectedButton.setDisable(true);
         });
 
-        new Thread(() -> {
+        executor.submit(() -> {
             int completed = 0;
             List<String> failedPackages = new ArrayList<>();
             List<SoftwareUpdateEntry> techMismatchEntries = new ArrayList<>();
@@ -457,17 +513,34 @@ public class SoftwareUpdatesTabView extends BorderPane {
                         batchProgressLabel.setText(current + " / " + total);
                         batchProgressBar.setProgress((double) current / total);
                     });
+
+                    // Update per-entry UI state
+                    Platform.runLater(() -> {
+                        e.setStatus("Installing...");
+                        e.setProgress(-1.0);
+                    });
+
                     ProcessResult res;
                     if ("WindowsUpdate".equals(e.source()) && e.updateId() != null) {
                         res = service.installWindowsUpdate(e.updateId(), 1200);
                     } else {
-                        res = service.updatePackageWithFallback(e.id(), true, 1200);
+                        try {
+                            res = service.updatePackageWithStreaming(e.id(), true, 1200, e, installCancelled);
+                        } catch (java.util.concurrent.CancellationException cex) {
+                            // user cancelled streaming install
+                            break;
+                        }
                     }
+
                     if (res.success()) {
                         InstallerCleanupHelper.promptAndCleanup(service, e, Instant.now());
                         Platform.runLater(() -> {
                             statusLabel.setText("Update installed for " + e.getName());
                             rows.remove(e);
+                        });
+                        Platform.runLater(() -> {
+                            e.setStatus("");
+                            e.setProgress(0.0);
                         });
                         if (res.combinedOutput() != null && res.combinedOutput().contains("RebootRequired")) {
                             Platform.runLater(() ->
@@ -476,6 +549,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     } else {
                         AppLogger.warning("Update failed for " + e.id() + ": " + res.combinedOutput());
                         failedPackages.add(e.getName() != null ? e.getName() : e.id());
+                        Platform.runLater(() -> {
+                            e.setStatus("Failed");
+                            e.setProgress(0.0);
+                        });
                     }
                 } catch (Exception ex) {
                     AppLogger.warning("Exception during update: " + ex.getMessage());
@@ -484,6 +561,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     } else {
                         failedPackages.add(e.getName() != null ? e.getName() : e.id());
                     }
+                    Platform.runLater(() -> {
+                        e.setStatus("Failed");
+                        e.setProgress(0.0);
+                    });
                 }
                 completed++;
             }
@@ -507,7 +588,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 }
                 scan();
             });
-        }, "software-install").start();
+        });
     }
 
     private void updateSingle(SoftwareUpdateEntry entry, TableCell<SoftwareUpdateEntry, Void> cell) {
@@ -525,23 +606,35 @@ public class SoftwareUpdatesTabView extends BorderPane {
             progress.setVisible(true);
             scanButton.setDisable(true);
             updateSelectedButton.setDisable(true);
-            showCellInstallingState(cell);
+            if (cell != null) showCellInstallingState(cell);
+            // reflect model state as well so bindings can update
+            entry.setStatus("Installing...");
+            entry.setProgress(-1.0);
         });
 
-        new Thread(() -> {
-            try {
+        executor.submit(() -> {
+                try {
                 Instant start = Instant.now();
                 ProcessResult res;
                 if ("WindowsUpdate".equals(entry.source()) && entry.updateId() != null) {
                     res = service.installWindowsUpdate(entry.updateId(), 1200);
                 } else {
-                    res = service.updatePackageWithFallback(entry.id(), true, 1200);
+                    try {
+                        res = service.updatePackageWithStreaming(entry.id(), true, 1200, entry, installCancelled);
+                    } catch (java.util.concurrent.CancellationException cex) {
+                        // cancelled
+                        return;
+                    }
                 }
                 if (res.success()) {
                     InstallerCleanupHelper.promptAndCleanup(service, entry, start);
                     Platform.runLater(() -> {
                         statusLabel.setText("Update installed for " + entry.getName());
                         rows.remove(entry);
+                    });
+                    Platform.runLater(() -> {
+                        entry.setStatus("");
+                        entry.setProgress(0.0);
                     });
                     if (res.combinedOutput() != null && res.combinedOutput().contains("RebootRequired")) {
                         Platform.runLater(() ->
@@ -550,6 +643,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 } else {
                     Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
                         "Install failed:\n" + res.combinedOutput()).showAndWait());
+                    Platform.runLater(() -> {
+                        entry.setStatus("Failed");
+                        entry.setProgress(0.0);
+                    });
                 }
             } catch (Exception ex) {
                 String msg = ex.getMessage();
@@ -576,11 +673,11 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     scanButton.setDisable(false);
                     updateSelectedButton.setDisable(false);
                     updateInstallButtonState();
-                    hideCellInstallingState(cell);
+                    if (cell != null) hideCellInstallingState(cell);
                     busy.set(false);
                 });
             }
-        }, "software-install-single").start();
+        });
     }
 
     private void maybeCreateRestorePoint() {
