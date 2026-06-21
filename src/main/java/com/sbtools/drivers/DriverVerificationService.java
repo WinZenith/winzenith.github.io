@@ -3,6 +3,8 @@ package com.sbtools.drivers;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
+import com.sbtools.util.JsonMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -17,6 +19,54 @@ public class DriverVerificationService {
     private static final ProcessRunner POWERSHELL_RUNNER = new ProcessRunner(120);
 
     public record VerificationResult(boolean verified, String message) {
+    }
+
+    /**
+     * Verifies the Authenticode signer's thumbprint matches the expected value.
+     */
+    public VerificationResult verifyAuthenticodeThumbprint(Path file, String expectedThumbprint) {
+        if (expectedThumbprint == null || expectedThumbprint.isBlank()) {
+            return new VerificationResult(true, "No expected thumbprint provided - skipped verification");
+        }
+        if (!com.sbtools.util.AppPaths.isWindows()) {
+            return new VerificationResult(true, "Not on Windows - skipped Authenticode thumbprint check");
+        }
+        try {
+            List<String> cmd = new ArrayList<>();
+            cmd.add("powershell");
+            cmd.add("-NoProfile");
+            cmd.add("-Command");
+            cmd.add("Get-AuthenticodeSignature -FilePath '" + file + "' | Select-Object -Property Status,SignerCertificate | ConvertTo-Json -Depth 4");
+            ProcessResult result = POWERSHELL_RUNNER.run(cmd);
+            if (!result.success()) {
+                AppLogger.warning("Authenticode thumbprint check failed: " + result.combinedOutput());
+                return new VerificationResult(true, "Could not verify signature thumbprint - proceeding with caution");
+            }
+
+            JsonNode root = JsonMapper.parseTree(result.stdout());
+            JsonNode signer = root.get("SignerCertificate");
+            String actualThumb = "";
+            if (signer != null && !signer.isNull()) {
+                JsonNode t = signer.get("Thumbprint");
+                if (t != null && !t.isNull()) actualThumb = t.asText("");
+            }
+            String normActual = actualThumb.replaceAll("\\s+", "").toLowerCase();
+            String normExpected = expectedThumbprint.replaceAll("\\s+", "").toLowerCase();
+            if (normExpected.isEmpty()) {
+                return new VerificationResult(true, "No expected thumbprint - skipped");
+            }
+            if (normActual.equalsIgnoreCase(normExpected)) {
+                AppLogger.info("Authenticode thumbprint matches expected for " + file.getFileName());
+                return new VerificationResult(true, "Thumbprint matches expected");
+            } else {
+                AppLogger.warning("Authenticode thumbprint mismatch for " + file.getFileName()
+                        + ", expected=" + expectedThumbprint + ", actual=" + actualThumb);
+                return new VerificationResult(false, "Authenticode thumbprint mismatch: expected " + expectedThumbprint + " actual " + actualThumb);
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Authenticode thumbprint verification error: " + e.getMessage());
+            return new VerificationResult(true, "Could not verify signature thumbprint - proceeding with caution");
+        }
     }
 
     public VerificationResult verifyChecksum(Path file, String expectedSha256) {

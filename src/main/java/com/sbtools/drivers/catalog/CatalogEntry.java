@@ -33,6 +33,12 @@ public final class CatalogEntry {
     private Instant lastVerified;
     private List<String> tags;
     private String releaseDate;
+    // Added metadata fields to support richer catalog entries
+    private String platform;
+    private String arch;
+    private String packageId;
+    private String hashAlgorithm;
+    private boolean testOnly;
 
     public CatalogEntry() {
     }
@@ -113,4 +119,19 @@ public final class CatalogEntry {
 
     public String releaseDate() { return releaseDate; }
     public void setReleaseDate(String releaseDate) { this.releaseDate = releaseDate; }
+
+    public String platform() { return platform; }
+    public void setPlatform(String platform) { this.platform = platform; }
+
+    public String arch() { return arch; }
+    public void setArch(String arch) { this.arch = arch; }
+
+    public String packageId() { return packageId; }
+    public void setPackageId(String packageId) { this.packageId = packageId; }
+
+    public String hashAlgorithm() { return hashAlgorithm; }
+    public void setHashAlgorithm(String hashAlgorithm) { this.hashAlgorithm = hashAlgorithm; }
+
+    public boolean testOnly() { return testOnly; }
+    public void setTestOnly(boolean testOnly) { this.testOnly = testOnly; }
 }

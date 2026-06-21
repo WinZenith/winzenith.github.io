@@ -117,16 +117,50 @@ public final class DriverCatalogDatabase {
      * Returns matches sorted by confidence (highest first).
      */
     public List<CatalogEntry> findMatchingEntries(InstalledDriver driver) {
-        List<CatalogEntry> matches = new ArrayList<>();
-
+        // Gather candidate entries by hardware ID and by name regex
         List<CatalogEntry> hwMatches = findByHardwareId(driver);
-        matches.addAll(hwMatches);
-
         List<CatalogEntry> regexMatches = findByNameRegex(driver);
-        matches.addAll(regexMatches);
 
-        return matches.stream()
-                .filter(e -> isVersionNewer(e.latestVersion(), driver.driverVersion()))
+        // Combine candidates, preserving order (hardware matches first)
+        List<CatalogEntry> combined = new ArrayList<>();
+        combined.addAll(hwMatches);
+        for (CatalogEntry e : regexMatches) {
+            if (!combined.contains(e)) combined.add(e);
+        }
+
+        List<CatalogEntry> filtered = new ArrayList<>();
+        for (CatalogEntry e : combined) {
+            // Skip test entries in normal matching
+            if (e.testOnly()) continue;
+
+            int factors = 0;
+            if (hwMatches.contains(e)) factors++;
+            if (regexMatches.contains(e)) factors++;
+
+            // INF metadata match counts as a factor when specified
+            if (e.matchMethod() == CatalogEntry.MatchMethod.INF_METADATA && e.matchValue() != null && !e.matchValue().isBlank()) {
+                String inf = driver.infName() != null ? driver.infName().toUpperCase() : "";
+                if (!inf.isBlank() && inf.contains(e.matchValue().toUpperCase())) factors++;
+            }
+
+            // Package ID match (if catalog entry encodes a package id)
+            if (e.matchMethod() == CatalogEntry.MatchMethod.PACKAGE_ID && e.matchValue() != null && !e.matchValue().isBlank()) {
+                String dk = driver.driverKey() != null ? driver.driverKey().toUpperCase() : "";
+                if (!dk.isBlank() && dk.contains(e.matchValue().toUpperCase())) factors++;
+            }
+
+            // Presence of trusted metadata (hash or certificate thumbprint) counts as an independent factor
+            boolean metadataFactor = (e.hashSha256() != null && !e.hashSha256().isBlank())
+                    || (e.certThumbprint() != null && !e.certThumbprint().isBlank());
+            if (metadataFactor) factors++;
+
+            // Accept if at least two independent factors match, or very high confidence
+            if ((factors >= 2 || e.confidence() >= 0.95) && isVersionNewer(e.latestVersion(), driver.driverVersion())) {
+                filtered.add(e);
+            }
+        }
+
+        return filtered.stream()
                 .sorted((a, b) -> Double.compare(b.confidence(), a.confidence()))
                 .collect(Collectors.toList());
     }
@@ -165,11 +199,12 @@ public final class DriverCatalogDatabase {
      * existing update pipeline.
      */
     public static DriverUpdateCandidate toCandidate(CatalogEntry entry, InstalledDriver driver) {
+        String pkg = entry.packageId() != null && !entry.packageId().isBlank() ? entry.packageId() : entry.id();
         return new DriverUpdateCandidate(
                 driver,
                 entry.latestVersion(),
                 entry.provider(),
-                null,
+                pkg,
                 entry.provider() + " driver update available",
                 "Certified " + entry.component() + " driver from " + entry.provider()
                         + " (confidence: " + String.format("%.0f", entry.confidence() * 100) + "%)",

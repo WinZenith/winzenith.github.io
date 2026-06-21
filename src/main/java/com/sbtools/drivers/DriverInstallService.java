@@ -221,6 +221,23 @@ public class DriverInstallService {
                         "Signature verification failed: " + sigResult.message());
             }
 
+            // If the catalog provides an expected signer thumbprint, verify it matches.
+            if (catalogDatabase != null) {
+                java.util.Optional<CatalogEntry> catalogEntry = catalogDatabase.findBestMatch(candidate.installed());
+                if (catalogEntry.isPresent() && catalogEntry.get().certThumbprint() != null
+                        && !catalogEntry.get().certThumbprint().isBlank()) {
+                    String expectedThumb = catalogEntry.get().certThumbprint();
+                    DriverVerificationService.VerificationResult thumbResult = verificationService.verifyAuthenticodeThumbprint(driverFile, expectedThumb);
+                    if (!thumbResult.verified()) {
+                        AppLogger.warning("Authenticode thumbprint verification failed: " + thumbResult.message());
+                        cleanupTempFiles(driverFile);
+                        return new InstallResult(InstallStatus.VERIFICATION_FAILED, false,
+                                "Signature thumbprint verification failed: " + thumbResult.message());
+                    }
+                    AppLogger.info("Authenticode thumbprint verified for " + driverFile.getFileName());
+                }
+            }
+
             reportStatus("Installing driver. Please wait…");
 
             String lowerName = driverFile.getFileName().toString().toLowerCase();
