@@ -9,6 +9,10 @@ public class OemDellCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.DELL);
     }
 
+    public OemDellCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.DELL, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "Dell";

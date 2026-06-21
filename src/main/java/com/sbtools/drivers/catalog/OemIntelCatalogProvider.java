@@ -35,24 +35,18 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
 
     private static final Map<String, String> CATEGORY_DSA_NAMES = new HashMap<>();
     private static final Map<String, String> GRAPHICS_DOWNLOAD_PAGES = new HashMap<>();
-    private static final Map<String, String> GRAPHICS_DIRECT_URLS = new HashMap<>();
-
     static {
         CATEGORY_DSA_NAMES.put("bluetooth", "Bluetooth");
         CATEGORY_DSA_NAMES.put("wifi", "Wi-Fi");
         CATEGORY_DSA_NAMES.put("graphics", "Graphics");
-
-        GRAPHICS_DIRECT_URLS.put("uhd630", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
-        GRAPHICS_DIRECT_URLS.put("uhd620", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
-        GRAPHICS_DIRECT_URLS.put("uhd", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
-        GRAPHICS_DIRECT_URLS.put("iris", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
-        GRAPHICS_DIRECT_URLS.put("arc", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
-        GRAPHICS_DIRECT_URLS.put("hd530", "https://downloadmirror.intel.com/764512/gfx_win_101.2115.exe");
-        GRAPHICS_DIRECT_URLS.put("hd630", "https://downloadmirror.intel.com/916846/gfx_win_101.2141.exe");
     }
 
     public OemIntelCatalogProvider() {
         super(OemVendorHelper.INTEL);
+    }
+
+    public OemIntelCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.INTEL, catalogDatabase);
     }
 
     @Override
@@ -99,21 +93,6 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
         if (info != null && info.length >= 2 && info[1] != null) {
             AppLogger.info("Intel: Resolved direct download URL: " + info[1]);
             return info[1];
-        }
-
-        String category = detectCategory(driver);
-        if ("graphics".equals(category)) {
-            String directUrl = getGraphicsDirectUrl(driver);
-            if (directUrl != null) {
-                AppLogger.info("Intel: Using direct graphics download URL: " + directUrl);
-                return directUrl;
-            }
-        }
-
-        AppLogger.info("Intel: Falling back to page scraping for " + vendorPageUrl);
-        String scrapedUrl = scrapeIntelDownloadPage(vendorPageUrl);
-        if (scrapedUrl != null) {
-            return scrapedUrl;
         }
 
         AppLogger.info("Intel: Trying OEM support site fallback");
@@ -193,34 +172,6 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
         return null;
     }
 
-    private String getGraphicsDirectUrl(InstalledDriver driver) {
-        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
-        
-        if (name.contains("uhd graphics 630") || name.contains("uhd 630")) {
-            return GRAPHICS_DIRECT_URLS.get("uhd630");
-        }
-        if (name.contains("uhd graphics 620") || name.contains("uhd 620")) {
-            return GRAPHICS_DIRECT_URLS.get("uhd620");
-        }
-        if (name.contains("uhd") || name.contains("uhd graphics")) {
-            return GRAPHICS_DIRECT_URLS.get("uhd");
-        }
-        if (name.contains("iris")) {
-            return GRAPHICS_DIRECT_URLS.get("iris");
-        }
-        if (name.contains("arc")) {
-            return GRAPHICS_DIRECT_URLS.get("arc");
-        }
-        if (name.contains("hd graphics 530") || name.contains("hd 530")) {
-            return GRAPHICS_DIRECT_URLS.get("hd530");
-        }
-        if (name.contains("hd graphics 630") || name.contains("hd 630")) {
-            return GRAPHICS_DIRECT_URLS.get("hd630");
-        }
-        
-        return GRAPHICS_DIRECT_URLS.get("uhd");
-    }
-
     private String scrapeIntelDownloadPage(String pageUrl) {
         try {
             HttpRequest req = HttpRequest.newBuilder()
@@ -240,51 +191,16 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             }
 
             String html = resp.body();
-            
+
             Pattern p = Pattern.compile(
-                    "data-href\\s*=\\s*\"(https?://[^\"]+downloadmirror\\.intel\\.com[^\"]+)\"",
-                    Pattern.CASE_INSENSITIVE);
-            Matcher m = p.matcher(html);
-            if (m.find()) {
-                String url = decodeHtmlEntities(m.group(1));
-                if (isDirectDownloadUrl(url)) {
-                    AppLogger.info("Intel: Scraped download URL from page: " + url);
-                    return url;
-                }
-            }
-
-            p = Pattern.compile(
-                    "href\\s*=\\s*\"(https?://[^\"]*download\\.intel\\.com[^\"]+)\"",
-                    Pattern.CASE_INSENSITIVE);
-            m = p.matcher(html);
-            while (m.find()) {
-                String url = decodeHtmlEntities(m.group(1));
-                if (isDirectDownloadUrl(url)) {
-                    AppLogger.info("Intel: Scraped download URL from page: " + url);
-                    return url;
-                }
-            }
-
-            p = Pattern.compile(
                     "href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"",
                     Pattern.CASE_INSENSITIVE);
-            m = p.matcher(html);
+            Matcher m = p.matcher(html);
             while (m.find()) {
                 String url = decodeHtmlEntities(m.group(1));
-                if (isDirectDownloadUrl(url) && !url.contains("intel.com/content/www")) {
+                if (isDirectDownloadUrl(url) && !url.contains("intel.com/content/www")
+                        && !url.contains("downloadmirror.intel.com")) {
                     AppLogger.info("Intel: Scraped download URL from page: " + url);
-                    return url;
-                }
-            }
-
-            p = Pattern.compile(
-                    "\"downloadUrl\"\\s*:\\s*\"(https?://[^\"]+)\"",
-                    Pattern.CASE_INSENSITIVE);
-            m = p.matcher(html);
-            if (m.find()) {
-                String url = decodeHtmlEntities(m.group(1));
-                if (isDirectDownloadUrl(url)) {
-                    AppLogger.info("Intel: Found downloadUrl in JSON: " + url);
                     return url;
                 }
             }
@@ -427,7 +343,7 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             if (url.isEmpty()) continue;
 
             if (url.contains("downloadmirror.intel.com")) {
-                return url;
+                continue;
             }
 
             if (url.endsWith(".exe") || url.endsWith(".zip")) {

@@ -2,6 +2,8 @@ package com.sbtools.drivers;
 
 import com.sbtools.drivers.model.InstalledDriver;
 
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.regex.Pattern;
 
 public class DriverHealthService {
@@ -13,8 +15,8 @@ public class DriverHealthService {
         int score = 100;
         StringBuilder details = new StringBuilder();
 
-        if (driver.driverVersion() != null && !driver.driverVersion().isEmpty()) {
-            int agePenalty = estimateAgePenalty(driver);
+        int agePenalty = estimateAgePenalty(driver);
+        if (agePenalty > 0) {
             score -= agePenalty;
             details.append("Age penalty: -").append(agePenalty).append(" pts\n");
         }
@@ -52,7 +54,23 @@ public class DriverHealthService {
     }
 
     private static int estimateAgePenalty(InstalledDriver driver) {
-        String ver = driver.driverVersion();
+        if (driver.releaseDate() != null) {
+            return estimateAgePenaltyFromDate(driver.releaseDate());
+        }
+        return estimateAgePenaltyFromVersion(driver.driverVersion());
+    }
+
+    private static int estimateAgePenaltyFromDate(LocalDate releaseDate) {
+        long daysOld = ChronoUnit.DAYS.between(releaseDate, LocalDate.now());
+        if (daysOld < 0) return 0;
+        if (daysOld <= 90) return 0;
+        if (daysOld <= 180) return 5;
+        if (daysOld <= 365) return 10;
+        if (daysOld <= 730) return 15;
+        return 25;
+    }
+
+    private static int estimateAgePenaltyFromVersion(String ver) {
         if (ver == null || ver.isEmpty()) return 10;
 
         String[] parts = ver.split("\\.");

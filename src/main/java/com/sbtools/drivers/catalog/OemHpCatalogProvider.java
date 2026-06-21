@@ -9,6 +9,10 @@ public class OemHpCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.HP);
     }
 
+    public OemHpCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.HP, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "HP";

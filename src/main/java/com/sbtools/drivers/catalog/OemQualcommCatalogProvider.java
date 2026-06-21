@@ -14,6 +14,10 @@ public class OemQualcommCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.QUALCOMM);
     }
 
+    public OemQualcommCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.QUALCOMM, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "Qualcomm";

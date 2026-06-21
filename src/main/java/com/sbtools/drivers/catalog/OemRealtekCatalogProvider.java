@@ -20,6 +20,10 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.REALTEK);
     }
 
+    public OemRealtekCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.REALTEK, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "Realtek";
@@ -91,8 +95,32 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
-        AppLogger.info("Realtek: No direct download available for " + driver.friendlyName()
-                + " - user will be directed to vendor website");
+        AppLogger.info("Realtek: Resolving direct download URL for " + driver.friendlyName());
+
+        String categoryUrl = detectCategoryUrl(driver);
+        String body = httpGet(categoryUrl);
+        if (body == null) {
+            AppLogger.warning("Realtek: Could not fetch download page");
+            return null;
+        }
+
+        java.util.regex.Pattern linkPattern = java.util.regex.Pattern.compile(
+                "href\\s*=\\s*\"([^\"]+\\.(?:exe|zip))\"", java.util.regex.Pattern.CASE_INSENSITIVE);
+        java.util.regex.Matcher m = linkPattern.matcher(body);
+        while (m.find()) {
+            String url = m.group(1);
+            if (url.startsWith("//")) {
+                url = "https:" + url;
+            } else if (url.startsWith("/")) {
+                url = "https://www.realtek.com" + url;
+            }
+            if (url.contains("realtek.com") && !url.contains("DownloadList")) {
+                AppLogger.info("Realtek: Found download URL: " + url);
+                return url;
+            }
+        }
+
+        AppLogger.info("Realtek: No direct download found, user will be directed to vendor website");
         return null;
     }
 }

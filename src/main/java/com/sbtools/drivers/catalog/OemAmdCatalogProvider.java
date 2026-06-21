@@ -18,6 +18,10 @@ public class OemAmdCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.AMD);
     }
 
+    public OemAmdCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.AMD, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "AMD";
@@ -67,6 +71,29 @@ public class OemAmdCatalogProvider extends AbstractOemCatalogProvider {
                 || name.contains("x470") || name.contains("x570")) {
             return "6.03.19.217";
         }
+        return null;
+    }
+
+    @Override
+    protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
+        AppLogger.info("AMD: Resolving direct download URL for " + driver.friendlyName());
+
+        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
+
+        if (name.contains("chipset") || name.contains("b450") || name.contains("b550")
+                || name.contains("x470") || name.contains("x570")) {
+            String url = "https://drivers.amd.com/drivers/installer/24.10/AMD_Chipset_Drivers.exe";
+            AppLogger.info("AMD: Using chipset installer URL: " + url);
+            return url;
+        }
+
+        if (name.contains("radeon")) {
+            String url = "https://drivers.amd.com/drivers/installer/24.10/AMDSoftwareAdrenalinEdition.exe";
+            AppLogger.info("AMD: Using Adrenalin installer URL: " + url);
+            return url;
+        }
+
+        AppLogger.info("AMD: No direct download found, user will be directed to vendor website");
         return null;
     }
 }

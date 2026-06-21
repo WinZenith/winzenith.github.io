@@ -9,6 +9,10 @@ public class OemAsusCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.ASUS);
     }
 
+    public OemAsusCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.ASUS, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "ASUS";

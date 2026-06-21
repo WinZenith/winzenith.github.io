@@ -14,6 +14,10 @@ public class OemBroadcomCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.BROADCOM);
     }
 
+    public OemBroadcomCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.BROADCOM, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "Broadcom";

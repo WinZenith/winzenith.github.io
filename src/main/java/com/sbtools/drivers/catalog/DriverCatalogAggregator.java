@@ -19,31 +19,38 @@ public class DriverCatalogAggregator {
 
     private final List<DriverCatalogProvider> providers;
     private final ProviderCache cache;
+    private final DriverCatalogDatabase catalogDatabase;
 
     public DriverCatalogAggregator(List<DriverCatalogProvider> providers) {
-        this(providers, new ProviderCache());
+        this(providers, new ProviderCache(), null);
     }
 
     public DriverCatalogAggregator(List<DriverCatalogProvider> providers, ProviderCache cache) {
+        this(providers, cache, null);
+    }
+
+    public DriverCatalogAggregator(List<DriverCatalogProvider> providers, ProviderCache cache, DriverCatalogDatabase catalogDatabase) {
         this.providers = List.copyOf(providers);
         this.cache = cache;
+        this.catalogDatabase = catalogDatabase;
     }
 
     public static DriverCatalogAggregator createDefault() {
+        DriverCatalogDatabase catalog = DriverCatalogDatabase.load();
         return new DriverCatalogAggregator(List.of(
-                new OemNvidiaCatalogProvider(),
-                new OemAmdCatalogProvider(),
-                new OemIntelCatalogProvider(),
-                new OemRealtekCatalogProvider(),
-                new OemBroadcomCatalogProvider(),
-                new OemQualcommCatalogProvider(),
-                new OemSynapticsCatalogProvider(),
-                new OemLenovoCatalogProvider(),
-                new OemDellCatalogProvider(),
-                new OemHpCatalogProvider(),
-                new OemAsusCatalogProvider(),
+                new OemNvidiaCatalogProvider(catalog),
+                new OemAmdCatalogProvider(catalog),
+                new OemIntelCatalogProvider(catalog),
+                new OemRealtekCatalogProvider(catalog),
+                new OemBroadcomCatalogProvider(catalog),
+                new OemQualcommCatalogProvider(catalog),
+                new OemSynapticsCatalogProvider(catalog),
+                new OemLenovoCatalogProvider(catalog),
+                new OemDellCatalogProvider(catalog),
+                new OemHpCatalogProvider(catalog),
+                new OemAsusCatalogProvider(catalog),
                 new WindowsUpdateCatalogProvider()
-        ));
+        ), new ProviderCache(), catalog);
     }
 
     public int providerCount() {
@@ -107,11 +114,11 @@ public class DriverCatalogAggregator {
             CancellationToken token,
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderResult) {
-        // We'd prefer virtual threads here (JDK 21+), but the project targets an older JDK.
-        // A cached thread pool sized to provider count still gives us full provider fan-out
-        // for I/O-bound work without the fixed-size bottleneck of the previous implementation.
-        int poolSize = Math.max(1, Math.min(providers.size(), 16));
-        ExecutorService pool = Executors.newFixedThreadPool(poolSize, r -> {
+        // Rate-limit concurrent vendor requests to avoid HTTP 429 throttling.
+        // 4 concurrent providers is a good balance between speed and politeness.
+        int maxConcurrent = Math.min(4, providers.size());
+        java.util.concurrent.Semaphore rateLimit = new java.util.concurrent.Semaphore(maxConcurrent);
+        ExecutorService pool = Executors.newFixedThreadPool(maxConcurrent, r -> {
             Thread t = new Thread(r, "catalog-provider");
             t.setDaemon(true);
             return t;
@@ -122,17 +129,25 @@ public class DriverCatalogAggregator {
                         if (token.isCancelled()) {
                             return null;
                         }
-                        if (onProviderStarted != null) {
-                            try { onProviderStarted.accept(provider.id()); } catch (Exception ignored) { }
-                        }
-                        List<DriverUpdateCandidate> results = queryProvider(provider, installed, token);
-                        if (token.isCancelled()) {
+                        rateLimit.acquire();
+                        try {
+                            if (token.isCancelled()) {
+                                return null;
+                            }
+                            if (onProviderStarted != null) {
+                                try { onProviderStarted.accept(provider.id()); } catch (Exception ignored) { }
+                            }
+                            List<DriverUpdateCandidate> results = queryProvider(provider, installed, token);
+                            if (token.isCancelled()) {
+                                return null;
+                            }
+                            if (onProviderResult != null) {
+                                try { onProviderResult.accept(results); } catch (Exception ignored) { }
+                            }
                             return null;
+                        } finally {
+                            rateLimit.release();
                         }
-                        if (onProviderResult != null) {
-                            try { onProviderResult.accept(results); } catch (Exception ignored) { }
-                        }
-                        return null;
                     }))
                     .toList();
             for (var future : futures) {
@@ -186,10 +201,31 @@ public class DriverCatalogAggregator {
     }
 
     private static boolean isBetter(DriverUpdateCandidate candidate, DriverUpdateCandidate existing) {
+        boolean candidateHasDownload = hasWorkingDownload(candidate);
+        boolean existingHasDownload = hasWorkingDownload(existing);
+
+        if (candidateHasDownload && !existingHasDownload) {
+            return true;
+        }
+        if (!candidateHasDownload && existingHasDownload) {
+            return false;
+        }
+
         if ("WindowsUpdate".equals(candidate.source())) {
             return !"WindowsUpdate".equals(existing.source())
                     || VersionCompare.compare(candidate.availableVersion(), existing.availableVersion()) > 0;
         }
         return VersionCompare.compare(candidate.availableVersion(), existing.availableVersion()) > 0;
+    }
+
+    private static boolean hasWorkingDownload(DriverUpdateCandidate candidate) {
+        if (candidate.downloadUrl() != null && !candidate.downloadUrl().isBlank()) {
+            return true;
+        }
+        if ("WindowsUpdate".equals(candidate.source())
+                && candidate.packageId() != null && !candidate.packageId().isBlank()) {
+            return true;
+        }
+        return false;
     }
 }

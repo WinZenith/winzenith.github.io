@@ -77,6 +77,10 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.NVIDIA);
     }
 
+    public OemNvidiaCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.NVIDIA, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "Nvidia";

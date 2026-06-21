@@ -25,9 +25,15 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             .build();
 
     private final OemVendorHelper vendor;
+    private final DriverCatalogDatabase catalogDatabase;
 
     protected AbstractOemCatalogProvider(OemVendorHelper vendor) {
+        this(vendor, null);
+    }
+
+    protected AbstractOemCatalogProvider(OemVendorHelper vendor, DriverCatalogDatabase catalogDatabase) {
         this.vendor = vendor;
+        this.catalogDatabase = catalogDatabase;
     }
 
     @Override
@@ -38,6 +44,49 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                 continue;
             }
             AppLogger.debug(vendor.label() + ": Matched driver " + driver.friendlyName() + " (current version: " + driver.driverVersion() + ")");
+
+            // Try catalog database first (metadata-first matching)
+            if (catalogDatabase != null) {
+                List<CatalogEntry> catalogMatches = catalogDatabase.findMatchingEntries(driver);
+                CatalogEntry bestCatalogMatch = catalogMatches.stream()
+                        .filter(e -> vendor.label().equalsIgnoreCase(e.provider()))
+                        .findFirst()
+                        .orElse(null);
+
+                if (bestCatalogMatch != null) {
+                    AppLogger.info(vendor.label() + ": Found catalog entry for " + driver.friendlyName()
+                            + " (version: " + bestCatalogMatch.latestVersion()
+                            + ", confidence: " + String.format("%.0f", bestCatalogMatch.confidence() * 100) + "%)");
+                    DriverUpdateCandidate candidate = DriverCatalogDatabase.toCandidate(bestCatalogMatch, driver);
+
+                    if (candidate.downloadUrl() == null || candidate.downloadUrl().isBlank()) {
+                        AppLogger.info(vendor.label() + ": Catalog entry has no sourceUrl, resolving via provider");
+                        String vendorPageUrl = candidate.vendorPageUrl();
+                        if (vendorPageUrl == null || vendorPageUrl.isBlank()) {
+                            vendorPageUrl = getVendorPageUrl(driver);
+                        }
+                        String resolvedUrl = resolveDirectDownloadUrl(driver, vendorPageUrl);
+                        if (resolvedUrl != null && !resolvedUrl.isBlank()) {
+                            candidate = new DriverUpdateCandidate(
+                                    candidate.installed(),
+                                    candidate.availableVersion(),
+                                    candidate.source(),
+                                    candidate.packageId(),
+                                    candidate.title(),
+                                    candidate.description(),
+                                    candidate.severity(),
+                                    resolvedUrl,
+                                    candidate.vendorPageUrl()
+                            );
+                        }
+                    }
+
+                    out.add(candidate);
+                    continue;
+                }
+            }
+
+            // Fall back to web scraping (legacy path)
             String latest = fetchLatestVersion(driver);
             if (latest != null && VersionCompare.isOlder(driver.driverVersion(), latest)) {
                 AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName() + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
@@ -69,21 +118,55 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
 
     protected abstract String fetchLatestVersion(InstalledDriver driver);
 
+    private static final int HTTP_MAX_RETRIES = 3;
+    private static final long HTTP_INITIAL_BACKOFF_MS = 1000;
+
     protected String httpGet(String url) {
-        try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-                    .GET()
-                    .build();
-            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
-                return resp.body();
-            }
-        } catch (IOException | InterruptedException e) {
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
+        long backoffMs = HTTP_INITIAL_BACKOFF_MS;
+        for (int attempt = 1; attempt <= HTTP_MAX_RETRIES; attempt++) {
+            try {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(url))
+                        .timeout(Duration.ofSeconds(20))
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+                        .GET()
+                        .build();
+                HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 429) {
+                    AppLogger.warning(vendor.label() + ": HTTP 429 rate limited on " + url + " (attempt " + attempt + "/" + HTTP_MAX_RETRIES + ")");
+                    if (attempt < HTTP_MAX_RETRIES) {
+                        Thread.sleep(backoffMs);
+                        backoffMs *= 2;
+                        continue;
+                    }
+                    return null;
+                }
+                if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
+                    return resp.body();
+                }
+                if (resp.statusCode() >= 500 && attempt < HTTP_MAX_RETRIES) {
+                    AppLogger.warning(vendor.label() + ": HTTP " + resp.statusCode() + " on " + url + " (attempt " + attempt + "/" + HTTP_MAX_RETRIES + "), retrying…");
+                    Thread.sleep(backoffMs);
+                    backoffMs *= 2;
+                    continue;
+                }
+                return null;
+            } catch (IOException | InterruptedException e) {
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+                if (attempt < HTTP_MAX_RETRIES) {
+                    AppLogger.warning(vendor.label() + ": HTTP error on " + url + " (attempt " + attempt + "/" + HTTP_MAX_RETRIES + "): " + e.getMessage());
+                    try {
+                        Thread.sleep(backoffMs);
+                        backoffMs *= 2;
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+                    continue;
+                }
             }
         }
         return null;

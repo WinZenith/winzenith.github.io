@@ -17,6 +17,10 @@ public class OemSynapticsCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.SYNAPTICS);
     }
 
+    public OemSynapticsCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.SYNAPTICS, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "Synaptics";

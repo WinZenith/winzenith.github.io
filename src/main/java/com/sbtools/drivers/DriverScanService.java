@@ -9,6 +9,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -62,8 +64,20 @@ public class DriverScanService {
                 text(n, "driverVersion"),
                 text(n, "infName"),
                 text(n, "driverKey"),
-                text(n, "status")
+                text(n, "status"),
+                parseDate(text(n, "releaseDate"))
         );
+    }
+
+    private static LocalDate parseDate(String dateStr) {
+        if (dateStr == null || dateStr.isBlank()) {
+            return null;
+        }
+        try {
+            return LocalDate.parse(dateStr);
+        } catch (DateTimeParseException e) {
+            return null;
+        }
     }
 
     private static String text(JsonNode n, String key) {

@@ -11,6 +11,14 @@ Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
     Where-Object { $_.DeviceID -and $_.DriverVersion } |
     ForEach-Object {
         $hwIds = $_.DeviceID
+        $driverDate = ''
+        if ($_.DriverDate) {
+            try {
+                $driverDate = [Management.ManagementDateTimeConverter]::ToDateTime($_.DriverDate).ToString('yyyy-MM-dd')
+            } catch {
+                $driverDate = ''
+            }
+        }
         $entry = [ordered]@{
             deviceId       = $_.DeviceID
             friendlyName   = if ($_.DeviceName) { $_.DeviceName } else { $_.DeviceID }
@@ -20,6 +28,7 @@ Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
             infName        = $_.InfName
             driverKey      = if ($_.Driver) { $_.Driver } else { '' }
             status         = 'OK'
+            releaseDate    = $driverDate
         }
         $seen[$_.DeviceID] = $true
         $drivers += $entry
@@ -29,6 +38,14 @@ Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
     Where-Object { $_.PNPDeviceID -and -not $seen.ContainsKey($_.PNPDeviceID) } |
     ForEach-Object {
         $ver = if ($_.DriverVersion) { $_.DriverVersion } else { '' }
+        $driverDate = ''
+        if ($_.DriverDate) {
+            try {
+                $driverDate = [Management.ManagementDateTimeConverter]::ToDateTime($_.DriverDate).ToString('yyyy-MM-dd')
+            } catch {
+                $driverDate = ''
+            }
+        }
         $entry = [ordered]@{
             deviceId       = $_.PNPDeviceID
             friendlyName   = if ($_.Name) { $_.Name } else { $_.PNPDeviceID }
@@ -38,6 +55,7 @@ Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
             infName        = ''
             driverKey      = ''
             status         = 'OK'
+            releaseDate    = $driverDate
         }
         $seen[$_.PNPDeviceID] = $true
         $drivers += $entry
@@ -48,9 +66,14 @@ Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
     ForEach-Object {
         $dev = $_
         $ver = ''
+        $driverDate = ''
         try {
             $ver = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName 'DEVPKEY_Device_DriverVersion' -ErrorAction SilentlyContinue).Data
             if ($null -eq $ver) { $ver = '' }
+            $dateObj = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName 'DEVPKEY_Device_DriverDate' -ErrorAction SilentlyContinue).Data
+            if ($null -ne $dateObj) {
+                $driverDate = $dateObj.ToString('yyyy-MM-dd')
+            }
         } catch {
             $ver = ''
         }
@@ -63,6 +86,7 @@ Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
             infName        = ''
             driverKey      = ''
             status         = 'OK'
+            releaseDate    = $driverDate
         }
         $seen[$dev.InstanceId] = $true
         $drivers += $entry

@@ -2,6 +2,8 @@ package com.sbtools.drivers;
 
 import com.sbtools.backup.DriverBackupService;
 import com.sbtools.backup.SystemRestoreService;
+import com.sbtools.drivers.catalog.CatalogEntry;
+import com.sbtools.drivers.catalog.DriverCatalogDatabase;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
 import com.sbtools.drivers.model.InstallStatus;
 import com.sbtools.settings.AppSettings;
@@ -43,10 +45,19 @@ public class DriverInstallService {
     private final DriverBackupService backupService = new DriverBackupService();
     private final SystemRestoreService restoreService = new SystemRestoreService();
     private final DriverVerificationService verificationService = new DriverVerificationService();
+    private final DriverCatalogDatabase catalogDatabase;
     private final ProcessRunner processRunner = new ProcessRunner(900);
     private final AtomicBoolean cancellationFlag = new AtomicBoolean(false);
     private volatile ProgressCallback progressCallback;
     private volatile StatusCallback statusCallback;
+
+    public DriverInstallService() {
+        this.catalogDatabase = DriverCatalogDatabase.load();
+    }
+
+    public DriverInstallService(DriverCatalogDatabase catalogDatabase) {
+        this.catalogDatabase = catalogDatabase;
+    }
 
     public void setProgressCallback(ProgressCallback callback) {
         this.progressCallback = callback;
@@ -181,6 +192,25 @@ public class DriverInstallService {
             long fileSize = Files.size(driverFile);
             AppLogger.info("Driver downloaded (" + fileSize + " bytes) to: " + driverFile);
             reportProgress(fileSize, fileSize, 1.0);
+
+            reportStatus("Verifying driver integrity…");
+
+            if (catalogDatabase != null) {
+                java.util.Optional<CatalogEntry> catalogEntry = catalogDatabase.findBestMatch(candidate.installed());
+                if (catalogEntry.isPresent() && catalogEntry.get().hashSha256() != null
+                        && !catalogEntry.get().hashSha256().isBlank()) {
+                    String expectedHash = catalogEntry.get().hashSha256();
+                    DriverVerificationService.VerificationResult hashResult = verificationService.verifyChecksum(driverFile, expectedHash);
+                    if (!hashResult.verified()) {
+                        AppLogger.warning("Catalog hash verification failed: " + hashResult.message());
+                        cleanupTempFiles(driverFile);
+                        return new InstallResult(InstallStatus.VERIFICATION_FAILED, false,
+                                "Catalog hash verification failed: " + hashResult.message());
+                    }
+                    AppLogger.info("Catalog hash verification passed for " + driverFile.getFileName());
+                }
+            }
+
             reportStatus("Verifying driver signature…");
 
             DriverVerificationService.VerificationResult sigResult = verificationService.verifyAuthenticode(driverFile);
@@ -568,7 +598,7 @@ public class DriverInstallService {
                 case "Synaptics" -> host.contains("synaptics.com");
                 case "Lenovo" -> host.contains("lenovo.com") || host.contains("lenovo-images.com");
                 case "Dell" -> host.contains("dell.com") || host.contains("dellcdn.com");
-                case "HP" -> host.contains("hp.com") || host.contains("hp.com") || host.contains("hpe.com");
+                case "HP" -> host.contains("hp.com") || host.contains("hpe.com");
                 case "ASUS" -> host.contains("asus.com") || host.contains("asusnet.net");
                 case "WindowsUpdate" -> host.contains("microsoft.com") || host.contains("windowsupdate.com")
                         || host.contains("download.microsoft.com") || host.contains("catalog.update.microsoft.com")

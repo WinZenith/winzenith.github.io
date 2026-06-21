@@ -9,6 +9,10 @@ public class OemLenovoCatalogProvider extends AbstractOemCatalogProvider {
         super(OemVendorHelper.LENOVO);
     }
 
+    public OemLenovoCatalogProvider(DriverCatalogDatabase catalogDatabase) {
+        super(OemVendorHelper.LENOVO, catalogDatabase);
+    }
+
     @Override
     public String id() {
         return "Lenovo";
