@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.*;
 
 public class StartupService {
 
@@ -30,6 +31,8 @@ public class StartupService {
 
     private volatile long lastScanTime = 0;
     private volatile List<StartupItem> cachedItems = null;
+    // Cache company name lookups to avoid repeated expensive native version queries
+    private static final ConcurrentHashMap<String, String> COMPANY_NAME_CACHE = new ConcurrentHashMap<>();
 
     public static class StartupBackupEntry {
         private String id;
@@ -94,6 +97,40 @@ public class StartupService {
 
         items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
         return items;
+    }
+
+    /**
+     * Parallelized version of listAll(). Scans registry, scheduled tasks and services concurrently.
+     */
+    public List<StartupItem> listAllParallel() {
+        if (!AppPaths.isWindows()) return Collections.emptyList();
+
+        ExecutorService ex = Executors.newFixedThreadPool(3);
+        try {
+            List<Callable<List<StartupItem>>> tasks = Arrays.asList(
+                    this::listRegistryApps,
+                    this::listScheduledTasks,
+                    this::listWindowsServices
+            );
+
+            List<Future<List<StartupItem>>> futures = ex.invokeAll(tasks, 60, TimeUnit.SECONDS);
+            List<StartupItem> items = new ArrayList<>();
+            for (Future<List<StartupItem>> f : futures) {
+                try {
+                    List<StartupItem> part = f.get();
+                    if (part != null) items.addAll(part);
+                } catch (CancellationException | ExecutionException ignored) {
+                }
+            }
+
+            items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
+            return items;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return listAll();
+        } finally {
+            ex.shutdownNow();
+        }
     }
 
     public List<StartupItem> listAllCached(long maxAgeMs) {
@@ -660,23 +697,41 @@ public class StartupService {
         if (filePath == null || filePath.isBlank()) {
             return "";
         }
+
+        String key;
+        try {
+            key = new java.io.File(filePath).getAbsolutePath().toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            key = filePath;
+        }
+
+        String cached = COMPANY_NAME_CACHE.get(key);
+        if (cached != null) return cached;
+
+        String result = "";
         try {
             int size = Version.INSTANCE.GetFileVersionInfoSize(filePath, null);
-            if (size <= 0) return "";
+            if (size <= 0) {
+                COMPANY_NAME_CACHE.put(key, "");
+                return "";
+            }
 
             Memory dwHandle = new Memory(size);
             if (!Version.INSTANCE.GetFileVersionInfo(filePath, 0, size, dwHandle)) {
+                COMPANY_NAME_CACHE.put(key, "");
                 return "";
             }
 
             PointerByReference lpBuffer = new PointerByReference();
             IntByReference puLen = new IntByReference();
             if (!Version.INSTANCE.VerQueryValue(dwHandle, "\\VarFileInfo\\Translation", lpBuffer, puLen)) {
+                COMPANY_NAME_CACHE.put(key, "");
                 return "";
             }
 
             Pointer translationPointer = lpBuffer.getValue();
             if (translationPointer == null || puLen.getValue() < 4) {
+                COMPANY_NAME_CACHE.put(key, "");
                 return "";
             }
 
@@ -687,10 +742,13 @@ public class StartupService {
             if (Version.INSTANCE.VerQueryValue(dwHandle, subBlock, lpBuffer, puLen)) {
                 Pointer companyNamePointer = lpBuffer.getValue();
                 if (companyNamePointer != null) {
-                    return companyNamePointer.getWideString(0);
+                    result = companyNamePointer.getWideString(0);
                 }
             }
         } catch (Exception ignored) {}
-        return "";
+
+        if (result == null) result = "";
+        COMPANY_NAME_CACHE.put(key, result);
+        return result;
     }
 }

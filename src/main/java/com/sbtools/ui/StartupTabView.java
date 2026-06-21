@@ -27,6 +27,15 @@ import javafx.stage.Modality;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.stream.Collectors;
+import javafx.beans.binding.Bindings;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
+import java.awt.Desktop;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.BooleanSupplier;
@@ -106,6 +115,11 @@ public class StartupTabView extends BorderPane {
         buildTable(taskTable, "Task Name", "Publisher", "Location", "Actions / Command");
         buildTable(serviceTable, "Service Name", "Display Name", "Start Type", "Binary Path");
 
+        // Allow multi-selection for bulk operations
+        registryTable.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
+        taskTable.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
+        serviceTable.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
+
         sortedRegistry.comparatorProperty().bind(registryTable.comparatorProperty());
         sortedTasks.comparatorProperty().bind(taskTable.comparatorProperty());
         sortedServices.comparatorProperty().bind(serviceTable.comparatorProperty());
@@ -135,8 +149,9 @@ public class StartupTabView extends BorderPane {
 
         busy.addListener((obs, oldVal, newVal) -> {
             scanButton.setDisable(newVal);
-            toggleButton.setDisable(newVal || getSelectedTable().getSelectionModel().getSelectedItem() == null);
-            deleteButton.setDisable(newVal || getSelectedTable().getSelectionModel().getSelectedItem() == null);
+            boolean hasSelection = !getSelectedTable().getSelectionModel().getSelectedItems().isEmpty();
+            toggleButton.setDisable(newVal || !hasSelection);
+            deleteButton.setDisable(newVal || !hasSelection);
             backupsButton.setDisable(newVal);
             registrySearch.setDisable(newVal);
             taskSearch.setDisable(newVal);
@@ -250,6 +265,59 @@ public class StartupTabView extends BorderPane {
 
         table.setRowFactory(tv -> {
             TableRow<StartupItem> row = new TableRow<>();
+
+            // Context menu for quick actions
+            ContextMenu ctx = new ContextMenu();
+            MenuItem openLoc = new MenuItem("Open file location");
+            MenuItem copyCmd = new MenuItem("Copy command");
+            MenuItem details = new MenuItem("Show details");
+            MenuItem searchOnline = new MenuItem("Search online");
+            ctx.getItems().addAll(openLoc, copyCmd, details, searchOnline);
+
+            openLoc.setOnAction(evt -> {
+                StartupItem it = row.getItem();
+                if (it == null) return;
+                String exe = com.sbtools.startup.StartupService.extractExecutablePath(it.getPath());
+                try {
+                    java.io.File f = new java.io.File(exe);
+                    if (f.exists()) {
+                        // select file in explorer
+                        new ProcessBuilder("explorer.exe", "/select," + f.getAbsolutePath()).start();
+                    } else {
+                        new Alert(Alert.AlertType.INFORMATION, "File not found: " + exe).showAndWait();
+                    }
+                } catch (Exception ex) {
+                    AppLogger.error("Failed to open file location", ex);
+                    new Alert(Alert.AlertType.ERROR, "Failed to open file location:\n" + ex.getMessage()).showAndWait();
+                }
+            });
+
+            copyCmd.setOnAction(evt -> {
+                StartupItem it = row.getItem();
+                if (it == null) return;
+                Clipboard cb = Clipboard.getSystemClipboard();
+                ClipboardContent content = new ClipboardContent();
+                content.putString(it.getPath());
+                cb.setContent(content);
+            });
+
+            details.setOnAction(evt -> showDetailsDialog(row.getItem()));
+
+            searchOnline.setOnAction(evt -> {
+                StartupItem it = row.getItem();
+                if (it == null) return;
+                try {
+                    String q = URLEncoder.encode(it.getName() + " " + it.getPublisher(), StandardCharsets.UTF_8.toString());
+                    if (Desktop.isDesktopSupported()) {
+                        Desktop.getDesktop().browse(new URI("https://www.google.com/search?q=" + q));
+                    }
+                } catch (Exception ex) {
+                    AppLogger.error("Failed to open browser", ex);
+                }
+            });
+
+            row.contextMenuProperty().bind(Bindings.when(row.emptyProperty()).then((ContextMenu) null).otherwise(ctx));
+
             row.setOnMouseClicked(event -> {
                 if (event.getClickCount() == 2 && (!row.isEmpty())) {
                     triggerToggle();
@@ -273,7 +341,7 @@ public class StartupTabView extends BorderPane {
 
     private void updateButtonStates() {
         TableView<StartupItem> table = getSelectedTable();
-        boolean hasSelection = table.getSelectionModel().getSelectedItem() != null;
+        boolean hasSelection = !table.getSelectionModel().getSelectedItems().isEmpty();
         toggleButton.setDisable(!hasSelection || busy.get());
         deleteButton.setDisable(!hasSelection || busy.get());
 
@@ -318,22 +386,17 @@ public class StartupTabView extends BorderPane {
 
         executor.execute(() -> {
             try {
-                List<StartupItem> regItems = service.listRegistryApps();
-                List<StartupItem> taskItemsResult = service.listScheduledTasks();
-                List<StartupItem> svcItems = service.listWindowsServices();
+                List<StartupItem> allItems = service.listAllParallel();
 
-                for (StartupItem item : regItems) {
+                for (StartupItem item : allItems) {
                     item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
                 }
-                for (StartupItem item : taskItemsResult) {
-                    item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
-                }
-                for (StartupItem item : svcItems) {
-                    item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
-                }
-                double totalMs = regItems.stream().mapToDouble(StartupItem::getEstimatedBootImpactMs).sum()
-                    + taskItemsResult.stream().mapToDouble(StartupItem::getEstimatedBootImpactMs).sum()
-                    + svcItems.stream().mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
+
+                List<StartupItem> regItems = allItems.stream().filter(i -> i.getType() == StartupItemType.REGISTRY).collect(Collectors.toList());
+                List<StartupItem> taskItemsResult = allItems.stream().filter(i -> i.getType() == StartupItemType.TASK).collect(Collectors.toList());
+                List<StartupItem> svcItems = allItems.stream().filter(i -> i.getType() == StartupItemType.SERVICE).collect(Collectors.toList());
+
+                double totalMs = allItems.stream().mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
                 final String formattedTotal = StartupImpactService.formatImpact(totalMs);
                 Platform.runLater(() -> {
                     registryItems.setAll(regItems);
@@ -342,7 +405,7 @@ public class StartupTabView extends BorderPane {
                     applyRegistryFilter();
                     applyTaskFilter();
                     applyServiceFilter();
-                    int total = regItems.size() + taskItemsResult.size() + svcItems.size();
+                    int total = allItems.size();
                     statusLabel.setText("Found " + total + " startup item(s).");
                     bootDelayLabel.setText("Total estimated boot delay: " + formattedTotal);
                 });
@@ -362,80 +425,125 @@ public class StartupTabView extends BorderPane {
     }
 
     private void triggerToggle() {
-        StartupItem selected = getSelectedTable().getSelectionModel().getSelectedItem();
-        if (selected == null || busy.get()) return;
+        List<StartupItem> selected = new ArrayList<>(getSelectedTable().getSelectionModel().getSelectedItems());
+        if (selected.isEmpty() || busy.get()) return;
 
         busy.set(true);
         progress.setVisible(true);
-        String actionName = selected.isEnabled() ? "Disabling" : "Enabling";
-        statusLabel.setText(actionName + " " + selected.getName() + "...");
+        statusLabel.setText("Toggling " + selected.size() + " item(s)...");
 
         executor.execute(() -> {
-            try {
-                service.toggleStatus(selected);
-                Platform.runLater(() -> {
-                    getSelectedTable().refresh();
-                    statusLabel.setText("Item " + (selected.isEnabled() ? "enabled" : "disabled") + " successfully.");
-                });
-            } catch (Exception e) {
-                AppLogger.error("Failed to toggle status", e);
-                Platform.runLater(() -> {
-                    statusLabel.setText("Action failed.");
-                    new Alert(Alert.AlertType.ERROR, "Failed to toggle startup item status:\n" + e.getMessage()).showAndWait();
-                });
-            } finally {
-                Platform.runLater(() -> {
-                    busy.set(false);
-                    progress.setVisible(false);
-                });
+            List<String> errors = new ArrayList<>();
+            for (StartupItem item : selected) {
+                try {
+                    service.toggleStatus(item);
+                } catch (Exception e) {
+                    AppLogger.error("Failed to toggle status for " + item.getName(), e);
+                    errors.add(item.getName() + ": " + e.getMessage());
+                }
             }
+
+            Platform.runLater(() -> {
+                getSelectedTable().refresh();
+                if (errors.isEmpty()) {
+                    statusLabel.setText("Toggled " + selected.size() + " item(s) successfully.");
+                } else {
+                    statusLabel.setText("Completed with errors.");
+                    new Alert(Alert.AlertType.ERROR, "Some items failed:\n" + String.join("\n", errors)).showAndWait();
+                }
+                busy.set(false);
+                progress.setVisible(false);
+            });
         });
     }
 
     private void triggerDelete() {
-        StartupItem selected = getSelectedTable().getSelectionModel().getSelectedItem();
-        if (selected == null || busy.get()) return;
+        List<StartupItem> selected = new ArrayList<>(getSelectedTable().getSelectionModel().getSelectedItems());
+        if (selected.isEmpty() || busy.get()) return;
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Confirm Deletion");
-        confirm.setHeaderText("Delete Startup Item: " + selected.getName());
-        confirm.setContentText("Are you sure you want to permanently delete this startup item?\n" +
-                "This action will remove it from the system startup locations. A backup will be created automatically.");
+        if (selected.size() == 1) {
+            confirm.setHeaderText("Delete Startup Item: " + selected.get(0).getName());
+        } else {
+            confirm.setHeaderText("Delete " + selected.size() + " startup items");
+        }
+        confirm.setContentText("Are you sure you want to permanently delete the selected startup item(s)?\n" +
+                "A backup will be created automatically for each item.");
         confirm.initModality(Modality.APPLICATION_MODAL);
 
         if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
             busy.set(true);
             progress.setVisible(true);
-            statusLabel.setText("Deleting " + selected.getName() + "...");
+            statusLabel.setText("Deleting " + selected.size() + " item(s)...");
 
             executor.execute(() -> {
-                try {
-                    service.deleteItem(selected);
-                    Platform.runLater(() -> {
-                        if (selected.getType() == StartupItemType.REGISTRY) {
-                            registryItems.remove(selected);
-                        } else if (selected.getType() == StartupItemType.TASK) {
-                            taskItems.remove(selected);
-                        }
-                        applyRegistryFilter();
-                        applyTaskFilter();
-                        statusLabel.setText("Startup item deleted successfully.");
-                        new Alert(Alert.AlertType.INFORMATION, "The startup item has been deleted. You can restore it anytime from the Backups panel.").showAndWait();
-                    });
-                } catch (Exception e) {
-                    AppLogger.error("Failed to delete startup item", e);
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Deletion failed.");
-                        new Alert(Alert.AlertType.ERROR, "Failed to delete startup item:\n" + e.getMessage()).showAndWait();
-                    });
-                } finally {
-                    Platform.runLater(() -> {
-                        busy.set(false);
-                        progress.setVisible(false);
-                    });
+                List<String> errors = new ArrayList<>();
+                for (StartupItem item : selected) {
+                    try {
+                        service.deleteItem(item);
+                        Platform.runLater(() -> {
+                            if (item.getType() == StartupItemType.REGISTRY) {
+                                registryItems.remove(item);
+                            } else if (item.getType() == StartupItemType.TASK) {
+                                taskItems.remove(item);
+                            }
+                        });
+                    } catch (Exception e) {
+                        AppLogger.error("Failed to delete startup item " + item.getName(), e);
+                        errors.add(item.getName() + ": " + e.getMessage());
+                    }
                 }
+
+                Platform.runLater(() -> {
+                    applyRegistryFilter();
+                    applyTaskFilter();
+                    if (errors.isEmpty()) {
+                        statusLabel.setText("Deleted " + selected.size() + " item(s) successfully.");
+                        new Alert(Alert.AlertType.INFORMATION, "The selected startup item(s) have been deleted. You can restore them from the Backups panel.").showAndWait();
+                    } else {
+                        statusLabel.setText("Deletion completed with errors.");
+                        new Alert(Alert.AlertType.ERROR, "Some items failed to delete:\n" + String.join("\n", errors)).showAndWait();
+                    }
+                    busy.set(false);
+                    progress.setVisible(false);
+                });
             });
         }
+    }
+
+    private void showDetailsDialog(StartupItem item) {
+        if (item == null) return;
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Startup item details");
+        dialog.initModality(Modality.APPLICATION_MODAL);
+        try {
+            dialog.getDialogPane().getStylesheets().add(getClass().getResource("/custom.css").toExternalForm());
+        } catch (Exception ignored) {}
+
+        VBox content = new VBox(8);
+        content.setPadding(new Insets(10));
+
+        Label name = new Label("Name: " + item.getName());
+        Label publisher = new Label("Publisher: " + item.getPublisher());
+        Label location = new Label("Location: " + item.getLocation());
+        Label status = new Label("Status: " + (item.isEnabled() ? "Enabled" : "Disabled"));
+        Label impact = new Label("Estimated boot impact: " + StartupImpactService.formatImpact(item.getEstimatedBootImpactMs()));
+
+        TextArea cmd = new TextArea(item.getPath() == null ? "" : item.getPath());
+        cmd.setEditable(false);
+        cmd.setWrapText(true);
+        cmd.setPrefRowCount(4);
+
+        content.getChildren().addAll(name, publisher, location, status, impact, new Label("Command / Path:"), cmd);
+
+        if (item.getType() == StartupItemType.SERVICE && item.getDependencies() != null && !item.getDependencies().isEmpty()) {
+            content.getChildren().add(new Label("Dependencies: " + String.join(", ", item.getDependencies())));
+        }
+
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.CLOSE);
+        dialog.showAndWait();
     }
 
     // ── Backup Manager Dialog ──────────────────────────────────────────────────
