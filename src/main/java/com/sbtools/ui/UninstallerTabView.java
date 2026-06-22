@@ -22,6 +22,13 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 import javafx.stage.Modality;
+import java.awt.image.BufferedImage;
+import javafx.scene.image.WritableImage;
+import javafx.scene.image.PixelWriter;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -50,6 +57,7 @@ public class UninstallerTabView extends BorderPane {
     private final ToggleButton appxToggle = new ToggleButton("Windows Store Apps");
 
     private final TableView<InstalledApp> table = new TableView<>(sortedApps);
+    private static final ExecutorService ICON_EXECUTOR = Executors.newFixedThreadPool(Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors())));
 
     public UninstallerTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -138,6 +146,7 @@ public class UninstallerTabView extends BorderPane {
         iconCol.setCellFactory(col -> new TableCell<>() {
             private final javafx.scene.image.ImageView imageView = new javafx.scene.image.ImageView();
             private final javafx.scene.layout.StackPane iconPane = new javafx.scene.layout.StackPane(imageView);
+            private final AtomicReference<Future<?>> iconTaskRef = new AtomicReference<>();
             {
                 getStyleClass().add("icon-cell");
                 imageView.setFitWidth(20);
@@ -153,16 +162,53 @@ public class UninstallerTabView extends BorderPane {
             protected void updateItem(String item, boolean empty) {
                 super.updateItem(item, empty);
                 setText(null);
+
+                // Cancel any previous icon extraction task for this cell
+                Future<?> prev = iconTaskRef.getAndSet(null);
+                if (prev != null && !prev.isDone()) {
+                    prev.cancel(true);
+                }
+
                 if (empty || getItem() == null || getTableRow() == null || getTableRow().getItem() == null) {
                     setGraphic(null);
                 } else {
                     InstalledApp app = getTableRow().getItem();
                     imageView.setImage(null);
-                    String loc = AppIconResolver.resolveAppIconPath(app);
-                    if (loc != null) {
-                        imageView.setImage(com.sbtools.util.IconExtractor.extractIcon(loc));
-                    }
                     setGraphic(iconPane);
+
+                    // Extract icon off the FX thread, then set on the FX thread.
+                    Future<?> f = ICON_EXECUTOR.submit(() -> {
+                        try {
+                            String loc = AppIconResolver.resolveAppIconPath(app);
+                            if (loc != null && !loc.isBlank()) {
+                                BufferedImage bimg = com.sbtools.util.IconExtractor.extractIconBuffered(loc);
+                                if (bimg != null) {
+                                    final int w = bimg.getWidth();
+                                    final int h = bimg.getHeight();
+                                    final BufferedImage fb = bimg;
+                                    Platform.runLater(() -> {
+                                        try {
+                                            WritableImage fxImg = new WritableImage(w, h);
+                                            PixelWriter pw = fxImg.getPixelWriter();
+                                            for (int yy = 0; yy < h; yy++) {
+                                                for (int xx = 0; xx < w; xx++) {
+                                                    pw.setArgb(xx, yy, fb.getRGB(xx, yy));
+                                                }
+                                            }
+                                            if (getTableRow() != null && getTableRow().getItem() == app) {
+                                                imageView.setImage(fxImg);
+                                            }
+                                        } catch (Exception ex) {
+                                            AppLogger.debug("Failed to convert icon to FX image: " + ex.getMessage());
+                                        }
+                                    });
+                                }
+                            }
+                        } catch (Exception e) {
+                            AppLogger.debug("Icon extraction failed: " + e.getMessage());
+                        }
+                    });
+                    iconTaskRef.set(f);
                 }
             }
         });
