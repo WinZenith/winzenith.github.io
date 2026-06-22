@@ -25,7 +25,7 @@ public class UpdateChecker {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(RELEASES_URL))
                     .header("Accept", "application/vnd.github.v3+json")
-                    .header("User-Agent", AppInfo.DISPLAY_NAME + "/" + AppInfo.VERSION)
+                    .header("User-Agent", AppInfo.DISPLAY_NAME + "/" + AppInfo.getVersion())
                     .timeout(Duration.ofSeconds(10))
                     .GET()
                     .build();
@@ -47,7 +47,7 @@ public class UpdateChecker {
             }
 
             String latestVersion = tagName.startsWith("v") ? tagName.substring(1) : tagName;
-            if (isNewerVersion(latestVersion, AppInfo.VERSION)) {
+            if (isNewerVersion(latestVersion, AppInfo.getVersion())) {
                 cachedResult = UpdateResult.updateAvailable(latestVersion, downloadUrl);
             } else {
                 cachedResult = UpdateResult.upToDate();

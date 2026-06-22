@@ -2,6 +2,7 @@ package com.sbtools.cleaner;
 
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
+import com.sbtools.util.ProcessManager;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -55,7 +56,7 @@ public class RegistryDefragService {
                 ProcessBuilder exportPb = new ProcessBuilder("reg", "export", hive,
                         exportFile.toString(), "/y");
                 exportPb.redirectErrorStream(true);
-                Process exportProcess = exportPb.start();
+                Process exportProcess = ProcessManager.start(exportPb);
                 boolean exportOk = exportProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
 
                 if (!exportOk || !Files.exists(exportFile) || Files.size(exportFile) == 0) {
@@ -77,7 +78,7 @@ public class RegistryDefragService {
 
                 ProcessBuilder deletePb = new ProcessBuilder("reg", "delete", hive, "/f");
                 deletePb.redirectErrorStream(true);
-                Process deleteProcess = deletePb.start();
+                Process deleteProcess = ProcessManager.start(deletePb);
                 deleteProcess.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
 
                 if (progressCallback != null) {
@@ -86,7 +87,7 @@ public class RegistryDefragService {
 
                 ProcessBuilder importPb = new ProcessBuilder("reg", "import", exportFile.toString());
                 importPb.redirectErrorStream(true);
-                Process importProcess = importPb.start();
+                Process importProcess = ProcessManager.start(importPb);
                 boolean importOk = importProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
 
                 if (importOk) {
@@ -114,7 +115,7 @@ public class RegistryDefragService {
             }
             ProcessBuilder restorePb = new ProcessBuilder("reg", "import", exportFile.toString());
             restorePb.redirectErrorStream(true);
-            Process restoreProcess = restorePb.start();
+            Process restoreProcess = ProcessManager.start(restorePb);
             boolean restoreOk = restoreProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
             if (restoreOk) {
                 AppLogger.info("Registry restored for " + hive + " from backup");
@@ -136,7 +137,7 @@ public class RegistryDefragService {
             try {
                 ProcessBuilder pb = new ProcessBuilder("reg", "query", hive, "/s");
                 pb.redirectErrorStream(true);
-                Process p = pb.start();
+                Process p = ProcessManager.start(pb);
 
                 long[] valueCount = {0};
                 long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);

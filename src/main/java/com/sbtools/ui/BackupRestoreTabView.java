@@ -7,6 +7,7 @@ import com.sbtools.backup.SystemRestoreService;
 import com.sbtools.util.AdminCheck;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
+import com.sbtools.util.ProcessManager;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -612,7 +613,7 @@ public class BackupRestoreTabView extends BorderPane {
                             List.of("reg", "export", area, outputFile.toString(), "/y"));
                     ProcessBuilder pb = new ProcessBuilder(exportArgs);
                     pb.redirectErrorStream(true);
-                    Process process = pb.start();
+                    Process process = ProcessManager.start(pb);
                     int exitCode = process.waitFor();
                     if (exitCode == 0) {
                         exportedFiles.add(outputFile.getFileName().toString());
@@ -679,7 +680,7 @@ public class BackupRestoreTabView extends BorderPane {
                 Path filePath = AppPaths.backupsRoot().resolve("cleanup-backups").resolve(selected.getFilename());
                 ProcessBuilder pb = new ProcessBuilder("reg", "import", filePath.toString());
                 pb.redirectErrorStream(true);
-                Process process = pb.start();
+                Process process = ProcessManager.start(pb);
                 int exitCode = process.waitFor();
 
                 Platform.runLater(() -> {

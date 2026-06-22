@@ -36,6 +36,11 @@ public class ProcessRunner {
         pb.redirectErrorStream(false);
         AppLogger.info("Running: " + String.join(" ", command));
         Process process = pb.start();
+        // Track process so it can be terminated on application shutdown if still running
+        try {
+            ProcessManager.register(process);
+        } catch (Throwable ignored) {
+        }
         ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
         Thread stdoutReader = startStreamReader(process.getInputStream(), stdoutBuf);
@@ -65,6 +70,8 @@ public class ProcessRunner {
         pb.redirectErrorStream(true);
         AppLogger.info("Running (streaming): " + String.join(" ", command));
         Process process = pb.start();
+        // Track process so it can be terminated on application shutdown if still running
+        try { ProcessManager.register(process); } catch (Throwable ignored) {}
         StringBuilder outBuf = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {

@@ -2,6 +2,8 @@ package com.sbtools.cleaner;
 
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
+import com.sbtools.util.ProcessManager;
+import com.sbtools.util.CancelableCompletableFuture;
 import com.sun.jna.platform.win32.Advapi32Util;
 import com.sun.jna.platform.win32.WinReg;
 
@@ -40,6 +42,110 @@ public class CleanupService {
         public Map<CleanupCategory, Long> getPerCategory() { return perCategory; }
     }
 
+    // Per-category cleaner abstraction and registry
+    private interface Cleaner {
+        void scan(CleanupRow row);
+        long clean(Path backupRootOrNull) throws Exception;
+    }
+
+    private final java.util.Map<CleanupCategory, Cleaner> cleaners = new java.util.HashMap<>();
+
+    public CleanupService() {
+        initCleaners();
+    }
+
+    private void initCleaners() {
+        // Map each category to its scan/clean implementation (using existing methods)
+        cleaners.put(CleanupCategory.REGISTRY, new Cleaner() {
+            public void scan(CleanupRow row) { scanRegistry(row); }
+            public long clean(Path backupRootOrNull) { return cleanRegistry(backupRootOrNull); }
+        });
+        cleaners.put(CleanupCategory.REGISTRY_DEFRAG, new Cleaner() {
+            public void scan(CleanupRow row) { scanRegistryDefrag(row); }
+            public long clean(Path backupRootOrNull) { return cleanRegistryDefrag(); }
+        });
+        cleaners.put(CleanupCategory.EMPTY_RECYCLE_BIN, new Cleaner() {
+            public void scan(CleanupRow row) { scanRecycleBin(row); }
+            public long clean(Path backupRootOrNull) { return cleanRecycleBin(); }
+        });
+        cleaners.put(CleanupCategory.JUNK_FILES, new Cleaner() {
+            public void scan(CleanupRow row) { scanJunkFiles(row); }
+            public long clean(Path backupRootOrNull) { return cleanDirectoryPattern(getJunkDirs()); }
+        });
+        cleaners.put(CleanupCategory.PRIVACY_TRACES, new Cleaner() {
+            public void scan(CleanupRow row) { scanPrivacyTraces(row); }
+            public long clean(Path backupRootOrNull) { return cleanPrivacyTraces(); }
+        });
+        cleaners.put(CleanupCategory.WEB_BROWSING_TRACES, new Cleaner() {
+            public void scan(CleanupRow row) { scanBrowserTraces(row); }
+            public long clean(Path backupRootOrNull) { return cleanBrowserTraces(); }
+        });
+        cleaners.put(CleanupCategory.CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanDirectoryPattern(getCacheDirs()); }
+        });
+        cleaners.put(CleanupCategory.INSTALLER_FILES, new Cleaner() {
+            public void scan(CleanupRow row) { scanInstallerFiles(row); }
+            public long clean(Path backupRootOrNull) { return cleanInstallerFiles(); }
+        });
+        cleaners.put(CleanupCategory.TEMPORARY_SYSTEM_FILES, new Cleaner() {
+            public void scan(CleanupRow row) { scanTempSystemFiles(row); }
+            public long clean(Path backupRootOrNull) { return cleanDirectoryPattern(getTempSystemDirs()); }
+        });
+        cleaners.put(CleanupCategory.MEMORY_DUMPS, new Cleaner() {
+            public void scan(CleanupRow row) { scanMemoryDumps(row); }
+            public long clean(Path backupRootOrNull) { return cleanMemoryDumps(); }
+        });
+        cleaners.put(CleanupCategory.WINDOWS_ERROR_REPORTING, new Cleaner() {
+            public void scan(CleanupRow row) { scanWindowsErrorReporting(row); }
+            public long clean(Path backupRootOrNull) { return cleanWindowsErrorReporting(); }
+        });
+        cleaners.put(CleanupCategory.WINDOWS_UPDATE_CLEANUP, new Cleaner() {
+            public void scan(CleanupRow row) { scanWindowsUpdateCleanup(row); }
+            public long clean(Path backupRootOrNull) { return cleanWindowsUpdateCleanup(); }
+        });
+        cleaners.put(CleanupCategory.THUMBNAIL_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanThumbnailCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanThumbnailCache(); }
+        });
+        cleaners.put(CleanupCategory.EMPTY_FOLDERS, new Cleaner() {
+            public void scan(CleanupRow row) { scanEmptyFolders(row); }
+            public long clean(Path backupRootOrNull) { return cleanEmptyFolders(); }
+        });
+        cleaners.put(CleanupCategory.NOTIFICATION_HISTORY, new Cleaner() {
+            public void scan(CleanupRow row) { scanNotificationHistory(row); }
+            public long clean(Path backupRootOrNull) { return cleanNotificationHistory(); }
+        });
+        cleaners.put(CleanupCategory.FONT_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanFontCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanFontCache(); }
+        });
+        cleaners.put(CleanupCategory.TASKBAR_JUMP_LISTS, new Cleaner() {
+            public void scan(CleanupRow row) { scanTaskbarJumpLists(row); }
+            public long clean(Path backupRootOrNull) { return cleanTaskbarJumpLists(); }
+        });
+        cleaners.put(CleanupCategory.OFFICE_DOCUMENT_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanOfficeDocumentCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanOfficeDocumentCache(); }
+        });
+        cleaners.put(CleanupCategory.WINDOWS_DEFENDER_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanWindowsDefenderCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanWindowsDefenderCache(); }
+        });
+        cleaners.put(CleanupCategory.WINDOWS_LOG_FILES, new Cleaner() {
+            public void scan(CleanupRow row) { scanWindowsLogFiles(row); }
+            public long clean(Path backupRootOrNull) { return cleanWindowsLogFiles(); }
+        });
+        cleaners.put(CleanupCategory.WINDOWS_STORE_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanWindowsStoreCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanWindowsStoreCache(); }
+        });
+        cleaners.put(CleanupCategory.OTHER_PROGRAMS_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanOtherProgramsCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanOtherProgramsCache(); }
+        });
+    }
+
     public List<CleanupRow> scan(Runnable onProgress) {
         CleanupCategory[] categories = CleanupCategory.values();
         CleanupRow[] rows = new CleanupRow[categories.length];
@@ -67,29 +173,35 @@ public class CleanupService {
 
     private void scanCategory(CleanupRow row) {
         try {
-            switch (row.getCategory()) {
-                case REGISTRY -> scanRegistry(row);
-                case REGISTRY_DEFRAG -> scanRegistryDefrag(row);
-                case EMPTY_RECYCLE_BIN -> scanRecycleBin(row);
-                case JUNK_FILES -> scanJunkFiles(row);
-                case PRIVACY_TRACES -> scanPrivacyTraces(row);
-                case WEB_BROWSING_TRACES -> scanBrowserTraces(row);
-                case CACHE -> scanCache(row);
-                case INSTALLER_FILES -> scanInstallerFiles(row);
-                case TEMPORARY_SYSTEM_FILES -> scanTempSystemFiles(row);
-                case MEMORY_DUMPS -> scanMemoryDumps(row);
-                case WINDOWS_ERROR_REPORTING -> scanWindowsErrorReporting(row);
-                case WINDOWS_UPDATE_CLEANUP -> scanWindowsUpdateCleanup(row);
-                case THUMBNAIL_CACHE -> scanThumbnailCache(row);
-                case EMPTY_FOLDERS -> scanEmptyFolders(row);
-                case NOTIFICATION_HISTORY -> scanNotificationHistory(row);
-                case FONT_CACHE -> scanFontCache(row);
-                case TASKBAR_JUMP_LISTS -> scanTaskbarJumpLists(row);
-                case OFFICE_DOCUMENT_CACHE -> scanOfficeDocumentCache(row);
-                case WINDOWS_DEFENDER_CACHE -> scanWindowsDefenderCache(row);
-                case WINDOWS_LOG_FILES -> scanWindowsLogFiles(row);
-                case WINDOWS_STORE_CACHE -> scanWindowsStoreCache(row);
-                case OTHER_PROGRAMS_CACHE -> scanOtherProgramsCache(row);
+            Cleaner c = cleaners.get(row.getCategory());
+            if (c != null) {
+                c.scan(row);
+            } else {
+                // Fallback to legacy behavior
+                switch (row.getCategory()) {
+                    case REGISTRY -> scanRegistry(row);
+                    case REGISTRY_DEFRAG -> scanRegistryDefrag(row);
+                    case EMPTY_RECYCLE_BIN -> scanRecycleBin(row);
+                    case JUNK_FILES -> scanJunkFiles(row);
+                    case PRIVACY_TRACES -> scanPrivacyTraces(row);
+                    case WEB_BROWSING_TRACES -> scanBrowserTraces(row);
+                    case CACHE -> scanCache(row);
+                    case INSTALLER_FILES -> scanInstallerFiles(row);
+                    case TEMPORARY_SYSTEM_FILES -> scanTempSystemFiles(row);
+                    case MEMORY_DUMPS -> scanMemoryDumps(row);
+                    case WINDOWS_ERROR_REPORTING -> scanWindowsErrorReporting(row);
+                    case WINDOWS_UPDATE_CLEANUP -> scanWindowsUpdateCleanup(row);
+                    case THUMBNAIL_CACHE -> scanThumbnailCache(row);
+                    case EMPTY_FOLDERS -> scanEmptyFolders(row);
+                    case NOTIFICATION_HISTORY -> scanNotificationHistory(row);
+                    case FONT_CACHE -> scanFontCache(row);
+                    case TASKBAR_JUMP_LISTS -> scanTaskbarJumpLists(row);
+                    case OFFICE_DOCUMENT_CACHE -> scanOfficeDocumentCache(row);
+                    case WINDOWS_DEFENDER_CACHE -> scanWindowsDefenderCache(row);
+                    case WINDOWS_LOG_FILES -> scanWindowsLogFiles(row);
+                    case WINDOWS_STORE_CACHE -> scanWindowsStoreCache(row);
+                    case OTHER_PROGRAMS_CACHE -> scanOtherProgramsCache(row);
+                }
             }
         } catch (Exception e) {
             AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
@@ -124,31 +236,112 @@ public class CleanupService {
         return new CleanSummary(totalBytes, totalItems, perCategory);
     }
 
+    /**
+     * Asynchronous, cancelable scan. Returns a CancelableCompletableFuture that can be cancelled
+     * which will attempt to cancel per-category workers and shutdown the executor.
+     */
+    public CancelableCompletableFuture<java.util.List<CleanupRow>> scanAsync(Runnable onProgress) {
+        CleanupCategory[] categories = CleanupCategory.values();
+        CleanupRow[] rows = new CleanupRow[categories.length];
+        for (int i = 0; i < categories.length; i++) {
+            rows[i] = new CleanupRow(categories[i]);
+        }
+
+        int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 6);
+        java.util.concurrent.ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+
+        java.util.List<CompletableFuture<?>> futures = new java.util.ArrayList<>();
+        for (int i = 0; i < categories.length; i++) {
+            final CleanupRow row = rows[i];
+            CompletableFuture<Void> f = CompletableFuture.runAsync(() -> {
+                try {
+                    Cleaner c = cleaners.get(row.getCategory());
+                    if (c != null) c.scan(row);
+                    else scanCategory(row);
+                } catch (Exception e) {
+                    AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
+                    row.setSizeOrCountText("Error");
+                } finally {
+                    if (onProgress != null) onProgress.run();
+                }
+            }, executor);
+            futures.add(f);
+        }
+
+        CompletableFuture<java.util.List<CleanupRow>> finalFuture = CompletableFuture
+                .allOf(futures.toArray(new CompletableFuture[0]))
+                .thenApply(v -> java.util.List.of(rows));
+        finalFuture.whenComplete((r, ex) -> executor.shutdown());
+
+        CancelableCompletableFuture<java.util.List<CleanupRow>> result = new CancelableCompletableFuture<>(futures, executor);
+        result.completeFrom(finalFuture);
+        return result;
+    }
+
+    /**
+     * Asynchronous, cancelable clean. Returns a CancelableCompletableFuture that completes with a CleanSummary.
+     */
+    public CancelableCompletableFuture<CleanSummary> cleanAsync(java.util.List<CleanupRow> selectedRows, boolean registryBackup, Runnable onProgress) {
+        java.util.List<CleanupRow> tasks = selectedRows.stream().filter(CleanupRow::isSelected).toList();
+        if (tasks.isEmpty()) {
+            CompletableFuture<CleanSummary> done = CompletableFuture.completedFuture(new CleanSummary(0, 0, new java.util.HashMap<>()));
+            CancelableCompletableFuture<CleanSummary> cf = new CancelableCompletableFuture<>(java.util.Collections.emptyList(), null);
+            cf.completeFrom(done);
+            return cf;
+        }
+
+        final java.nio.file.Path backupRoot = registryBackup
+                ? AppPaths.backupsRoot().resolve("cleanup-backups")
+                .resolve(java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")))
+                : null;
+
+        int threadCount = Math.min(tasks.size(), Runtime.getRuntime().availableProcessors());
+        java.util.concurrent.ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+
+        java.util.List<CompletableFuture<Long>> futures = new java.util.ArrayList<>();
+        for (CleanupRow row : tasks) {
+            final CleanupRow taskRow = row;
+            CompletableFuture<Long> f = CompletableFuture.supplyAsync(() -> {
+                try {
+                    Cleaner c = cleaners.get(taskRow.getCategory());
+                    if (c != null) return c.clean(backupRoot);
+                    return cleanCategory(taskRow.getCategory(), backupRoot);
+                } catch (Exception e) {
+                    AppLogger.warning("Clean failed for " + taskRow.getCategory().getDisplayName() + ": " + e.getMessage());
+                    return 0L;
+                } finally {
+                    if (onProgress != null) onProgress.run();
+                }
+            }, executor);
+            futures.add(f);
+        }
+
+        CompletableFuture<CleanSummary> finalFuture = CompletableFuture
+                .allOf(futures.toArray(new CompletableFuture[0]))
+                .thenApply(v -> {
+                    long totalBytes = 0;
+                    int totalItems = 0;
+                    java.util.Map<CleanupCategory, Long> perCategory = new java.util.HashMap<>();
+                    for (int i = 0; i < tasks.size(); i++) {
+                        long cleaned = futures.get(i).join();
+                        CleanupRow row = tasks.get(i);
+                        totalBytes += cleaned;
+                        totalItems += row.getItemCount();
+                        perCategory.put(row.getCategory(), cleaned);
+                    }
+                    return new CleanSummary(totalBytes, totalItems, perCategory);
+                });
+        finalFuture.whenComplete((r, ex) -> executor.shutdown());
+
+        CancelableCompletableFuture<CleanSummary> result = new CancelableCompletableFuture<>(new java.util.ArrayList<>(futures), executor);
+        result.completeFrom(finalFuture);
+        return result;
+    }
+
     private long cleanCategory(CleanupCategory category, Path backupRootOrNull) throws Exception {
-        return switch (category) {
-            case REGISTRY -> cleanRegistry(backupRootOrNull);
-            case REGISTRY_DEFRAG -> cleanRegistryDefrag();
-            case EMPTY_RECYCLE_BIN -> cleanRecycleBin();
-            case JUNK_FILES -> cleanDirectoryPattern(getJunkDirs());
-            case PRIVACY_TRACES -> cleanPrivacyTraces();
-            case WEB_BROWSING_TRACES -> cleanBrowserTraces();
-            case CACHE -> cleanDirectoryPattern(getCacheDirs());
-            case INSTALLER_FILES -> cleanInstallerFiles();
-            case TEMPORARY_SYSTEM_FILES -> cleanDirectoryPattern(getTempSystemDirs());
-            case MEMORY_DUMPS -> cleanMemoryDumps();
-            case WINDOWS_ERROR_REPORTING -> cleanWindowsErrorReporting();
-            case WINDOWS_UPDATE_CLEANUP -> cleanWindowsUpdateCleanup();
-            case THUMBNAIL_CACHE -> cleanThumbnailCache();
-            case EMPTY_FOLDERS -> cleanEmptyFolders();
-            case NOTIFICATION_HISTORY -> cleanNotificationHistory();
-            case FONT_CACHE -> cleanFontCache();
-            case TASKBAR_JUMP_LISTS -> cleanTaskbarJumpLists();
-            case OFFICE_DOCUMENT_CACHE -> cleanOfficeDocumentCache();
-            case WINDOWS_DEFENDER_CACHE -> cleanWindowsDefenderCache();
-            case WINDOWS_LOG_FILES -> cleanWindowsLogFiles();
-            case WINDOWS_STORE_CACHE -> cleanWindowsStoreCache();
-            case OTHER_PROGRAMS_CACHE -> cleanOtherProgramsCache();
-        };
+        Cleaner c = cleaners.get(category);
+        if (c != null) return c.clean(backupRootOrNull);
+        throw new UnsupportedOperationException("No cleaner registered for " + category);
     }
 
     // ── Registry ──────────────────────────────────────────────────────────
@@ -464,10 +657,9 @@ public class CleanupService {
                         Path regBackup = backupRootOrNull.resolve("registry-" + keyPath.replace("\\", "_") + ".reg");
                         Files.createDirectories(regBackup.getParent());
                         try {
-                            new ProcessBuilder("reg", "export",
+                            ProcessManager.start(new ProcessBuilder("reg", "export",
                                     (hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") + "\\" + keyPath,
-                                    regBackup.toString(), "/y")
-                                    .inheritIO().start().waitFor();
+                                    regBackup.toString(), "/y").inheritIO()).waitFor();
                         } catch (Exception ignored) {}
                     }
 
@@ -487,12 +679,11 @@ public class CleanupService {
 
     private void backupRegKey(Path backupRootOrNull, String description, String hiveName, String keyPath) {
         if (backupRootOrNull != null) {
-            try {
-                Path regBackup = backupRootOrNull.resolve("registry-" + description + ".reg");
-                Files.createDirectories(regBackup.getParent());
-                new ProcessBuilder("reg", "export", hiveName + "\\" + keyPath, regBackup.toString(), "/y")
-                        .inheritIO().start().waitFor();
-            } catch (Exception ignored) {}
+                try {
+                    Path regBackup = backupRootOrNull.resolve("registry-" + description + ".reg");
+                    Files.createDirectories(regBackup.getParent());
+                    ProcessManager.start(new ProcessBuilder("reg", "export", hiveName + "\\" + keyPath, regBackup.toString(), "/y").inheritIO()).waitFor();
+                } catch (Exception ignored) {}
         }
     }
 
@@ -790,7 +981,7 @@ public class CleanupService {
         try {
             ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
                     "rd", "/s", "/q", System.getenv("SYSTEMDRIVE") + "\\$Recycle.Bin");
-            pb.inheritIO().start().waitFor();
+            ProcessManager.start(pb.inheritIO()).waitFor();
         } catch (Exception ex) {
             AppLogger.warning("Failed to empty Recycle Bin: " + ex.getMessage());
         }
@@ -1405,7 +1596,7 @@ public class CleanupService {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image",
                     "/AnalyzeComponentStore");
             pb.redirectErrorStream(true);
-            Process p = pb.start();
+            Process p = ProcessManager.start(pb);
             boolean finished = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
             if (finished) {
                 String output = new String(p.getInputStream().readAllBytes(),
@@ -1450,7 +1641,7 @@ public class CleanupService {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image",
                     "/StartComponentCleanup");
             pb.redirectErrorStream(true);
-            Process p = pb.start();
+            Process p = ProcessManager.start(pb);
             boolean finished = p.waitFor(300, java.util.concurrent.TimeUnit.SECONDS);
             if (finished) {
                 cleaned += 1;

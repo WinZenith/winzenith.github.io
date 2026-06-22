@@ -4,6 +4,7 @@ import com.sbtools.cleaner.CleanupCategory;
 import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanupService;
 import com.sbtools.util.AppLogger;
+import com.sbtools.util.CancelableCompletableFuture;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
@@ -34,6 +35,8 @@ public class CleanerTabView extends BorderPane {
     private final CleanupService service = new CleanupService();
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
+    private CancelableCompletableFuture<java.util.List<CleanupRow>> activeScanFuture;
+    private CancelableCompletableFuture<CleanupService.CleanSummary> activeCleanFuture;
 
     public CleanerTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -49,16 +52,24 @@ public class CleanerTabView extends BorderPane {
         Button scanButton = new Button("Scan");
         Button selectAllButton = new Button("Select All");
         Button cleanButton = new Button("Clean Selected");
+        Button cancelButton = new Button("Cancel");
         TableView<CleanupRow> table = new TableView<>(rows);
 
         progressBar.setVisible(false);
         progressBar.setPrefWidth(200);
 
-        scanButton.setOnAction(e -> startScan(rows, statusLabel, progressBar, scanButton, selectAllButton, cleanButton, table));
+        scanButton.setOnAction(e -> startScan(rows, statusLabel, progressBar, scanButton, selectAllButton, cleanButton, cancelButton, table));
         selectAllButton.setOnAction(e -> toggleSelectAll(rows));
-        cleanButton.setOnAction(e -> startClean(rows, statusLabel, progressBar, scanButton, selectAllButton, cleanButton));
+        cleanButton.setOnAction(e -> startClean(rows, statusLabel, progressBar, scanButton, selectAllButton, cleanButton, cancelButton));
         cleanButton.setDisable(true);
         cleanButton.getStyleClass().add("danger");
+        cancelButton.setDisable(true);
+        cancelButton.setOnAction(e -> {
+            try {
+                if (activeScanFuture != null && !activeScanFuture.isDone()) activeScanFuture.cancel(true);
+                if (activeCleanFuture != null && !activeCleanFuture.isDone()) activeCleanFuture.cancel(true);
+            } catch (Exception ignored) {}
+        });
 
         HBox top = new HBox(12, scanButton, selectAllButton, cleanButton, progressBar, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
@@ -75,8 +86,10 @@ public class CleanerTabView extends BorderPane {
             scanButton.setDisable(newVal);
             selectAllButton.setDisable(newVal);
             cleanButton.setDisable(newVal || getSelectedCount(rows) == 0);
+            cancelButton.setDisable(!newVal);
         });
 
+        top.getChildren().add(cancelButton);
         VBox content = new VBox(top, center);
         VBox.setVgrow(center, Priority.ALWAYS);
         return content;
@@ -135,7 +148,7 @@ public class CleanerTabView extends BorderPane {
 
     private void startScan(ObservableList<CleanupRow> rows, Label statusLabel, ProgressBar progressBar,
                            Button scanButton, Button selectAllButton, Button cleanButton,
-                           TableView<CleanupRow> table) {
+                           Button cancelButton, TableView<CleanupRow> table) {
         if (busy.get()) return;
         busy.set(true);
         statusLabel.setText("Scanning system...");
@@ -145,38 +158,45 @@ public class CleanerTabView extends BorderPane {
         progressBar.setProgress(0);
         progressBar.setVisible(true);
 
-        new Thread(() -> {
-            try {
-                int totalCategories = CleanupCategory.values().length;
-                AtomicInteger scanned = new AtomicInteger();
-                List<CleanupRow> results = service.scan(() -> {
-                    int done = scanned.incrementAndGet();
-                    Platform.runLater(() -> {
-                        progressBar.setProgress((double) done / totalCategories);
-                        statusLabel.setText("Scanning: " + done + "/" + totalCategories + "...");
-                    });
+        int totalCategories = CleanupCategory.values().length;
+        AtomicInteger scanned = new AtomicInteger();
+
+        activeScanFuture = service.scanAsync(() -> {
+            int done = scanned.incrementAndGet();
+            Platform.runLater(() -> {
+                progressBar.setProgress((double) done / totalCategories);
+                statusLabel.setText("Scanning: " + done + "/" + totalCategories + "...");
+            });
+        });
+        cancelButton.setDisable(false);
+
+        activeScanFuture.whenComplete((results, ex) -> {
+            if (ex != null) {
+                Platform.runLater(() -> {
+                    if (activeScanFuture.isCancelled()) {
+                        statusLabel.setText("Scan canceled.");
+                    } else {
+                        statusLabel.setText("Scan failed.");
+                        new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
+                    }
+                    busy.set(false);
+                    scanButton.setDisable(false);
+                    progressBar.setVisible(false);
+                    cancelButton.setDisable(true);
                 });
+            } else {
                 Platform.runLater(() -> {
                     rows.setAll(results);
                     long totalBytes = results.stream().mapToLong(CleanupRow::getTotalBytes).sum();
                     statusLabel.setText("Scan complete — " + CleanupService.formatBytes(totalBytes) + " identified.");
                     cleanButton.setDisable(false);
                     progressBar.setVisible(false);
-                });
-            } catch (Exception e) {
-                AppLogger.error("Cleanup scan failed", e);
-                Platform.runLater(() -> {
-                    statusLabel.setText("Scan failed.");
-                    new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + e.getMessage()).showAndWait();
-                });
-            } finally {
-                Platform.runLater(() -> {
                     busy.set(false);
                     scanButton.setDisable(false);
-                    progressBar.setVisible(false);
+                    cancelButton.setDisable(true);
                 });
             }
-        }, "cleaner-scan").start();
+        });
     }
 
     private void toggleSelectAll(ObservableList<CleanupRow> rows) {
@@ -191,9 +211,10 @@ public class CleanerTabView extends BorderPane {
     }
 
     private void startClean(ObservableList<CleanupRow> rows, Label statusLabel, ProgressBar progressBar,
-                            Button scanButton, Button selectAllButton, Button cleanButton) {
+                            Button scanButton, Button selectAllButton, Button cleanButton,
+                            Button cancelButton) {
         if (busy.get()) return;
-        List<CleanupRow> selected = rows.stream().filter(CleanupRow::isSelected).toList();
+        java.util.List<CleanupRow> selected = rows.stream().filter(CleanupRow::isSelected).toList();
         if (selected.isEmpty()) return;
 
         busy.set(true);
@@ -234,16 +255,32 @@ public class CleanerTabView extends BorderPane {
 
         final boolean finalRegistryBackup = registryBackup;
         int totalCategories = selected.size();
-        new Thread(() -> {
-            try {
-                AtomicInteger cleaned = new AtomicInteger();
-                CleanupService.CleanSummary summary = service.clean(selected, finalRegistryBackup, () -> {
-                    int done = cleaned.incrementAndGet();
-                    Platform.runLater(() -> {
-                        progressBar.setProgress((double) done / totalCategories);
-                        statusLabel.setText("Cleaning: " + done + "/" + totalCategories + "...");
-                    });
+        AtomicInteger cleaned = new AtomicInteger();
+
+        activeCleanFuture = service.cleanAsync(selected, finalRegistryBackup, () -> {
+            int done = cleaned.incrementAndGet();
+            Platform.runLater(() -> {
+                progressBar.setProgress((double) done / totalCategories);
+                statusLabel.setText("Cleaning: " + done + "/" + totalCategories + "...");
+            });
+        });
+        cancelButton.setDisable(false);
+
+        activeCleanFuture.whenComplete((summary, ex) -> {
+            if (ex != null) {
+                Platform.runLater(() -> {
+                    if (activeCleanFuture.isCancelled()) {
+                        statusLabel.setText("Cleanup canceled.");
+                    } else {
+                        statusLabel.setText("Cleanup failed.");
+                        new Alert(Alert.AlertType.ERROR, "Cleanup failed:\n" + ex.getMessage()).showAndWait();
+                    }
+                    progressBar.setVisible(false);
+                    busy.set(false);
+                    scanButton.setDisable(false);
+                    cancelButton.setDisable(true);
                 });
+            } else {
                 Platform.runLater(() -> {
                     StringBuilder sb = new StringBuilder();
                     sb.append("Cleanup completed.\n\n");
@@ -258,21 +295,11 @@ public class CleanerTabView extends BorderPane {
                     statusLabel.setText("Cleanup completed \u2014 " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
                     progressBar.setVisible(false);
                     new Alert(Alert.AlertType.INFORMATION, sb.toString()).showAndWait();
-                });
-            } catch (Exception e) {
-                AppLogger.error("Cleanup failed", e);
-                Platform.runLater(() -> {
-                    statusLabel.setText("Cleanup failed.");
-                    progressBar.setVisible(false);
-                    new Alert(Alert.AlertType.ERROR, "Cleanup failed:\n" + e.getMessage()).showAndWait();
-                });
-            } finally {
-                Platform.runLater(() -> {
                     busy.set(false);
                     scanButton.setDisable(false);
-                    progressBar.setVisible(false);
+                    cancelButton.setDisable(true);
                 });
             }
-        }, "cleaner-clean").start();
+        });
     }
 }

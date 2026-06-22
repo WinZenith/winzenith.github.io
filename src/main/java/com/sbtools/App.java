@@ -28,6 +28,7 @@ import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 
 import java.io.IOException;
+import com.sbtools.util.ProcessManager;
 
 public class App extends Application {
 
@@ -118,7 +119,7 @@ public class App extends Application {
         stage.setMaximized(true);
         stage.show();
 
-        if (settings.autoCheckForUpdates()) {
+        if (settings.autoCheckForUpdates() && com.sbtools.util.AppInfo.isPackaged()) {
             updateChecker.checkForUpdateAsync(() -> {
                 UpdateChecker.UpdateResult result = updateChecker.getCachedResult();
                 if (result.isUpdateAvailable()) {
@@ -223,5 +224,15 @@ public class App extends Application {
 
     public static void main(String[] args) {
         launch(args);
+    }
+
+    @Override
+    public void stop() throws Exception {
+        // Ensure any tracked child processes are terminated when the app stops
+        try {
+            AppLogger.info("Application stopping; shutting down tracked processes...");
+        } catch (Throwable ignored) {}
+        ProcessManager.shutdownAll();
+        super.stop();
     }
 }

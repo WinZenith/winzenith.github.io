@@ -6,6 +6,7 @@ import com.sbtools.util.JsonMapper;
 import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
+import com.sbtools.util.ProcessManager;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -76,7 +77,7 @@ public class ShredderService {
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
-        Process process = pb.start();
+        Process process = ProcessManager.start(pb);
 
         ProcessWatcher watcher = new ProcessWatcher(process, progressCallback, cancelled, stopFlag);
         watcher.watch();
