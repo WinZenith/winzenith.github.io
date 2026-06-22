@@ -2,6 +2,8 @@ package com.sbtools.ui;
 
 import com.sbtools.defrag.DefragService;
 import com.sbtools.defrag.DriveInfo;
+import com.sbtools.diskhealth.DiskHealthInfo;
+import com.sbtools.diskhealth.DiskHealthService;
 import com.sbtools.shredder.ShredderFileEntry;
 import com.sbtools.shredder.ShredderResult;
 import com.sbtools.shredder.ShredderService;
@@ -34,6 +36,7 @@ import javafx.scene.control.TableView;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -57,6 +60,7 @@ public class DiskToolsTabView extends BorderPane {
     private final BooleanSupplier adminCheck;
     private final DefragService defragService = new DefragService();
     private final ShredderService shredderService = new ShredderService();
+    private final DiskHealthService diskHealthService = new DiskHealthService();
 
     private final AtomicBoolean defragCancelled = new AtomicBoolean(false);
     private final AtomicBoolean wipeCancelled = new AtomicBoolean(false);
@@ -110,6 +114,16 @@ public class DiskToolsTabView extends BorderPane {
     private final CheckBox selectAllWipeCheck = new CheckBox("Select All");
     private final Map<String, BooleanProperty> wipeSelected = new HashMap<>();
 
+    /* ───── Disk Health tab components ───── */
+    private final ComboBox<String> healthDriveCombo = new ComboBox<>();
+    private final ObservableList<DiskHealthInfo> healthDrives = FXCollections.observableArrayList();
+    private final Button refreshHealthBtn = new Button("Refresh");
+    private final ProgressBar healthProgress = new ProgressBar(0);
+    private final Label healthStatus = new Label("Click Refresh to load disk health data.");
+    private final GridPane smartGrid = new GridPane();
+    private final Label overallHealthLabel = new Label();
+    private boolean smartctlAvailable = false;
+
     public DiskToolsTabView(BooleanSupplier adminCheck) {
         this.adminCheck = adminCheck;
 
@@ -119,9 +133,10 @@ public class DiskToolsTabView extends BorderPane {
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
         Tab defragTab = new Tab("Defrag", buildDefragContent());
+        Tab healthTab = new Tab("Disk Health", buildDiskHealthContent());
         Tab secureEraseTab = new Tab("Secure Erase", buildSecureEraseContent());
 
-        tabPane.getTabs().addAll(defragTab, secureEraseTab);
+        tabPane.getTabs().addAll(defragTab, healthTab, secureEraseTab);
         setCenter(tabPane);
 
         loadDrives();
@@ -653,6 +668,251 @@ public class DiskToolsTabView extends BorderPane {
                 DefragVisualization.createLegendItem(Color.rgb(255, 184, 108), "Page/Hibernation"),
                 DefragVisualization.createLegendItem(Color.rgb(68, 71, 90), "Free")
         );
+    }
+
+    /* ===================================================================
+       DISK HEALTH TAB
+       =================================================================== */
+
+    private VBox buildDiskHealthContent() {
+        refreshHealthBtn.getStyleClass().add("accent");
+        refreshHealthBtn.setOnAction(e -> loadDiskHealth());
+        refreshHealthBtn.setTooltip(new Tooltip("Refresh disk health (SMART) data"));
+
+        healthProgress.setVisible(false);
+        healthProgress.setPrefWidth(200);
+        healthStatus.getStyleClass().add("text-muted");
+
+        healthDriveCombo.setPrefWidth(250);
+        healthDriveCombo.setTooltip(new Tooltip("Select a drive to view detailed SMART data"));
+        healthDriveCombo.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
+            if (sel != null) {
+                DiskHealthInfo info = findHealthInfo(sel);
+                if (info != null) updateSmartDetailPanel(info);
+            }
+        });
+
+        HBox toolbar = new HBox(8, refreshHealthBtn, healthDriveCombo, healthProgress, healthStatus);
+        toolbar.setAlignment(Pos.CENTER_LEFT);
+        toolbar.setPadding(new Insets(12, 16, 12, 16));
+        toolbar.getStyleClass().add("toolbar");
+
+        smartGrid.setHgap(16);
+        smartGrid.setVgap(4);
+        smartGrid.setPadding(new Insets(12, 16, 12, 16));
+
+        overallHealthLabel.getStyleClass().addAll("label", "large");
+
+        VBox detailCard = new VBox(8, overallHealthLabel, smartGrid);
+        detailCard.setPadding(new Insets(12));
+        detailCard.getStyleClass().add("sysinfo-card");
+
+        VBox.setVgrow(detailCard, Priority.ALWAYS);
+
+        VBox content = new VBox(4, toolbar, detailCard);
+        return content;
+    }
+
+    private void loadDiskHealth() {
+        refreshHealthBtn.setDisable(true);
+        healthProgress.setProgress(-1);
+        healthProgress.setVisible(true);
+        healthStatus.setText("Loading disk health data...");
+
+        new Thread(() -> {
+            try {
+                DiskHealthService.HealthResult result = diskHealthService.getDiskHealth();
+                Platform.runLater(() -> {
+                    smartctlAvailable = result.smartctlAvailable();
+                    healthDrives.setAll(result.drives());
+                    healthDriveCombo.getItems().clear();
+                    for (DiskHealthInfo d : result.drives()) {
+                        String display = d.getDriveLetter().isEmpty()
+                                ? d.getModel() + " (" + d.getMediaType() + ")"
+                                : d.getDriveLetter() + " - " + d.getModel();
+                        healthDriveCombo.getItems().add(display);
+                    }
+                    if (!healthDriveCombo.getItems().isEmpty()) {
+                        healthDriveCombo.getSelectionModel().select(0);
+                    }
+                    healthStatus.setText("Found " + result.drives().size() + " disk(s).");
+                });
+            } catch (Exception e) {
+                AppLogger.error("Failed to load disk health", e);
+                Platform.runLater(() -> {
+                    healthStatus.setText("Failed to load disk health data.");
+                    new Alert(Alert.AlertType.ERROR, "Failed to load disk health:\n" + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> {
+                    refreshHealthBtn.setDisable(false);
+                    healthProgress.setVisible(false);
+                });
+            }
+        }, "disk-health-load").start();
+    }
+
+    private DiskHealthInfo findHealthInfo(String display) {
+        for (DiskHealthInfo d : healthDrives) {
+            String letter = d.getDriveLetter().isEmpty() ? "" : d.getDriveLetter() + " - ";
+            if (display.startsWith(letter) && display.contains(d.getModel())) {
+                return d;
+            }
+        }
+        return healthDrives.isEmpty() ? null : healthDrives.get(0);
+    }
+
+    private void updateSmartDetailPanel(DiskHealthInfo info) {
+        smartGrid.getChildren().clear();
+        int row = 0;
+
+        addSmartRow(row++, "Model", info.getModel().isEmpty() ? "Unknown" : info.getModel());
+        addSmartRow(row++, "Serial", info.getSerialNumber().isEmpty() ? "-" : info.getSerialNumber());
+        addSmartRow(row++, "Interface", info.getInterfaceType().isEmpty() ? "Unknown" : info.getInterfaceType());
+        addSmartRow(row++, "Media Type", info.getMediaType());
+        addSmartRow(row++, "Capacity", info.getSizeFormatted());
+
+        addSmartSeparator(row++);
+
+        String healthStatus = info.getHealthStatus();
+        Label healthValueLabel = new Label(healthStatus);
+        if (info.isHealthOk()) {
+            healthValueLabel.getStyleClass().addAll("label", "success");
+        } else if (info.isHealthCaution()) {
+            healthValueLabel.getStyleClass().addAll("label", "warning");
+        } else if (info.isHealthCritical()) {
+            healthValueLabel.getStyleClass().addAll("label", "danger");
+        } else {
+            healthValueLabel.getStyleClass().addAll("label", "text-muted");
+        }
+        addSmartGridRow(row++, "Health Status", healthValueLabel);
+
+        Label opLabel = new Label(info.getOperationalStatus());
+        if ("OK".equalsIgnoreCase(info.getOperationalStatus())) {
+            opLabel.getStyleClass().addAll("label", "success");
+        } else {
+            opLabel.getStyleClass().addAll("label", "warning");
+        }
+        addSmartGridRow(row++, "Operational Status", opLabel);
+
+        boolean hasSmartSection = false;
+
+        if (info.getTemperature() > 0) {
+            if (hasSmartSection) { addSmartSeparator(row++); hasSmartSection = false; }
+            addSmartRow(row++, "Temperature", info.getTemperature() + " \u00B0C");
+            hasSmartSection = true;
+        }
+        if (info.getPowerOnHours() >= 0) {
+            if (hasSmartSection) { addSmartSeparator(row++); hasSmartSection = false; }
+            addSmartRow(row++, "Power-On Hours", DiskHealthInfo.formatDuration(info.getPowerOnHours()));
+            hasSmartSection = true;
+        }
+        if (info.isSsd() && info.getWearLevel() >= 0) {
+            if (hasSmartSection) { addSmartSeparator(row++); hasSmartSection = false; }
+            addSmartRow(row++, "Wear Level", info.getWearLevel() + "%");
+            hasSmartSection = true;
+        }
+
+        boolean hasSectorData = info.getReallocatedSectors() >= 0
+                || info.getCurrentPendingSectorCount() >= 0
+                || info.getUncorrectableSectorCount() >= 0;
+        if (hasSectorData) {
+            if (hasSmartSection) { addSmartSeparator(row++); hasSmartSection = false; }
+            if (info.getReallocatedSectors() >= 0) {
+                Label l = createColoredValueLabel(info.getReallocatedSectors());
+                addSmartGridRow(row++, "Reallocated Sectors", l);
+            }
+            if (info.getCurrentPendingSectorCount() >= 0) {
+                Label l = createColoredValueLabel(info.getCurrentPendingSectorCount());
+                addSmartGridRow(row++, "Pending Sectors", l);
+            }
+            if (info.getUncorrectableSectorCount() >= 0) {
+                Label l = createColoredValueLabel(info.getUncorrectableSectorCount());
+                addSmartGridRow(row++, "Uncorrectable Sectors", l);
+            }
+            hasSmartSection = true;
+        }
+
+        if (info.getLoadCycleCount() >= 0) {
+            if (hasSmartSection) { addSmartSeparator(row++); hasSmartSection = false; }
+            addSmartRow(row++, "Load Cycle Count", String.valueOf(info.getLoadCycleCount()));
+            hasSmartSection = true;
+        }
+        if (info.getPowerCycleCount() >= 0) {
+            if (hasSmartSection) { addSmartSeparator(row++); hasSmartSection = false; }
+            addSmartRow(row++, "Power Cycle Count", String.valueOf(info.getPowerCycleCount()));
+            hasSmartSection = true;
+        }
+
+        boolean hasTransferData = info.getTotalHostReads() >= 0 || info.getTotalHostWrites() >= 0;
+        if (hasTransferData) {
+            if (hasSmartSection) { addSmartSeparator(row++); }
+            if (info.getTotalHostReads() >= 0) {
+                addSmartRow(row++, "Total Host Reads", DiskHealthInfo.formatBytes(info.getTotalHostReads()));
+            }
+            if (info.getTotalHostWrites() >= 0) {
+                addSmartRow(row++, "Total Host Writes", DiskHealthInfo.formatBytes(info.getTotalHostWrites()));
+            }
+        }
+
+        String summary = "Drive: " + (info.getDriveLetter().isEmpty() ? info.getModel() : info.getDriveLetter())
+                + "  |  Status: " + info.getHealthStatus()
+                + "  |  " + info.getMediaType() + "  |  " + info.getInterfaceType();
+        if ("smartctl".equals(info.getDataSource())) {
+            summary += "  |  Data: smartctl";
+        }
+        overallHealthLabel.setText(summary);
+        if (info.isHealthOk()) {
+            overallHealthLabel.getStyleClass().removeAll("warning", "danger");
+            overallHealthLabel.getStyleClass().add("success");
+        } else if (info.isHealthCaution()) {
+            overallHealthLabel.getStyleClass().removeAll("success", "danger");
+            overallHealthLabel.getStyleClass().add("warning");
+        } else if (info.isHealthCritical()) {
+            overallHealthLabel.getStyleClass().removeAll("success", "warning");
+            overallHealthLabel.getStyleClass().add("danger");
+        }
+    }
+
+    private void addSmartRow(int row, String label, String value) {
+        Label labelNode = new Label(label);
+        labelNode.getStyleClass().addAll("label", "sysinfo-label");
+        labelNode.setMinWidth(160);
+
+        Label valueNode = new Label(value);
+        valueNode.getStyleClass().addAll("label", "sysinfo-value");
+
+        smartGrid.add(labelNode, 0, row);
+        smartGrid.add(valueNode, 1, row);
+    }
+
+    private void addSmartGridRow(int row, String label, Label valueLabel) {
+        Label labelNode = new Label(label);
+        labelNode.getStyleClass().addAll("label", "sysinfo-label");
+        labelNode.setMinWidth(160);
+
+        valueLabel.getStyleClass().addAll("label", "sysinfo-value");
+
+        smartGrid.add(labelNode, 0, row);
+        smartGrid.add(valueLabel, 1, row);
+    }
+
+    private void addSmartSeparator(int row) {
+        Label sep = new Label("");
+        sep.setMinHeight(8);
+        smartGrid.add(sep, 0, row);
+    }
+
+    private Label createColoredValueLabel(long value) {
+        Label l = new Label(String.valueOf(value));
+        if (value == 0) {
+            l.getStyleClass().addAll("label", "success");
+        } else if (value < 10) {
+            l.getStyleClass().addAll("label", "warning");
+        } else {
+            l.getStyleClass().addAll("label", "danger");
+        }
+        return l;
     }
 
     /* ===================================================================
