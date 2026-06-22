@@ -111,12 +111,16 @@ public class HelpTabView extends VBox {
                 "You may need to restart the browser for changes to take effect."));
 
         getChildren().add(createFaqSection("Network Optimizer",
-                "The Network Optimizer has four sub-tabs. " +
+                "The Network Optimizer has eight sub-tabs. " +
                 "Network Adapters lists all network interfaces on your system with their status, speed, and IP configuration. " +
-                "Optimization applies TCP/IP tuning presets (Default, Gaming, Streaming, Download) to improve network performance for specific use cases. " +
+                "Optimization applies TCP/IP tuning presets (Default, Maximum Performance, Maximum Stability, Gaming) to improve network performance. " +
                 "Select a preset and click \"Apply\" — changes are applied via PowerShell and take effect immediately. " +
-                "DNS & Cache lets you flush the DNS resolver cache and set custom DNS server addresses (e.g., Google 8.8.8.8 or Cloudflare 1.1.1.1). " +
-                "Connection Overview provides a real-time summary of active connections, latency, and bandwidth. " +
+                "DNS & Cache lets you flush the DNS resolver cache, reset the network stack, and set custom DNS server addresses (e.g., Google 8.8.8.8 or Cloudflare 1.1.1.1). " +
+                "Adapter Settings displays advanced properties for a selected network adapter (read-only). " +
+                "Wi-Fi shows the current wireless connection details and saved profiles, with disconnect and forget options. " +
+                "Connection Monitor displays all active network connections with protocol, addresses, state, and process information, with optional filtering. " +
+                "Connection Overview provides the full ipconfig /all output for detailed network configuration. " +
+                "Change History tracks the last 3 network operations performed. " +
                 "All network changes can be reverted to defaults using the \"Reset\" button."));
 
         Label contactTitle = new Label("Contact us");

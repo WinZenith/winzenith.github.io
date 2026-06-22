@@ -204,6 +204,17 @@
     -fx-text-fill: #50fa7b;
 }
 
+/* --- Ignored rows (browser extensions) --- */
+.table-view .table-row-cell.ignored-row {
+    -fx-opacity: 0.4;
+}
+.table-view .table-row-cell.ignored-row .table-cell {
+    -fx-text-fill: #6272a4;
+}
+.table-view .table-row-cell.ignored-row:selected {
+    -fx-opacity: 0.6;
+}
+
 /* --- Duplicate group alternating tint --- */
 .table-view .table-row-cell.group-even {
     -fx-background-color: #22232e;

@@ -4,239 +4,122 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $result = @()
 
-if ($Browser -eq "Chrome" -or $Browser -eq "All") {
-    $cp = "$env:LOCALAPPDATA\Google\Chrome\User Data"
-    if (Test-Path $cp) {
-        Get-ChildItem "$cp\*\Extensions" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $extDir = $_.FullName
-            Get-ChildItem $extDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                $extId = $_.Name
-                $vd = Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($vd) {
-                    $mp = Join-Path (Join-Path $_.FullName $vd.Name) "manifest.json"
-                    if (Test-Path $mp) {
-                        $m = Get-Content $mp -Raw | ConvertFrom-Json
-                        $rawName = if ($m.name) { $m.name } else { "Unknown" }
-                        $resolvedName = $rawName
-                        $rawDesc = if ($m.description) { $m.description } else { "" }
-                        $resolvedDesc = $rawDesc
-                        if ($rawName -match '^__MSG_(.+)__$') {
-                            $key = $matches[1]
-                            $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                            $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                            if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedName = $msgs.$key.message } } catch {} }
-                        }
-                        if ($rawDesc -match '^__MSG_(.+)__$') {
-                            $key = $matches[1]
-                            $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                            $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                            if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
-                        }
-                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
-                        $result += [PSCustomObject]@{
-                            id = $extId
-                            name = $resolvedName
-                            version = if ($m.version) { $m.version } else { "" }
-                            description = $resolvedDesc
-                            enabled = -not (Test-Path $disabledFile)
-                            browser = "Chrome"
-                            path = $extDir
-                            installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                            permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
-                        }
-                    }
+function Scan-ChromiumExtensions {
+    param(
+        [string]$BrowserName,
+        [string]$ExtensionsDir
+    )
+    $entries = @()
+    if (-not (Test-Path $ExtensionsDir)) { return $entries }
+    Get-ChildItem $ExtensionsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $extId = $_.Name
+        $vd = Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($vd) {
+            $mp = Join-Path (Join-Path $_.FullName $vd.Name) "manifest.json"
+            if (Test-Path $mp) {
+                $m = Get-Content $mp -Raw | ConvertFrom-Json
+                $rawName = if ($m.name) { $m.name } else { "Unknown" }
+                $resolvedName = $rawName
+                $rawDesc = if ($m.description) { $m.description } else { "" }
+                $resolvedDesc = $rawDesc
+                if ($rawName -match '^__MSG_(.+)__$') {
+                    $key = $matches[1]
+                    $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
+                    $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
+                    if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedName = $msgs.$key.message } } catch {} }
+                }
+                if ($rawDesc -match '^__MSG_(.+)__$') {
+                    $key = $matches[1]
+                    $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
+                    $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
+                    if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
+                }
+                $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
+                $entries += [PSCustomObject]@{
+                    id = $extId
+                    name = $resolvedName
+                    version = if ($m.version) { $m.version } else { "" }
+                    description = $resolvedDesc
+                    enabled = -not (Test-Path $disabledFile)
+                    browser = $BrowserName
+                    path = $ExtensionsDir
+                    installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
+                    permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
                 }
             }
         }
     }
+    return $entries
 }
 
-if ($Browser -eq "Edge" -or $Browser -eq "All") {
-    $cp = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
-    if (Test-Path $cp) {
-        Get-ChildItem "$cp\*\Extensions" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $extDir = $_.FullName
-            Get-ChildItem $extDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                $extId = $_.Name
-                $vd = Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($vd) {
-                    $mp = Join-Path (Join-Path $_.FullName $vd.Name) "manifest.json"
-                    if (Test-Path $mp) {
-                        $m = Get-Content $mp -Raw | ConvertFrom-Json
-                        $rawName = if ($m.name) { $m.name } else { "Unknown" }
-                        $resolvedName = $rawName
-                        $rawDesc = if ($m.description) { $m.description } else { "" }
-                        $resolvedDesc = $rawDesc
-                        if ($rawName -match '^__MSG_(.+)__$') {
-                            $key = $matches[1]
-                            $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                            $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                            if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedName = $msgs.$key.message } } catch {} }
-                        }
-                        if ($rawDesc -match '^__MSG_(.+)__$') {
-                            $key = $matches[1]
-                            $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                            $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                            if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
-                        }
-                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
-                        $result += [PSCustomObject]@{
-                            id = $extId
-                            name = $resolvedName
-                            version = if ($m.version) { $m.version } else { "" }
-                            description = $resolvedDesc
-                            enabled = -not (Test-Path $disabledFile)
-                            browser = "Edge"
-                            path = $extDir
-                            installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                            permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
-                        }
-                    }
-                }
-            }
-        }
+function Scan-ChromiumProfileBrowser {
+    param(
+        [string]$BrowserName,
+        [string]$UserDataPath
+    )
+    $entries = @()
+    if (-not (Test-Path $UserDataPath)) { return $entries }
+    Get-ChildItem "$UserDataPath\*\Extensions" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $entries += Scan-ChromiumExtensions -BrowserName $BrowserName -ExtensionsDir $_.FullName
+    }
+    return $entries
+}
+
+function Scan-ChromiumSingleProfileBrowser {
+    param(
+        [string]$BrowserName,
+        [string]$ExtensionsPath
+    )
+    $entries = @()
+    if (-not (Test-Path $ExtensionsPath)) { return $entries }
+    $entries = Scan-ChromiumExtensions -BrowserName $BrowserName -ExtensionsDir $ExtensionsPath
+    return $entries
+}
+
+# --- Chromium-based browsers with multi-profile support ---
+
+$chromeProfiles = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+$chromeCanaryProfiles = "$env:LOCALAPPDATA\Google\Chrome SxS\User Data"
+$edgeProfiles = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
+$edgeBetaProfiles = "$env:LOCALAPPDATA\Microsoft\Edge Beta\User Data"
+$edgeDevProfiles = "$env:LOCALAPPDATA\Microsoft\Edge Dev\User Data"
+$edgeCanaryProfiles = "$env:LOCALAPPDATA\Microsoft\Edge SxS\User Data"
+$braveProfiles = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"
+$vivaldiProfiles = "$env:LOCALAPPDATA\Vivaldi\User Data"
+
+$chromiumMultiProfileBrowsers = @(
+    @{ Name = "Chrome";       Path = $chromeProfiles },
+    @{ Name = "Chrome Canary"; Path = $chromeCanaryProfiles },
+    @{ Name = "Edge";         Path = $edgeProfiles },
+    @{ Name = "Edge Beta";    Path = $edgeBetaProfiles },
+    @{ Name = "Edge Dev";     Path = $edgeDevProfiles },
+    @{ Name = "Edge Canary";  Path = $edgeCanaryProfiles },
+    @{ Name = "Brave";        Path = $braveProfiles },
+    @{ Name = "Vivaldi";      Path = $vivaldiProfiles }
+)
+
+foreach ($b in $chromiumMultiProfileBrowsers) {
+    if ($Browser -eq "All" -or $Browser -eq $b.Name) {
+        $result += Scan-ChromiumProfileBrowser -BrowserName $b.Name -UserDataPath $b.Path
     }
 }
 
-if ($Browser -eq "Brave" -or $Browser -eq "All") {
-    $cp = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"
-    if (Test-Path $cp) {
-        Get-ChildItem "$cp\*\Extensions" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $extDir = $_.FullName
-            Get-ChildItem $extDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                $extId = $_.Name
-                $vd = Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($vd) {
-                    $mp = Join-Path (Join-Path $_.FullName $vd.Name) "manifest.json"
-                    if (Test-Path $mp) {
-                        $m = Get-Content $mp -Raw | ConvertFrom-Json
-                        $rawName = if ($m.name) { $m.name } else { "Unknown" }
-                        $resolvedName = $rawName
-                        $rawDesc = if ($m.description) { $m.description } else { "" }
-                        $resolvedDesc = $rawDesc
-                        if ($rawName -match '^__MSG_(.+)__$') {
-                            $key = $matches[1]
-                            $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                            $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                            if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedName = $msgs.$key.message } } catch {} }
-                        }
-                        if ($rawDesc -match '^__MSG_(.+)__$') {
-                            $key = $matches[1]
-                            $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                            $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                            if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
-                        }
-                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
-                        $result += [PSCustomObject]@{
-                            id = $extId
-                            name = $resolvedName
-                            version = if ($m.version) { $m.version } else { "" }
-                            description = $resolvedDesc
-                            enabled = -not (Test-Path $disabledFile)
-                            browser = "Brave"
-                            path = $extDir
-                            installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                            permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
-                        }
-                    }
-                }
-            }
-        }
-    }
+# --- Chromium-based browsers with single profile (Opera, Opera GX) ---
+
+$operaPath = "$env:APPDATA\Opera Software\Opera Stable\Extensions"
+$operaGxPath = "$env:APPDATA\Opera Software\Opera GX Stable\Extensions"
+
+if ($Browser -eq "All" -or $Browser -eq "Opera") {
+    $result += Scan-ChromiumSingleProfileBrowser -BrowserName "Opera" -ExtensionsPath $operaPath
 }
 
-if ($Browser -eq "Opera" -or $Browser -eq "All") {
-    $extDir = "$env:APPDATA\Opera Software\Opera Stable\Extensions"
-    if (Test-Path $extDir) {
-        Get-ChildItem $extDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $extId = $_.Name
-            $vd = Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($vd) {
-                $mp = Join-Path (Join-Path $_.FullName $vd.Name) "manifest.json"
-                if (Test-Path $mp) {
-                    $m = Get-Content $mp -Raw | ConvertFrom-Json
-                    $rawName = if ($m.name) { $m.name } else { "Unknown" }
-                    $resolvedName = $rawName
-                    $rawDesc = if ($m.description) { $m.description } else { "" }
-                    $resolvedDesc = $rawDesc
-                    if ($rawName -match '^__MSG_(.+)__$') {
-                        $key = $matches[1]
-                        $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                        $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                        if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedName = $msgs.$key.message } } catch {} }
-                    }
-                    if ($rawDesc -match '^__MSG_(.+)__$') {
-                        $key = $matches[1]
-                        $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                        $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                        if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
-                    }
-                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
-                        $result += [PSCustomObject]@{
-                            id = $extId
-                            name = $resolvedName
-                            version = if ($m.version) { $m.version } else { "" }
-                            description = $resolvedDesc
-                            enabled = -not (Test-Path $disabledFile)
-                            browser = "Opera"
-                            path = $extDir
-                            installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                            permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
-                        }
-                }
-            }
-        }
-    }
+if ($Browser -eq "All" -or $Browser -eq "Opera GX") {
+    $result += Scan-ChromiumSingleProfileBrowser -BrowserName "Opera GX" -ExtensionsPath $operaGxPath
 }
 
-if ($Browser -eq "Vivaldi" -or $Browser -eq "All") {
-    $cp = "$env:LOCALAPPDATA\Vivaldi\User Data"
-    if (Test-Path $cp) {
-        Get-ChildItem "$cp\*\Extensions" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $extDir = $_.FullName
-            Get-ChildItem $extDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                $extId = $_.Name
-                $vd = Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($vd) {
-                    $mp = Join-Path (Join-Path $_.FullName $vd.Name) "manifest.json"
-                    if (Test-Path $mp) {
-                        $m = Get-Content $mp -Raw | ConvertFrom-Json
-                        $rawName = if ($m.name) { $m.name } else { "Unknown" }
-                        $resolvedName = $rawName
-                        $rawDesc = if ($m.description) { $m.description } else { "" }
-                        $resolvedDesc = $rawDesc
-                        if ($rawName -match '^__MSG_(.+)__$') {
-                            $key = $matches[1]
-                            $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                            $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                            if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedName = $msgs.$key.message } } catch {} }
-                        }
-                        if ($rawDesc -match '^__MSG_(.+)__$') {
-                            $key = $matches[1]
-                            $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                            $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                            if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
-                        }
-                        $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
-                        $result += [PSCustomObject]@{
-                            id = $extId
-                            name = $resolvedName
-                            version = if ($m.version) { $m.version } else { "" }
-                            description = $resolvedDesc
-                            enabled = -not (Test-Path $disabledFile)
-                            browser = "Vivaldi"
-                            path = $extDir
-                            installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                            permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+# --- Firefox ---
 
-if ($Browser -eq "Firefox" -or $Browser -eq "All") {
+if ($Browser -eq "All" -or $Browser -eq "Firefox") {
     $ffProfiles = "$env:APPDATA\Mozilla\Firefox\Profiles"
     if (Test-Path $ffProfiles) {
         Get-ChildItem $ffProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {

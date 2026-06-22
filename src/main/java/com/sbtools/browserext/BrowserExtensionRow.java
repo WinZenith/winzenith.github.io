@@ -14,6 +14,7 @@ public class BrowserExtensionRow {
     private final StringProperty version = new SimpleStringProperty();
     private final StringProperty description = new SimpleStringProperty();
     private final BooleanProperty enabled = new SimpleBooleanProperty();
+    private final BooleanProperty ignored = new SimpleBooleanProperty(false);
     private final StringProperty path = new SimpleStringProperty();
     private final StringProperty installDate = new SimpleStringProperty();
     private final StringProperty permissions = new SimpleStringProperty();
@@ -54,6 +55,10 @@ public class BrowserExtensionRow {
     public BooleanProperty enabledProperty() { return enabled; }
     public boolean isEnabled() { return enabled.get(); }
     public void setEnabled(boolean enabled) { this.enabled.set(enabled); }
+
+    public BooleanProperty ignoredProperty() { return ignored; }
+    public boolean isIgnored() { return ignored.get(); }
+    public void setIgnored(boolean ignored) { this.ignored.set(ignored); }
 
     public StringProperty pathProperty() { return path; }
     public String getPath() { return path.get(); }

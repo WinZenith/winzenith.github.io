@@ -17,6 +17,13 @@ import java.util.Map;
 
 public class BrowserExtensionService {
 
+    private static final List<String> CHROMIUM_BROWSERS = List.of(
+            "Chrome", "Chrome Canary", "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
+            "Brave", "Opera", "Opera GX", "Vivaldi"
+    );
+
+    public record ToggleResult(int success, int failed) {}
+
     private final ObjectMapper mapper = new ObjectMapper();
 
     public List<BrowserExtensionRow> scanAllBrowsers(Runnable onProgress) {
@@ -80,7 +87,7 @@ public class BrowserExtensionService {
             Path extPath = Paths.get(ext.getPath());
             if (!Files.exists(extPath)) return false;
             String browser = ext.getBrowser();
-            if ("Chrome".equals(browser) || "Edge".equals(browser) || "Brave".equals(browser) || "Opera".equals(browser) || "Vivaldi".equals(browser)) {
+            if (CHROMIUM_BROWSERS.contains(browser)) {
                 Path extFolder = extPath.resolve(ext.getExtensionId());
                 Path versionDir = Files.list(extFolder)
                         .filter(Files::isDirectory)
@@ -120,6 +127,21 @@ public class BrowserExtensionService {
             AppLogger.warning("Failed to toggle extension: " + e.getMessage());
             return false;
         }
+    }
+
+    public ToggleResult toggleAllForBrowser(List<BrowserExtensionRow> extensions, String browser, boolean enable) {
+        int success = 0;
+        int fail = 0;
+        for (BrowserExtensionRow ext : extensions) {
+            if (ext.isIgnored()) continue;
+            if (!browser.equals(ext.getBrowser())) continue;
+            if (toggleExtension(ext, enable)) {
+                success++;
+            } else {
+                fail++;
+            }
+        }
+        return new ToggleResult(success, fail);
     }
 
     private String str(Map<String, Object> map, String key) {

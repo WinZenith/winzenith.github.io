@@ -702,25 +702,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
             if (skipped.stream().noneMatch(s -> s.endsWith("\t" + entry.id()))) {
                 skipped.add(stored);
             }
-            AppSettings updated = new AppSettings(
-                current.autoBackupDrivers(),
-                current.createSystemRestorePoint(),
-                current.eulaAccepted(),
-                current.excludedDriverIds(),
-                skipped,
-                current.networkOptimizationPreset(),
-                current.downloadDirectory(),
-                current.minimizeToTray(),
-                current.startMinimized(),
-                current.scanOnStartup(),
-                current.notifyOnDriverUpdate(),
-                current.backupDirectory(),
-                current.powerShellPath(),
-                current.windowWidth(),
-                current.windowHeight(),
-                current.windowMaximized(),
-                current.autoCheckForUpdates()
-            );
+            AppSettings updated = current.toBuilder()
+                .skippedSoftwareIds(skipped)
+                .build();
             settingsStore.save(updated);
         } catch (Exception ex) {
             AppLogger.warning("Failed to skip software entry: " + ex.getMessage());
@@ -766,25 +750,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
         IgnoredListDialog.show("Ignored Software Updates", current.skippedSoftwareIds(), (updated, ignored) -> {
             try {
                 AppSettings curr = settingsStore.load();
-                AppSettings saved = new AppSettings(
-                    curr.autoBackupDrivers(),
-                    curr.createSystemRestorePoint(),
-                    curr.eulaAccepted(),
-                    curr.excludedDriverIds(),
-                    updated,
-                    curr.networkOptimizationPreset(),
-                    curr.downloadDirectory(),
-                    curr.minimizeToTray(),
-                    curr.startMinimized(),
-                    curr.scanOnStartup(),
-                    curr.notifyOnDriverUpdate(),
-                    curr.backupDirectory(),
-                    curr.powerShellPath(),
-                    curr.windowWidth(),
-                    curr.windowHeight(),
-                    curr.windowMaximized(),
-                    curr.autoCheckForUpdates()
-                );
+                AppSettings saved = curr.toBuilder()
+                    .skippedSoftwareIds(updated)
+                    .build();
                 settingsStore.save(saved);
             } catch (Exception ex) {
                 AppLogger.warning("Failed to update ignored list: " + ex.getMessage());

@@ -23,14 +23,16 @@ public record AppSettings(
         int windowWidth,
         int windowHeight,
         boolean windowMaximized,
-        boolean autoCheckForUpdates
+        boolean autoCheckForUpdates,
+        List<String> ignoredBrowserExtensionIds
 ) {
     public static AppSettings defaults() {
         return new AppSettings(true, true, false,
                 Collections.emptyList(), Collections.emptyList(),
                 "DEFAULT", System.getProperty("user.home") + "\\Downloads",
                 false, false, false, true,
-                "", "powershell", 960, 600, true, true);
+                "", "powershell", 960, 600, true, true,
+                Collections.emptyList());
     }
 
     /**
@@ -47,6 +49,10 @@ public record AppSettings(
 
     public AppSettings withSkippedSoftwareIds(List<String> newSkippedSoftwareIds) {
         return toBuilder().skippedSoftwareIds(newSkippedSoftwareIds).build();
+    }
+
+    public AppSettings withIgnoredBrowserExtensionIds(List<String> newIgnoredBrowserExtensionIds) {
+        return toBuilder().ignoredBrowserExtensionIds(newIgnoredBrowserExtensionIds).build();
     }
 
     public static final class Builder {
@@ -67,6 +73,7 @@ public record AppSettings(
         private int windowHeight;
         private boolean windowMaximized;
         private boolean autoCheckForUpdates;
+        private List<String> ignoredBrowserExtensionIds;
 
         private Builder(AppSettings s) {
             this.autoBackupDrivers = s.autoBackupDrivers;
@@ -86,6 +93,7 @@ public record AppSettings(
             this.windowHeight = s.windowHeight;
             this.windowMaximized = s.windowMaximized;
             this.autoCheckForUpdates = s.autoCheckForUpdates;
+            this.ignoredBrowserExtensionIds = s.ignoredBrowserExtensionIds;
         }
 
         public Builder autoBackupDrivers(boolean v) { this.autoBackupDrivers = v; return this; }
@@ -105,6 +113,7 @@ public record AppSettings(
         public Builder windowHeight(int v) { this.windowHeight = v; return this; }
         public Builder windowMaximized(boolean v) { this.windowMaximized = v; return this; }
         public Builder autoCheckForUpdates(boolean v) { this.autoCheckForUpdates = v; return this; }
+        public Builder ignoredBrowserExtensionIds(List<String> v) { this.ignoredBrowserExtensionIds = v; return this; }
 
         public AppSettings build() {
             return new AppSettings(
@@ -124,7 +133,8 @@ public record AppSettings(
                     windowWidth,
                     windowHeight,
                     windowMaximized,
-                    autoCheckForUpdates);
+                    autoCheckForUpdates,
+                    ignoredBrowserExtensionIds);
         }
     }
 }

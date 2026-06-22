@@ -135,25 +135,9 @@ class OptimizationPanel extends VBox {
 
     private void savePreset(OptimizationPreset preset) {
         try {
-            settingsStore.save(new AppSettings(
-                    currentSettings.autoBackupDrivers(),
-                    currentSettings.createSystemRestorePoint(),
-                    currentSettings.eulaAccepted(),
-                    currentSettings.excludedDriverIds(),
-                    currentSettings.skippedSoftwareIds(),
-                    preset.name(),
-                    currentSettings.downloadDirectory(),
-                    currentSettings.minimizeToTray(),
-                    currentSettings.startMinimized(),
-                    currentSettings.scanOnStartup(),
-                    currentSettings.notifyOnDriverUpdate(),
-                    currentSettings.backupDirectory(),
-                    currentSettings.powerShellPath(),
-                    currentSettings.windowWidth(),
-                    currentSettings.windowHeight(),
-                    currentSettings.windowMaximized(),
-                    currentSettings.autoCheckForUpdates()
-            ));
+            settingsStore.save(currentSettings.toBuilder()
+                    .networkOptimizationPreset(preset.name())
+                    .build());
         } catch (IOException e) {
             AppLogger.warning("Failed to save optimization preset: " + e.getMessage());
         }

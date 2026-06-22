@@ -198,25 +198,7 @@ public class App extends Application {
             return;
         }
         try {
-            settingsStore.save(new AppSettings(
-                    settings.autoBackupDrivers(),
-                    settings.createSystemRestorePoint(),
-                    true,
-                    settings.excludedDriverIds(),
-                    settings.skippedSoftwareIds(),
-                    settings.networkOptimizationPreset(),
-                    settings.downloadDirectory(),
-                    settings.minimizeToTray(),
-                    settings.startMinimized(),
-                    settings.scanOnStartup(),
-                    settings.notifyOnDriverUpdate(),
-                    settings.backupDirectory(),
-                    settings.powerShellPath(),
-                    settings.windowWidth(),
-                    settings.windowHeight(),
-                    settings.windowMaximized(),
-                    settings.autoCheckForUpdates()
-            ));
+            settingsStore.save(settings.toBuilder().eulaAccepted(true).build());
         } catch (IOException e) {
             AppLogger.error("Failed to save EULA acceptance", e);
         }

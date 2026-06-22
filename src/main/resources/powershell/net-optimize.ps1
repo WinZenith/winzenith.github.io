@@ -46,8 +46,11 @@ switch ($Preset) {
         netsh int tcp set global ecncapability=disabled
         Add-Result "Source Address Prefix" "disabled"
         netsh int ip set global sourceaddressprefixstore=disabled
-        Add-Result "TCP Ack Frequency" "1"
-        Add-Result "TCP No Delay" "1"
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+        Set-ItemProperty -Path $regPath -Name "TcpAckFrequency" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+        Add-Result "TCP Ack Frequency" "1 (set via registry)"
+        Set-ItemProperty -Path $regPath -Name "TCPNoDelay" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+        Add-Result "TCP No Delay" "1 (set via registry)"
         break
     }
     default {
@@ -63,6 +66,11 @@ switch ($Preset) {
         netsh int tcp set global rsc=normal
         Add-Result "Source Address Prefix" "enabled"
         netsh int ip set global sourceaddressprefixstore=enabled
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+        Remove-ItemProperty -Path $regPath -Name "TcpAckFrequency" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $regPath -Name "TCPNoDelay" -ErrorAction SilentlyContinue
+        Add-Result "TCP Ack Frequency" "removed (registry default)"
+        Add-Result "TCP No Delay" "removed (registry default)"
         break
     }
 }

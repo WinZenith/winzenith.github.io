@@ -80,25 +80,9 @@ public class IgnoredListDialog {
         show(title, currentItems, (updated, ignored) -> {
             try {
                 AppSettings current = store.load();
-                AppSettings updated_ = new AppSettings(
-                        current.autoBackupDrivers(),
-                        current.createSystemRestorePoint(),
-                        current.eulaAccepted(),
-                        current.excludedDriverIds(),
-                        updated,
-                        current.networkOptimizationPreset(),
-                        current.downloadDirectory(),
-                        current.minimizeToTray(),
-                        current.startMinimized(),
-                        current.scanOnStartup(),
-                        current.notifyOnDriverUpdate(),
-                        current.backupDirectory(),
-                        current.powerShellPath(),
-                        current.windowWidth(),
-                        current.windowHeight(),
-                        current.windowMaximized(),
-                        current.autoCheckForUpdates()
-                );
+                AppSettings updated_ = current.toBuilder()
+                        .skippedSoftwareIds(updated)
+                        .build();
                 store.save(updated_);
             } catch (IOException ex) {
                 // ignore
