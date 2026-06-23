@@ -81,6 +81,11 @@ if (Test-Path $iconPath) {
 }
 
 if ($All -or (-not $Msi)) {
+    $appImageRoot = Join-Path $dest "WinZenith"
+    if (Test-Path $appImageRoot) {
+        Remove-Item -Recurse -Force $appImageRoot
+        Write-Host "Removed old app-image directory"
+    }
     Write-Host "Building app-image..."
     & $jpackage --type app-image @commonArgs
     $appImageRoot = Join-Path $dest "WinZenith"
