@@ -15,7 +15,6 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
@@ -157,13 +156,6 @@ public class DriverBackupService {
             }
         }
         return total;
-    }
-
-    public Map<String, Integer> countByDevice() throws IOException {
-        return loadIndex().getEntries().stream()
-                .collect(Collectors.groupingBy(
-                        DriverBackupEntry::deviceId,
-                        Collectors.summingInt(e -> 1)));
     }
 
     private long countInfFiles(Path folder) throws IOException {

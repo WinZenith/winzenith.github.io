@@ -2,7 +2,6 @@ package com.sbtools.ui;
 
 import com.sbtools.netoptimizer.NetworkChangeEntry;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
-import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;

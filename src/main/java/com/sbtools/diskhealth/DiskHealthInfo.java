@@ -135,10 +135,6 @@ public class DiskHealthInfo {
         return formatBytes(sizeBytes.get());
     }
 
-    public String getHealthStatusFormatted() {
-        return healthStatus.get();
-    }
-
     public boolean isHealthOk() {
         String s = healthStatus.get();
         return "Healthy".equalsIgnoreCase(s) || "OK".equalsIgnoreCase(s);
@@ -152,24 +148,6 @@ public class DiskHealthInfo {
     public boolean isHealthCritical() {
         String s = healthStatus.get();
         return "Critical".equalsIgnoreCase(s) || "Pred Fail".equalsIgnoreCase(s);
-    }
-
-    public boolean isSmartDataAvailable() {
-        return temperature.get() >= 0 || powerOnHours.get() >= 0 || wearLevel.get() >= 0
-                || reallocatedSectors.get() >= 0 || totalHostReads.get() >= 0;
-    }
-
-    public int getSmartFieldCount() {
-        int count = 0;
-        if (temperature.get() >= 0) count++;
-        if (powerOnHours.get() >= 0) count++;
-        if (wearLevel.get() >= 0) count++;
-        if (reallocatedSectors.get() >= 0) count++;
-        if (currentPendingSectorCount.get() >= 0) count++;
-        if (uncorrectableSectorCount.get() >= 0) count++;
-        if (totalHostReads.get() >= 0) count++;
-        if (totalHostWrites.get() >= 0) count++;
-        return count;
     }
 
     public static String formatBytes(long bytes) {

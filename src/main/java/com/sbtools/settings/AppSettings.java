@@ -47,14 +47,6 @@ public record AppSettings(
         return toBuilder().excludedDriverIds(newExcludedDriverIds).build();
     }
 
-    public AppSettings withSkippedSoftwareIds(List<String> newSkippedSoftwareIds) {
-        return toBuilder().skippedSoftwareIds(newSkippedSoftwareIds).build();
-    }
-
-    public AppSettings withIgnoredBrowserExtensionIds(List<String> newIgnoredBrowserExtensionIds) {
-        return toBuilder().ignoredBrowserExtensionIds(newIgnoredBrowserExtensionIds).build();
-    }
-
     public static final class Builder {
         private boolean autoBackupDrivers;
         private boolean createSystemRestorePoint;

@@ -21,12 +21,6 @@ public final class CancellationToken {
         return cancelled.get() || Thread.currentThread().isInterrupted();
     }
 
-    public void throwIfCancelled() {
-        if (isCancelled()) {
-            throw new CancellationException();
-        }
-    }
-
     public static final class CancellationException extends RuntimeException {
         public CancellationException() {
             super("Operation cancelled");

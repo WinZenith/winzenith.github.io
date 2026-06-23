@@ -16,39 +16,6 @@ import java.io.File;
 
 public class IconExtractor {
 
-    public static Image extractIcon(String filePath) {
-        if (filePath == null || filePath.isBlank()) return null;
-
-        File file = new File(filePath);
-        if (!file.exists()) return null;
-
-        WinDef.HICON[] largeIcons = new WinDef.HICON[1];
-        WinDef.HICON[] smallIcons = new WinDef.HICON[1];
-
-        try {
-            int count = Shell32.INSTANCE.ExtractIconEx(filePath, 0, largeIcons, smallIcons, 1);
-            if (count <= 0) return null;
-
-            WinDef.HICON hicon = largeIcons[0];
-            if (hicon == null) {
-                hicon = smallIcons[0];
-            }
-            if (hicon == null) return null;
-
-            try {
-                return hiconToImage(hicon);
-            } finally {
-                User32.INSTANCE.DestroyIcon(hicon);
-                if (smallIcons[0] != null && smallIcons[0] != hicon) {
-                    User32.INSTANCE.DestroyIcon(smallIcons[0]);
-                }
-            }
-        } catch (Exception e) {
-            cleanupIcons(largeIcons, smallIcons);
-            return null;
-        }
-    }
-
     /**
      * Extracts the icon as a BufferedImage. This method is safe to call off the JavaFX
      * application thread and is intended to be used by background threads which will

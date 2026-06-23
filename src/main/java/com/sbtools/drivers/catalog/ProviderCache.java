@@ -1,7 +1,6 @@
 package com.sbtools.drivers.catalog;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
 import com.sbtools.drivers.model.InstalledDriver;
@@ -80,14 +79,6 @@ public final class ProviderCache {
         }
     }
 
-    public void invalidate(String providerId) {
-        try {
-            Files.deleteIfExists(pathFor(providerId));
-        } catch (Exception e) {
-            AppLogger.warning("ProviderCache invalidate failed for " + providerId + ": " + e.getMessage());
-        }
-    }
-
     private Path pathFor(String providerId) {
         String safe = providerId.replaceAll("[^A-Za-z0-9_.-]", "_");
         return cacheDir.resolve(safe + ".json");
@@ -113,19 +104,5 @@ public final class ProviderCache {
         public String fingerprint;
         public long savedAtEpochSecond;
         public List<DriverUpdateCandidate> candidates;
-    }
-
-    /** Convenience for callers that want to roundtrip arbitrary lists via the shared mapper. */
-    public static <T> List<T> readListOrEmpty(String json, Class<T> elementType) {
-        try {
-            return MAPPER.readValue(json, MAPPER.getTypeFactory().constructCollectionType(java.util.ArrayList.class, elementType));
-        } catch (Exception e) {
-            return List.of();
-        }
-    }
-
-    /** Exposed only for tests. */
-    static TypeReference<List<DriverUpdateCandidate>> candidateListType() {
-        return new TypeReference<>() {};
     }
 }

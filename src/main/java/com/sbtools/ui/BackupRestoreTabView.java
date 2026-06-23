@@ -4,7 +4,6 @@ import com.sbtools.backup.DriverBackupService;
 import com.sbtools.backup.RestoreRow;
 import com.sbtools.backup.SystemRestoreRow;
 import com.sbtools.backup.SystemRestoreService;
-import com.sbtools.util.AdminCheck;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 import com.sbtools.util.ProcessManager;

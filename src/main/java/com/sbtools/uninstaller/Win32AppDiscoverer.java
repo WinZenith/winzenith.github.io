@@ -6,7 +6,6 @@ import com.sun.jna.platform.win32.WinReg.HKEY;
 import com.sbtools.util.AppLogger;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.TreeSet;
 

@@ -74,7 +74,6 @@ public class DriveInfo {
     public void setFragmentationPercent(long v) { fragmentationPercent.set(v); }
 
     public boolean isSsd() { return "SSD".equalsIgnoreCase(mediaType.get()); }
-    public boolean isHdd() { return "HDD".equalsIgnoreCase(mediaType.get()); }
 
     public long getUsedBytes() { return sizeBytes.get() - freeBytes.get(); }
 

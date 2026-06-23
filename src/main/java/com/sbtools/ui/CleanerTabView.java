@@ -3,7 +3,6 @@ package com.sbtools.ui;
 import com.sbtools.cleaner.CleanupCategory;
 import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanupService;
-import com.sbtools.util.AppLogger;
 import com.sbtools.util.CancelableCompletableFuture;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;

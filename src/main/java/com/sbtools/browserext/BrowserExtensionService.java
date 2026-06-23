@@ -129,21 +129,6 @@ public class BrowserExtensionService {
         }
     }
 
-    public ToggleResult toggleAllForBrowser(List<BrowserExtensionRow> extensions, String browser, boolean enable) {
-        int success = 0;
-        int fail = 0;
-        for (BrowserExtensionRow ext : extensions) {
-            if (ext.isIgnored()) continue;
-            if (!browser.equals(ext.getBrowser())) continue;
-            if (toggleExtension(ext, enable)) {
-                success++;
-            } else {
-                fail++;
-            }
-        }
-        return new ToggleResult(success, fail);
-    }
-
     private String str(Map<String, Object> map, String key) {
         Object v = map.get(key);
         return v != null ? v.toString() : "";

@@ -11,14 +11,10 @@ import com.sbtools.util.AppPaths;
 import com.sbtools.util.JsonMapper;
 import com.sbtools.util.VersionCompare;
 
-import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -73,13 +69,6 @@ public final class DriverCatalogDatabase {
         all.addAll(loadUserSupplemental());
         AppLogger.info("DriverCatalogDatabase: Loaded " + all.size() + " catalog entries");
         return new DriverCatalogDatabase(all);
-    }
-
-    /**
-     * Loads only the bundled catalog resource.
-     */
-    public static DriverCatalogDatabase loadBundledOnly() {
-        return new DriverCatalogDatabase(loadBundled());
     }
 
     private static List<CatalogEntry> loadBundled() {
@@ -174,13 +163,6 @@ public final class DriverCatalogDatabase {
     }
 
     /**
-     * Finds all entries for a given provider.
-     */
-    public List<CatalogEntry> findByProvider(String provider) {
-        return byProvider.getOrDefault(provider, List.of());
-    }
-
-    /**
      * Finds all entries that match a given hardware ID.
      */
     public List<CatalogEntry> findByHardwareId(String hardwareId) {
@@ -212,20 +194,6 @@ public final class DriverCatalogDatabase {
                 entry.sourceUrl(),
                 entry.vendorPageUrl()
         );
-    }
-
-    /**
-     * Returns the total number of entries in the catalog.
-     */
-    public int size() {
-        return entries.size();
-    }
-
-    /**
-     * Returns all entries in the catalog.
-     */
-    public List<CatalogEntry> allEntries() {
-        return entries;
     }
 
     private List<CatalogEntry> findByHardwareId(InstalledDriver driver) {

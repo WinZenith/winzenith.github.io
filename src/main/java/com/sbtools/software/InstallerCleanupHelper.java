@@ -1,6 +1,5 @@
 package com.sbtools.software;
 
-import com.sbtools.util.AppLogger;
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;

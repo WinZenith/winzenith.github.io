@@ -68,17 +68,6 @@ public final class ProcessManager {
     }
 
     /**
-     * Remove a process from the registry.
-     */
-    public static void deregister(Process process) {
-        if (process == null) return;
-        try {
-            processes.entrySet().removeIf(e -> e.getValue() == process);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    /**
      * Attempts to terminate all currently-registered processes.
      * This is best-effort and may not succeed for processes owned by other users
      * or in some system states.

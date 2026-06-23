@@ -367,17 +367,6 @@ public class SoftwareUpdateService {
         return null;
     }
 
-    public ProcessResult updatePackage(String packageId, boolean silent, long timeoutSeconds) throws IOException, InterruptedException {
-        List<String> args = new ArrayList<>(List.of(
-                "upgrade", "--id", packageId, "--accept-source-agreements", "--accept-package-agreements"));
-        if (silent) args.add("--silent");
-
-        ProcessResult r = winget.runWithFallback(timeoutSeconds, args.toArray(new String[0]));
-        if (r != null && r.success()) return r;
-        if (r != null) return r;
-        throw new IOException("Failed to run winget upgrade");
-    }
-
     /**
      * Attempts to upgrade a package while streaming output and progress updates to the provided entry.
      * This will update entry.status and entry.progress as lines/progress are received.
@@ -418,30 +407,11 @@ public class SoftwareUpdateService {
         }
     }
 
-    /**
-     * Attempts to upgrade a package. If the upgrade fails due to an install-technology
-     * mismatch (e.g. EXE → MSIX), throws a descriptive IOException so the UI can
-     * show a helpful message instead of silently breaking things.
-     */
-    public ProcessResult updatePackageWithFallback(String packageId, boolean silent, long timeoutSeconds) throws IOException, InterruptedException {
-        ProcessResult r = updatePackage(packageId, silent, timeoutSeconds);
-        if (r.success()) return r;
-
-        if (isInstallTechnologyMismatch(r)) {
-            throw new IOException("INSTALL_TECHNOLOGY_MISMATCH");
-        }
-        return r;
-    }
-
     static boolean isInstallTechnologyMismatch(ProcessResult result) {
         String combined = "";
         if (result.stdout() != null) combined += result.stdout();
         if (result.stderr() != null) combined += result.stderr();
         return combined.contains("install technology is different")
                 || combined.contains("0x8A150011");
-    }
-
-    public WingetRunner wingetRunner() {
-        return winget;
     }
 }

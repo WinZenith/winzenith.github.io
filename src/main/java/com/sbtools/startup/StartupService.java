@@ -133,17 +133,6 @@ public class StartupService {
         }
     }
 
-    public List<StartupItem> listAllCached(long maxAgeMs) {
-        List<StartupItem> snap = cachedItems;
-        if (snap != null && (System.currentTimeMillis() - lastScanTime) < maxAgeMs) {
-            return new ArrayList<>(snap);
-        }
-        List<StartupItem> fresh = listAll();
-        cachedItems = fresh;
-        lastScanTime = System.currentTimeMillis();
-        return new ArrayList<>(fresh);
-    }
-
     public void invalidateCache() {
         cachedItems = null;
         lastScanTime = 0;

@@ -57,11 +57,6 @@ public class UpdateHistoryStore {
         AppLogger.info("Update history recorded: " + deviceName + " " + oldVersion + " -> " + newVersion);
     }
 
-    public void clearHistory() throws IOException {
-        saveHistory(new ArrayList<>());
-        AppLogger.info("Update history cleared");
-    }
-
     private List<UpdateEntry> loadHistory() {
         Path p = path();
         if (!Files.exists(p)) {

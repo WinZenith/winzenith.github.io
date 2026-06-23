@@ -12,7 +12,6 @@ import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
-import javafx.beans.property.SimpleLongProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
