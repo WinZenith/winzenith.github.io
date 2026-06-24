@@ -4,7 +4,7 @@
   <groupId>com.winzenith</groupId>
   <artifactId>win-zenith</artifactId>
   <name>WinZenith</name>
-  <version>1.0.9</version>
+  <version>1.1.0</version>
   <description>Windows driver scan, update, restore, and system optimization</description>
   <build>
     <plugins>
@@ -90,12 +90,12 @@
                 <maxHeapSize>1024</maxHeapSize>
               </jre>
               <versionInfo>
-                <fileVersion>1.0.9.0</fileVersion>
-                <txtFileVersion>1.0.9.0</txtFileVersion>
+                <fileVersion>1.1.0.0</fileVersion>
+                <txtFileVersion>1.1.0.0</txtFileVersion>
                 <fileDescription>WinZenith - Windows System Optimizer</fileDescription>
                 <copyright>2026</copyright>
-                <productVersion>1.0.9.0</productVersion>
-                <txtProductVersion>1.0.9.0</txtProductVersion>
+                <productVersion>1.1.0.0</productVersion>
+                <txtProductVersion>1.1.0.0</txtProductVersion>
                 <productName>WinZenith</productName>
                 <companyName />
                 <internalName>winzenith</internalName>
