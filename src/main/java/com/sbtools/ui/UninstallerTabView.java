@@ -230,10 +230,20 @@ public class UninstallerTabView extends BorderPane {
         nameCol.setPrefWidth(360);
         nameCol.setCellFactory(textCellFactory);
 
-        TableColumn<InstalledApp, String> sizeCol = new TableColumn<>("Size");
-        sizeCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(FormatUtils.formatSize(c.getValue().getEstimatedSize())));
+         TableColumn<InstalledApp, Number> sizeCol = new TableColumn<>("Size");
+        sizeCol.setCellValueFactory(c -> new javafx.beans.property.ReadOnlyObjectWrapper<>(c.getValue().getEstimatedSize()));
         sizeCol.setPrefWidth(100);
-        sizeCol.setCellFactory(textCellFactory);
+        sizeCol.setCellFactory(col -> new TableCell<>() {
+            @Override
+            protected void updateItem(Number item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : FormatUtils.formatSize(item.intValue()));
+                setGraphic(null);
+                if (!getStyleClass().contains("text-cell")) {
+                    getStyleClass().add("text-cell");
+                }
+            }
+        });
 
         TableColumn<InstalledApp, String> versionCol = new TableColumn<>("Version");
         versionCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().getVersion()));
