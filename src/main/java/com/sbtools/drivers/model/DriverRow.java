@@ -16,7 +16,9 @@ public class DriverRow {
     private final StringProperty availableVersion = new SimpleStringProperty();
     private final StringProperty source = new SimpleStringProperty();
     private final BooleanProperty excluded = new SimpleBooleanProperty(false);
+    private final BooleanProperty selected = new SimpleBooleanProperty(false);
     private final ObjectProperty<DriverHealthService.DriverHealthScore> healthScore = new SimpleObjectProperty<>();
+    private final ObjectProperty<UpdateSeverity> severity = new SimpleObjectProperty<>();
     private DriverUpdateCandidate candidate;
 
     public DriverRow(InstalledDriver installed) {
@@ -41,9 +43,11 @@ public class DriverRow {
         if (candidate == null) {
             availableVersion.set("—");
             source.set("—");
+            severity.set(null);
         } else {
             availableVersion.set(candidate.availableVersion());
             source.set(candidate.source());
+            severity.set(candidate.severity());
         }
     }
 
@@ -85,5 +89,25 @@ public class DriverRow {
 
     public StringProperty sourceProperty() {
         return source;
+    }
+
+    public boolean isSelected() {
+        return selected.get();
+    }
+
+    public void setSelected(boolean selected) {
+        this.selected.set(selected);
+    }
+
+    public BooleanProperty selectedProperty() {
+        return selected;
+    }
+
+    public UpdateSeverity getSeverity() {
+        return severity.get();
+    }
+
+    public ObjectProperty<UpdateSeverity> severityProperty() {
+        return severity;
     }
 }
