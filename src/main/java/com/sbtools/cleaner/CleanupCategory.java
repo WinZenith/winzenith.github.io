@@ -6,7 +6,7 @@ public enum CleanupCategory {
     EMPTY_RECYCLE_BIN("Empty Recycle Bin", "Files in the Recycle Bin", RiskLevel.LOW),
     JUNK_FILES("Junk files", "Temporary files from applications", RiskLevel.LOW),
     PRIVACY_TRACES("Privacy traces", "Recent documents, run history, and usage traces", RiskLevel.LOW),
-    WEB_BROWSING_TRACES("Web browsing traces", "Browser cache, cookies, and history across all browsers", RiskLevel.MEDIUM),
+    WEB_BROWSING_TRACES("Web browsing traces", "Browser cache, cookies, history, and login data across all browsers", RiskLevel.MEDIUM),
     CACHE("Cache", "System and application cache data", RiskLevel.LOW),
     INSTALLER_FILES("Installer Files", "Cached installer packages and downloaded setup files", RiskLevel.LOW),
     TEMPORARY_SYSTEM_FILES("Temporary System Files", "Windows temporary system files, prefetch, and update cache", RiskLevel.LOW),

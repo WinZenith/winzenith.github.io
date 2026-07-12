@@ -305,6 +305,7 @@ public class CleanerTabView extends BorderPane {
 
     private void startClean() {
         if (busy.get()) return;
+        if (!hasScanned || sessionRows.isEmpty()) return;
         java.util.List<CleanupRow> selected = sessionRows.stream().filter(CleanupRow::isSelected).toList();
         if (selected.isEmpty()) return;
 
@@ -330,6 +331,24 @@ public class CleanerTabView extends BorderPane {
                     ButtonType.OK, ButtonType.CANCEL);
             highRiskAlert.setHeaderText("High-Risk Cleanup Warning");
             if (highRiskAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
+                busy.set(false);
+                return;
+            }
+        }
+
+        boolean browserTracesSelected = selected.stream()
+                .anyMatch(r -> r.getCategory() == CleanupCategory.WEB_BROWSING_TRACES);
+        if (browserTracesSelected) {
+            Alert browserAlert = new Alert(Alert.AlertType.WARNING,
+                    "Web Browsing Traces cleanup will delete:\n\n"
+                            + "  - Browser cache files\n"
+                            + "  - Cookies (you will be logged out of websites)\n"
+                            + "  - Browsing history\n"
+                            + "  - Saved login data and form data\n\n"
+                            + "This may affect your browsing experience. Continue?",
+                    ButtonType.OK, ButtonType.CANCEL);
+            browserAlert.setHeaderText("Browser Data Warning");
+            if (browserAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
                 busy.set(false);
                 return;
             }

@@ -103,6 +103,17 @@ public class RegistryDefragService {
             }
         }
 
+        if (errors.isEmpty() && !defragged.isEmpty()) {
+            try {
+                Files.walk(backupDir)
+                        .sorted(java.util.Comparator.reverseOrder())
+                        .forEach(p -> {
+                            try { Files.deleteIfExists(p); } catch (Exception ignored) {}
+                        });
+                AppLogger.info("Cleaned up defrag backup directory after successful defrag");
+            } catch (Exception ignored) {}
+        }
+
         return new DefragResult(defragged.size(), defragged, errors);
     }
 
