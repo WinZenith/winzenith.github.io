@@ -26,6 +26,8 @@ import java.util.stream.Stream;
 
 public class CleanupService {
 
+    private static final long PER_CATEGORY_SCAN_TIMEOUT_SECONDS = 30;
+
     public static final class CleanSummary {
         private final long totalBytes;
         private final int totalItems;
@@ -144,6 +146,22 @@ public class CleanupService {
             public void scan(CleanupRow row) { scanOtherProgramsCache(row); }
             public long clean(Path backupRootOrNull) { return cleanOtherProgramsCache(); }
         });
+        cleaners.put(CleanupCategory.NVIDIA_SHADER_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanShaderCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanShaderCache(); }
+        });
+        cleaners.put(CleanupCategory.SOFTWARE_DISTRIBUTION_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanSoftwareDistributionCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanSoftwareDistributionCache(); }
+        });
+        cleaners.put(CleanupCategory.WINDOWS_DIAGNOSTICS_CACHE, new Cleaner() {
+            public void scan(CleanupRow row) { scanDiagnosticsCache(row); }
+            public long clean(Path backupRootOrNull) { return cleanDiagnosticsCache(); }
+        });
+        cleaners.put(CleanupCategory.OLD_WINDOWS_INSTALL, new Cleaner() {
+            public void scan(CleanupRow row) { scanOldWindowsInstall(row); }
+            public long clean(Path backupRootOrNull) { return cleanOldWindowsInstall(); }
+        });
     }
 
     public List<CleanupRow> scan(Runnable onProgress) {
@@ -177,35 +195,14 @@ public class CleanupService {
             if (c != null) {
                 c.scan(row);
             } else {
-                // Fallback to legacy behavior
-                switch (row.getCategory()) {
-                    case REGISTRY -> scanRegistry(row);
-                    case REGISTRY_DEFRAG -> scanRegistryDefrag(row);
-                    case EMPTY_RECYCLE_BIN -> scanRecycleBin(row);
-                    case JUNK_FILES -> scanJunkFiles(row);
-                    case PRIVACY_TRACES -> scanPrivacyTraces(row);
-                    case WEB_BROWSING_TRACES -> scanBrowserTraces(row);
-                    case CACHE -> scanCache(row);
-                    case INSTALLER_FILES -> scanInstallerFiles(row);
-                    case TEMPORARY_SYSTEM_FILES -> scanTempSystemFiles(row);
-                    case MEMORY_DUMPS -> scanMemoryDumps(row);
-                    case WINDOWS_ERROR_REPORTING -> scanWindowsErrorReporting(row);
-                    case WINDOWS_UPDATE_CLEANUP -> scanWindowsUpdateCleanup(row);
-                    case THUMBNAIL_CACHE -> scanThumbnailCache(row);
-                    case EMPTY_FOLDERS -> scanEmptyFolders(row);
-                    case NOTIFICATION_HISTORY -> scanNotificationHistory(row);
-                    case FONT_CACHE -> scanFontCache(row);
-                    case TASKBAR_JUMP_LISTS -> scanTaskbarJumpLists(row);
-                    case OFFICE_DOCUMENT_CACHE -> scanOfficeDocumentCache(row);
-                    case WINDOWS_DEFENDER_CACHE -> scanWindowsDefenderCache(row);
-                    case WINDOWS_LOG_FILES -> scanWindowsLogFiles(row);
-                    case WINDOWS_STORE_CACHE -> scanWindowsStoreCache(row);
-                    case OTHER_PROGRAMS_CACHE -> scanOtherProgramsCache(row);
-                }
+                AppLogger.warning("No cleaner registered for " + row.getCategory().getDisplayName());
+                row.setSizeOrCountText("Not supported");
             }
         } catch (Exception e) {
             AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
             row.setSizeOrCountText("Error");
+            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+            row.setErrorMessage(e.getMessage());
         }
     }
 
@@ -254,6 +251,7 @@ public class CleanupService {
         for (int i = 0; i < categories.length; i++) {
             final CleanupRow row = rows[i];
             CompletableFuture<Void> f = CompletableFuture.runAsync(() -> {
+                long startMs = System.currentTimeMillis();
                 try {
                     Cleaner c = cleaners.get(row.getCategory());
                     if (c != null) c.scan(row);
@@ -261,11 +259,76 @@ public class CleanupService {
                 } catch (Exception e) {
                     AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
                     row.setSizeOrCountText("Error");
+                    row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                    row.setErrorMessage(e.getMessage());
                 } finally {
+                    long elapsed = System.currentTimeMillis() - startMs;
+                    row.setScanDurationMs(elapsed);
+                    if (row.getScanStatus() != CleanupRow.ScanStatus.ERROR) {
+                        row.setScanStatus(CleanupRow.ScanStatus.DONE);
+                    }
                     if (onProgress != null) onProgress.run();
                 }
             }, executor);
-            futures.add(f);
+
+            CompletableFuture<Void> timed = f.orTimeout(PER_CATEGORY_SCAN_TIMEOUT_SECONDS,
+                    java.util.concurrent.TimeUnit.SECONDS)
+                    .exceptionally(ex -> {
+                        if (ex instanceof java.util.concurrent.TimeoutException) {
+                            AppLogger.warning("Scan timed out for " + row.getCategory().getDisplayName());
+                            row.setSizeOrCountText("Timed out");
+                            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                            row.setErrorMessage("Scan timed out after " + PER_CATEGORY_SCAN_TIMEOUT_SECONDS + "s");
+                        }
+                        return null;
+                    });
+            futures.add(timed);
+        }
+
+        CompletableFuture<java.util.List<CleanupRow>> finalFuture = CompletableFuture
+                .allOf(futures.toArray(new CompletableFuture[0]))
+                .thenApply(v -> java.util.List.of(rows));
+        finalFuture.whenComplete((r, ex) -> executor.shutdown());
+
+        CancelableCompletableFuture<java.util.List<CleanupRow>> result = new CancelableCompletableFuture<>(futures, executor);
+        result.completeFrom(finalFuture);
+        return result;
+    }
+
+    /**
+     * Re-scans only specific categories. Used after cleaning to refresh the Size/Count column.
+     */
+    public CancelableCompletableFuture<java.util.List<CleanupRow>> scanCategoriesAsync(java.util.List<CleanupCategory> categories, Runnable onProgress) {
+        CleanupRow[] rows = new CleanupRow[categories.size()];
+        for (int i = 0; i < categories.size(); i++) {
+            rows[i] = new CleanupRow(categories.get(i));
+        }
+
+        int threadCount = Math.min(rows.length, Math.min(Runtime.getRuntime().availableProcessors(), 6));
+        java.util.concurrent.ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+
+        java.util.List<CompletableFuture<?>> futures = new java.util.ArrayList<>();
+        for (int i = 0; i < categories.size(); i++) {
+            final CleanupRow row = rows[i];
+            CompletableFuture<Void> f = CompletableFuture.runAsync(() -> {
+                long startMs = System.currentTimeMillis();
+                try {
+                    Cleaner c = cleaners.get(row.getCategory());
+                    if (c != null) c.scan(row);
+                    else scanCategory(row);
+                } catch (Exception e) {
+                    AppLogger.warning("Rescan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
+                    row.setSizeOrCountText("Error");
+                } finally {
+                    row.setScanDurationMs(System.currentTimeMillis() - startMs);
+                    if (onProgress != null) onProgress.run();
+                }
+            }, executor);
+
+            CompletableFuture<Void> timed = f.orTimeout(PER_CATEGORY_SCAN_TIMEOUT_SECONDS,
+                    java.util.concurrent.TimeUnit.SECONDS)
+                    .exceptionally(ex -> null);
+            futures.add(timed);
         }
 
         CompletableFuture<java.util.List<CleanupRow>> finalFuture = CompletableFuture
@@ -687,6 +750,27 @@ public class CleanupService {
         }
     }
 
+    private boolean regDeleteKeyRecursive(String hiveName, String keyPath) {
+        WinReg.HKEY hive = switch (hiveName) {
+            case "HKLM" -> WinReg.HKEY_LOCAL_MACHINE;
+            case "HKCR" -> WinReg.HKEY_CLASSES_ROOT;
+            case "HKCU" -> WinReg.HKEY_CURRENT_USER;
+            default -> null;
+        };
+        if (hive == null) return false;
+
+        try {
+            String[] subKeys = Advapi32Util.registryGetKeys(hive, keyPath);
+            for (String sub : subKeys) {
+                regDeleteKeyRecursive(hiveName, keyPath + "\\" + sub);
+            }
+            Advapi32Util.registryDeleteKey(hive, keyPath);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private long cleanInvalidFileExtensions(Path backupRootOrNull) {
         long count = 0;
         try {
@@ -715,8 +799,7 @@ public class CleanupService {
                     backupRegKey(backupRootOrNull, "fileextensions", "HKCR", "");
                     for (String key : toDelete) {
                         try {
-                            Advapi32Util.registryDeleteKey(WinReg.HKEY_CLASSES_ROOT, key);
-                            count++;
+                            if (regDeleteKeyRecursive("HKCR", key)) count++;
                         } catch (Exception ignored) {}
                     }
                 }
@@ -764,8 +847,7 @@ public class CleanupService {
                     backupRegKey(backupRootOrNull, "clsid", "HKCR", "CLSID");
                     for (String guid : toDelete) {
                         try {
-                            Advapi32Util.registryDeleteKey(WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid);
-                            count++;
+                            if (regDeleteKeyRecursive("HKCR", "CLSID\\" + guid)) count++;
                         } catch (Exception ignored) {}
                     }
                 }
@@ -801,9 +883,7 @@ public class CleanupService {
                     backupRegKey(backupRootOrNull, "apppaths", "HKLM", keyPath);
                     for (String appKey : toDelete) {
                         try {
-                            Advapi32Util.registryDeleteKey(
-                                    WinReg.HKEY_LOCAL_MACHINE, keyPath + "\\" + appKey);
-                            count++;
+                            if (regDeleteKeyRecursive("HKLM", keyPath + "\\" + appKey)) count++;
                         } catch (Exception ignored) {}
                     }
                 }
@@ -858,9 +938,7 @@ public class CleanupService {
                     backupRegKey(backupRootOrNull, "uninstall", "HKLM", keyPath);
                     for (String guid : toDelete) {
                         try {
-                            Advapi32Util.registryDeleteKey(
-                                    WinReg.HKEY_LOCAL_MACHINE, keyPath + "\\" + guid);
-                            count++;
+                            if (regDeleteKeyRecursive("HKLM", keyPath + "\\" + guid)) count++;
                         } catch (Exception ignored) {}
                     }
                 }
@@ -2344,6 +2422,168 @@ public class CleanupService {
         cleaned += cleanSlackCache();
         cleaned += cleanZoomCache();
         cleaned += cleanTeamsCache();
+        return cleaned;
+    }
+
+    // ── NVIDIA/AMD Shader Cache ──────────────────────────────────────────
+
+    private void scanShaderCache(CleanupRow row) {
+        long totalSize = 0;
+        List<Path> dirs = new ArrayList<>();
+        String localAppData = System.getenv("LOCALAPPDATA");
+
+        if (localAppData != null) {
+            addPath(dirs, localAppData + "\\NVIDIA\\DXCache");
+            addPath(dirs, localAppData + "\\NVIDIA\\GLCache");
+            addPath(dirs, localAppData + "\\NVIDIA\\NvShaderCache");
+            addPath(dirs, localAppData + "\\AMD\\D3DSCache");
+            addPath(dirs, localAppData + "\\AMD\\VkCache");
+        }
+
+        for (Path dir : dirs) {
+            if (dir != null && Files.isDirectory(dir)) {
+                try (Stream<Path> walk = Files.walk(dir)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanShaderCache() {
+        long cleaned = 0;
+        List<Path> dirs = new ArrayList<>();
+        String localAppData = System.getenv("LOCALAPPDATA");
+
+        if (localAppData != null) {
+            addPath(dirs, localAppData + "\\NVIDIA\\DXCache");
+            addPath(dirs, localAppData + "\\NVIDIA\\GLCache");
+            addPath(dirs, localAppData + "\\NVIDIA\\NvShaderCache");
+            addPath(dirs, localAppData + "\\AMD\\D3DSCache");
+            addPath(dirs, localAppData + "\\AMD\\VkCache");
+        }
+
+        for (Path dir : dirs) {
+            if (dir != null && Files.isDirectory(dir)) {
+                cleaned += deleteDirectoryContents(dir);
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Software Distribution Cache ──────────────────────────────────────
+
+    private void scanSoftwareDistributionCache(CleanupRow row) {
+        long totalSize = 0;
+        String windir = System.getenv("WINDIR");
+        if (windir != null) {
+            List<Path> dirs = new ArrayList<>();
+            addPath(dirs, windir + "\\SoftwareDistribution\\DataStore");
+            addPath(dirs, windir + "\\SoftwareDistribution\\DataStore\\Logs");
+
+            for (Path dir : dirs) {
+                if (dir != null && Files.isDirectory(dir)) {
+                    try (Stream<Path> walk = Files.walk(dir)) {
+                        totalSize += walk.filter(Files::isRegularFile)
+                                .mapToLong(p -> p.toFile().length()).sum();
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+        row.setTotalBytes(totalSize);
+        row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private long cleanSoftwareDistributionCache() {
+        long cleaned = 0;
+        String windir = System.getenv("WINDIR");
+        if (windir != null) {
+            List<Path> dirs = new ArrayList<>();
+            addPath(dirs, windir + "\\SoftwareDistribution\\DataStore");
+            addPath(dirs, windir + "\\SoftwareDistribution\\DataStore\\Logs");
+
+            for (Path dir : dirs) {
+                if (dir != null && Files.isDirectory(dir)) {
+                    cleaned += deleteDirectoryContents(dir);
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Diagnostics Cache ────────────────────────────────────────────────
+
+    private void scanDiagnosticsCache(CleanupRow row) {
+        long totalSize = 0;
+        List<Path> dirs = new ArrayList<>();
+        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\WER\\ReportQueue");
+        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\WER\\ReportArchive");
+        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\WER\\ReportQueue");
+        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\WER\\ReportArchive");
+        scanDirectorySizes(row, dirs, 4);
+    }
+
+    private long cleanDiagnosticsCache() {
+        long cleaned = 0;
+        List<Path> dirs = new ArrayList<>();
+        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\WER\\ReportQueue");
+        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\WER\\ReportArchive");
+        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\WER\\ReportQueue");
+        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\WER\\ReportArchive");
+
+        for (Path dir : dirs) {
+            if (dir != null && Files.isDirectory(dir)) {
+                cleaned += deleteDirectoryContents(dir);
+            }
+        }
+        return cleaned;
+    }
+
+    // ── Previous Windows Installation ────────────────────────────────────
+
+    private void scanOldWindowsInstall(CleanupRow row) {
+        long totalSize = 0;
+        String sysdrive = System.getenv("SYSTEMDRIVE");
+        if (sysdrive != null) {
+            Path windowsOld = Paths.get(sysdrive + "\\Windows.old");
+            if (Files.isDirectory(windowsOld)) {
+                try (Stream<Path> walk = Files.walk(windowsOld)) {
+                    totalSize += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
+            }
+        }
+        row.setTotalBytes(totalSize);
+        if (totalSize > 0) {
+            row.setSizeOrCountText(formatBytes(totalSize));
+        } else {
+            row.setSizeOrCountText("Not found");
+        }
+    }
+
+    private long cleanOldWindowsInstall() {
+        long cleaned = 0;
+        String sysdrive = System.getenv("SYSTEMDRIVE");
+        if (sysdrive != null) {
+            Path windowsOld = Paths.get(sysdrive + "\\Windows.old");
+            if (Files.isDirectory(windowsOld)) {
+                try {
+                    cleaned = Files.walk(windowsOld)
+                            .mapToLong(p -> p.toFile().length())
+                            .sum();
+                } catch (Exception ignored) {}
+
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
+                            "rd", "/s", "/q", windowsOld.toString());
+                    ProcessManager.start(pb.inheritIO()).waitFor();
+                } catch (Exception ex) {
+                    AppLogger.warning("Failed to remove Windows.old: " + ex.getMessage());
+                }
+            }
+        }
         return cleaned;
     }
 

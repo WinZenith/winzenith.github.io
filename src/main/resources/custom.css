@@ -215,6 +215,13 @@
     -fx-opacity: 0.6;
 }
 
+/* --- Cleanup summary label --- */
+.cleanup-summary {
+    -fx-text-fill: #50fa7b;
+    -fx-font-size: 13px;
+    -fx-padding: 4 0 0 0;
+}
+
 /* --- Duplicate group alternating tint --- */
 .table-view .table-row-cell.group-even {
     -fx-background-color: #22232e;

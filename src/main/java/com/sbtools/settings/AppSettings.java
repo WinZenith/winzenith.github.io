@@ -24,7 +24,9 @@ public record AppSettings(
         int windowHeight,
         boolean windowMaximized,
         boolean autoCheckForUpdates,
-        List<String> ignoredBrowserExtensionIds
+        List<String> ignoredBrowserExtensionIds,
+        List<String> ignoredCleanupCategories,
+        boolean autoCreateRestoreBeforeCleanup
 ) {
     public static AppSettings defaults() {
         return new AppSettings(true, true, false,
@@ -32,7 +34,7 @@ public record AppSettings(
                 "DEFAULT", System.getProperty("user.home") + "\\Downloads",
                 false, false, false, true,
                 "", "powershell", 960, 600, true, true,
-                Collections.emptyList());
+                Collections.emptyList(), Collections.emptyList(), false);
     }
 
     /**
@@ -66,6 +68,8 @@ public record AppSettings(
         private boolean windowMaximized;
         private boolean autoCheckForUpdates;
         private List<String> ignoredBrowserExtensionIds;
+        private List<String> ignoredCleanupCategories;
+        private boolean autoCreateRestoreBeforeCleanup;
 
         private Builder(AppSettings s) {
             this.autoBackupDrivers = s.autoBackupDrivers;
@@ -86,6 +90,8 @@ public record AppSettings(
             this.windowMaximized = s.windowMaximized;
             this.autoCheckForUpdates = s.autoCheckForUpdates;
             this.ignoredBrowserExtensionIds = s.ignoredBrowserExtensionIds;
+            this.ignoredCleanupCategories = s.ignoredCleanupCategories;
+            this.autoCreateRestoreBeforeCleanup = s.autoCreateRestoreBeforeCleanup;
         }
 
         public Builder autoBackupDrivers(boolean v) { this.autoBackupDrivers = v; return this; }
@@ -106,6 +112,8 @@ public record AppSettings(
         public Builder windowMaximized(boolean v) { this.windowMaximized = v; return this; }
         public Builder autoCheckForUpdates(boolean v) { this.autoCheckForUpdates = v; return this; }
         public Builder ignoredBrowserExtensionIds(List<String> v) { this.ignoredBrowserExtensionIds = v; return this; }
+        public Builder ignoredCleanupCategories(List<String> v) { this.ignoredCleanupCategories = v; return this; }
+        public Builder autoCreateRestoreBeforeCleanup(boolean v) { this.autoCreateRestoreBeforeCleanup = v; return this; }
 
         public AppSettings build() {
             return new AppSettings(
@@ -126,7 +134,9 @@ public record AppSettings(
                     windowHeight,
                     windowMaximized,
                     autoCheckForUpdates,
-                    ignoredBrowserExtensionIds);
+                    ignoredBrowserExtensionIds,
+                    ignoredCleanupCategories,
+                    autoCreateRestoreBeforeCleanup);
         }
     }
 }

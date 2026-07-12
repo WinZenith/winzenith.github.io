@@ -33,6 +33,10 @@ public final class AppPaths {
         return logsDir().resolve("app.log");
     }
 
+    public static Path dataDir() {
+        return localAppData();
+    }
+
     public static boolean isWindows() {
         return System.getProperty("os.name", "").toLowerCase().contains("win");
     }

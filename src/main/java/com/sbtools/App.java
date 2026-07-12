@@ -86,7 +86,7 @@ public class App extends Application {
                 new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin),
                 new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin),
                 new StartupTabView(busy, AdminCheck::isRunningAsAdmin),
-                new CleanerTabView(busy, AdminCheck::isRunningAsAdmin),
+                new CleanerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore),
                 new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin),
                 new DiskToolsTabView(AdminCheck::isRunningAsAdmin),
                 new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin),
