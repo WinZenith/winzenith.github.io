@@ -8,6 +8,7 @@ import com.sbtools.util.AppInfo;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.AppPaths;
+import com.sbtools.util.VersionCompare;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
@@ -52,11 +53,15 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private final Button scanButton = new Button("Scan");
     private final Button stopScanButton = new Button("Stop scan");
     private final Button updateSelectedButton = new Button("Update Selected");
+    private final Button selectAllButton = new Button("Select All");
+    private final Button deselectAllButton = new Button("Deselect All");
+    private final Button retryFailedButton = new Button("Retry Failed");
     private final SettingsStore settingsStore = new SettingsStore();
 
     private final AtomicBoolean scanCancelled = new AtomicBoolean(false);
     private volatile Future<?> scanFuture;
     private final AtomicBoolean installCancelled = new AtomicBoolean(false);
+    private final List<SoftwareUpdateEntry> failedEntries = new ArrayList<>();
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
     public SoftwareUpdatesTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
@@ -76,7 +81,17 @@ public class SoftwareUpdatesTabView extends BorderPane {
         Button ignoredListButton = new Button("Ignored List");
         ignoredListButton.setOnAction(e -> showIgnoredListDialog());
 
-        HBox top = new HBox(12, scanButton, stopScanButton, updateSelectedButton, ignoredListButton, progress, batchProgressBar, batchProgressLabel, statusLabel);
+        selectAllButton.setDisable(true);
+        selectAllButton.setOnAction(e -> rows.forEach(r -> r.setSelected(true)));
+
+        deselectAllButton.setDisable(true);
+        deselectAllButton.setOnAction(e -> rows.forEach(r -> r.setSelected(false)));
+
+        retryFailedButton.setVisible(false);
+        retryFailedButton.setDisable(true);
+        retryFailedButton.setOnAction(e -> retryFailed());
+
+        HBox top = new HBox(12, scanButton, stopScanButton, updateSelectedButton, selectAllButton, deselectAllButton, retryFailedButton, ignoredListButton, progress, batchProgressBar, batchProgressLabel, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -114,27 +129,41 @@ public class SoftwareUpdatesTabView extends BorderPane {
         selCol.setCellValueFactory(c -> c.getValue().selectedProperty());
         selCol.setCellFactory(CheckBoxTableCell.forTableColumn(selCol));
         selCol.setPrefWidth(60);
+        selCol.setSortable(false);
 
         TableColumn<SoftwareUpdateEntry, String> nameCol = new TableColumn<>("Program");
         nameCol.setCellValueFactory(c -> c.getValue().nameProperty());
+        nameCol.setComparator(String::compareToIgnoreCase);
 
         TableColumn<SoftwareUpdateEntry, String> currentCol = new TableColumn<>("Current Version");
         currentCol.setCellValueFactory(c -> c.getValue().currentVersionProperty());
         currentCol.setPrefWidth(120);
+        currentCol.setComparator(VersionCompare::compare);
 
         TableColumn<SoftwareUpdateEntry, String> availCol = new TableColumn<>("Available Version");
         availCol.setCellValueFactory(c -> c.getValue().availableVersionProperty());
         availCol.setPrefWidth(120);
+        availCol.setComparator(VersionCompare::compare);
 
         TableColumn<SoftwareUpdateEntry, String> sourceCol = new TableColumn<>("Source");
         sourceCol.setCellValueFactory(c -> c.getValue().sourceProperty());
         sourceCol.setPrefWidth(100);
+        sourceCol.setComparator(String::compareToIgnoreCase);
 
-        TableColumn<SoftwareUpdateEntry, String> sizeCol = new TableColumn<>("Size");
-        sizeCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(formatBytes(c.getValue().sizeBytes())));
+        TableColumn<SoftwareUpdateEntry, SoftwareUpdateEntry> sizeCol = new TableColumn<>("Size");
+        sizeCol.setCellValueFactory(c -> new javafx.beans.property.ReadOnlyObjectWrapper<>(c.getValue()));
         sizeCol.setPrefWidth(80);
+        sizeCol.setComparator(java.util.Comparator.comparingLong(SoftwareUpdateEntry::sizeBytes));
+        sizeCol.setCellFactory(col -> new TableCell<>() {
+            @Override
+            protected void updateItem(SoftwareUpdateEntry item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : formatBytes(item.sizeBytes()));
+            }
+        });
 
         TableColumn<SoftwareUpdateEntry, Void> actionCol = new TableColumn<>("Action");
+        actionCol.setSortable(false);
         actionCol.setPrefWidth(350);
         actionCol.setCellFactory(col -> new TableCell<>() {
             private final UIButton updateBtn = UIButton.small("Update");
@@ -290,7 +319,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
     private void updateInstallButtonState() {
         boolean any = rows.stream().anyMatch(r -> r.selectedProperty().get());
+        boolean hasRows = !rows.isEmpty();
         updateSelectedButton.setDisable(!any || busy.get());
+        selectAllButton.setDisable(!hasRows || busy.get());
+        deselectAllButton.setDisable(!hasRows || busy.get());
     }
 
     @SuppressWarnings("unchecked")
@@ -486,6 +518,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
         maybeCreateRestorePoint();
 
+        failedEntries.clear();
         busy.set(true);
         installCancelled.set(false);
         int total = selected.size();
@@ -498,6 +531,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
             batchProgressLabel.setText("0 / " + total);
             scanButton.setDisable(true);
             updateSelectedButton.setDisable(true);
+            retryFailedButton.setVisible(false);
+            retryFailedButton.setDisable(true);
         });
 
         executor.submit(() -> {
@@ -549,6 +584,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     } else {
                         AppLogger.warning("Update failed for " + e.id() + ": " + res.combinedOutput());
                         failedPackages.add(e.getName() != null ? e.getName() : e.id());
+                        failedEntries.add(e);
                         Platform.runLater(() -> {
                             e.setStatus("Failed");
                             e.setProgress(0.0);
@@ -558,8 +594,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     AppLogger.warning("Exception during update: " + ex.getMessage());
                     if (ex.getMessage() != null && ex.getMessage().contains("INSTALL_TECHNOLOGY_MISMATCH")) {
                         techMismatchEntries.add(e);
+                        failedEntries.add(e);
                     } else {
                         failedPackages.add(e.getName() != null ? e.getName() : e.id());
+                        failedEntries.add(e);
                     }
                     Platform.runLater(() -> {
                         e.setStatus("Failed");
@@ -581,14 +619,40 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     statusLabel.setText("Update cancelled. " + finalCompleted + " of " + total + " completed.");
                 } else if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
                     int totalFailed = finalFailed.size() + finalTechMismatch.size();
-                    statusLabel.setText("Completed with " + totalFailed + " failure(s). Re-scan to refresh.");
+                    statusLabel.setText("Completed with " + finalFailed.size() + " failure(s). Use \"Retry Failed\" or re-scan.");
+                    for (SoftwareUpdateEntry fe : failedEntries) {
+                        fe.setStatus("Failed");
+                        fe.setProgress(0.0);
+                        fe.setSelected(false);
+                        if (!rows.contains(fe)) rows.add(fe);
+                    }
+                    retryFailedButton.setVisible(true);
+                    retryFailedButton.setDisable(false);
+                    updateInstallButtonState();
                     showBatchResultDialog(finalFailed, finalTechMismatch);
                 } else {
-                    statusLabel.setText("Selected updates finished. Re-scan to refresh list.");
+                    statusLabel.setText("All selected updates installed successfully.");
+                    retryFailedButton.setVisible(false);
+                    retryFailedButton.setDisable(true);
+                    scan();
                 }
-                scan();
             });
         });
+    }
+
+    private void retryFailed() {
+        if (failedEntries.isEmpty()) return;
+        List<SoftwareUpdateEntry> toRetry = new ArrayList<>(failedEntries);
+        for (SoftwareUpdateEntry e : toRetry) {
+            e.setStatus("");
+            e.setProgress(0.0);
+            e.setSelected(true);
+        }
+        failedEntries.clear();
+        retryFailedButton.setVisible(false);
+        retryFailedButton.setDisable(true);
+        updateInstallButtonState();
+        updateSelected();
     }
 
     private void updateSingle(SoftwareUpdateEntry entry, TableCell<SoftwareUpdateEntry, Void> cell) {
@@ -731,17 +795,23 @@ public class SoftwareUpdatesTabView extends BorderPane {
         a.setHeaderText("Update results");
         a.setContentText(msg.toString());
 
+        List<ButtonType> buttons = new ArrayList<>();
+        if (!failedNames.isEmpty()) {
+            buttons.add(new ButtonType("Retry Failed"));
+        }
         if (!techMismatchEntries.isEmpty()) {
-            ButtonType ignoreBtn = new ButtonType("Add to Ignore List");
-            ButtonType okBtn = new ButtonType("OK", ButtonBar.ButtonData.OK_DONE);
-            a.getButtonTypes().setAll(ignoreBtn, okBtn);
-            if (a.showAndWait().orElse(okBtn) == ignoreBtn) {
-                for (SoftwareUpdateEntry e : techMismatchEntries) {
-                    skipEntry(e);
-                }
+            buttons.add(new ButtonType("Add to Ignore List"));
+        }
+        buttons.add(new ButtonType("OK", ButtonBar.ButtonData.OK_DONE));
+        a.getButtonTypes().setAll(buttons);
+
+        ButtonType result = a.showAndWait().orElse(new ButtonType("OK", ButtonBar.ButtonData.OK_DONE));
+        if (result.getText().equals("Retry Failed")) {
+            retryFailed();
+        } else if (result.getText().equals("Add to Ignore List")) {
+            for (SoftwareUpdateEntry e : techMismatchEntries) {
+                skipEntry(e);
             }
-        } else {
-            a.showAndWait();
         }
     }
 
