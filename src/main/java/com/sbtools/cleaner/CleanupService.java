@@ -454,18 +454,12 @@ public class CleanupService {
                         value = value.substring(1, value.length() - 1);
                     }
                     if (value.contains("\\") && !value.startsWith("-")) {
-                        String filePath = value;
-                        if (filePath.toLowerCase().startsWith("c:")) {
-                            int idx = filePath.indexOf('\\');
-                            if (idx >= 0) {
-                                String possiblePath = filePath.substring(idx);
-                                if (!possiblePath.isEmpty()) {
-                                    Path p = Paths.get(possiblePath);
-                                    if (!Files.exists(p.getParent())) {
-                                        count++;
-                                    }
-                                }
-                            }
+                        String cleanPath = value;
+                        int spaceIdx = cleanPath.indexOf(" -");
+                        if (spaceIdx > 0) cleanPath = cleanPath.substring(0, spaceIdx);
+                        Path p = Paths.get(cleanPath);
+                        if (!Files.exists(p)) {
+                            count++;
                         }
                     }
                 }
@@ -700,18 +694,12 @@ public class CleanupService {
                         value = value.substring(1, value.length() - 1);
                     }
                     if (value.contains("\\") && !value.startsWith("-")) {
-                        String filePath = value;
-                        if (filePath.toLowerCase().startsWith("c:")) {
-                            int idx = filePath.indexOf('\\');
-                            if (idx >= 0) {
-                                String possiblePath = filePath.substring(idx);
-                                if (!possiblePath.isEmpty()) {
-                                    Path p = Paths.get(possiblePath);
-                                    if (!Files.exists(p.getParent())) {
-                                        toDelete.add(entry.getKey());
-                                    }
-                                }
-                            }
+                        String cleanPath = value;
+                        int spaceIdx = cleanPath.indexOf(" -");
+                        if (spaceIdx > 0) cleanPath = cleanPath.substring(0, spaceIdx);
+                        Path p = Paths.get(cleanPath);
+                        if (!Files.exists(p)) {
+                            toDelete.add(entry.getKey());
                         }
                     }
                 }
@@ -1057,11 +1045,19 @@ public class CleanupService {
             }
         } catch (Exception ignored) {}
         try {
-            ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
-                    "rd", "/s", "/q", System.getenv("SYSTEMDRIVE") + "\\$Recycle.Bin");
+            ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
+                    "Clear-RecycleBin -Force -ErrorAction SilentlyContinue");
+            pb.redirectErrorStream(true);
             ProcessManager.start(pb.inheritIO()).waitFor();
         } catch (Exception ex) {
-            AppLogger.warning("Failed to empty Recycle Bin: " + ex.getMessage());
+            AppLogger.warning("Failed to empty Recycle Bin via PowerShell, trying fallback: " + ex.getMessage());
+            try {
+                ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
+                        "rd", "/s", "/q", System.getenv("SYSTEMDRIVE") + "\\$Recycle.Bin");
+                ProcessManager.start(pb.inheritIO()).waitFor();
+            } catch (Exception ex2) {
+                AppLogger.warning("Failed to empty Recycle Bin: " + ex2.getMessage());
+            }
         }
         return size;
     }
@@ -1098,6 +1094,30 @@ public class CleanupService {
                 }
             } catch (Exception ignored) {}
         }
+
+        // Count RunMRU entries that will be cleaned
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER,
+                    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU")) {
+                Map<String, Object> values = Advapi32Util.registryGetValues(WinReg.HKEY_CURRENT_USER,
+                        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU");
+                for (String key : values.keySet()) {
+                    if (!"MRUListEx".equals(key) && !"MRUList".equals(key)) {
+                        itemCount++;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // Count RecentDocs entries that will be cleaned
+        try {
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER,
+                    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs")) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CURRENT_USER,
+                        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs");
+                itemCount += subKeys.length;
+            }
+        } catch (Exception ignored) {}
 
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
@@ -1156,27 +1176,19 @@ public class CleanupService {
         String localAppData = System.getenv("LOCALAPPDATA");
         String appData = System.getenv("APPDATA");
 
-        // Chrome
-        List<Path> chromeDirs = new ArrayList<>();
+        // Chrome - multi-profile
         if (localAppData != null) {
-            Path chrome = Paths.get(localAppData, "Google", "Chrome", "User Data", "Default");
-            chromeDirs.add(chrome.resolve("Cache"));
-            chromeDirs.add(chrome.resolve("Code Cache"));
-            chromeDirs.add(chrome.resolve("Network"));
+            Path chromeUserData = Paths.get(localAppData, "Google", "Chrome", "User Data");
+            profiles.addAll(getChromiumProfiles("Chrome", chromeUserData));
         }
-        profiles.add(new BrowserProfile("Chrome", chromeDirs));
 
-        // Edge
-        List<Path> edgeDirs = new ArrayList<>();
+        // Edge - multi-profile
         if (localAppData != null) {
-            Path edge = Paths.get(localAppData, "Microsoft", "Edge", "User Data", "Default");
-            edgeDirs.add(edge.resolve("Cache"));
-            edgeDirs.add(edge.resolve("Code Cache"));
-            edgeDirs.add(edge.resolve("Network"));
+            Path edgeUserData = Paths.get(localAppData, "Microsoft", "Edge", "User Data");
+            profiles.addAll(getChromiumProfiles("Edge", edgeUserData));
         }
-        profiles.add(new BrowserProfile("Edge", edgeDirs));
 
-        // Firefox
+        // Firefox - already enumerates all profiles
         List<Path> firefoxDirs = new ArrayList<>();
         if (appData != null) {
             Path firefoxProfiles = Paths.get(appData, "Mozilla", "Firefox", "Profiles");
@@ -1192,16 +1204,13 @@ public class CleanupService {
         }
         profiles.add(new BrowserProfile("Firefox", firefoxDirs));
 
-        // Brave
-        List<Path> braveDirs = new ArrayList<>();
+        // Brave - multi-profile
         if (localAppData != null) {
-            Path brave = Paths.get(localAppData, "BraveSoftware", "Brave-Browser", "User Data", "Default");
-            braveDirs.add(brave.resolve("Cache"));
-            braveDirs.add(brave.resolve("Code Cache"));
+            Path braveUserData = Paths.get(localAppData, "BraveSoftware", "Brave-Browser", "User Data");
+            profiles.addAll(getChromiumProfiles("Brave", braveUserData));
         }
-        profiles.add(new BrowserProfile("Brave", braveDirs));
 
-        // Opera
+        // Opera - single profile location
         List<Path> operaDirs = new ArrayList<>();
         if (appData != null) {
             Path opera = Paths.get(appData, "Opera Software", "Opera Stable");
@@ -1210,7 +1219,7 @@ public class CleanupService {
         }
         profiles.add(new BrowserProfile("Opera", operaDirs));
 
-        // Opera GX
+        // Opera GX - single profile location
         List<Path> operaGxDirs = new ArrayList<>();
         if (appData != null) {
             Path operaGX = Paths.get(appData, "Opera Software", "Opera GX Stable");
@@ -1219,32 +1228,54 @@ public class CleanupService {
         }
         profiles.add(new BrowserProfile("Opera GX", operaGxDirs));
 
-        // Vivaldi
-        List<Path> vivaldiDirs = new ArrayList<>();
+        // Vivaldi - multi-profile
         if (localAppData != null) {
-            Path vivaldi = Paths.get(localAppData, "Vivaldi", "User Data", "Default");
-            vivaldiDirs.add(vivaldi.resolve("Cache"));
-            vivaldiDirs.add(vivaldi.resolve("Code Cache"));
+            Path vivaldiUserData = Paths.get(localAppData, "Vivaldi", "User Data");
+            profiles.addAll(getChromiumProfiles("Vivaldi", vivaldiUserData));
         }
-        profiles.add(new BrowserProfile("Vivaldi", vivaldiDirs));
 
-        // Chromium
-        List<Path> chromiumDirs = new ArrayList<>();
+        // Chromium - multi-profile
         if (localAppData != null) {
-            Path chromium = Paths.get(localAppData, "Chromium", "User Data", "Default");
-            chromiumDirs.add(chromium.resolve("Cache"));
-            chromiumDirs.add(chromium.resolve("Code Cache"));
+            Path chromiumUserData = Paths.get(localAppData, "Chromium", "User Data");
+            profiles.addAll(getChromiumProfiles("Chromium", chromiumUserData));
         }
-        profiles.add(new BrowserProfile("Chromium", chromiumDirs));
 
-        // Yandex Browser
-        List<Path> yandexDirs = new ArrayList<>();
+        // Yandex Browser - multi-profile
         if (localAppData != null) {
-            Path yandex = Paths.get(localAppData, "Yandex", "YandexBrowser", "User Data", "Default");
-            yandexDirs.add(yandex.resolve("Cache"));
-            yandexDirs.add(yandex.resolve("Code Cache"));
+            Path yandexUserData = Paths.get(localAppData, "Yandex", "YandexBrowser", "User Data");
+            profiles.addAll(getChromiumProfiles("Yandex Browser", yandexUserData));
         }
-        profiles.add(new BrowserProfile("Yandex Browser", yandexDirs));
+
+        return profiles;
+    }
+
+    private List<BrowserProfile> getChromiumProfiles(String browserName, Path userDataDir) {
+        List<BrowserProfile> profiles = new ArrayList<>();
+        if (!Files.isDirectory(userDataDir)) return profiles;
+
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(userDataDir)) {
+            for (Path entry : ds) {
+                if (Files.isDirectory(entry)) {
+                    String dirName = entry.getFileName().toString();
+                    if (dirName.equals("Default") || dirName.startsWith("Profile ")) {
+                        List<Path> cacheDirs = new ArrayList<>();
+                        cacheDirs.add(entry.resolve("Cache"));
+                        cacheDirs.add(entry.resolve("Code Cache"));
+                        cacheDirs.add(entry.resolve("Network"));
+                        String profileLabel = dirName.equals("Default") ? browserName : browserName + " (" + dirName + ")";
+                        profiles.add(new BrowserProfile(profileLabel, cacheDirs));
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        if (profiles.isEmpty()) {
+            List<Path> cacheDirs = new ArrayList<>();
+            cacheDirs.add(userDataDir.resolve("Default").resolve("Cache"));
+            cacheDirs.add(userDataDir.resolve("Default").resolve("Code Cache"));
+            cacheDirs.add(userDataDir.resolve("Default").resolve("Network"));
+            profiles.add(new BrowserProfile(browserName, cacheDirs));
+        }
 
         return profiles;
     }
@@ -1276,93 +1307,71 @@ public class CleanupService {
             }
             String localAppData = System.getenv("LOCALAPPDATA");
             String appData = System.getenv("APPDATA");
-            String userProfile = System.getenv("USERPROFILE");
             List<Path> extraFiles = new ArrayList<>();
-            switch (profile.name()) {
-                case "Chrome" -> {
-                    if (localAppData != null) {
-                        Path base = Paths.get(localAppData, "Google", "Chrome", "User Data", "Default");
-                        extraFiles.add(base.resolve("Cookies"));
-                        extraFiles.add(base.resolve("Cookies-journal"));
-                        extraFiles.add(base.resolve("History"));
-                        extraFiles.add(base.resolve("History-journal"));
-                        extraFiles.add(base.resolve("Login Data"));
+            String name = profile.name();
+            if (name.startsWith("Chrome")) {
+                if (localAppData != null) {
+                    Path base = dirForProfile(localAppData, "Google", "Chrome", "User Data", name);
+                    if (base != null) addBrowserDbFiles(extraFiles, base, true);
+                }
+            } else if (name.startsWith("Edge")) {
+                if (localAppData != null) {
+                    Path base = dirForProfile(localAppData, "Microsoft", "Edge", "User Data", name);
+                    if (base != null) addBrowserDbFiles(extraFiles, base, true);
+                }
+            } else if (name.equals("Firefox")) {
+                if (appData != null) {
+                    Path profilesDir = Paths.get(appData, "Mozilla", "Firefox", "Profiles");
+                    if (Files.isDirectory(profilesDir)) {
+                        try (DirectoryStream<Path> ds = Files.newDirectoryStream(profilesDir)) {
+                            for (Path firefoxProfile : ds) {
+                                extraFiles.add(firefoxProfile.resolve("cookies.sqlite"));
+                                extraFiles.add(firefoxProfile.resolve("cookies.sqlite-wal"));
+                                extraFiles.add(firefoxProfile.resolve("places.sqlite"));
+                                extraFiles.add(firefoxProfile.resolve("places.sqlite-wal"));
+                                extraFiles.add(firefoxProfile.resolve("formhistory.sqlite"));
+                                extraFiles.add(firefoxProfile.resolve("favicons.sqlite"));
+                            }
+                        } catch (Exception ignored) {}
                     }
                 }
-                case "Edge" -> {
-                    if (localAppData != null) {
-                        Path base = Paths.get(localAppData, "Microsoft", "Edge", "User Data", "Default");
-                        extraFiles.add(base.resolve("Cookies"));
-                        extraFiles.add(base.resolve("Cookies-journal"));
-                        extraFiles.add(base.resolve("History"));
-                        extraFiles.add(base.resolve("History-journal"));
-                        extraFiles.add(base.resolve("Login Data"));
-                    }
-                }
-                case "Firefox" -> {
-                    if (appData != null) {
-                        Path profilesDir = Paths.get(appData, "Mozilla", "Firefox", "Profiles");
-                        if (Files.isDirectory(profilesDir)) {
-                            try (DirectoryStream<Path> ds = Files.newDirectoryStream(profilesDir)) {
-                                for (Path firefoxProfile : ds) {
-                                    extraFiles.add(firefoxProfile.resolve("cookies.sqlite"));
-                                    extraFiles.add(firefoxProfile.resolve("cookies.sqlite-wal"));
-                                    extraFiles.add(firefoxProfile.resolve("places.sqlite"));
-                                    extraFiles.add(firefoxProfile.resolve("places.sqlite-wal"));
-                                    extraFiles.add(firefoxProfile.resolve("formhistory.sqlite"));
-                                    extraFiles.add(firefoxProfile.resolve("favicons.sqlite"));
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                    }
-                }
-                case "Brave" -> {
-                    if (localAppData != null) {
-                        Path base = Paths.get(localAppData, "BraveSoftware", "Brave-Browser", "User Data", "Default");
+            } else if (name.startsWith("Brave")) {
+                if (localAppData != null) {
+                    Path base = dirForProfile(localAppData, "BraveSoftware", "Brave-Browser", "User Data", name);
+                    if (base != null) {
                         extraFiles.add(base.resolve("Cookies"));
                         extraFiles.add(base.resolve("History"));
                     }
                 }
-                case "Vivaldi" -> {
-                    if (localAppData != null) {
-                        Path base = Paths.get(localAppData, "Vivaldi", "User Data", "Default");
+            } else if (name.startsWith("Vivaldi")) {
+                if (localAppData != null) {
+                    Path base = dirForProfile(localAppData, "Vivaldi", "User Data", name);
+                    if (base != null) {
                         extraFiles.add(base.resolve("Cookies"));
                         extraFiles.add(base.resolve("History"));
                     }
                 }
-                case "Opera" -> {
-                    if (appData != null) {
-                        Path base = Paths.get(appData, "Opera Software", "Opera Stable");
-                        extraFiles.add(base.resolve("Cookies"));
-                        extraFiles.add(base.resolve("History"));
-                    }
+            } else if (name.equals("Opera")) {
+                if (appData != null) {
+                    Path base = Paths.get(appData, "Opera Software", "Opera Stable");
+                    extraFiles.add(base.resolve("Cookies"));
+                    extraFiles.add(base.resolve("History"));
                 }
-                case "Opera GX" -> {
-                    if (appData != null) {
-                        Path base = Paths.get(appData, "Opera Software", "Opera GX Stable");
-                        extraFiles.add(base.resolve("Cookies"));
-                        extraFiles.add(base.resolve("History"));
-                    }
+            } else if (name.equals("Opera GX")) {
+                if (appData != null) {
+                    Path base = Paths.get(appData, "Opera Software", "Opera GX Stable");
+                    extraFiles.add(base.resolve("Cookies"));
+                    extraFiles.add(base.resolve("History"));
                 }
-                case "Chromium" -> {
-                    if (localAppData != null) {
-                        Path base = Paths.get(localAppData, "Chromium", "User Data", "Default");
-                        extraFiles.add(base.resolve("Cookies"));
-                        extraFiles.add(base.resolve("Cookies-journal"));
-                        extraFiles.add(base.resolve("History"));
-                        extraFiles.add(base.resolve("History-journal"));
-                        extraFiles.add(base.resolve("Login Data"));
-                    }
+            } else if (name.startsWith("Chromium")) {
+                if (localAppData != null) {
+                    Path base = dirForProfile(localAppData, "Chromium", "User Data", name);
+                    if (base != null) addBrowserDbFiles(extraFiles, base, true);
                 }
-                case "Yandex Browser" -> {
-                    if (localAppData != null) {
-                        Path base = Paths.get(localAppData, "Yandex", "YandexBrowser", "User Data", "Default");
-                        extraFiles.add(base.resolve("Cookies"));
-                        extraFiles.add(base.resolve("Cookies-journal"));
-                        extraFiles.add(base.resolve("History"));
-                        extraFiles.add(base.resolve("History-journal"));
-                        extraFiles.add(base.resolve("Login Data"));
-                    }
+            } else if (name.startsWith("Yandex Browser")) {
+                if (localAppData != null) {
+                    Path base = dirForProfile(localAppData, "Yandex", "YandexBrowser", "User Data", name);
+                    if (base != null) addBrowserDbFiles(extraFiles, base, true);
                 }
             }
             for (Path f : extraFiles) {
@@ -1378,13 +1387,31 @@ public class CleanupService {
         return cleaned;
     }
 
+    private Path dirForProfile(String localAppData, String... pathParts) {
+        String profileLabel = pathParts[pathParts.length - 1];
+        String dirName = profileLabel.contains("(") ?
+                profileLabel.substring(profileLabel.indexOf('(') + 1, profileLabel.indexOf(')')) : "Default";
+        Path userData = Paths.get(localAppData, java.util.Arrays.copyOf(pathParts, pathParts.length - 1));
+        Path profileDir = userData.resolve(dirName);
+        return Files.isDirectory(profileDir) ? profileDir : null;
+    }
+
+    private void addBrowserDbFiles(List<Path> extraFiles, Path base, boolean hasJournals) {
+        extraFiles.add(base.resolve("Cookies"));
+        extraFiles.add(base.resolve("History"));
+        extraFiles.add(base.resolve("Login Data"));
+        if (hasJournals) {
+            extraFiles.add(base.resolve("Cookies-journal"));
+            extraFiles.add(base.resolve("History-journal"));
+        }
+    }
+
     // ── Cache ─────────────────────────────────────────────────────────────
 
     private List<Path> getCacheDirs() {
         List<Path> dirs = new ArrayList<>();
         addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\INetCache");
         addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\INetCookies");
-        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Temp");
         return dirs;
     }
 
@@ -1414,26 +1441,6 @@ public class CleanupService {
                             if (size > 10 * 1024 * 1024) {
                                 totalSize += size;
                             }
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-
-        // Downloaded installer directories
-        Path downloads = Paths.get(System.getenv("USERPROFILE") + "\\Downloads");
-        if (Files.isDirectory(downloads)) {
-            try (Stream<Path> files = Files.list(downloads)) {
-                for (Path f : (Iterable<Path>) files::iterator) {
-                    if (Files.isRegularFile(f)) {
-                        String name = f.getFileName().toString().toLowerCase();
-                        if ((name.endsWith(".msi") || name.endsWith(".exe")) && !name.contains("unins")) {
-                            try {
-                                long size = Files.size(f);
-                                if (size > 10 * 1024 * 1024) {
-                                    totalSize += size;
-                                }
-                            } catch (Exception ignored) {}
                         }
                     }
                 }
@@ -1499,26 +1506,6 @@ public class CleanupService {
             } catch (Exception ignored) {}
         }
 
-        Path downloads = Paths.get(System.getenv("USERPROFILE") + "\\Downloads");
-        if (Files.isDirectory(downloads)) {
-            try (Stream<Path> files = Files.list(downloads)) {
-                for (Path f : (Iterable<Path>) files::iterator) {
-                    if (Files.isRegularFile(f)) {
-                        String name = f.getFileName().toString().toLowerCase();
-                        if ((name.endsWith(".msi") || name.endsWith(".exe")) && !name.contains("unins")) {
-                            try {
-                                long size = Files.size(f);
-                                if (size > 10 * 1024 * 1024) {
-                                    deletePermanently(f);
-                                    cleaned += size;
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-
         return cleaned;
     }
 
@@ -1530,7 +1517,6 @@ public class CleanupService {
         String sysdrive = System.getenv("SYSTEMDRIVE");
         if (windir != null) {
             addPath(dirs, windir + "\\Prefetch");
-            addPath(dirs, windir + "\\SoftwareDistribution\\Download");
         }
         if (sysdrive != null) {
             Path btDir = Paths.get(sysdrive + "\\$Windows.~BT");
@@ -1722,7 +1708,7 @@ public class CleanupService {
             Process p = ProcessManager.start(pb);
             boolean finished = p.waitFor(300, java.util.concurrent.TimeUnit.SECONDS);
             if (finished) {
-                cleaned += 1;
+                AppLogger.info("DISM component cleanup completed successfully");
             } else {
                 AppLogger.warning("DISM cleanup timed out after 300 seconds");
                 p.destroyForcibly();
@@ -1730,11 +1716,15 @@ public class CleanupService {
         } catch (Exception e) {
             AppLogger.warning("DISM cleanup failed: " + e.getMessage());
         }
-        // Also clean SoftwareDistribution\Download
+        // Also clean SoftwareDistribution\Download - measure size before deleting
         String windir = System.getenv("WINDIR");
         if (windir != null) {
             Path sd = Paths.get(windir + "\\SoftwareDistribution\\Download");
             if (Files.isDirectory(sd)) {
+                try (Stream<Path> walk = Files.walk(sd)) {
+                    cleaned += walk.filter(Files::isRegularFile)
+                            .mapToLong(p -> p.toFile().length()).sum();
+                } catch (Exception ignored) {}
                 cleaned += deleteDirectoryContents(sd);
             }
         }
@@ -1751,7 +1741,10 @@ public class CleanupService {
             if (Files.isDirectory(explorerDir)) {
                 try (Stream<Path> files = Files.list(explorerDir)) {
                     totalSize += files.filter(Files::isRegularFile)
-                            .filter(p -> p.getFileName().toString().toLowerCase().startsWith("thumbcache_"))
+                            .filter(p -> {
+                                String name = p.getFileName().toString().toLowerCase();
+                                return name.startsWith("thumbcache_") || name.startsWith("iconcache_");
+                            })
                             .mapToLong(p -> p.toFile().length())
                             .sum();
                 } catch (Exception ignored) {}
@@ -1769,20 +1762,13 @@ public class CleanupService {
             if (Files.isDirectory(explorerDir)) {
                 try (Stream<Path> files = Files.list(explorerDir)) {
                     for (Path f : (Iterable<Path>) files::iterator) {
-                        if (Files.isRegularFile(f) && f.getFileName().toString().toLowerCase().startsWith("thumbcache_")) {
-                            long size = Files.size(f);
-                            deletePermanently(f);
-                            cleaned += size;
-                        }
-                    }
-                } catch (Exception ignored) {}
-                // Also delete iconcache_* files
-                try (Stream<Path> files = Files.list(explorerDir)) {
-                    for (Path f : (Iterable<Path>) files::iterator) {
-                        if (Files.isRegularFile(f) && f.getFileName().toString().toLowerCase().startsWith("iconcache_")) {
-                            long size = Files.size(f);
-                            deletePermanently(f);
-                            cleaned += size;
+                        if (Files.isRegularFile(f)) {
+                            String name = f.getFileName().toString().toLowerCase();
+                            if (name.startsWith("thumbcache_") || name.startsWith("iconcache_")) {
+                                long size = Files.size(f);
+                                deletePermanently(f);
+                                cleaned += size;
+                            }
                         }
                     }
                 } catch (Exception ignored) {}
@@ -1828,6 +1814,7 @@ public class CleanupService {
     }
 
     private long cleanEmptyFolders() {
+        long deletedCount = 0;
         List<Path> roots = new ArrayList<>();
         String userHome = System.getenv("USERPROFILE");
         if (userHome != null) {
@@ -1849,12 +1836,13 @@ public class CleanupService {
                     for (Path dir : emptyDirs) {
                         try {
                             Files.deleteIfExists(dir);
+                            deletedCount++;
                         } catch (Exception ignored) {}
                     }
                 } catch (Exception ignored) {}
             }
         }
-        return 0;
+        return deletedCount;
     }
 
     // ── Notification History ──────────────────────────────────────────────
@@ -1894,6 +1882,7 @@ public class CleanupService {
     private void scanTaskbarJumpLists(CleanupRow row) {
         List<Path> dirs = new ArrayList<>();
         addPath(dirs, System.getenv("APPDATA") + "\\Microsoft\\Windows\\Recent\\AutomaticDestinations");
+        addPath(dirs, System.getenv("APPDATA") + "\\Microsoft\\Windows\\Recent\\CustomDestinations");
         scanDirectorySizes(row, dirs);
     }
 
@@ -1901,6 +1890,7 @@ public class CleanupService {
         long cleaned = 0;
         List<Path> dirs = new ArrayList<>();
         addPath(dirs, System.getenv("APPDATA") + "\\Microsoft\\Windows\\Recent\\AutomaticDestinations");
+        addPath(dirs, System.getenv("APPDATA") + "\\Microsoft\\Windows\\Recent\\CustomDestinations");
         cleaned += cleanDirectoryPattern(dirs);
         return cleaned;
     }
@@ -2055,7 +2045,20 @@ public class CleanupService {
                         if (Files.isDirectory(pkg)) {
                             Path localState = pkg.resolve("LocalState");
                             if (Files.isDirectory(localState)) {
-                                cleaned += deleteDirectoryContents(localState);
+                                try (Stream<Path> walk = Files.walk(localState, 1)) {
+                                    for (Path f : (Iterable<Path>) walk::iterator) {
+                                        if (f.equals(localState)) continue;
+                                        if (Files.isRegularFile(f)) {
+                                            try {
+                                                if (!Files.isHidden(f)) {
+                                                    long size = Files.size(f);
+                                                    deletePermanently(f);
+                                                    cleaned += size;
+                                                }
+                                            } catch (Exception ignored) {}
+                                        }
+                                    }
+                                } catch (Exception ignored) {}
                             }
                         }
                     }
@@ -2162,6 +2165,9 @@ public class CleanupService {
     private void scanAdobeCache(CleanupRow row) {
         long totalSize = 0;
         String appData = System.getenv("APPDATA");
+        String localAppData = System.getenv("LOCALAPPDATA");
+
+        // APPDATA Adobe cache
         if (appData != null) {
             Path adobeCommon = Paths.get(appData, "Adobe", "Common");
             List<Path> dirs = new ArrayList<>();
@@ -2176,6 +2182,29 @@ public class CleanupService {
                 } catch (Exception ignored) {}
             }
         }
+
+        // LOCALAPPDATA Adobe cache (Camera Raw, etc.)
+        if (localAppData != null) {
+            Path adobeLocal = Paths.get(localAppData, "Adobe");
+            if (Files.isDirectory(adobeLocal)) {
+                List<Path> localDirs = new ArrayList<>();
+                Path cameraRaw = adobeLocal.resolve("CameraRaw").resolve("Cache");
+                if (Files.isDirectory(cameraRaw)) localDirs.add(cameraRaw);
+                Path cameraRawDb = adobeLocal.resolve("CameraRaw").resolve("CameraRawDatabase");
+                if (Files.isDirectory(cameraRawDb)) localDirs.add(cameraRawDb);
+                Path flashPlayer = adobeLocal.resolve("Flash Player").resolve("SharedAssets");
+                if (Files.isDirectory(flashPlayer)) localDirs.add(flashPlayer);
+                Path colorSync = adobeLocal.resolve("Color").resolve("CachedProfiles");
+                if (Files.isDirectory(colorSync)) localDirs.add(colorSync);
+                for (Path dir : localDirs) {
+                    try (Stream<Path> walk = Files.walk(dir)) {
+                        totalSize += walk.filter(Files::isRegularFile)
+                                .mapToLong(p -> p.toFile().length()).sum();
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+
         row.setTotalBytes(totalSize);
         row.setSizeOrCountText(formatBytes(totalSize));
     }
@@ -2183,6 +2212,9 @@ public class CleanupService {
     private long cleanAdobeCache() {
         long cleaned = 0;
         String appData = System.getenv("APPDATA");
+        String localAppData = System.getenv("LOCALAPPDATA");
+
+        // APPDATA Adobe cache
         if (appData != null) {
             Path adobeCommon = Paths.get(appData, "Adobe", "Common");
             List<Path> dirs = new ArrayList<>();
@@ -2196,6 +2228,28 @@ public class CleanupService {
                 }
             }
         }
+
+        // LOCALAPPDATA Adobe cache
+        if (localAppData != null) {
+            Path adobeLocal = Paths.get(localAppData, "Adobe");
+            if (Files.isDirectory(adobeLocal)) {
+                List<Path> localDirs = new ArrayList<>();
+                Path cameraRaw = adobeLocal.resolve("CameraRaw").resolve("Cache");
+                if (Files.isDirectory(cameraRaw)) localDirs.add(cameraRaw);
+                Path cameraRawDb = adobeLocal.resolve("CameraRaw").resolve("CameraRawDatabase");
+                if (Files.isDirectory(cameraRawDb)) localDirs.add(cameraRawDb);
+                Path flashPlayer = adobeLocal.resolve("Flash Player").resolve("SharedAssets");
+                if (Files.isDirectory(flashPlayer)) localDirs.add(flashPlayer);
+                Path colorSync = adobeLocal.resolve("Color").resolve("CachedProfiles");
+                if (Files.isDirectory(colorSync)) localDirs.add(colorSync);
+                for (Path dir : localDirs) {
+                    if (Files.isDirectory(dir)) {
+                        cleaned += deleteDirectoryContents(dir);
+                    }
+                }
+            }
+        }
+
         return cleaned;
     }
 
@@ -2203,15 +2257,14 @@ public class CleanupService {
 
     private void scanSteamCache(CleanupRow row) {
         long totalSize = 0;
-        String progFilesX86 = System.getenv("PROGRAMFILES(X86)");
-        if (progFilesX86 != null) {
-            Path steam = Paths.get(progFilesX86, "Steam");
+        Path steamDir = findSteamDir();
+        if (steamDir != null) {
             List<Path> dirs = new ArrayList<>();
-            Path appcache = steam.resolve("appcache");
+            Path appcache = steamDir.resolve("appcache");
             if (Files.isDirectory(appcache)) dirs.add(appcache);
-            Path logs = steam.resolve("logs");
+            Path logs = steamDir.resolve("logs");
             if (Files.isDirectory(logs)) dirs.add(logs);
-            Path downloading = steam.resolve("steamapps").resolve("downloading");
+            Path downloading = steamDir.resolve("steamapps").resolve("downloading");
             if (Files.isDirectory(downloading)) dirs.add(downloading);
             for (Path dir : dirs) {
                 try (Stream<Path> walk = Files.walk(dir)) {
@@ -2226,15 +2279,14 @@ public class CleanupService {
 
     private long cleanSteamCache() {
         long cleaned = 0;
-        String progFilesX86 = System.getenv("PROGRAMFILES(X86)");
-        if (progFilesX86 != null) {
-            Path steam = Paths.get(progFilesX86, "Steam");
+        Path steamDir = findSteamDir();
+        if (steamDir != null) {
             List<Path> dirs = new ArrayList<>();
-            Path appcache = steam.resolve("appcache");
+            Path appcache = steamDir.resolve("appcache");
             if (Files.isDirectory(appcache)) dirs.add(appcache);
-            Path logs = steam.resolve("logs");
+            Path logs = steamDir.resolve("logs");
             if (Files.isDirectory(logs)) dirs.add(logs);
-            Path downloading = steam.resolve("steamapps").resolve("downloading");
+            Path downloading = steamDir.resolve("steamapps").resolve("downloading");
             if (Files.isDirectory(downloading)) dirs.add(downloading);
             for (Path dir : dirs) {
                 if (Files.isDirectory(dir)) {
@@ -2243,6 +2295,20 @@ public class CleanupService {
             }
         }
         return cleaned;
+    }
+
+    private Path findSteamDir() {
+        String progFilesX86 = System.getenv("PROGRAMFILES(X86)");
+        if (progFilesX86 != null) {
+            Path steam = Paths.get(progFilesX86, "Steam");
+            if (Files.isDirectory(steam)) return steam;
+        }
+        String progFiles = System.getenv("PROGRAMFILES");
+        if (progFiles != null) {
+            Path steam = Paths.get(progFiles, "Steam");
+            if (Files.isDirectory(steam)) return steam;
+        }
+        return null;
     }
 
     // ── Slack Cache ───────────────────────────────────────────────────────
@@ -2301,7 +2367,6 @@ public class CleanupService {
             if (Files.isDirectory(zoomData)) {
                 try (Stream<Path> walk = Files.walk(zoomData, 1)) {
                     totalSize += walk.filter(Files::isRegularFile)
-                            .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".bin"))
                             .mapToLong(p -> p.toFile().length()).sum();
                 } catch (Exception ignored) {}
             }
@@ -2318,7 +2383,7 @@ public class CleanupService {
             if (Files.isDirectory(zoomData)) {
                 try (Stream<Path> files = Files.list(zoomData)) {
                     for (Path f : (Iterable<Path>) files::iterator) {
-                        if (Files.isRegularFile(f) && f.getFileName().toString().toLowerCase().endsWith(".bin")) {
+                        if (Files.isRegularFile(f)) {
                             long size = Files.size(f);
                             deletePermanently(f);
                             cleaned += size;
@@ -2335,39 +2400,101 @@ public class CleanupService {
     private void scanTeamsCache(CleanupRow row) {
         long totalSize = 0;
         String appData = System.getenv("APPDATA");
-        if (appData != null) {
-            Path teams = Paths.get(appData, "Microsoft", "Teams");
-            List<Path> dirs = new ArrayList<>();
-            Path cache = teams.resolve("Cache");
-            if (Files.isDirectory(cache)) dirs.add(cache);
-            Path codeCache = teams.resolve("Code Cache");
-            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
-            Path appCache = teams.resolve("Application Cache");
-            if (Files.isDirectory(appCache)) dirs.add(appCache);
-            for (Path dir : dirs) {
-                try (Stream<Path> walk = Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
+        String localAppData = System.getenv("LOCALAPPDATA");
+
+        // Old Teams path
+        List<Path> oldTeamsDirs = getTeamsDirs(appData != null ? Paths.get(appData, "Microsoft", "Teams") : null);
+        for (Path dir : oldTeamsDirs) {
+            try (Stream<Path> walk = Files.walk(dir)) {
+                totalSize += walk.filter(Files::isRegularFile)
+                        .mapToLong(p -> p.toFile().length()).sum();
+            } catch (Exception ignored) {}
+        }
+
+        // New Teams (Teams classic) path
+        List<Path> newTeamsDirs = getTeamsDirs(appData != null ? Paths.get(appData, "Microsoft", "Teams classic") : null);
+        for (Path dir : newTeamsDirs) {
+            try (Stream<Path> walk = Files.walk(dir)) {
+                totalSize += walk.filter(Files::isRegularFile)
+                        .mapToLong(p -> p.toFile().length()).sum();
+            } catch (Exception ignored) {}
+        }
+
+        // New Teams (Microsoft Teams) in Packages
+        if (localAppData != null) {
+            Path teamsPackage = Paths.get(localAppData, "Packages");
+            if (Files.isDirectory(teamsPackage)) {
+                try (DirectoryStream<Path> ds = Files.newDirectoryStream(teamsPackage)) {
+                    for (Path pkg : ds) {
+                        String pkgName = pkg.getFileName().toString();
+                        if (pkgName.contains("MicrosoftTeams") || pkgName.contains("MSTeams")) {
+                            Path ac = pkg.resolve("AC");
+                            if (Files.isDirectory(ac)) {
+                                try (Stream<Path> walk = Files.walk(ac)) {
+                                    totalSize += walk.filter(Files::isRegularFile)
+                                            .mapToLong(p -> p.toFile().length()).sum();
+                                } catch (Exception ignored) {}
+                            }
+                        }
+                    }
                 } catch (Exception ignored) {}
             }
         }
+
         row.setTotalBytes(totalSize);
         row.setSizeOrCountText(formatBytes(totalSize));
+    }
+
+    private List<Path> getTeamsDirs(Path teamsBase) {
+        List<Path> dirs = new ArrayList<>();
+        if (teamsBase != null && Files.isDirectory(teamsBase)) {
+            Path cache = teamsBase.resolve("Cache");
+            if (Files.isDirectory(cache)) dirs.add(cache);
+            Path codeCache = teamsBase.resolve("Code Cache");
+            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
+            Path appCache = teamsBase.resolve("Application Cache");
+            if (Files.isDirectory(appCache)) dirs.add(appCache);
+        }
+        return dirs;
     }
 
     private long cleanTeamsCache() {
         long cleaned = 0;
         String appData = System.getenv("APPDATA");
-        if (appData != null) {
-            Path teams = Paths.get(appData, "Microsoft", "Teams");
-            List<Path> dirs = new ArrayList<>();
-            Path cache = teams.resolve("Cache");
-            if (Files.isDirectory(cache)) dirs.add(cache);
-            Path codeCache = teams.resolve("Code Cache");
-            if (Files.isDirectory(codeCache)) dirs.add(codeCache);
-            Path appCache = teams.resolve("Application Cache");
-            if (Files.isDirectory(appCache)) dirs.add(appCache);
-            for (Path dir : dirs) {
+        String localAppData = System.getenv("LOCALAPPDATA");
+
+        // Old Teams path
+        cleaned += cleanTeamsDirs(appData != null ? Paths.get(appData, "Microsoft", "Teams") : null);
+
+        // New Teams (Teams classic) path
+        cleaned += cleanTeamsDirs(appData != null ? Paths.get(appData, "Microsoft", "Teams classic") : null);
+
+        // New Teams (Microsoft Teams) in Packages
+        if (localAppData != null) {
+            Path teamsPackage = Paths.get(localAppData, "Packages");
+            if (Files.isDirectory(teamsPackage)) {
+                try (DirectoryStream<Path> ds = Files.newDirectoryStream(teamsPackage)) {
+                    for (Path pkg : ds) {
+                        String pkgName = pkg.getFileName().toString();
+                        if (pkgName.contains("MicrosoftTeams") || pkgName.contains("MSTeams")) {
+                            Path ac = pkg.resolve("AC");
+                            if (Files.isDirectory(ac)) {
+                                cleaned += deleteDirectoryContents(ac);
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
+        return cleaned;
+    }
+
+    private long cleanTeamsDirs(Path teamsBase) {
+        long cleaned = 0;
+        if (teamsBase != null && Files.isDirectory(teamsBase)) {
+            for (String sub : List.of("Cache", "Code Cache", "Application Cache")) {
+                Path dir = teamsBase.resolve(sub);
                 if (Files.isDirectory(dir)) {
                     cleaned += deleteDirectoryContents(dir);
                 }
@@ -2518,20 +2645,18 @@ public class CleanupService {
     private void scanDiagnosticsCache(CleanupRow row) {
         long totalSize = 0;
         List<Path> dirs = new ArrayList<>();
-        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\WER\\ReportQueue");
-        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\WER\\ReportArchive");
-        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\WER\\ReportQueue");
-        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\WER\\ReportArchive");
+        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\Diagnosis");
+        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\Diagnosis");
+        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\PowerShell\\Diagnosis");
         scanDirectorySizes(row, dirs, 4);
     }
 
     private long cleanDiagnosticsCache() {
         long cleaned = 0;
         List<Path> dirs = new ArrayList<>();
-        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\WER\\ReportQueue");
-        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\WER\\ReportArchive");
-        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\WER\\ReportQueue");
-        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\WER\\ReportArchive");
+        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\Diagnosis");
+        addPath(dirs, System.getenv("PROGRAMDATA") + "\\Microsoft\\Windows\\Diagnosis");
+        addPath(dirs, System.getenv("LOCALAPPDATA") + "\\Microsoft\\Windows\\PowerShell\\Diagnosis");
 
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
