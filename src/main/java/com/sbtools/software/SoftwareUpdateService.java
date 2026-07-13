@@ -6,6 +6,7 @@ import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
 import com.fasterxml.jackson.databind.JsonNode;
+import javafx.application.Platform;
 
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
@@ -380,16 +381,16 @@ public class SoftwareUpdateService {
 
         try {
             ProcessResult r = winget.runWithFallbackStreaming(
-                    line -> {
+                    line -> Platform.runLater(() -> {
                         try {
                             if (entry != null) entry.setStatus(line == null ? "" : line);
                         } catch (Exception ignored) {}
-                    },
-                    pct -> {
+                    }),
+                    pct -> Platform.runLater(() -> {
                         try {
                             if (entry != null) entry.setProgress(pct);
                         } catch (Exception ignored) {}
-                    },
+                    }),
                     cancelled,
                     args.toArray(new String[0])
             );

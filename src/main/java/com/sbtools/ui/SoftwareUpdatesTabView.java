@@ -1,19 +1,13 @@
 package com.sbtools.ui;
 
-import com.sbtools.backup.SystemRestoreService;
-import com.sbtools.software.InstallerCleanupHelper;
 import com.sbtools.software.SoftwareUpdateEntry;
-import com.sbtools.software.SoftwareUpdateService;
+import com.sbtools.software.SoftwareUpdateViewModel;
 import com.sbtools.util.AppInfo;
-import com.sbtools.util.AppLogger;
-import com.sbtools.util.ProcessResult;
 import com.sbtools.util.AppPaths;
 import com.sbtools.util.VersionCompare;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
-import javafx.collections.FXCollections;
 import javafx.collections.ListChangeListener;
-import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
@@ -23,15 +17,8 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
@@ -40,13 +27,9 @@ import com.sbtools.settings.SettingsStore;
 
 public class SoftwareUpdatesTabView extends BorderPane {
 
-    private final SoftwareUpdateService service = new SoftwareUpdateService();
-    private final SystemRestoreService restoreService = new SystemRestoreService();
+    private final SoftwareUpdateViewModel viewModel;
     private final BooleanProperty busy;
-    private final BooleanSupplier adminCheck;
 
-    private final ObservableList<SoftwareUpdateEntry> rows = FXCollections.observableArrayList();
-    private final Label statusLabel = new Label("Scan for available app updates via winget.");
     private final ProgressIndicator progress = new ProgressIndicator();
     private final ProgressBar batchProgressBar = new ProgressBar(0);
     private final Label batchProgressLabel = new Label();
@@ -56,42 +39,28 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private final Button selectAllButton = new Button("Select All");
     private final Button deselectAllButton = new Button("Deselect All");
     private final Button retryFailedButton = new Button("Retry Failed");
-    private final SettingsStore settingsStore = new SettingsStore();
-
-    private final AtomicBoolean scanCancelled = new AtomicBoolean(false);
-    private volatile Future<?> scanFuture;
-    private final AtomicBoolean installCancelled = new AtomicBoolean(false);
-    private final List<SoftwareUpdateEntry> failedEntries = new ArrayList<>();
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final Button ignoredListButton = new Button("Ignored List");
+    private final Button historyButton = new Button("History");
+    private final Label statusLabel = new Label();
 
     public SoftwareUpdatesTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
-        this.adminCheck = adminCheck;
+        this.viewModel = new SoftwareUpdateViewModel(busy, adminCheck::getAsBoolean);
+
         progress.setVisible(false);
         progress.setMaxSize(24, 24);
         batchProgressBar.setVisible(false);
         batchProgressBar.setPrefWidth(150);
         batchProgressLabel.setVisible(false);
-
-        scanButton.setOnAction(e -> scan());
-        stopScanButton.setOnAction(e -> stopScan());
-        stopScanButton.setDisable(true);
-        updateSelectedButton.setOnAction(e -> updateSelected());
-        updateSelectedButton.setDisable(true);
-        Button ignoredListButton = new Button("Ignored List");
-        ignoredListButton.setOnAction(e -> showIgnoredListDialog());
-
-        selectAllButton.setDisable(true);
-        selectAllButton.setOnAction(e -> rows.forEach(r -> r.setSelected(true)));
-
-        deselectAllButton.setDisable(true);
-        deselectAllButton.setOnAction(e -> rows.forEach(r -> r.setSelected(false)));
-
         retryFailedButton.setVisible(false);
         retryFailedButton.setDisable(true);
-        retryFailedButton.setOnAction(e -> retryFailed());
 
-        HBox top = new HBox(12, scanButton, stopScanButton, updateSelectedButton, selectAllButton, deselectAllButton, retryFailedButton, ignoredListButton, progress, batchProgressBar, batchProgressLabel, statusLabel);
+        bindViewModel();
+        wireButtons();
+
+        HBox top = new HBox(12, scanButton, stopScanButton, updateSelectedButton,
+                selectAllButton, deselectAllButton, retryFailedButton,
+                ignoredListButton, historyButton, progress, batchProgressBar, batchProgressLabel, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -101,7 +70,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         setTop(top);
         setCenter(table);
 
-        rows.addListener((ListChangeListener<SoftwareUpdateEntry>) c -> {
+        viewModel.getRows().addListener((ListChangeListener<SoftwareUpdateEntry>) c -> {
             while (c.next()) {
                 if (c.wasAdded()) {
                     for (SoftwareUpdateEntry entry : c.getAddedSubList()) {
@@ -121,8 +90,52 @@ public class SoftwareUpdatesTabView extends BorderPane {
         }
     }
 
+    private void bindViewModel() {
+        statusLabel.textProperty().bind(viewModel.statusTextProperty());
+        batchProgressBar.progressProperty().bind(viewModel.batchProgressProperty());
+        batchProgressLabel.textProperty().bind(viewModel.batchProgressTextProperty());
+
+        viewModel.showBatchProgressProperty().addListener((obs, oldVal, newVal) -> {
+            batchProgressBar.setVisible(newVal);
+            batchProgressLabel.setVisible(newVal);
+        });
+
+        viewModel.showRetryFailedProperty().addListener((obs, oldVal, newVal) -> {
+            retryFailedButton.setVisible(newVal);
+            retryFailedButton.setDisable(!newVal);
+        });
+
+        viewModel.setOnWingetNotAvailable(this::showWingetNotAvailableDialog);
+    }
+
+    private void wireButtons() {
+        scanButton.setOnAction(e -> viewModel.scan());
+        stopScanButton.setOnAction(e -> viewModel.stopScan());
+        stopScanButton.setDisable(true);
+
+        updateSelectedButton.setOnAction(e -> updateSelected());
+        updateSelectedButton.setDisable(true);
+
+        selectAllButton.setDisable(true);
+        selectAllButton.setOnAction(e -> viewModel.getRows().forEach(r -> r.setSelected(true)));
+
+        deselectAllButton.setDisable(true);
+        deselectAllButton.setOnAction(e -> viewModel.getRows().forEach(r -> r.setSelected(false)));
+
+        retryFailedButton.setOnAction(e -> viewModel.retryFailed());
+
+        ignoredListButton.setOnAction(e -> showIgnoredListDialog());
+        historyButton.setOnAction(e -> showHistoryDialog());
+
+        busy.addListener((obs, oldVal, newVal) -> {
+            scanButton.setDisable(newVal);
+            stopScanButton.setDisable(!newVal);
+            updateSelectedButton.setDisable(newVal || viewModel.getRows().stream().noneMatch(r -> r.selectedProperty().get()));
+        });
+    }
+
     private TableView<SoftwareUpdateEntry> buildTable() {
-        TableView<SoftwareUpdateEntry> table = new TableView<>(rows);
+        TableView<SoftwareUpdateEntry> table = new TableView<>(viewModel.getRows());
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
         TableColumn<SoftwareUpdateEntry, Boolean> selCol = new TableColumn<>("Install");
@@ -173,7 +186,6 @@ public class SoftwareUpdatesTabView extends BorderPane {
             private final Label sizeLabel = new Label("Installing...");
             private final Label installingLabel = new Label("Installing update. Please wait...");
             private final ProgressIndicator spinner = new ProgressIndicator();
-            // Track the entry currently bound to this cell so we can unbind listeners when reused
             private SoftwareUpdateEntry boundEntry = null;
             private javafx.beans.value.ChangeListener<String> statusListener = null;
 
@@ -190,39 +202,22 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
                 updateBtn.setOnAction(e -> {
                     SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
-                    if (entry != null) {
-                        updateSingle(entry, this);
-                    }
+                    if (entry != null) viewModel.updateSingle(entry);
                 });
 
                 ignoreBtn.setOnAction(e -> {
                     SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
-                    if (entry != null) {
-                        skipEntry(entry);
-                    }
+                    if (entry != null) viewModel.skipEntry(entry);
                 });
 
-                stopBtn.setOnAction(e -> {
-                    installCancelled.set(true);
-                    stopBtn.setDisable(true);
-                });
+                stopBtn.setOnAction(e -> viewModel.stopScan());
             }
 
             @Override
             protected void updateItem(Void item, boolean empty) {
                 super.updateItem(item, empty);
-                // Unbind previous entry listeners when cell is cleared or reused
                 if (empty) {
-                    if (boundEntry != null) {
-                        try {
-                            downloadProgress.progressProperty().unbind();
-                        } catch (Exception ignored) {}
-                        if (statusListener != null) {
-                            try { boundEntry.statusProperty().removeListener(statusListener); } catch (Exception ignored) {}
-                            statusListener = null;
-                        }
-                        boundEntry = null;
-                    }
+                    unbindEntry();
                     setGraphic(null);
                     return;
                 }
@@ -233,23 +228,15 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 ignoreBtn.setDisable(disabled);
                 stopBtn.setDisable(true);
 
-                // If the cell is switching to a different entry, unbind old listeners
                 if (boundEntry != null && boundEntry != entry) {
-                    try { downloadProgress.progressProperty().unbind(); } catch (Exception ignored) {}
-                    if (statusListener != null) {
-                        try { boundEntry.statusProperty().removeListener(statusListener); } catch (Exception ignored) {}
-                        statusListener = null;
-                    }
+                    unbindEntry();
                 }
 
                 boundEntry = entry;
                 if (entry != null) {
-                    // bind progress
                     try {
                         downloadProgress.progressProperty().bind(entry.progressProperty());
                     } catch (Exception ignored) {}
-
-                    // bind status text and show/hide progress when status changes
                     installingLabel.textProperty().bind(entry.statusProperty());
                     statusListener = (obs, oldVal, newVal) -> Platform.runLater(() -> {
                         boolean show = newVal != null && !newVal.isBlank();
@@ -258,7 +245,6 @@ public class SoftwareUpdatesTabView extends BorderPane {
                         sizeLabel.setVisible(show);
                     });
                     entry.statusProperty().addListener(statusListener);
-
                     boolean showNow = entry.getStatus() != null && !entry.getStatus().isBlank();
                     downloadProgress.setVisible(showNow);
                     installingLabel.setVisible(showNow);
@@ -274,30 +260,15 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 setGraphic(container);
             }
 
-            private void showInstallingState() {
-                updateBtn.setVisible(false);
-                ignoreBtn.setVisible(false);
-                stopBtn.setVisible(true);
-                stopBtn.setDisable(false);
-                downloadProgress.setVisible(true);
-                downloadProgress.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
-                sizeLabel.setVisible(true);
-                sizeLabel.setText("Installing...");
-                installingLabel.setVisible(true);
-                spinner.setVisible(true);
-            }
-
-            private void hideInstallingState() {
-                updateBtn.setVisible(true);
-                updateBtn.setDisable(false);
-                ignoreBtn.setVisible(true);
-                ignoreBtn.setDisable(false);
-                stopBtn.setVisible(false);
-                stopBtn.setDisable(true);
-                downloadProgress.setVisible(false);
-                sizeLabel.setVisible(false);
-                installingLabel.setVisible(false);
-                spinner.setVisible(false);
+            private void unbindEntry() {
+                if (boundEntry != null) {
+                    try { downloadProgress.progressProperty().unbind(); } catch (Exception ignored) {}
+                    if (statusListener != null) {
+                        try { boundEntry.statusProperty().removeListener(statusListener); } catch (Exception ignored) {}
+                        statusListener = null;
+                    }
+                    boundEntry = null;
+                }
             }
         });
 
@@ -318,148 +289,18 @@ public class SoftwareUpdatesTabView extends BorderPane {
     }
 
     private void updateInstallButtonState() {
-        boolean any = rows.stream().anyMatch(r -> r.selectedProperty().get());
-        boolean hasRows = !rows.isEmpty();
+        boolean any = viewModel.getRows().stream().anyMatch(r -> r.selectedProperty().get());
+        boolean hasRows = !viewModel.getRows().isEmpty();
         updateSelectedButton.setDisable(!any || busy.get());
         selectAllButton.setDisable(!hasRows || busy.get());
         deselectAllButton.setDisable(!hasRows || busy.get());
     }
 
-    @SuppressWarnings("unchecked")
-    private void showCellInstallingState(TableCell<SoftwareUpdateEntry, Void> cell) {
-        try {
-            if (cell.getGraphic() instanceof HBox container) {
-                for (var child : container.getChildren()) {
-                    if (child instanceof UIButton) {
-                        child.setVisible(false);
-                    } else if (child instanceof ProgressBar pb) {
-                        pb.setVisible(true);
-                        pb.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
-                    } else if (child instanceof Label label) {
-                        if (label.getText() != null && label.getText().contains("Installing")) {
-                            label.setVisible(true);
-                        } else {
-                            label.setVisible(true);
-                            label.setText("Installing...");
-                        }
-                    } else if (child instanceof ProgressIndicator pi) {
-                        pi.setVisible(true);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            // Ignore
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private void hideCellInstallingState(TableCell<SoftwareUpdateEntry, Void> cell) {
-        try {
-            if (cell.getGraphic() instanceof HBox container) {
-                for (var child : container.getChildren()) {
-                    if (child instanceof UIButton btn) {
-                        btn.setVisible(true);
-                        btn.setDisable(false);
-                    } else if (child instanceof ProgressBar pb) {
-                        pb.setVisible(false);
-                    } else if (child instanceof Label label) {
-                        label.setVisible(false);
-                        label.setText("");
-                    } else if (child instanceof ProgressIndicator pi) {
-                        pi.setVisible(false);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            // Ignore
-        }
-    }
-
-    private void stopScan() {
-        scanCancelled.set(true);
-        if (scanFuture != null) {
-            try {
-                scanFuture.cancel(true);
-            } catch (Exception ignored) {
-            }
-            scanFuture = null;
-        }
-        busy.set(false);
-        progress.setVisible(false);
-        scanButton.setDisable(false);
-        stopScanButton.setDisable(true);
-        statusLabel.setText("Scan stopped.");
-    }
-
-    private void scan() {
-        if (busy.get()) return;
-        scanCancelled.set(false);
-        busy.set(true);
-        progress.setVisible(true);
-        scanButton.setDisable(true);
-        stopScanButton.setDisable(false);
-        statusLabel.setText("Scanning for updates...");
-        scanFuture = executor.submit(() -> {
-            try {
-                // Show winget-not-available dialog if needed (runs on scan thread, posts to FX)
-                boolean wingetAvailable = service.isWingetAvailable();
-                if (!wingetAvailable) {
-                    String diag = service.getWingetDiagnostics();
-                    Platform.runLater(() -> showWingetNotAvailableDialog(diag));
-                }
-
-                // Run both scans concurrently
-                final int[] counts = {0, 0};
-                List<SoftwareUpdateEntry> allUpdates = service.scanAllConcurrent(
-                        scanCancelled,
-                        wc -> counts[0] = wc,
-                        wuc -> counts[1] = wuc
-                );
-
-                if (scanCancelled.get()) return;
-
-                final int wc = counts[0];
-                final int wuc = counts[1];
-                AppSettings settings = settingsStore.load();
-                List<String> skippedIds = settings.skippedSoftwareIds();
-                Set<String> skippedIdSet = skippedIds.stream()
-                    .map(s -> { int t = s.lastIndexOf('\t'); return t >= 0 ? s.substring(t + 1) : s; })
-                    .collect(Collectors.toSet());
-                final List<SoftwareUpdateEntry> filteredUpdates = allUpdates.stream()
-                    .filter(e -> !skippedIdSet.contains(e.id()))
-                    .collect(Collectors.toList());
-                if (scanCancelled.get()) return;
-                Platform.runLater(() -> {
-                    if (scanCancelled.get()) return;
-                    rows.setAll(filteredUpdates);
-                    if (wc > 0 && wuc > 0) {
-                        statusLabel.setText(filteredUpdates.size() + " outdated item(s) found (" + wc + " app(s), " + wuc + " Windows Update(s)).");
-                    } else if (wc > 0) {
-                        statusLabel.setText(wc + " outdated app(s) found.");
-                    } else if (wuc > 0) {
-                        statusLabel.setText(wuc + " Windows Update(s) found.");
-                    } else {
-                        statusLabel.setText("Everything is up to date.");
-                    }
-                    updateInstallButtonState();
-                });
-            } catch (Exception ex) {
-                if (!scanCancelled.get()) {
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Scan failed: " + ex.getMessage());
-                        new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
-                    });
-                }
-            } finally {
-                scanFuture = null;
-                Platform.runLater(() -> {
-                    busy.set(false);
-                    progress.setVisible(false);
-                    scanButton.setDisable(false);
-                    stopScanButton.setDisable(true);
-                });
-            }
-        });
+    private void updateSelected() {
+        List<SoftwareUpdateEntry> selected = viewModel.getRows().stream()
+                .filter(r -> r.selectedProperty().get())
+                .collect(Collectors.toList());
+        viewModel.updateSelected(selected);
     }
 
     private void showWingetNotAvailableDialog(String diagnostics) {
@@ -505,329 +346,25 @@ public class SoftwareUpdatesTabView extends BorderPane {
         a.showAndWait();
     }
 
-    private void updateSelected() {
-        if (!adminCheck.getAsBoolean()) {
-            Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait());
-            return;
-        }
-        List<SoftwareUpdateEntry> selected = rows.stream().filter(r -> r.selectedProperty().get()).collect(Collectors.toList());
-        if (selected.isEmpty()) {
-            new Alert(Alert.AlertType.INFORMATION, "Select at least one program to update.").showAndWait();
-            return;
-        }
-
-        maybeCreateRestorePoint();
-
-        failedEntries.clear();
-        busy.set(true);
-        installCancelled.set(false);
-        int total = selected.size();
-        statusLabel.setText("Installing " + total + " update(s)...");
-        Platform.runLater(() -> {
-            progress.setVisible(true);
-            batchProgressBar.setVisible(true);
-            batchProgressBar.setProgress(0);
-            batchProgressLabel.setVisible(true);
-            batchProgressLabel.setText("0 / " + total);
-            scanButton.setDisable(true);
-            updateSelectedButton.setDisable(true);
-            retryFailedButton.setVisible(false);
-            retryFailedButton.setDisable(true);
-        });
-
-        executor.submit(() -> {
-            int completed = 0;
-            List<String> failedPackages = new ArrayList<>();
-            List<SoftwareUpdateEntry> techMismatchEntries = new ArrayList<>();
-            for (SoftwareUpdateEntry e : selected) {
-                if (installCancelled.get()) break;
-                try {
-                    int current = completed;
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Installing " + e.getName() + "...");
-                        batchProgressLabel.setText(current + " / " + total);
-                        batchProgressBar.setProgress((double) current / total);
-                    });
-
-                    // Update per-entry UI state
-                    Platform.runLater(() -> {
-                        e.setStatus("Installing...");
-                        e.setProgress(-1.0);
-                    });
-
-                    ProcessResult res;
-                    if ("WindowsUpdate".equals(e.source()) && e.updateId() != null) {
-                        res = service.installWindowsUpdate(e.updateId(), 1200);
-                    } else {
-                        try {
-                            res = service.updatePackageWithStreaming(e.id(), true, 1200, e, installCancelled);
-                        } catch (java.util.concurrent.CancellationException cex) {
-                            // user cancelled streaming install
-                            break;
-                        }
-                    }
-
-                    if (res.success()) {
-                        InstallerCleanupHelper.promptAndCleanup(service, e, Instant.now());
-                        Platform.runLater(() -> {
-                            statusLabel.setText("Update installed for " + e.getName());
-                            rows.remove(e);
-                        });
-                        Platform.runLater(() -> {
-                            e.setStatus("");
-                            e.setProgress(0.0);
-                        });
-                        if (res.combinedOutput() != null && res.combinedOutput().contains("RebootRequired")) {
-                            Platform.runLater(() ->
-                                new Alert(Alert.AlertType.INFORMATION, "Restart required to finish installation of " + e.getName() + ".").showAndWait());
-                        }
-                    } else {
-                        AppLogger.warning("Update failed for " + e.id() + ": " + res.combinedOutput());
-                        failedPackages.add(e.getName() != null ? e.getName() : e.id());
-                        failedEntries.add(e);
-                        Platform.runLater(() -> {
-                            e.setStatus("Failed");
-                            e.setProgress(0.0);
-                        });
-                    }
-                } catch (Exception ex) {
-                    AppLogger.warning("Exception during update: " + ex.getMessage());
-                    if (ex.getMessage() != null && ex.getMessage().contains("INSTALL_TECHNOLOGY_MISMATCH")) {
-                        techMismatchEntries.add(e);
-                        failedEntries.add(e);
-                    } else {
-                        failedPackages.add(e.getName() != null ? e.getName() : e.id());
-                        failedEntries.add(e);
-                    }
-                    Platform.runLater(() -> {
-                        e.setStatus("Failed");
-                        e.setProgress(0.0);
-                    });
-                }
-                completed++;
-            }
-            final int finalCompleted = completed;
-            final List<String> finalFailed = failedPackages;
-            final List<SoftwareUpdateEntry> finalTechMismatch = techMismatchEntries;
-            Platform.runLater(() -> {
-                progress.setVisible(false);
-                batchProgressBar.setVisible(false);
-                batchProgressLabel.setVisible(false);
-                scanButton.setDisable(false);
-                busy.set(false);
-                if (installCancelled.get()) {
-                    statusLabel.setText("Update cancelled. " + finalCompleted + " of " + total + " completed.");
-                } else if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
-                    int totalFailed = finalFailed.size() + finalTechMismatch.size();
-                    statusLabel.setText("Completed with " + finalFailed.size() + " failure(s). Use \"Retry Failed\" or re-scan.");
-                    for (SoftwareUpdateEntry fe : failedEntries) {
-                        fe.setStatus("Failed");
-                        fe.setProgress(0.0);
-                        fe.setSelected(false);
-                        if (!rows.contains(fe)) rows.add(fe);
-                    }
-                    retryFailedButton.setVisible(true);
-                    retryFailedButton.setDisable(false);
-                    updateInstallButtonState();
-                    showBatchResultDialog(finalFailed, finalTechMismatch);
-                } else {
-                    statusLabel.setText("All selected updates installed successfully.");
-                    retryFailedButton.setVisible(false);
-                    retryFailedButton.setDisable(true);
-                    scan();
-                }
-            });
-        });
-    }
-
-    private void retryFailed() {
-        if (failedEntries.isEmpty()) return;
-        List<SoftwareUpdateEntry> toRetry = new ArrayList<>(failedEntries);
-        for (SoftwareUpdateEntry e : toRetry) {
-            e.setStatus("");
-            e.setProgress(0.0);
-            e.setSelected(true);
-        }
-        failedEntries.clear();
-        retryFailedButton.setVisible(false);
-        retryFailedButton.setDisable(true);
-        updateInstallButtonState();
-        updateSelected();
-    }
-
-    private void updateSingle(SoftwareUpdateEntry entry, TableCell<SoftwareUpdateEntry, Void> cell) {
-        if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait();
-            return;
-        }
-
-        maybeCreateRestorePoint();
-
-        busy.set(true);
-        installCancelled.set(false);
-        statusLabel.setText("Installing update for " + entry.getName() + "...");
-        Platform.runLater(() -> {
-            progress.setVisible(true);
-            scanButton.setDisable(true);
-            updateSelectedButton.setDisable(true);
-            if (cell != null) showCellInstallingState(cell);
-            // reflect model state as well so bindings can update
-            entry.setStatus("Installing...");
-            entry.setProgress(-1.0);
-        });
-
-        executor.submit(() -> {
-                try {
-                Instant start = Instant.now();
-                ProcessResult res;
-                if ("WindowsUpdate".equals(entry.source()) && entry.updateId() != null) {
-                    res = service.installWindowsUpdate(entry.updateId(), 1200);
-                } else {
-                    try {
-                        res = service.updatePackageWithStreaming(entry.id(), true, 1200, entry, installCancelled);
-                    } catch (java.util.concurrent.CancellationException cex) {
-                        // cancelled
-                        return;
-                    }
-                }
-                if (res.success()) {
-                    InstallerCleanupHelper.promptAndCleanup(service, entry, start);
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Update installed for " + entry.getName());
-                        rows.remove(entry);
-                    });
-                    Platform.runLater(() -> {
-                        entry.setStatus("");
-                        entry.setProgress(0.0);
-                    });
-                    if (res.combinedOutput() != null && res.combinedOutput().contains("RebootRequired")) {
-                        Platform.runLater(() ->
-                            new Alert(Alert.AlertType.INFORMATION, "Restart required to finish installation.").showAndWait());
-                    }
-                } else {
-                    Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
-                        "Install failed:\n" + res.combinedOutput()).showAndWait());
-                    Platform.runLater(() -> {
-                        entry.setStatus("Failed");
-                        entry.setProgress(0.0);
-                    });
-                }
-            } catch (Exception ex) {
-                String msg = ex.getMessage();
-                if (msg != null && msg.contains("INSTALL_TECHNOLOGY_MISMATCH")) {
-                    Platform.runLater(() -> {
-                        Alert a = new Alert(Alert.AlertType.WARNING);
-                        a.setTitle(AppInfo.DISPLAY_NAME);
-                        a.setHeaderText("Cannot update " + entry.getName());
-                        a.setContentText("The installer technology changed between versions. "
-                            + "Please uninstall the current version manually, then scan again to install the newer version.");
-                        ButtonType ignoreBtn = new ButtonType("Add to Ignore List");
-                        ButtonType okBtn = new ButtonType("OK", ButtonBar.ButtonData.OK_DONE);
-                        a.getButtonTypes().setAll(ignoreBtn, okBtn);
-                        if (a.showAndWait().orElse(okBtn) == ignoreBtn) {
-                            skipEntry(entry);
-                        }
-                    });
-                } else {
-                    Platform.runLater(() -> new Alert(Alert.AlertType.ERROR, "Install failed:\n" + msg).showAndWait());
-                }
-            } finally {
-                Platform.runLater(() -> {
-                    progress.setVisible(false);
-                    scanButton.setDisable(false);
-                    updateSelectedButton.setDisable(false);
-                    updateInstallButtonState();
-                    if (cell != null) hideCellInstallingState(cell);
-                    busy.set(false);
-                });
-            }
-        });
-    }
-
-    private void maybeCreateRestorePoint() {
-        AppSettings settings = settingsStore.load();
-        if (settings.createSystemRestorePoint()) {
-            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Would you like to create a System Restore Point before proceeding with the updates?");
-            confirm.setHeaderText(AppInfo.DISPLAY_NAME);
-            if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
-                boolean created = restoreService.createRestorePoint("WinZenith software update");
-                if (!created) {
-                    AppLogger.warning("Restore point creation failed or skipped.");
-                }
-            }
-        }
-    }
-
-    private void skipEntry(SoftwareUpdateEntry entry) {
-        try {
-            AppSettings current = settingsStore.load();
-            List<String> skipped = new ArrayList<>(current.skippedSoftwareIds());
-            String stored = entry.getName() + "\t" + entry.id();
-            if (skipped.stream().noneMatch(s -> s.endsWith("\t" + entry.id()))) {
-                skipped.add(stored);
-            }
-            AppSettings updated = current.toBuilder()
-                .skippedSoftwareIds(skipped)
-                .build();
-            settingsStore.save(updated);
-        } catch (Exception ex) {
-            AppLogger.warning("Failed to skip software entry: " + ex.getMessage());
-        }
-        rows.remove(entry);
-    }
-
-    private void showBatchResultDialog(List<String> failedNames, List<SoftwareUpdateEntry> techMismatchEntries) {
-        StringBuilder msg = new StringBuilder();
-        if (!failedNames.isEmpty()) {
-            msg.append("The following updates failed:\n\n");
-            for (String f : failedNames) msg.append("  - ").append(f).append("\n");
-        }
-        if (!techMismatchEntries.isEmpty()) {
-            if (msg.length() > 0) msg.append("\n");
-            msg.append("The following programs cannot be updated automatically\n");
-            msg.append("(installer technology changed between versions):\n\n");
-            for (SoftwareUpdateEntry e : techMismatchEntries) msg.append("  - ").append(e.getName()).append("\n");
-            msg.append("\nPlease uninstall them manually, then scan again to install the newer version.");
-        }
-
-        Alert a = new Alert(Alert.AlertType.WARNING);
-        a.setTitle(AppInfo.DISPLAY_NAME);
-        a.setHeaderText("Update results");
-        a.setContentText(msg.toString());
-
-        List<ButtonType> buttons = new ArrayList<>();
-        if (!failedNames.isEmpty()) {
-            buttons.add(new ButtonType("Retry Failed"));
-        }
-        if (!techMismatchEntries.isEmpty()) {
-            buttons.add(new ButtonType("Add to Ignore List"));
-        }
-        buttons.add(new ButtonType("OK", ButtonBar.ButtonData.OK_DONE));
-        a.getButtonTypes().setAll(buttons);
-
-        ButtonType result = a.showAndWait().orElse(new ButtonType("OK", ButtonBar.ButtonData.OK_DONE));
-        if (result.getText().equals("Retry Failed")) {
-            retryFailed();
-        } else if (result.getText().equals("Add to Ignore List")) {
-            for (SoftwareUpdateEntry e : techMismatchEntries) {
-                skipEntry(e);
-            }
-        }
-    }
-
     private void showIgnoredListDialog() {
+        SettingsStore settingsStore = new SettingsStore();
         AppSettings current = settingsStore.load();
         IgnoredListDialog.show("Ignored Software Updates", current.skippedSoftwareIds(), (updated, ignored) -> {
             try {
                 AppSettings curr = settingsStore.load();
-                AppSettings saved = curr.toBuilder()
-                    .skippedSoftwareIds(updated)
-                    .build();
-                settingsStore.save(saved);
+                settingsStore.save(curr.toBuilder().skippedSoftwareIds(updated).build());
             } catch (Exception ex) {
-                AppLogger.warning("Failed to update ignored list: " + ex.getMessage());
+                com.sbtools.util.AppLogger.warning("Failed to update ignored list: " + ex.getMessage());
             }
         });
+    }
+
+    private void showHistoryDialog() {
+        SoftwareUpdateHistoryDialog.show();
+    }
+
+    public void dispose() {
+        viewModel.dispose();
     }
 
     private static String formatBytes(long bytes) {

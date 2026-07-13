@@ -107,6 +107,10 @@ public class UpdateDialog extends Dialog<ButtonType> {
                                 Platform.runLater(() -> progressBar.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS));
                             }
                         }
+                        if (contentLength > 0 && total != contentLength) {
+                            throw new java.io.IOException("Download incomplete: expected " + contentLength
+                                    + " bytes but received " + total + " bytes. The file may be corrupted.");
+                        }
                     }
 
                     Platform.runLater(() -> {

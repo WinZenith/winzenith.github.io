@@ -52,4 +52,8 @@ public final class VersionCompare {
     public static boolean isOlder(String installed, String available) {
         return compare(installed, available) < 0;
     }
+
+    public static boolean isNewer(String candidate, String current) {
+        return compare(candidate, current) > 0;
+    }
 }

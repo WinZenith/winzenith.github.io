@@ -2,6 +2,7 @@ package com.sbtools.update;
 
 import com.sbtools.util.AppInfo;
 import com.sbtools.util.AppLogger;
+import com.sbtools.util.VersionCompare;
 import javafx.application.Platform;
 
 import java.net.URI;
@@ -47,7 +48,7 @@ public class UpdateChecker {
             }
 
             String latestVersion = tagName.startsWith("v") ? tagName.substring(1) : tagName;
-            if (isNewerVersion(latestVersion, AppInfo.getVersion())) {
+            if (VersionCompare.isNewer(latestVersion, AppInfo.getVersion())) {
                 cachedResult = UpdateResult.updateAvailable(latestVersion, downloadUrl);
             } else {
                 cachedResult = UpdateResult.upToDate();
@@ -70,27 +71,6 @@ public class UpdateChecker {
 
     public UpdateResult getCachedResult() {
         return cachedResult;
-    }
-
-    private boolean isNewerVersion(String latest, String current) {
-        String[] latestParts = latest.split("\\.");
-        String[] currentParts = current.split("\\.");
-        int maxLen = Math.max(latestParts.length, currentParts.length);
-        for (int i = 0; i < maxLen; i++) {
-            int l = i < latestParts.length ? parseVersionPart(latestParts[i]) : 0;
-            int c = i < currentParts.length ? parseVersionPart(currentParts[i]) : 0;
-            if (l > c) return true;
-            if (l < c) return false;
-        }
-        return false;
-    }
-
-    private int parseVersionPart(String s) {
-        try {
-            return Integer.parseInt(s.replaceAll("[^0-9]", ""));
-        } catch (NumberFormatException e) {
-            return 0;
-        }
     }
 
     private String extractJsonString(String json, String key) {
