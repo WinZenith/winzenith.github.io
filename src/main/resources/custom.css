@@ -496,3 +496,198 @@
 .sysinfo-status {
     -fx-padding: 4 16 4 0;
 }
+
+/* ============================================
+   DASHBOARD - Visual overhaul styles
+   ============================================ */
+
+/* Welcome Screen */
+.dashboard-welcome {
+    -fx-alignment: CENTER;
+    -fx-spacing: 20;
+    -fx-padding: 40 60 40 60;
+}
+
+.dashboard-welcome-title {
+    -fx-font-size: 28px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #f8f8f2;
+}
+
+.dashboard-welcome-desc {
+    -fx-font-size: 14px;
+    -fx-text-fill: #6272a4;
+    -fx-wrap-text: true;
+    -fx-text-alignment: CENTER;
+    -fx-max-width: 480;
+}
+
+/* Welcome Info Cards Row */
+.dashboard-welcome-cards {
+    -fx-spacing: 16;
+    -fx-alignment: CENTER;
+    -fx-padding: 10 0 0 0;
+}
+
+.dashboard-info-card {
+    -fx-background-color: #282a36;
+    -fx-border-color: #44475a;
+    -fx-border-width: 1;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-padding: 20;
+    -fx-spacing: 8;
+    -fx-alignment: CENTER;
+    -fx-pref-width: 200;
+    -fx-min-height: 140;
+}
+
+.dashboard-info-card:hover {
+    -fx-border-color: #6272a4;
+    -fx-effect: dropshadow(gaussian, #6272a4, 10, 0.15, 0, 0);
+}
+
+.dashboard-info-card-icon {
+    -fx-font-size: 28px;
+    -fx-text-fill: #50fa7b;
+}
+
+.dashboard-info-card-title {
+    -fx-font-size: 14px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #f8f8f2;
+    -fx-text-alignment: CENTER;
+}
+
+.dashboard-info-card-desc {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6272a4;
+    -fx-wrap-text: true;
+    -fx-text-alignment: CENTER;
+    -fx-max-width: 170;
+}
+
+/* Summary Cards Row */
+.dashboard-summary-row {
+    -fx-spacing: 12;
+    -fx-padding: 0 0 8 0;
+}
+
+.dashboard-summary-card {
+    -fx-background-color: #282a36;
+    -fx-border-color: #44475a;
+    -fx-border-width: 1;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-padding: 16 24 16 24;
+    -fx-spacing: 4;
+    -fx-alignment: CENTER_LEFT;
+    -fx-min-width: 180;
+}
+
+.dashboard-summary-card:hover {
+    -fx-border-color: #6272a4;
+}
+
+.dashboard-summary-value {
+    -fx-font-size: 26px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #f8f8f2;
+}
+
+.dashboard-summary-label {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6272a4;
+}
+
+/* Per-Category Progress Row */
+.dashboard-progress-row {
+    -fx-spacing: 12;
+    -fx-padding: 4 0 8 0;
+}
+
+.dashboard-progress-item {
+    -fx-background-color: #282a36;
+    -fx-border-color: #44475a;
+    -fx-border-width: 1;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+    -fx-padding: 10 16 10 16;
+    -fx-spacing: 6;
+    -fx-min-width: 180;
+    -fx-alignment: CENTER_LEFT;
+}
+
+.dashboard-progress-item.active {
+    -fx-border-color: #50fa7b;
+    -fx-effect: dropshadow(gaussian, #50fa7b, 8, 0.15, 0, 0);
+}
+
+.dashboard-progress-item.done {
+    -fx-border-color: #50fa7b;
+}
+
+.dashboard-progress-item.failed {
+    -fx-border-color: #ff5555;
+}
+
+.dashboard-progress-label {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #f8f8f2;
+}
+
+.dashboard-progress-status {
+    -fx-font-size: 11px;
+    -fx-text-fill: #6272a4;
+}
+
+.dashboard-progress-status.active {
+    -fx-text-fill: #50fa7b;
+}
+
+.dashboard-progress-status.done {
+    -fx-text-fill: #50fa7b;
+}
+
+.dashboard-progress-status.failed {
+    -fx-text-fill: #ff5555;
+}
+
+/* Status Bar */
+.dashboard-status-bar {
+    -fx-background-color: #1e1f29;
+    -fx-border-color: #44475a;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 8 20 8 20;
+    -fx-alignment: CENTER_LEFT;
+}
+
+.dashboard-timestamp {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6272a4;
+    -fx-padding: 0 0 0 20;
+}
+
+/* Healthy State Message */
+.dashboard-healthy {
+    -fx-alignment: CENTER;
+    -fx-spacing: 12;
+    -fx-padding: 40 0 40 0;
+}
+
+.dashboard-healthy-icon {
+    -fx-font-size: 48px;
+    -fx-text-fill: #50fa7b;
+}
+
+.dashboard-healthy-title {
+    -fx-font-size: 18px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #50fa7b;
+}
+
+.dashboard-healthy-desc {
+    -fx-font-size: 13px;
+    -fx-text-fill: #6272a4;
+}

@@ -313,19 +313,33 @@ public class CleanupService {
         int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 6);
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
         try {
-            CompletableFuture<?>[] futures = new CompletableFuture[categories.length];
-            for (int i = 0; i < categories.length; i++) {
-                final CleanupRow row = rows[i];
-                futures[i] = CompletableFuture.runAsync(() -> {
-                    scanCategory(row);
-                    if (onProgress != null)
-                        onProgress.run();
-                }, executor);
-            }
-            CompletableFuture.allOf(futures).join();
+            return scanWithExecutor(rows, categories, onProgress, executor);
         } finally {
             executor.shutdown();
         }
+    }
+
+    public List<CleanupRow> scan(Runnable onProgress, ExecutorService sharedExecutor) {
+        CleanupCategory[] categories = CleanupCategory.values();
+        CleanupRow[] rows = new CleanupRow[categories.length];
+        for (int i = 0; i < categories.length; i++) {
+            rows[i] = new CleanupRow(categories[i]);
+        }
+        return scanWithExecutor(rows, categories, onProgress, sharedExecutor);
+    }
+
+    private List<CleanupRow> scanWithExecutor(CleanupRow[] rows, CleanupCategory[] categories,
+                                               Runnable onProgress, ExecutorService executor) {
+        CompletableFuture<?>[] futures = new CompletableFuture[categories.length];
+        for (int i = 0; i < categories.length; i++) {
+            final CleanupRow row = rows[i];
+            futures[i] = CompletableFuture.runAsync(() -> {
+                scanCategory(row);
+                if (onProgress != null)
+                    onProgress.run();
+            }, executor);
+        }
+        CompletableFuture.allOf(futures).join();
         return List.of(rows);
     }
 

@@ -28,7 +28,6 @@ public class HelpTabView extends VBox {
                 "The Dashboard is your system overview hub. Click \"Scan for Issues\" to run a comprehensive check across drivers, software updates, and cleanup opportunities. " +
                 "Results appear in a summary table grouped by category, showing how many issues were found in each area. " +
                 "You can click on any category row to jump directly to the corresponding tab for more details. " +
-                "If auto-scan is enabled, the scan runs automatically when the application starts, giving you an instant health report. " +
                 "The Dashboard does not make any changes to your system — it only reports what it finds."));
 
         getChildren().add(createFaqSection("Drivers",

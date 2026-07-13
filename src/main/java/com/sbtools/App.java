@@ -216,8 +216,10 @@ public class App extends Application {
         } catch (Throwable ignored) {}
         if (tabViews != null) {
             for (Node view : tabViews) {
-                if (view instanceof DriversTabView dtv) {
+                if (view instanceof DashboardTabView dtv) {
                     dtv.dispose();
+                } else if (view instanceof DriversTabView dtv2) {
+                    dtv2.dispose();
                 } else if (view instanceof SoftwareUpdatesTabView suv) {
                     suv.dispose();
                 } else if (view instanceof UninstallerTabView utv) {
