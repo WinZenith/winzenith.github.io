@@ -214,6 +214,11 @@ public class App extends Application {
         try {
             AppLogger.info("Application stopping; shutting down tracked processes...");
         } catch (Throwable ignored) {}
+        for (Node view : tabViews) {
+            if (view instanceof DriversTabView dtv) {
+                dtv.dispose();
+            }
+        }
         ProcessManager.shutdownAll();
         super.stop();
     }

@@ -197,8 +197,8 @@ public class DriversTabView extends BorderPane {
         UILabel outdatedLabel = UILabel.sectionTitle("Outdated Drivers");
         UILabel upToDateLabel = UILabel.sectionTitle("Up to Date Drivers");
         
-        outdatedTable = buildTable(outdatedRows);
-        upToDateTable = buildUpToDateTable(upToDateRows);
+        outdatedTable = buildTable(filteredOutdated);
+        upToDateTable = buildUpToDateTable(filteredUpToDate);
         
         VBox.setVgrow(outdatedTable, Priority.ALWAYS);
         VBox.setVgrow(upToDateTable, Priority.ALWAYS);
@@ -358,6 +358,7 @@ public class DriversTabView extends BorderPane {
         }
 
         private DriverRow currentRow() {
+            if (getTableView() == null) return null;
             int idx = getIndex();
             if (idx < 0 || idx >= getTableView().getItems().size()) {
                 return null;
@@ -459,10 +460,13 @@ public class DriversTabView extends BorderPane {
 
             {
                 ignoreBtn.setOnAction(e -> {
-                    DriverRow row = getTableView().getItems().get(getIndex());
-                    if (row != null) {
-                        excludeDriver(row);
-                        getTableView().getItems().remove(row);
+                    int idx = getIndex();
+                    if (idx >= 0 && idx < getTableView().getItems().size()) {
+                        DriverRow row = getTableView().getItems().get(idx);
+                        if (row != null) {
+                            excludeDriver(row);
+                            getTableView().getItems().remove(row);
+                        }
                     }
                 });
             }
@@ -899,14 +903,17 @@ public class DriversTabView extends BorderPane {
         }
     }
 
+    private final FilteredList<DriverRow> filteredOutdated = new FilteredList<>(outdatedRows);
+    private final FilteredList<DriverRow> filteredUpToDate = new FilteredList<>(upToDateRows);
+
     private void filterTables() {
         String filter = searchField.getText().toLowerCase().trim();
         if (filter.isEmpty()) {
-            outdatedTable.setItems(outdatedRows);
-            upToDateTable.setItems(upToDateRows);
+            filteredOutdated.setPredicate(null);
+            filteredUpToDate.setPredicate(null);
         } else {
-            outdatedTable.setItems(new FilteredList<>(outdatedRows, row -> matchesFilter(row, filter)));
-            upToDateTable.setItems(new FilteredList<>(upToDateRows, row -> matchesFilter(row, filter)));
+            filteredOutdated.setPredicate(row -> matchesFilter(row, filter));
+            filteredUpToDate.setPredicate(row -> matchesFilter(row, filter));
         }
     }
 
@@ -1147,8 +1154,16 @@ public class DriversTabView extends BorderPane {
 
                 try {
                     installService.resetCancellation();
-                    installService.setProgressCallback(null);
-                    installService.setStatusCallback(null);
+                    installService.setProgressCallback((bytesReceived, totalBytes, fraction) -> {
+                        String sizeText = totalBytes > 0
+                                ? formatBytes(bytesReceived) + " / " + formatBytes(totalBytes)
+                                : formatBytes(bytesReceived);
+                        Platform.runLater(() -> statusLabel.setText("Installing " + (idx + 1) + "/" + total
+                                + ": " + row.installed().friendlyName() + " \u2014 " + sizeText));
+                    });
+                    installService.setStatusCallback(status -> Platform.runLater(() ->
+                            statusLabel.setText("Installing " + (idx + 1) + "/" + total + ": "
+                                    + row.installed().friendlyName() + " \u2014 " + status)));
                     DriverInstallService.InstallResult result = installService.install(c, settings);
                     if (result.installed()) {
                         succeeded++;
@@ -1307,5 +1322,31 @@ public class DriversTabView extends BorderPane {
         }
         stopBackupButton.setDisable(true);
         setStatus("Cancelling backup\u2026");
+    }
+
+    /**
+     * Shuts down background executor services. Call when the tab is removed
+     * or the application is shutting down to avoid leaked threads.
+     */
+    public void dispose() {
+        CancellationToken scan = scanToken;
+        if (scan != null) scan.cancel();
+        CancellationToken backup = backupToken;
+        if (backup != null) backup.cancel();
+        installService.cancel();
+        shutdownExecutor(scanExecutor);
+        shutdownExecutor(installExecutor);
+    }
+
+    private static void shutdownExecutor(ExecutorService executor) {
+        executor.shutdownNow();
+        try {
+            if (!executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }
