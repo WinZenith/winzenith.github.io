@@ -220,6 +220,8 @@ public class App extends Application {
                     dtv.dispose();
                 } else if (view instanceof SoftwareUpdatesTabView suv) {
                     suv.dispose();
+                } else if (view instanceof UninstallerTabView utv) {
+                    utv.dispose();
                 }
             }
         }

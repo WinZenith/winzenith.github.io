@@ -273,9 +273,11 @@ public class UninstallerTabView extends BorderPane {
             row.setPrefHeight(28);
 
             MenuItem uninstallItem = new MenuItem("Uninstall");
+            uninstallItem.disableProperty().bind(busy);
             uninstallItem.setOnAction(e -> uninstallSingleApp(row.getItem()));
 
             MenuItem forceUninstallItem = new MenuItem("Force Uninstall");
+            forceUninstallItem.disableProperty().bind(busy);
             forceUninstallItem.getStyleClass().add("danger-menu-item");
             forceUninstallItem.setOnAction(e -> triggerForceUninstallForApp(row.getItem()));
 
@@ -435,6 +437,7 @@ public class UninstallerTabView extends BorderPane {
                 AppLogger.info("Starting uninstaller for: " + app.getName());
                 ProcessResult result = service.runUninstaller(app);
                 AppLogger.info("Uninstaller completed with exit code: " + result.exitCode());
+                boolean uninstallSucceeded = result.success();
 
                 waitForUninstallCompletion(app);
 
@@ -445,6 +448,18 @@ public class UninstallerTabView extends BorderPane {
                 Platform.runLater(() -> {
                     progress.setVisible(false);
                     statusLabel.setText("Scanning completed.");
+
+                    if (!uninstallSucceeded) {
+                        Alert warn = new Alert(Alert.AlertType.WARNING);
+                        warn.setTitle("Uninstall May Have Failed");
+                        warn.setHeaderText("The uninstaller returned an error for: " + app.getName());
+                        warn.setContentText("The standard uninstaller reported errors:\n\n"
+                                + result.combinedOutput() + "\n\n"
+                                + "Leftovers have been scanned regardless. Do you want to review them?");
+                        warn.initModality(Modality.APPLICATION_MODAL);
+                        warn.showAndWait();
+                    }
+
                     showLeftoversReview(app, fileLeftovers, regLeftovers);
                 });
 
@@ -477,7 +492,8 @@ public class UninstallerTabView extends BorderPane {
                 }
             }
         } else {
-            Thread.sleep(2000);
+            AppLogger.info("No install location available; waiting 5s for uninstaller to settle");
+            Thread.sleep(5000);
         }
     }
 
@@ -691,5 +707,9 @@ public class UninstallerTabView extends BorderPane {
         alert.initModality(Modality.APPLICATION_MODAL);
         alert.getDialogPane().setPrefWidth(600);
         alert.showAndWait();
+    }
+
+    public void dispose() {
+        ICON_EXECUTOR.shutdownNow();
     }
 }

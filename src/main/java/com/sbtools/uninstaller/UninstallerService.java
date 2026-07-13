@@ -78,11 +78,13 @@ public class UninstallerService {
     }
 
     private boolean isMicrosoftOrWindows(InstalledApp app) {
-        String lowerName = app.getName().toLowerCase();
-        String lowerPub = app.getPublisher().toLowerCase();
-        return lowerPub.contains("microsoft")
-                || lowerName.contains("microsoft")
-                || lowerName.contains("windows");
+        String lowerPub = app.getPublisher() != null ? app.getPublisher().toLowerCase() : "";
+        String lowerName = app.getName() != null ? app.getName().toLowerCase() : "";
+        boolean isMicrosoftPublisher = lowerPub.contains("microsoft");
+        boolean isMicrosoftOrWindowsName = lowerName.startsWith("microsoft ")
+                || lowerName.equals("microsoft windows")
+                || lowerName.startsWith("microsoft windows ");
+        return isMicrosoftPublisher || isMicrosoftOrWindowsName;
     }
 
     /**
@@ -392,6 +394,7 @@ public class UninstallerService {
             addIfNotNull(roots, System.getenv("ProgramFiles(x86)"));
             addIfNotNull(roots, System.getenv("AppData"));
             addIfNotNull(roots, System.getenv("LocalAppData"));
+            addIfNotNull(roots, System.getenv("ProgramData"));
 
             for (String root : roots) {
                 File rootDir = new File(root);
@@ -416,7 +419,11 @@ public class UninstallerService {
                     ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
             try {
                 if (Advapi32Util.registryKeyExists(hive, app.getRegistryKeyPath())) {
-                    Advapi32Util.registryDeleteKey(hive, app.getRegistryKeyPath());
+                    try {
+                        Advapi32Util.registryDeleteKey(hive, app.getRegistryKeyPath());
+                    } catch (Exception ex) {
+                        deleteRegistryKeyRecursively(hive, app.getRegistryKeyPath());
+                    }
                     summary.add("Deleted registry key: " + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
                 }
             } catch (Exception e) {

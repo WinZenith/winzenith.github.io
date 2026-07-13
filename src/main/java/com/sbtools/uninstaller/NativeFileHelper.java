@@ -23,12 +23,25 @@ public class NativeFileHelper {
         }
 
         if (file.isDirectory()) {
-            // Recursively delete contents first so the directory can be deleted
+            boolean allChildrenDeleted = true;
             File[] children = file.listFiles();
             if (children != null) {
                 for (File child : children) {
-                    deleteOrQueue(child);
+                    if (!deleteOrQueue(child)) {
+                        allChildrenDeleted = false;
+                    }
                 }
+            }
+            // If any child was queued for reboot, queue the parent directory too
+            // instead of attempting direct deletion (which would fail as not-empty)
+            if (!allChildrenDeleted) {
+                boolean scheduled = queueForReboot(file.getAbsolutePath());
+                if (scheduled) {
+                    AppLogger.info("Queued directory for deletion on next reboot (contains locked children): " + file.getAbsolutePath());
+                } else {
+                    AppLogger.warning("Failed to queue directory for reboot deletion: " + file.getAbsolutePath());
+                }
+                return false;
             }
         }
 
