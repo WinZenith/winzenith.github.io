@@ -650,4 +650,8 @@ public class StartupTabView extends BorderPane {
 
         dialog.showAndWait();
     }
+
+    public void dispose() {
+        executor.shutdownNow();
+    }
 }

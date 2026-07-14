@@ -117,12 +117,13 @@ public class UpdateDialog extends Dialog<ButtonType> {
                         statusLabel.setText("Downloaded to: " + target.toString());
                         try {
                             if (Desktop.isDesktopSupported()) {
-                                Desktop.getDesktop().open(tempDir.toFile());
+                                Desktop.getDesktop().open(target.toFile());
                             }
                         } catch (Exception ex) {
                             // ignore
                         }
                         downloadButton.setDisable(false);
+                        cleanupTempDir(tempDir);
                     });
                 } catch (Exception ex) {
                     Platform.runLater(() -> {
@@ -144,5 +145,20 @@ public class UpdateDialog extends Dialog<ButtonType> {
         } catch (Exception ex) {
             // fallback - just close
         }
+    }
+
+    private static void cleanupTempDir(Path tempDir) {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(5000);
+                Files.walk(tempDir)
+                        .sorted((a, b) -> b.compareTo(a))
+                        .forEach(p -> {
+                            try { Files.deleteIfExists(p); } catch (Exception ignored) {}
+                        });
+            } catch (Exception ignored) {}
+        }, "TempDirCleanup");
+        t.setDaemon(true);
+        t.start();
     }
 }

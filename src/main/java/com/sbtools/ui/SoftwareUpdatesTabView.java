@@ -181,7 +181,6 @@ public class SoftwareUpdatesTabView extends BorderPane {
         actionCol.setCellFactory(col -> new TableCell<>() {
             private final UIButton updateBtn = UIButton.small("Update");
             private final UIButton ignoreBtn = UIButton.small("Ignore");
-            private final UIButton stopBtn = UIButton.small("Stop");
             private final ProgressBar downloadProgress = new ProgressBar(ProgressBar.INDETERMINATE_PROGRESS);
             private final Label sizeLabel = new Label("Installing...");
             private final Label installingLabel = new Label("Installing update. Please wait...");
@@ -197,8 +196,6 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 downloadProgress.setPrefWidth(80);
                 downloadProgress.setVisible(false);
                 sizeLabel.setVisible(false);
-                stopBtn.setVisible(false);
-                stopBtn.setDisable(true);
 
                 updateBtn.setOnAction(e -> {
                     SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
@@ -209,8 +206,6 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
                     if (entry != null) viewModel.skipEntry(entry);
                 });
-
-                stopBtn.setOnAction(e -> viewModel.stopScan());
             }
 
             @Override
@@ -226,11 +221,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 boolean disabled = entry == null || busy.get();
                 updateBtn.setDisable(disabled);
                 ignoreBtn.setDisable(disabled);
-                stopBtn.setDisable(true);
 
-                if (boundEntry != null && boundEntry != entry) {
-                    unbindEntry();
-                }
+                unbindEntry();
 
                 boundEntry = entry;
                 if (entry != null) {
@@ -255,7 +247,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     sizeLabel.setVisible(false);
                 }
 
-                HBox container = new HBox(6, updateBtn, ignoreBtn, stopBtn, sizeLabel, downloadProgress, installingLabel, spinner);
+                HBox container = new HBox(6, updateBtn, ignoreBtn, sizeLabel, downloadProgress, installingLabel, spinner);
                 container.setAlignment(Pos.CENTER_LEFT);
                 setGraphic(container);
             }

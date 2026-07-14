@@ -1,6 +1,6 @@
 package com.sbtools.uninstaller;
 
-public class InstalledApp {
+public class InstalledApp implements Comparable<InstalledApp> {
     private final String name;
     private final String publisher;
     private final String version;
@@ -51,6 +51,13 @@ public class InstalledApp {
     public String getInstallDate() { return installDate; }
     public int getEstimatedSize() { return estimatedSize; }
     public String getArchitecture() { return architecture; }
+
+    @Override
+    public int compareTo(InstalledApp other) {
+        int cmp = this.name.compareToIgnoreCase(other.name);
+        if (cmp != 0) return cmp;
+        return this.version.compareToIgnoreCase(other.version);
+    }
 
     @Override
     public String toString() {

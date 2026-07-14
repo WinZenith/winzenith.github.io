@@ -581,4 +581,8 @@ public class SystemInfoTabView extends BorderPane {
             setContent(content);
         }
     }
+
+    public void dispose() {
+        executor.shutdownNow();
+    }
 }

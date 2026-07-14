@@ -20,6 +20,7 @@ public class SoftwareUpdateEntry {
     private final StringProperty name = new SimpleStringProperty();
     private final StringProperty currentVersion = new SimpleStringProperty();
     private final StringProperty availableVersion = new SimpleStringProperty();
+    private final StringProperty sourceProp = new SimpleStringProperty();
     private final BooleanProperty selected = new SimpleBooleanProperty(false);
 
     // Runtime UI state
@@ -39,6 +40,7 @@ public class SoftwareUpdateEntry {
         this.name.set(name == null ? "" : name);
         this.currentVersion.set(currentVersion == null ? "" : currentVersion);
         this.availableVersion.set(availableVersion == null ? "" : availableVersion);
+        this.sourceProp.set(this.source);
     }
 
     public String id() {
@@ -74,7 +76,7 @@ public class SoftwareUpdateEntry {
     }
 
     public StringProperty sourceProperty() {
-        return new SimpleStringProperty(source);
+        return sourceProp;
     }
 
     /**

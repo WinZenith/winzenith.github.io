@@ -37,7 +37,7 @@ public class App extends Application {
     private final BooleanProperty busy = new SimpleBooleanProperty(false);
 
     private static final String[] TAB_NAMES = {
-            "Dashboard", "Drivers", "Backup/Rollback", "Software update",
+            "Dashboard", "Drivers", "Backup/Rollback", "Software Update",
             "System Information", "Uninstaller", "Startup items/services",
             "System cleanup", "Duplicate Files", "Disk Tools",
             "Browser Extensions", "Network Optimizer"
@@ -51,6 +51,7 @@ public class App extends Application {
     private HelpTabView helpTab;
     private Image logoImage;
     private int selectedTab = 0;
+    private AppSettings appSettings;
 
     @Override
     public void start(Stage stage) {
@@ -78,20 +79,8 @@ public class App extends Application {
 
         logoImage = new Image(getClass().getResourceAsStream("/logo-ico.png"));
 
-        tabViews = new Node[]{
-                new DashboardTabView(busy, AdminCheck::isRunningAsAdmin),
-                new DriversTabView(busy, AdminCheck::isRunningAsAdmin),
-                new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdmin),
-                new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin),
-                new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin),
-                new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin),
-                new StartupTabView(busy, AdminCheck::isRunningAsAdmin),
-                new CleanerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore),
-                new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin),
-                new DiskToolsTabView(AdminCheck::isRunningAsAdmin),
-                new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin),
-                new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, settings)
-        };
+        appSettings = settings;
+        tabViews = new Node[TAB_NAMES.length];
 
         root = new BorderPane();
         sidebar = new VBox(6);
@@ -104,7 +93,7 @@ public class App extends Application {
         buildSidebar();
 
         root.setLeft(sidebar);
-        root.setCenter(tabViews[0]);
+        root.setCenter(createTab(0));
 
         if (!AppPaths.isWindows()) {
             new Alert(Alert.AlertType.WARNING,
@@ -152,7 +141,7 @@ public class App extends Application {
             tabButtons[i].setOnAction(e -> {
                 selectedTab = idx;
                 selectTab(tabButtons[idx]);
-                root.setCenter(tabViews[idx]);
+                root.setCenter(createTab(idx));
             });
         }
 
@@ -181,6 +170,28 @@ public class App extends Application {
             return UIButton.primary(name);
         }
         return UIButton.secondary(name);
+    }
+
+    private Node createTab(int index) {
+        if (tabViews[index] != null) {
+            return tabViews[index];
+        }
+        tabViews[index] = switch (index) {
+            case 0 -> new DashboardTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 1 -> new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 2 -> new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 3 -> new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 4 -> new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 5 -> new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 6 -> new StartupTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 7 -> new CleanerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore);
+            case 8 -> new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin);
+            case 9 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
+            case 10 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin);
+            case 11 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings);
+            default -> throw new IllegalArgumentException("Unknown tab index: " + index);
+        };
+        return tabViews[index];
     }
 
     private void selectTab(UIButton selected) {
@@ -216,6 +227,7 @@ public class App extends Application {
         } catch (Throwable ignored) {}
         if (tabViews != null) {
             for (Node view : tabViews) {
+                if (view == null) continue;
                 if (view instanceof DashboardTabView dtv) {
                     dtv.dispose();
                 } else if (view instanceof DriversTabView dtv2) {
@@ -224,6 +236,10 @@ public class App extends Application {
                     suv.dispose();
                 } else if (view instanceof UninstallerTabView utv) {
                     utv.dispose();
+                } else if (view instanceof StartupTabView stv) {
+                    stv.dispose();
+                } else if (view instanceof SystemInfoTabView sitv) {
+                    sitv.dispose();
                 }
             }
         }

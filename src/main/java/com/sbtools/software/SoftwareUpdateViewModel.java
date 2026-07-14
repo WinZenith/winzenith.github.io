@@ -51,9 +51,12 @@ public class SoftwareUpdateViewModel {
     private final BooleanProperty showRetryFailed = new SimpleBooleanProperty(false);
     private final BooleanProperty showBatchProgress = new SimpleBooleanProperty(false);
 
+    private static final int MAX_RETRY_ATTEMPTS = 3;
+
     private final AtomicBoolean scanCancelled = new AtomicBoolean(false);
     private volatile Future<?> scanFuture;
     private final AtomicBoolean installCancelled = new AtomicBoolean(false);
+    private final AtomicBoolean installRunning = new AtomicBoolean(false);
     private final List<SoftwareUpdateEntry> failedEntries = new ArrayList<>();
     private volatile boolean disposed = false;
 
@@ -92,8 +95,13 @@ public class SoftwareUpdateViewModel {
     public void scan() {
         if (busy.get() || disposed) return;
         scanCancelled.set(false);
-        busy.set(true);
-        statusText.set("Scanning for updates...");
+        retryCount = 0;
+        Platform.runLater(() -> {
+            if (disposed) return;
+            busy.set(true);
+            showRetryFailed.set(false);
+            statusText.set("Scanning for updates...");
+        });
         scanFuture = executor.submit(this::scanInternal, "SoftwareUpdate-Scan");
     }
 
@@ -111,7 +119,7 @@ public class SoftwareUpdateViewModel {
 
             final int[] counts = {0, 0};
             List<SoftwareUpdateEntry> allUpdates = service.scanAllConcurrent(
-                    scanCancelled,
+                    scanCancelled::get,
                     wc -> counts[0] = wc,
                     wuc -> counts[1] = wuc
             );
@@ -172,7 +180,11 @@ public class SoftwareUpdateViewModel {
             }
             scanFuture = null;
         }
-        busy.set(false);
+        if (!installRunning.get()) {
+            Platform.runLater(() -> {
+                if (!disposed) busy.set(false);
+            });
+        }
         statusText.set("Scan stopped.");
     }
 
@@ -188,11 +200,13 @@ public class SoftwareUpdateViewModel {
 
         maybeCreateRestorePointAsync().thenRunAsync(() -> {
             synchronized (failedEntries) { failedEntries.clear(); }
-            busy.set(true);
-            installCancelled.set(false);
+            installRunning.set(true);
             int total = selected.size();
-            statusText.set("Installing " + total + " update(s)...");
             Platform.runLater(() -> {
+                if (disposed) return;
+                busy.set(true);
+                installCancelled.set(false);
+                statusText.set("Installing " + total + " update(s)...");
                 showBatchProgress.set(true);
                 batchProgress.set(0);
                 batchProgressText.set("0 / " + total);
@@ -219,7 +233,11 @@ public class SoftwareUpdateViewModel {
 
         try {
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
-        } catch (Exception ignored) {
+        } catch (Exception ex) {
+            installCancelled.set(true);
+            for (CompletableFuture<Void> f : futures) {
+                f.cancel(true);
+            }
         }
 
         final int finalCompleted = completed.get();
@@ -231,6 +249,7 @@ public class SoftwareUpdateViewModel {
         Platform.runLater(() -> {
             if (disposed) return;
             showBatchProgress.set(false);
+            installRunning.set(false);
             busy.set(false);
             if (installCancelled.get()) {
                 statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
@@ -261,9 +280,13 @@ public class SoftwareUpdateViewModel {
 
         maybeCreateRestorePointAsync().thenRunAsync(() -> {
             synchronized (failedEntries) { failedEntries.clear(); }
-            busy.set(true);
-            installCancelled.set(false);
-            statusText.set("Installing update for " + entry.getName() + "...");
+            installRunning.set(true);
+            Platform.runLater(() -> {
+                if (disposed) return;
+                busy.set(true);
+                installCancelled.set(false);
+                statusText.set("Installing update for " + entry.getName() + "...");
+            });
 
             installExecutor.submit(() -> runSingleInstall(entry), "SoftwareUpdate-SingleInstall-" + entry.id());
         }, executor);
@@ -342,15 +365,24 @@ public class SoftwareUpdateViewModel {
                 });
             }
         } finally {
+            installRunning.set(false);
             Platform.runLater(() -> {
                 if (!disposed) busy.set(false);
             });
         }
     }
 
+    private int retryCount = 0;
+
     public void retryFailed() {
         synchronized (failedEntries) {
             if (failedEntries.isEmpty()) return;
+            if (retryCount >= MAX_RETRY_ATTEMPTS) {
+                Platform.runLater(() -> new Alert(Alert.AlertType.WARNING,
+                        "Maximum retry attempts (" + MAX_RETRY_ATTEMPTS + ") reached. Please scan again.").showAndWait());
+                return;
+            }
+            retryCount++;
             List<SoftwareUpdateEntry> toRetry = new ArrayList<>(failedEntries);
             failedEntries.clear();
             for (SoftwareUpdateEntry e : toRetry) {
@@ -387,6 +419,7 @@ public class SoftwareUpdateViewModel {
         disposed = true;
         scanCancelled.set(true);
         installCancelled.set(true);
+        installRunning.set(false);
         if (scanFuture != null) {
             try { scanFuture.cancel(true); } catch (Exception ignored) {}
         }

@@ -25,7 +25,7 @@ public class Win32AppDiscoverer {
         TreeSet<String> seen = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
 
         for (InstalledApp app : apps) {
-            String uniqueKey = app.getName() + "||" + app.getVersion();
+            String uniqueKey = app.getName() + "||" + app.getVersion() + "||" + app.getPublisher();
             if (!seen.contains(uniqueKey)) {
                 seen.add(uniqueKey);
                 deduped.add(app);
@@ -103,13 +103,7 @@ public class Win32AppDiscoverer {
     }
 
     private boolean isMicrosoftOrWindows(String publisher, String displayName) {
-        String lowerPub = publisher != null ? publisher.toLowerCase() : "";
-        String lowerName = displayName != null ? displayName.toLowerCase() : "";
-        boolean isMicrosoftPublisher = lowerPub.contains("microsoft");
-        boolean isMicrosoftOrWindowsName = lowerName.startsWith("microsoft ")
-                || lowerName.equals("microsoft windows")
-                || lowerName.matches("(?i)microsoft windows .*");
-        return isMicrosoftPublisher || isMicrosoftOrWindowsName;
+        return AppCompatUtils.isMicrosoftOrWindows(publisher, displayName);
     }
 
     private static String getStringValue(HKEY hive, String keyPath, String valueName) {

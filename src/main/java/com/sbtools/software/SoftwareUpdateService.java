@@ -21,8 +21,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class SoftwareUpdateService {
 
@@ -84,7 +84,11 @@ public class SoftwareUpdateService {
         String headerLine = null;
         for (int i = 0; i < lines.length; i++) {
             String l = lines[i];
-            if (l.toLowerCase().contains("name") && (l.toLowerCase().contains("version") || l.toLowerCase().contains("installed"))) {
+            String lower = l.toLowerCase();
+            boolean hasName = lower.contains("name");
+            boolean hasVersion = lower.contains("version") || lower.contains("installed");
+            boolean hasId = lower.contains("id") || lower.contains("identifier") || lower.contains("package");
+            if (hasName && (hasVersion || hasId)) {
                 headerIdx = i;
                 headerLine = l;
                 break;
@@ -302,18 +306,18 @@ public class SoftwareUpdateService {
      * Runs winget and Windows Update scans concurrently.
      * Returns combined results. Caller can check cancelled between scans.
      *
-     * @param cancelled  flag to check for cancellation
+     * @param cancelled  supplier checked for cancellation; called repeatedly during scan
      * @param onWingetDone  optional callback with winget result count (called on scan thread)
      * @param onWuDone      optional callback with WU result count (called on scan thread)
      */
-    public List<SoftwareUpdateEntry> scanAllConcurrent(AtomicBoolean cancelled,
+    public List<SoftwareUpdateEntry> scanAllConcurrent(java.util.function.BooleanSupplier cancelled,
                                                         java.util.function.IntConsumer onWingetDone,
                                                         java.util.function.IntConsumer onWuDone) {
         List<SoftwareUpdateEntry> allUpdates = new ArrayList<>();
 
         CompletableFuture<List<SoftwareUpdateEntry>> wingetFuture = CompletableFuture.supplyAsync(() -> {
             if (!winget.isAvailable()) return List.of();
-            if (cancelled.get()) return List.of();
+            if (cancelled.getAsBoolean()) return List.of();
             try {
                 List<SoftwareUpdateEntry> result = scanForUpdates();
                 if (onWingetDone != null) onWingetDone.accept(result.size());
@@ -326,7 +330,7 @@ public class SoftwareUpdateService {
         });
 
         CompletableFuture<List<SoftwareUpdateEntry>> wuFuture = CompletableFuture.supplyAsync(() -> {
-            if (cancelled.get()) return List.of();
+            if (cancelled.getAsBoolean()) return List.of();
             try {
                 List<SoftwareUpdateEntry> result = scanForWindowsUpdates();
                 if (onWuDone != null) onWuDone.accept(result.size());
@@ -342,6 +346,8 @@ public class SoftwareUpdateService {
             CompletableFuture.allOf(wingetFuture, wuFuture).join();
             allUpdates.addAll(wingetFuture.join());
             allUpdates.addAll(wuFuture.join());
+        } catch (java.util.concurrent.CancellationException ex) {
+            AppLogger.info("Parallel scan cancelled");
         } catch (Exception ex) {
             AppLogger.warning("Parallel scan failed: " + ex.getMessage());
         }

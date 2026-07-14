@@ -78,13 +78,7 @@ public class UninstallerService {
     }
 
     private boolean isMicrosoftOrWindows(InstalledApp app) {
-        String lowerPub = app.getPublisher() != null ? app.getPublisher().toLowerCase() : "";
-        String lowerName = app.getName() != null ? app.getName().toLowerCase() : "";
-        boolean isMicrosoftPublisher = lowerPub.contains("microsoft");
-        boolean isMicrosoftOrWindowsName = lowerName.startsWith("microsoft ")
-                || lowerName.equals("microsoft windows")
-                || lowerName.startsWith("microsoft windows ");
-        return isMicrosoftPublisher || isMicrosoftOrWindowsName;
+        return AppCompatUtils.isMicrosoftOrWindows(app);
     }
 
     /**
@@ -92,15 +86,49 @@ public class UninstallerService {
      */
     public ProcessResult runUninstaller(InstalledApp app) throws IOException, InterruptedException {
         if (!app.isWin32()) {
-            // Execute Appx removal
             Path script = PowerShellScripts.resolve("appx-uninstall.ps1");
             return processRunner.run(ProcessRunner.powershellScript(script.toString(), "-PackageFullName", app.getAppxPackageFullName()));
         } else {
-            // Execute Win32 UninstallString via cmd /c
             String uninstallCmd = app.getUninstallString();
-            List<String> command = List.of("cmd.exe", "/c", uninstallCmd);
+            if (uninstallCmd == null || uninstallCmd.isBlank()) {
+                throw new IOException("No uninstall command available for " + app.getName());
+            }
+            List<String> command = parseUninstallCommand(uninstallCmd);
             return processRunner.run(command);
         }
+    }
+
+    private List<String> parseUninstallCommand(String uninstallCmd) {
+        String trimmed = uninstallCmd.trim();
+        String lower = trimmed.toLowerCase();
+
+        if (lower.startsWith("msiexec")) {
+            return List.of("cmd.exe", "/c", trimmed);
+        }
+
+        if (trimmed.startsWith("\"")) {
+            int endQuote = trimmed.indexOf('"', 1);
+            if (endQuote > 1) {
+                String exe = trimmed.substring(1, endQuote);
+                String args = trimmed.substring(endQuote + 1).trim();
+                if (args.isEmpty()) {
+                    return List.of(exe);
+                }
+                return List.of("cmd.exe", "/c", exe, args);
+            }
+        }
+
+        int spaceIdx = trimmed.indexOf(' ');
+        if (spaceIdx > 0) {
+            String exe = trimmed.substring(0, spaceIdx);
+            String args = trimmed.substring(spaceIdx + 1).trim();
+            if (args.isEmpty()) {
+                return List.of(exe);
+            }
+            return List.of("cmd.exe", "/c", exe, args);
+        }
+
+        return List.of("cmd.exe", "/c", trimmed);
     }
 
     /**
@@ -121,6 +149,8 @@ public class UninstallerService {
         List<String> roots = new ArrayList<>();
         addIfNotNull(roots, System.getenv("ProgramFiles"));
         addIfNotNull(roots, System.getenv("ProgramFiles(x86)"));
+        addIfNotNull(roots, System.getenv("CommonProgramFiles"));
+        addIfNotNull(roots, System.getenv("CommonProgramFiles(x86)"));
         addIfNotNull(roots, System.getenv("AppData"));
         addIfNotNull(roots, System.getenv("LocalAppData"));
         addIfNotNull(roots, System.getenv("ProgramData"));
@@ -171,6 +201,7 @@ public class UninstallerService {
         scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SOFTWARE", app.getName(), app.getPublisher(), leftovers);
         scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SOFTWARE\\Wow6432Node", app.getName(), app.getPublisher(), leftovers);
         scanRegistryForLeftovers(WinReg.HKEY_CURRENT_USER, "HKCU", "SOFTWARE", app.getName(), app.getPublisher(), leftovers);
+        scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SYSTEM\\CurrentControlSet\\Services", app.getName(), app.getPublisher(), leftovers);
 
         return leftovers;
     }
@@ -214,7 +245,7 @@ public class UninstallerService {
                 }
             }
         } catch (Exception e) {
-            AppLogger.debug("Skipping registry scan branch: " + rootPath + " - " + e.getMessage());
+            AppLogger.error("Skipping registry scan branch: " + rootPath + " - " + e.getMessage());
         }
     }
 
@@ -288,7 +319,9 @@ public class UninstallerService {
         String[] generic = {
                 "software", "program", "app", "application", "microsoft", "windows",
                 "common", "temp", "local", "roaming", "data", "uninstall", "utilities",
-                "tools", "drivers", "updates"
+                "tools", "drivers", "updates", "config", "cache", "logs", "packages",
+                "resources", "share", "lib", "bin", "src", "include", "plugins",
+                "extensions", "modules", "system", "services", "startup"
         };
         for (String gen : generic) {
             if (name.equals(gen)) return true;
@@ -333,10 +366,10 @@ public class UninstallerService {
         }
     }
 
-    private void deleteRegistryKeyRecursively(HKEY hive, String keyPath) {
+    private boolean deleteRegistryKeyRecursively(HKEY hive, String keyPath) {
         try {
             if (!Advapi32Util.registryKeyExists(hive, keyPath)) {
-                return;
+                return true;
             }
             String[] subkeys = Advapi32Util.registryGetKeys(hive, keyPath);
             if (subkeys != null) {
@@ -346,8 +379,10 @@ public class UninstallerService {
             }
             Advapi32Util.registryDeleteKey(hive, keyPath);
             AppLogger.info("Deleted registry leftover key: " + keyPath);
+            return true;
         } catch (Exception e) {
-            AppLogger.warning("Failed to delete registry key: " + keyPath + " - " + e.getMessage());
+            AppLogger.error("Failed to delete registry key: " + keyPath + " - " + e.getMessage());
+            return false;
         }
     }
 
@@ -363,19 +398,12 @@ public class UninstallerService {
         String appName = app.getName();
         String lowerAppName = appName.toLowerCase();
 
-        // Kill all processes matching app name
-        try {
-            Process taskKill = new ProcessBuilder("taskkill", "/f", "/im", appName + ".exe")
-                    .redirectErrorStream(true)
-                    .start();
-            taskKill.waitFor(5, TimeUnit.SECONDS);
-            summary.add("Attempted to kill processes for: " + appName);
-        } catch (Exception e) {
-            errors.add("Failed to kill processes for " + appName + ": " + e.getMessage());
-        }
+        String installLoc = app.getInstallLocation();
+
+        // Kill processes whose executable path matches the install location
+        killProcessesByPath(installLoc, appName, summary, errors);
 
         // Delete the install directory
-        String installLoc = app.getInstallLocation();
         if (installLoc != null && !installLoc.isBlank()) {
             File dir = new File(installLoc);
             if (dir.exists()) {
@@ -392,6 +420,8 @@ public class UninstallerService {
             List<String> roots = new ArrayList<>();
             addIfNotNull(roots, System.getenv("ProgramFiles"));
             addIfNotNull(roots, System.getenv("ProgramFiles(x86)"));
+            addIfNotNull(roots, System.getenv("CommonProgramFiles"));
+            addIfNotNull(roots, System.getenv("CommonProgramFiles(x86)"));
             addIfNotNull(roots, System.getenv("AppData"));
             addIfNotNull(roots, System.getenv("LocalAppData"));
             addIfNotNull(roots, System.getenv("ProgramData"));
@@ -481,6 +511,28 @@ public class UninstallerService {
         }
 
         return new ForceUninstallResult(summary, errors);
+    }
+
+    private void killProcessesByPath(String installLoc, String appName, List<String> summary, List<String> errors) {
+        try {
+            String psScript;
+            if (installLoc != null && !installLoc.isBlank()) {
+                String escapedPath = installLoc.replace("'", "''");
+                psScript = "Get-Process | Where-Object { $_.Path -like '" + escapedPath + "*' } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
+                        "Write-Output 'done'";
+            } else {
+                String safeName = appName.replaceAll("[^a-zA-Z0-9._-]", "");
+                psScript = "Get-Process | Where-Object { $_.ProcessName -like '" + safeName + "' } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
+                        "Write-Output 'done'";
+            }
+            ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-Command", psScript);
+            pb.redirectErrorStream(true);
+            Process proc = pb.start();
+            proc.waitFor(10, TimeUnit.SECONDS);
+            summary.add("Killed processes matching " + (installLoc != null && !installLoc.isBlank() ? "install path" : "app name") + " for: " + appName);
+        } catch (Exception e) {
+            errors.add("Failed to kill processes for " + appName + ": " + e.getMessage());
+        }
     }
 
     private void deleteMatchingFiles(File dir, String lowerName, List<String> summary, List<String> errors) {
