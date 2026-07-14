@@ -24,6 +24,8 @@ import javafx.scene.layout.VBox;
 
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class CleanerTabView extends BorderPane {
@@ -37,6 +39,7 @@ public class CleanerTabView extends BorderPane {
     private CancelableCompletableFuture<CleanupService.CleanSummary> activeCleanFuture;
     private final ObservableList<CleanupRow> sessionRows = FXCollections.observableArrayList();
     private volatile boolean hasScanned = false;
+    private final AtomicBoolean cancelling = new AtomicBoolean(false);
 
     private TableView<CleanupRow> table;
     private Label statusLabel;
@@ -133,6 +136,7 @@ public class CleanerTabView extends BorderPane {
     }
 
     private void cancelActive() {
+        cancelling.set(true);
         try {
             if (activeScanFuture != null && !activeScanFuture.isDone()) activeScanFuture.cancel(true);
             if (activeCleanFuture != null && !activeCleanFuture.isDone()) activeCleanFuture.cancel(true);
@@ -280,7 +284,7 @@ public class CleanerTabView extends BorderPane {
         activeScanFuture.whenComplete((results, ex) -> {
             Platform.runLater(() -> {
                 if (ex != null) {
-                    if (activeScanFuture.isCancelled()) {
+                    if (cancelling.get() || activeScanFuture.isCancelled()) {
                         statusLabel.setText("Scan canceled.");
                     } else {
                         statusLabel.setText("Scan failed.");
@@ -289,15 +293,21 @@ public class CleanerTabView extends BorderPane {
                     progressBar.setVisible(false);
                     cancelButton.setDisable(true);
                 } else {
-                    sessionRows.setAll(results);
+                    AppSettings settings = settingsStore.load();
+                    List<String> ignored = settings.ignoredCleanupCategories();
+                    List<CleanupRow> filtered = results.stream()
+                            .filter(r -> ignored == null || !ignored.contains(r.getCategory().name()))
+                            .toList();
+                    sessionRows.setAll(filtered);
                     hasScanned = true;
-                    long totalBytes = results.stream().mapToLong(CleanupRow::getTotalBytes).sum();
+                    long totalBytes = filtered.stream().mapToLong(CleanupRow::getTotalBytes).sum();
                     statusLabel.setText("Scan complete - " + CleanupService.formatBytes(totalBytes) + " identified.");
                     cleanButton.setDisable(getSelectedCount() == 0);
                     progressBar.setVisible(false);
                     cancelButton.setDisable(true);
                     updateSummary();
                 }
+                cancelling.set(false);
                 busy.set(false);
             });
         });
@@ -374,7 +384,26 @@ public class CleanerTabView extends BorderPane {
 
         AppSettings settings = settingsStore.load();
         if (settings.autoCreateRestoreBeforeCleanup()) {
-            createRestorePoint();
+            CompletableFuture.runAsync(() -> {
+                Platform.runLater(() -> {
+                    statusLabel.setText("Creating System Restore point...");
+                    progressBar.setProgress(-1);
+                    progressBar.setVisible(true);
+                });
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
+                            "Checkpoint-Computer -Description 'WinZenith Cleanup Pre-Clean' -RestorePointType MODIFY_SETTINGS");
+                    pb.redirectErrorStream(true);
+                    Process p = pb.start();
+                    boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!finished) {
+                        p.destroyForcibly();
+                        AppLogger.warning("System Restore point creation timed out");
+                    }
+                } catch (Exception e) {
+                    AppLogger.warning("Failed to create System Restore point: " + e.getMessage());
+                }
+            });
         }
 
         statusLabel.setText("Cleaning...");
@@ -398,7 +427,7 @@ public class CleanerTabView extends BorderPane {
         activeCleanFuture.whenComplete((summary, ex) -> {
             if (ex != null) {
                 Platform.runLater(() -> {
-                    if (activeCleanFuture.isCancelled()) {
+                    if (cancelling.get() || activeCleanFuture.isCancelled()) {
                         statusLabel.setText("Cleanup canceled.");
                     } else {
                         statusLabel.setText("Cleanup failed.");
@@ -436,6 +465,9 @@ public class CleanerTabView extends BorderPane {
                                     existing.setTotalBytes(refreshed.getTotalBytes());
                                     existing.setItemCount(refreshed.getItemCount());
                                     existing.setSizeOrCountText(refreshed.sizeOrCountTextProperty().get());
+                                    existing.setScanStatus(refreshed.getScanStatus());
+                                    existing.setErrorMessage(refreshed.getErrorMessage());
+                                    existing.setScanDurationMs(refreshed.getScanDurationMs());
                                 }
                             }
                         }
@@ -459,29 +491,11 @@ public class CleanerTabView extends BorderPane {
                         resultAlert.setHeaderText("Cleanup Results");
                         resultAlert.showAndWait();
 
+                        cancelling.set(false);
                         busy.set(false);
                     });
                 });
             }
         });
-    }
-
-    private void createRestorePoint() {
-        statusLabel.setText("Creating System Restore point...");
-        progressBar.setProgress(-1);
-        progressBar.setVisible(true);
-        try {
-            ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
-                    "Checkpoint-Computer -Description 'WinZenith Cleanup Pre-Clean' -RestorePointType MODIFY_SETTINGS");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
-            if (!finished) {
-                p.destroyForcibly();
-                AppLogger.warning("System Restore point creation timed out");
-            }
-        } catch (Exception e) {
-            AppLogger.warning("Failed to create System Restore point: " + e.getMessage());
-        }
     }
 }

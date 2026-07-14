@@ -2,6 +2,7 @@ package com.sbtools.cleaner;
 
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
+import com.sbtools.util.FormatUtils;
 import com.sbtools.util.ProcessManager;
 import com.sbtools.util.CancelableCompletableFuture;
 import com.sun.jna.platform.win32.Advapi32Util;
@@ -352,6 +353,9 @@ public class CleanupService {
                 AppLogger.warning("No cleaner registered for " + row.getCategory().getDisplayName());
                 row.setSizeOrCountText("Not supported");
             }
+            if (row.getScanStatus() != CleanupRow.ScanStatus.ERROR) {
+                row.setScanStatus(CleanupRow.ScanStatus.DONE);
+            }
         } catch (Exception e) {
             AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
             row.setSizeOrCountText("Error");
@@ -410,11 +414,7 @@ public class CleanupService {
             CompletableFuture<Void> f = CompletableFuture.runAsync(() -> {
                 long startMs = System.currentTimeMillis();
                 try {
-                    Cleaner c = cleaners.get(row.getCategory());
-                    if (c != null)
-                        c.scan(row);
-                    else
-                        scanCategory(row);
+                    scanCategory(row);
                 } catch (Exception e) {
                     AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
                     row.setSizeOrCountText("Error");
@@ -476,17 +476,18 @@ public class CleanupService {
             CompletableFuture<Void> f = CompletableFuture.runAsync(() -> {
                 long startMs = System.currentTimeMillis();
                 try {
-                    Cleaner c = cleaners.get(row.getCategory());
-                    if (c != null)
-                        c.scan(row);
-                    else
-                        scanCategory(row);
+                    scanCategory(row);
                 } catch (Exception e) {
                     AppLogger
                             .warning("Rescan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
                     row.setSizeOrCountText("Error");
+                    row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                    row.setErrorMessage(e.getMessage());
                 } finally {
                     row.setScanDurationMs(System.currentTimeMillis() - startMs);
+                    if (row.getScanStatus() != CleanupRow.ScanStatus.ERROR) {
+                        row.setScanStatus(CleanupRow.ScanStatus.DONE);
+                    }
                     if (onProgress != null)
                         onProgress.run();
                 }
@@ -547,9 +548,6 @@ public class CleanupService {
             final CleanupRow taskRow = row;
             CompletableFuture<Long> f = CompletableFuture.supplyAsync(() -> {
                 try {
-                    Cleaner c = cleaners.get(taskRow.getCategory());
-                    if (c != null)
-                        return c.clean(backupRoot);
                     return cleanCategory(taskRow.getCategory(), backupRoot);
                 } catch (Exception e) {
                     AppLogger.warning(
@@ -1217,7 +1215,8 @@ public class CleanupService {
         try {
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, basePath)) {
                 String[] sids = Advapi32Util.registryGetKeys(WinReg.HKEY_LOCAL_MACHINE, basePath);
-                backupRegKey(backupRootOrNull, "installercomponents", "HKLM", basePath);
+                List<String> allToDelete = new ArrayList<>();
+                Map<String, List<String>> deletionsBySid = new HashMap<>();
                 for (String sid : sids) {
                     String compPath = basePath + "\\" + sid + "\\Components";
                     try {
@@ -1229,21 +1228,14 @@ public class CleanupService {
                                     String valPath = compPath + "\\" + compGUID;
                                     Map<String, Object> vals = Advapi32Util.registryGetValues(
                                             WinReg.HKEY_LOCAL_MACHINE, valPath);
-                                    List<String> toDelete = new ArrayList<>();
                                     for (String valName : vals.keySet()) {
                                         if (valName.contains(":") || valName.contains("\\")) {
                                             Path p = Paths.get(valName);
                                             if (!Files.exists(p)) {
-                                                toDelete.add(valName);
+                                                allToDelete.add(valName);
+                                                deletionsBySid.computeIfAbsent(sid, k -> new ArrayList<>())
+                                                        .add(valPath + "\\" + valName);
                                             }
-                                        }
-                                    }
-                                    for (String valName : toDelete) {
-                                        try {
-                                            Advapi32Util.registryDeleteValue(
-                                                    WinReg.HKEY_LOCAL_MACHINE, valPath, valName);
-                                            count++;
-                                        } catch (Exception ignored) {
                                         }
                                     }
                                 } catch (Exception ignored) {
@@ -1251,6 +1243,22 @@ public class CleanupService {
                             }
                         }
                     } catch (Exception ignored) {
+                    }
+                }
+                if (!allToDelete.isEmpty()) {
+                    backupRegKey(backupRootOrNull, "installercomponents", "HKLM", basePath);
+                    for (Map.Entry<String, List<String>> entry : deletionsBySid.entrySet()) {
+                        for (String fullPath : entry.getValue()) {
+                            try {
+                                String[] parts = fullPath.replace(basePath + "\\", "").split("\\\\", 2);
+                                if (parts.length == 2) {
+                                    Advapi32Util.registryDeleteValue(
+                                            WinReg.HKEY_LOCAL_MACHINE, parts[0], parts[1]);
+                                    count++;
+                                }
+                            } catch (Exception ignored) {
+                            }
+                        }
                     }
                 }
             }
@@ -1268,6 +1276,7 @@ public class CleanupService {
             if (recycleBin != null && Files.isDirectory(recycleBin)) {
                 try (Stream<Path> walk = Files.walk(recycleBin)) {
                     size = walk.filter(Files::isRegularFile)
+                            .filter(p -> !p.getFileName().toString().startsWith("$I"))
                             .mapToLong(p -> p.toFile().length())
                             .sum();
                 }
@@ -1293,7 +1302,12 @@ public class CleanupService {
             ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
                     "Clear-RecycleBin -Force -ErrorAction SilentlyContinue");
             pb.redirectErrorStream(true);
-            ProcessManager.start(pb.inheritIO()).waitFor();
+            Process p = ProcessManager.start(pb);
+            boolean finished = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                AppLogger.warning("Recycle Bin cleanup timed out");
+            }
         } catch (Exception ex) {
             AppLogger.warning("Failed to empty Recycle Bin via PowerShell, trying fallback: " + ex.getMessage());
             try {
@@ -1301,7 +1315,12 @@ public class CleanupService {
                 if (sysdrive != null) {
                     ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
                             "rd", "/s", "/q", sysdrive + "\\$Recycle.Bin");
-                    ProcessManager.start(pb.inheritIO()).waitFor();
+                    pb.redirectErrorStream(true);
+                    Process p = ProcessManager.start(pb);
+                    boolean finished = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!finished) {
+                        p.destroyForcibly();
+                    }
                 }
             } catch (Exception ex2) {
                 AppLogger.warning("Failed to empty Recycle Bin: " + ex2.getMessage());
@@ -1717,6 +1736,7 @@ public class CleanupService {
 
     private void scanInstallerFiles(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         List<Path> dirs = new ArrayList<>();
 
         Path winInstaller = safeEnvPath("WINDIR", "Installer");
@@ -1734,6 +1754,7 @@ public class CleanupService {
                             long size = Files.size(f);
                             if (size > 10 * 1024 * 1024) {
                                 totalSize += size;
+                                itemCount++;
                             }
                         }
                     }
@@ -1745,20 +1766,22 @@ public class CleanupService {
         for (Path dir : dirs) {
             if (Files.isDirectory(dir)) {
                 try (Stream<Path> walk = Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
+                    var stats = walk.filter(Files::isRegularFile)
                             .filter(p -> {
                                 String name = p.getFileName().toString().toLowerCase();
                                 return name.endsWith(".msi") || name.contains(".cab");
                             })
-                            .mapToLong(p -> p.toFile().length())
-                            .sum();
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
 
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanInstallerFiles() {
@@ -1863,13 +1886,17 @@ public class CleanupService {
             addPath(dirs, windir);
         }
         long totalSize = 0;
+        int itemCount = 0;
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
                 try (Stream<Path> files = Files.list(dir)) {
-                    totalSize += files.filter(Files::isRegularFile)
+                    var matched = files.filter(Files::isRegularFile)
                             .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".dmp"))
-                            .mapToLong(p -> p.toFile().length())
-                            .sum();
+                            .toList();
+                    for (Path f : matched) {
+                        totalSize += f.toFile().length();
+                        itemCount++;
+                    }
                 } catch (Exception ignored) {
                 }
             }
@@ -1880,10 +1907,12 @@ public class CleanupService {
             Path rootDump = Paths.get(sysdrive, "memory.dmp");
             if (Files.isRegularFile(rootDump)) {
                 totalSize += rootDump.toFile().length();
+                itemCount++;
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanMemoryDumps() {
@@ -1960,6 +1989,7 @@ public class CleanupService {
 
     private void scanWindowsUpdateCleanup(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         // Try fast DISM query with short timeout
         try {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image",
@@ -1995,8 +2025,10 @@ public class CleanupService {
                     for (Path dir : dirs) {
                         if (dir != null && Files.isDirectory(dir)) {
                             try (Stream<Path> walk = Files.walk(dir)) {
-                                totalSize += walk.filter(Files::isRegularFile)
-                                        .mapToLong(p -> p.toFile().length()).sum();
+                                var stats = walk.filter(Files::isRegularFile)
+                                        .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                                totalSize += stats.getSum();
+                                itemCount += (int) stats.getCount();
                             }
                         }
                     }
@@ -2004,7 +2036,8 @@ public class CleanupService {
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize) + (totalSize > 0 ? "" : " (via fallback)"));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanWindowsUpdateCleanup() {
@@ -2024,16 +2057,11 @@ public class CleanupService {
         } catch (Exception e) {
             AppLogger.warning("DISM cleanup failed: " + e.getMessage());
         }
-        // Also clean SoftwareDistribution\Download - measure size before deleting
+        // Also clean SoftwareDistribution\Download
         String windir = safeEnv("WINDIR");
         if (windir != null) {
             Path sd = Paths.get(windir, "SoftwareDistribution", "Download");
             if (Files.isDirectory(sd)) {
-                try (Stream<Path> walk = Files.walk(sd)) {
-                    cleaned += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
-                } catch (Exception ignored) {
-                }
                 cleaned += deleteDirectoryContents(sd);
             }
         }
@@ -2044,24 +2072,29 @@ public class CleanupService {
 
     private void scanThumbnailCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String localAppData = safeEnv("LOCALAPPDATA");
         if (localAppData != null) {
             Path explorerDir = Paths.get(localAppData, "Microsoft", "Windows", "Explorer");
             if (Files.isDirectory(explorerDir)) {
                 try (Stream<Path> files = Files.list(explorerDir)) {
-                    totalSize += files.filter(Files::isRegularFile)
+                    var matched = files.filter(Files::isRegularFile)
                             .filter(p -> {
                                 String name = p.getFileName().toString().toLowerCase();
                                 return name.startsWith("thumbcache_") || name.startsWith("iconcache_");
                             })
-                            .mapToLong(p -> p.toFile().length())
-                            .sum();
+                            .toList();
+                    for (Path f : matched) {
+                        totalSize += f.toFile().length();
+                        itemCount++;
+                    }
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanThumbnailCache() {
@@ -2213,6 +2246,7 @@ public class CleanupService {
 
     private void scanOfficeDocumentCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String localAppData = safeEnv("LOCALAPPDATA");
         if (localAppData != null) {
             Path officeParent = Paths.get(localAppData, "Microsoft", "Office");
@@ -2223,8 +2257,10 @@ public class CleanupService {
                             Path fileCache = versionDir.resolve("OfficeFileCache");
                             if (Files.isDirectory(fileCache)) {
                                 try (Stream<Path> walk = Files.walk(fileCache)) {
-                                    totalSize += walk.filter(Files::isRegularFile)
-                                            .mapToLong(p -> p.toFile().length()).sum();
+                                    var stats = walk.filter(Files::isRegularFile)
+                                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                                    totalSize += stats.getSum();
+                                    itemCount += (int) stats.getCount();
                                 }
                             }
                         }
@@ -2234,7 +2270,8 @@ public class CleanupService {
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanOfficeDocumentCache() {
@@ -2279,24 +2316,27 @@ public class CleanupService {
 
     private void scanWindowsLogFiles(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String windir = safeEnv("WINDIR");
         if (windir != null) {
             Path logsDir = Paths.get(windir, "Logs");
             if (Files.isDirectory(logsDir)) {
                 try (Stream<Path> walk = Files.walk(logsDir, 2)) {
-                    totalSize += walk.filter(Files::isRegularFile)
+                    var stats = walk.filter(Files::isRegularFile)
                             .filter(p -> {
                                 String name = p.getFileName().toString().toLowerCase();
                                 return name.endsWith(".log") || name.endsWith(".etl");
                             })
-                            .mapToLong(p -> p.toFile().length())
-                            .sum();
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanWindowsLogFiles() {
@@ -2328,6 +2368,7 @@ public class CleanupService {
 
     private void scanWindowsStoreCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String localAppData = safeEnv("LOCALAPPDATA");
         if (localAppData != null) {
             Path packagesDir = Paths.get(localAppData, "Packages");
@@ -2338,7 +2379,7 @@ public class CleanupService {
                             Path localState = pkg.resolve("LocalState");
                             if (Files.isDirectory(localState)) {
                                 try (Stream<Path> walk = Files.walk(localState, 1)) {
-                                    totalSize += walk.filter(Files::isRegularFile)
+                                    var stats = walk.filter(Files::isRegularFile)
                                             .filter(f -> {
                                                 try {
                                                     return !Files.isHidden(f);
@@ -2346,7 +2387,9 @@ public class CleanupService {
                                                     return true;
                                                 }
                                             })
-                                            .mapToLong(f -> f.toFile().length()).sum();
+                                            .collect(java.util.stream.Collectors.summarizingLong(f -> f.toFile().length()));
+                                    totalSize += stats.getSum();
+                                    itemCount += (int) stats.getCount();
                                 } catch (Exception ignored) {
                                 }
                             }
@@ -2357,7 +2400,8 @@ public class CleanupService {
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanWindowsStoreCache() {
@@ -2402,6 +2446,7 @@ public class CleanupService {
 
     private void scanDiscordCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String appData = safeEnv("APPDATA");
         if (appData != null) {
             Path discord = Paths.get(appData, "discord");
@@ -2417,14 +2462,17 @@ public class CleanupService {
                 dirs.add(gpuCache);
             for (Path dir : dirs) {
                 try (Stream<Path> walk = Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
+                    var stats = walk.filter(Files::isRegularFile)
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanDiscordCache() {
@@ -2455,6 +2503,7 @@ public class CleanupService {
 
     private void scanVscodeCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String appData = safeEnv("APPDATA");
         if (appData != null) {
             Path code = Paths.get(appData, "Code");
@@ -2470,14 +2519,17 @@ public class CleanupService {
                 dirs.add(cachedExtensions);
             for (Path dir : dirs) {
                 try (Stream<Path> walk = Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
+                    var stats = walk.filter(Files::isRegularFile)
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanVscodeCache() {
@@ -2508,6 +2560,7 @@ public class CleanupService {
 
     private void scanAdobeCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String appData = safeEnv("APPDATA");
         String localAppData = safeEnv("LOCALAPPDATA");
 
@@ -2523,8 +2576,10 @@ public class CleanupService {
                 dirs.add(mediaCacheFiles);
             for (Path dir : dirs) {
                 try (Stream<Path> walk = Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
+                    var stats = walk.filter(Files::isRegularFile)
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
@@ -2549,8 +2604,10 @@ public class CleanupService {
                     localDirs.add(colorSync);
                 for (Path dir : localDirs) {
                     try (Stream<Path> walk = Files.walk(dir)) {
-                        totalSize += walk.filter(Files::isRegularFile)
-                                .mapToLong(p -> p.toFile().length()).sum();
+                        var stats = walk.filter(Files::isRegularFile)
+                                .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                        totalSize += stats.getSum();
+                        itemCount += (int) stats.getCount();
                     } catch (Exception ignored) {
                     }
                 }
@@ -2558,7 +2615,8 @@ public class CleanupService {
         }
 
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanAdobeCache() {
@@ -2615,6 +2673,7 @@ public class CleanupService {
 
     private void scanSteamCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         Path steamDir = findSteamDir();
         if (steamDir != null) {
             List<Path> dirs = new ArrayList<>();
@@ -2629,14 +2688,17 @@ public class CleanupService {
                 dirs.add(downloading);
             for (Path dir : dirs) {
                 try (Stream<Path> walk = Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
+                    var stats = walk.filter(Files::isRegularFile)
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanSteamCache() {
@@ -2682,6 +2744,7 @@ public class CleanupService {
 
     private void scanSlackCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String appData = safeEnv("APPDATA");
         if (appData != null) {
             Path slack = Paths.get(appData, "Slack");
@@ -2697,14 +2760,17 @@ public class CleanupService {
                 dirs.add(gpuCache);
             for (Path dir : dirs) {
                 try (Stream<Path> walk = Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
+                    var stats = walk.filter(Files::isRegularFile)
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanSlackCache() {
@@ -2735,19 +2801,23 @@ public class CleanupService {
 
     private void scanZoomCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String appData = safeEnv("APPDATA");
         if (appData != null) {
             Path zoomData = Paths.get(appData, "Zoom", "data");
             if (Files.isDirectory(zoomData)) {
                 try (Stream<Path> walk = Files.walk(zoomData, 1)) {
-                    totalSize += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
+                    var stats = walk.filter(Files::isRegularFile)
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanZoomCache() {
@@ -2775,6 +2845,7 @@ public class CleanupService {
 
     private void scanTeamsCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String appData = safeEnv("APPDATA");
         String localAppData = safeEnv("LOCALAPPDATA");
 
@@ -2782,8 +2853,10 @@ public class CleanupService {
         List<Path> oldTeamsDirs = getTeamsDirs(appData != null ? Paths.get(appData, "Microsoft", "Teams") : null);
         for (Path dir : oldTeamsDirs) {
             try (Stream<Path> walk = Files.walk(dir)) {
-                totalSize += walk.filter(Files::isRegularFile)
-                        .mapToLong(p -> p.toFile().length()).sum();
+                var stats = walk.filter(Files::isRegularFile)
+                        .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                totalSize += stats.getSum();
+                itemCount += (int) stats.getCount();
             } catch (Exception ignored) {
             }
         }
@@ -2793,8 +2866,10 @@ public class CleanupService {
                 appData != null ? Paths.get(appData, "Microsoft", "Teams classic") : null);
         for (Path dir : newTeamsDirs) {
             try (Stream<Path> walk = Files.walk(dir)) {
-                totalSize += walk.filter(Files::isRegularFile)
-                        .mapToLong(p -> p.toFile().length()).sum();
+                var stats = walk.filter(Files::isRegularFile)
+                        .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                totalSize += stats.getSum();
+                itemCount += (int) stats.getCount();
             } catch (Exception ignored) {
             }
         }
@@ -2810,8 +2885,10 @@ public class CleanupService {
                             Path ac = pkg.resolve("AC");
                             if (Files.isDirectory(ac)) {
                                 try (Stream<Path> walk = Files.walk(ac)) {
-                                    totalSize += walk.filter(Files::isRegularFile)
-                                            .mapToLong(p -> p.toFile().length()).sum();
+                                    var stats = walk.filter(Files::isRegularFile)
+                                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                                    totalSize += stats.getSum();
+                                    itemCount += (int) stats.getCount();
                                 } catch (Exception ignored) {
                                 }
                             }
@@ -2823,7 +2900,8 @@ public class CleanupService {
         }
 
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private List<Path> getTeamsDirs(Path teamsBase) {
@@ -2892,37 +2970,40 @@ public class CleanupService {
 
     private void scanOtherProgramsCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
 
-        CleanupRow temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
+        CleanupRow temp = row;
         scanDiscordCache(temp);
         totalSize += temp.getTotalBytes();
+        itemCount += temp.getItemCount();
 
-        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanVscodeCache(temp);
         totalSize += temp.getTotalBytes();
+        itemCount += temp.getItemCount();
 
-        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanAdobeCache(temp);
         totalSize += temp.getTotalBytes();
+        itemCount += temp.getItemCount();
 
-        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanSteamCache(temp);
         totalSize += temp.getTotalBytes();
+        itemCount += temp.getItemCount();
 
-        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanSlackCache(temp);
         totalSize += temp.getTotalBytes();
+        itemCount += temp.getItemCount();
 
-        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanZoomCache(temp);
         totalSize += temp.getTotalBytes();
+        itemCount += temp.getItemCount();
 
-        temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
         scanTeamsCache(temp);
         totalSize += temp.getTotalBytes();
+        itemCount += temp.getItemCount();
 
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanOtherProgramsCache() {
@@ -2994,6 +3075,7 @@ public class CleanupService {
 
     private void scanSoftwareDistributionCache(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String windir = safeEnv("WINDIR");
         if (windir != null) {
             List<Path> dirs = new ArrayList<>();
@@ -3003,15 +3085,18 @@ public class CleanupService {
             for (Path dir : dirs) {
                 if (dir != null && Files.isDirectory(dir)) {
                     try (Stream<Path> walk = Files.walk(dir)) {
-                        totalSize += walk.filter(Files::isRegularFile)
-                                .mapToLong(p -> p.toFile().length()).sum();
+                        var stats = walk.filter(Files::isRegularFile)
+                                .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                        totalSize += stats.getSum();
+                        itemCount += (int) stats.getCount();
                     } catch (Exception ignored) {
                     }
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanSoftwareDistributionCache() {
@@ -3061,20 +3146,24 @@ public class CleanupService {
 
     private void scanOldWindowsInstall(CleanupRow row) {
         long totalSize = 0;
+        int itemCount = 0;
         String sysdrive = safeEnv("SYSTEMDRIVE");
         if (sysdrive != null) {
             Path windowsOld = Paths.get(sysdrive, "Windows.old");
             if (Files.isDirectory(windowsOld)) {
                 try (Stream<Path> walk = Files.walk(windowsOld)) {
-                    totalSize += walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length()).sum();
+                    var stats = walk.filter(Files::isRegularFile)
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
+        row.setItemCount(itemCount);
         if (totalSize > 0) {
-            row.setSizeOrCountText(formatBytes(totalSize));
+            row.setSizeOrCountText(formatBytes(totalSize) + " (" + itemCount + " files)");
         } else {
             row.setSizeOrCountText("Not found");
         }
@@ -3086,19 +3175,41 @@ public class CleanupService {
         if (sysdrive != null) {
             Path windowsOld = Paths.get(sysdrive, "Windows.old");
             if (Files.isDirectory(windowsOld)) {
-                try {
-                    cleaned = Files.walk(windowsOld)
+                try (Stream<Path> walk = Files.walk(windowsOld)) {
+                    cleaned = walk.filter(Files::isRegularFile)
                             .mapToLong(p -> p.toFile().length())
                             .sum();
                 } catch (Exception ignored) {
                 }
 
                 try {
+                    ProcessBuilder pbTakeown = new ProcessBuilder("cmd", "/c",
+                            "takeown /F \"" + windowsOld.toString() + "\\*\" /R /A");
+                    pbTakeown.redirectErrorStream(true);
+                    Process pTakeown = ProcessManager.start(pbTakeown);
+                    pTakeown.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+
+                    ProcessBuilder pbIcacls = new ProcessBuilder("cmd", "/c",
+                            "icacls \"" + windowsOld.toString() + "\\*\" /grant administrators:F /T");
+                    pbIcacls.redirectErrorStream(true);
+                    Process pIcacls = ProcessManager.start(pbIcacls);
+                    pIcacls.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+
                     ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
                             "rd", "/s", "/q", windowsOld.toString());
-                    ProcessManager.start(pb.inheritIO()).waitFor();
+                    pb.redirectErrorStream(true);
+                    Process p = ProcessManager.start(pb);
+                    boolean finished = p.waitFor(300, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!finished) {
+                        p.destroyForcibly();
+                        AppLogger.warning("Windows.old deletion timed out");
+                    }
                 } catch (Exception ex) {
                     AppLogger.warning("Failed to remove Windows.old: " + ex.getMessage());
+                }
+
+                if (cleaned == 0 && !Files.isDirectory(windowsOld)) {
+                    cleaned = 1;
                 }
             }
         }
@@ -3143,11 +3254,12 @@ public class CleanupService {
 
     private void scanDirectorySizesOlderThan(CleanupRow row, List<Path> dirs, java.time.Duration maxAge) {
         long totalSize = 0;
+        int itemCount = 0;
         long cutoff = System.currentTimeMillis() - maxAge.toMillis();
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
                 try (Stream<Path> walk = Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
+                    var stats = walk.filter(Files::isRegularFile)
                             .filter(p -> {
                                 try {
                                     if (Files.isHidden(p))
@@ -3158,22 +3270,25 @@ public class CleanupService {
                                     return true;
                                 }
                             })
-                            .mapToLong(p -> p.toFile().length())
-                            .sum();
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private void scanDirectorySizes(CleanupRow row, List<Path> dirs, int maxDepth) {
         long totalSize = 0;
+        int itemCount = 0;
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
                 try (Stream<Path> walk = maxDepth > 0 ? Files.walk(dir, maxDepth) : Files.walk(dir)) {
-                    totalSize += walk.filter(Files::isRegularFile)
+                    var stats = walk.filter(Files::isRegularFile)
                             .filter(p -> {
                                 try {
                                     return !Files.isHidden(p);
@@ -3181,14 +3296,16 @@ public class CleanupService {
                                     return true;
                                 }
                             })
-                            .mapToLong(p -> p.toFile().length())
-                            .sum();
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                    totalSize += stats.getSum();
+                    itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
                 }
             }
         }
         row.setTotalBytes(totalSize);
-        row.setSizeOrCountText(formatBytes(totalSize));
+        row.setItemCount(itemCount);
+        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
     }
 
     private long cleanDirectoryPattern(List<Path> dirs) {
@@ -3267,19 +3384,14 @@ public class CleanupService {
         } catch (IOException e) {
             AppLogger.warning("Could not delete " + source + ": " + e.getMessage());
             try {
-                source.toFile().deleteOnExit();
+                Thread.sleep(100);
+                Files.deleteIfExists(source);
             } catch (Exception ignored) {
             }
         }
     }
 
     public static String formatBytes(long bytes) {
-        if (bytes < 1024)
-            return bytes + " B";
-        if (bytes < 1024 * 1024)
-            return String.format("%.1f KB", bytes / 1024.0);
-        if (bytes < 1024L * 1024 * 1024)
-            return String.format("%.1f MB", bytes / (1024.0 * 1024));
-        return String.format("%.2f GB", bytes / (1024.0 * 1024 * 1024));
+        return FormatUtils.formatBytes(bytes);
     }
 }
