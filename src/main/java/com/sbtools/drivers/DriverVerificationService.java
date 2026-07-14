@@ -142,15 +142,16 @@ public class DriverVerificationService {
 
     private static String extractJsonString(String json, String key) {
         if (json == null) return null;
-        String search = "\"" + key + "\"";
-        int idx = json.indexOf(search);
-        if (idx < 0) return null;
-        int colonIdx = json.indexOf(':', idx + search.length());
-        if (colonIdx < 0) return null;
-        int quoteStart = json.indexOf('"', colonIdx + 1);
-        if (quoteStart < 0) return null;
-        int quoteEnd = json.indexOf('"', quoteStart + 1);
-        if (quoteEnd < 0) return null;
-        return json.substring(quoteStart + 1, quoteEnd);
+        try {
+            JsonNode root = JsonMapper.parseTree(json);
+            JsonNode node = root.get(key);
+            if (node != null && !node.isNull() && !node.isMissingNode()) {
+                return node.asText("");
+            }
+            return null;
+        } catch (Exception e) {
+            AppLogger.debug("Failed to parse JSON for key '" + key + "': " + e.getMessage());
+            return null;
+        }
     }
 }

@@ -38,13 +38,13 @@ public class DriverScanService {
         if (root.isArray()) {
             for (JsonNode n : root) {
                 InstalledDriver d = nodeToDriver(n);
-                if (d != null && d.isHealthy()) {
+                if (d != null) {
                     list.add(d);
                 }
             }
         } else if (root.isObject()) {
             InstalledDriver d = nodeToDriver(root);
-            if (d != null && d.isHealthy()) {
+            if (d != null) {
                 list.add(d);
             }
         }

@@ -13,10 +13,10 @@ public final class VersionCompare {
         if (b == null || b.isBlank()) {
             return 1;
         }
-        String na = normalizeVersion(a);
-        String nb = normalizeVersion(b);
-        String[] pa = na.split("\\.");
-        String[] pb = nb.split("\\.");
+        String baseA = extractBaseVersion(a);
+        String baseB = extractBaseVersion(b);
+        String[] pa = baseA.split("\\.");
+        String[] pb = baseB.split("\\.");
         int len = Math.max(pa.length, pb.length);
         for (int i = 0; i < len; i++) {
             long va = parsePart(i < pa.length ? pa[i] : "0");
@@ -25,16 +25,32 @@ public final class VersionCompare {
                 return Long.compare(va, vb);
             }
         }
-        return na.compareToIgnoreCase(nb);
+        boolean hasPrereleaseA = hasPrereleaseSuffix(a);
+        boolean hasPrereleaseB = hasPrereleaseSuffix(b);
+        if (hasPrereleaseA != hasPrereleaseB) {
+            return hasPrereleaseA ? -1 : 1;
+        }
+        return baseA.compareToIgnoreCase(baseB);
     }
 
-    private static String normalizeVersion(String version) {
+    private static String extractBaseVersion(String version) {
         String v = version.replace(',', '.');
         int dashIdx = v.indexOf('-');
         if (dashIdx > 0) {
             v = v.substring(0, dashIdx);
         }
         return v;
+    }
+
+    private static boolean hasPrereleaseSuffix(String version) {
+        if (version == null) return false;
+        String v = version.replace(',', '.');
+        int dashIdx = v.indexOf('-');
+        if (dashIdx <= 0) return false;
+        String suffix = v.substring(dashIdx + 1).toLowerCase();
+        return suffix.contains("alpha") || suffix.contains("beta")
+                || suffix.contains("rc") || suffix.contains("preview")
+                || suffix.contains("test") || suffix.contains("dev");
     }
 
     private static long parsePart(String part) {

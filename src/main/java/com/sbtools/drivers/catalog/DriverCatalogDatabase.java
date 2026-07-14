@@ -255,7 +255,7 @@ public final class DriverCatalogDatabase {
     }
 
     private static String normalizeHardwareId(String hwId) {
-        return hwId.toUpperCase().replaceAll("[^A-Z0-9&\\\\]", "");
+        return hwId.toUpperCase().replaceAll("[^A-Z0-9&\\\\_]", "");
     }
 
     private static Map<String, List<CatalogEntry>> indexByProvider(List<CatalogEntry> entries) {

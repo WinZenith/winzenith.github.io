@@ -93,20 +93,22 @@ public class DriverInstallService {
                     "Blocked: candidate appears to be a pre-release (alpha/beta/rc/preview). Only stable releases are installed.");
         }
 
+        if (backupEntry != null) {
+            AppLogger.info("Backup preserved for rollback at: " + backupEntry.backupFolder());
+        }
+
         if ("WindowsUpdate".equals(candidate.source()) && candidate.packageId() != null && !candidate.packageId().isBlank()) {
             try {
                 Path script = PowerShellScripts.resolve("wu-install.ps1");
                 ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
                         script.toString(), candidate.packageId()));
                 if (!result.success()) {
-                    removeBackupIfPresent(backupEntry);
                     return new InstallResult(InstallStatus.INSTALL_FAILED, false,
                             "Windows Update install failed: " + result.combinedOutput());
                 }
                 boolean reboot = result.stdout() != null && result.stdout().contains("\"rebootRequired\":true");
                 return new InstallResult(InstallStatus.SUCCESS, reboot, result.stdout());
             } catch (Exception e) {
-                removeBackupIfPresent(backupEntry);
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
         }
@@ -120,12 +122,8 @@ public class DriverInstallService {
             }
             try {
                 InstallResult result = downloadAndInstallDriver(candidate, settings);
-                if (result.status().isSuccess()) {
-                    removeBackupIfPresent(backupEntry);
-                }
                 return result;
             } catch (Exception e) {
-                removeBackupIfPresent(backupEntry);
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
         }
@@ -195,8 +193,9 @@ public class DriverInstallService {
 
             reportStatus("Verifying driver integrity…");
 
+            java.util.Optional<CatalogEntry> catalogEntry = java.util.Optional.empty();
             if (catalogDatabase != null) {
-                java.util.Optional<CatalogEntry> catalogEntry = catalogDatabase.findBestMatch(candidate.installed());
+                catalogEntry = catalogDatabase.findBestMatch(candidate.installed());
                 if (catalogEntry.isPresent() && catalogEntry.get().hashSha256() != null
                         && !catalogEntry.get().hashSha256().isBlank()) {
                     String expectedHash = catalogEntry.get().hashSha256();
@@ -222,23 +221,25 @@ public class DriverInstallService {
             }
 
             // If the catalog provides an expected signer thumbprint, verify it matches.
-            if (catalogDatabase != null) {
-                java.util.Optional<CatalogEntry> catalogEntry = catalogDatabase.findBestMatch(candidate.installed());
-                if (catalogEntry.isPresent() && catalogEntry.get().certThumbprint() != null
-                        && !catalogEntry.get().certThumbprint().isBlank()) {
-                    String expectedThumb = catalogEntry.get().certThumbprint();
-                    DriverVerificationService.VerificationResult thumbResult = verificationService.verifyAuthenticodeThumbprint(driverFile, expectedThumb);
-                    if (!thumbResult.verified()) {
-                        AppLogger.warning("Authenticode thumbprint verification failed: " + thumbResult.message());
-                        cleanupTempFiles(driverFile);
-                        return new InstallResult(InstallStatus.VERIFICATION_FAILED, false,
-                                "Signature thumbprint verification failed: " + thumbResult.message());
-                    }
-                    AppLogger.info("Authenticode thumbprint verified for " + driverFile.getFileName());
+            if (catalogEntry.isPresent() && catalogEntry.get().certThumbprint() != null
+                    && !catalogEntry.get().certThumbprint().isBlank()) {
+                String expectedThumb = catalogEntry.get().certThumbprint();
+                DriverVerificationService.VerificationResult thumbResult = verificationService.verifyAuthenticodeThumbprint(driverFile, expectedThumb);
+                if (!thumbResult.verified()) {
+                    AppLogger.warning("Authenticode thumbprint verification failed: " + thumbResult.message());
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.VERIFICATION_FAILED, false,
+                            "Signature thumbprint verification failed: " + thumbResult.message());
                 }
+                AppLogger.info("Authenticode thumbprint verified for " + driverFile.getFileName());
             }
 
             reportStatus("Installing driver. Please wait…");
+
+            if (cancellationFlag.get()) {
+                cleanupTempFiles(driverFile);
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+            }
 
             String lowerName = driverFile.getFileName().toString().toLowerCase();
             if (lowerName.endsWith(".exe")) {
@@ -276,6 +277,10 @@ public class DriverInstallService {
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Silent installation failed: " + fallbackResult.combinedOutput());
             }
 
+            if (cancellationFlag.get()) {
+                cleanupTempFiles(driverFile);
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+            }
             ProcessResult installResult = installDriverFile(driverFile, candidate);
             if (!installResult.success()) {
                 cleanupTempFiles(driverFile);
@@ -605,21 +610,24 @@ public class DriverInstallService {
             java.net.URL u = new java.net.URL(url);
             String host = u.getHost().toLowerCase();
             return switch (source) {
-                case "Intel" -> host.contains("intel.com");
-                case "Nvidia" -> host.contains("nvidia.com") || host.contains("geforce.com")
-                        || host.contains("download.nvidia.com") || host.contains("international.download.nvidia.com");
-                case "AMD" -> host.contains("amd.com");
-                case "Realtek" -> host.contains("realtek.com");
-                case "Broadcom" -> host.contains("broadcom.com");
-                case "Qualcomm" -> host.contains("qualcomm.com");
-                case "Synaptics" -> host.contains("synaptics.com");
-                case "Lenovo" -> host.contains("lenovo.com") || host.contains("lenovo-images.com");
-                case "Dell" -> host.contains("dell.com") || host.contains("dellcdn.com");
-                case "HP" -> host.contains("hp.com") || host.contains("hpe.com");
-                case "ASUS" -> host.contains("asus.com") || host.contains("asusnet.net");
-                case "WindowsUpdate" -> host.contains("microsoft.com") || host.contains("windowsupdate.com")
-                        || host.contains("download.microsoft.com") || host.contains("catalog.update.microsoft.com")
-                        || host.contains("catalog.s.download.windowsupdate.com");
+                case "Intel" -> host.equals("intel.com") || host.endsWith(".intel.com");
+                case "Nvidia" -> host.equals("nvidia.com") || host.endsWith(".nvidia.com")
+                        || host.equals("geforce.com") || host.endsWith(".geforce.com");
+                case "AMD" -> host.equals("amd.com") || host.endsWith(".amd.com");
+                case "Realtek" -> host.equals("realtek.com") || host.endsWith(".realtek.com");
+                case "Broadcom" -> host.equals("broadcom.com") || host.endsWith(".broadcom.com");
+                case "Qualcomm" -> host.equals("qualcomm.com") || host.endsWith(".qualcomm.com");
+                case "Synaptics" -> host.equals("synaptics.com") || host.endsWith(".synaptics.com");
+                case "Lenovo" -> host.equals("lenovo.com") || host.endsWith(".lenovo.com")
+                        || host.equals("lenovo-images.com") || host.endsWith(".lenovo-images.com");
+                case "Dell" -> host.equals("dell.com") || host.endsWith(".dell.com")
+                        || host.equals("dellcdn.com") || host.endsWith(".dellcdn.com");
+                case "HP" -> host.equals("hp.com") || host.endsWith(".hp.com")
+                        || host.equals("hpe.com") || host.endsWith(".hpe.com");
+                case "ASUS" -> host.equals("asus.com") || host.endsWith(".asus.com")
+                        || host.equals("asusnet.net") || host.endsWith(".asusnet.net");
+                case "WindowsUpdate" -> host.equals("microsoft.com") || host.endsWith(".microsoft.com")
+                        || host.equals("windowsupdate.com") || host.endsWith(".windowsupdate.com");
                 default -> false;
             };
         } catch (Exception e) {

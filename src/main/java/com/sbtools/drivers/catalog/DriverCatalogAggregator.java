@@ -211,11 +211,15 @@ public class DriverCatalogAggregator {
             return false;
         }
 
-        if ("WindowsUpdate".equals(candidate.source())) {
-            return !"WindowsUpdate".equals(existing.source())
-                    || VersionCompare.compare(candidate.availableVersion(), existing.availableVersion()) > 0;
+        int cmp = VersionCompare.compare(candidate.availableVersion(), existing.availableVersion());
+        if (cmp != 0) {
+            return cmp > 0;
         }
-        return VersionCompare.compare(candidate.availableVersion(), existing.availableVersion()) > 0;
+
+        if ("WindowsUpdate".equals(candidate.source()) && !"WindowsUpdate".equals(existing.source())) {
+            return false;
+        }
+        return true;
     }
 
     private static boolean hasWorkingDownload(DriverUpdateCandidate candidate) {

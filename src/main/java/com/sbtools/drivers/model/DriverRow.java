@@ -55,6 +55,11 @@ public class DriverRow {
         return candidate != null;
     }
 
+    public boolean isProblematic() {
+        return installed.status() != null && !installed.status().isBlank()
+                && !"OK".equalsIgnoreCase(installed.status());
+    }
+
     public boolean isExcluded() {
         return excluded.get();
     }

@@ -125,7 +125,7 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                     }
                 }
             }
-            if (validTokensCount > 0 && matched == validTokensCount) {
+            if (validTokensCount > 0 && matched > 0 && matched >= (validTokensCount + 1) / 2) {
                 return true;
             }
             if (matched >= 3) {

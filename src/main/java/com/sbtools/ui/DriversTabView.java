@@ -260,9 +260,17 @@ public class DriversTabView extends BorderPane {
             @Override
             protected void updateItem(UpdateSeverity item, boolean empty) {
                 super.updateItem(item, empty);
-                if (empty || item == null) {
+                if (empty) {
                     setGraphic(null);
-                } else {
+                    return;
+                }
+                DriverRow row = getTableRow() != null ? getTableRow().getItem() : null;
+                if (row != null && row.isProblematic()) {
+                    Label badge = new Label("ISSUE");
+                    badge.setStyle("-fx-background-color: #ff5555; -fx-text-fill: white; -fx-padding: 2 6; -fx-background-radius: 4; -fx-font-weight: bold;");
+                    badge.setTooltip(new Tooltip("Device status: " + row.installed().status()));
+                    setGraphic(badge);
+                } else if (item != null) {
                     Label badge = new Label(item.name());
                     badge.setStyle(switch (item) {
                         case CRITICAL -> "-fx-background-color: #ff5555; -fx-text-fill: white; -fx-padding: 2 6; -fx-background-radius: 4; -fx-font-weight: bold;";
@@ -272,6 +280,8 @@ public class DriversTabView extends BorderPane {
                         case UNKNOWN -> "-fx-background-color: #44475a; -fx-text-fill: #ccc; -fx-padding: 2 6; -fx-background-radius: 4;";
                     });
                     setGraphic(badge);
+                } else {
+                    setGraphic(null);
                 }
             }
         });
@@ -374,10 +384,18 @@ public class DriversTabView extends BorderPane {
                 return;
             }
             DriverRow row = currentRow();
-            updateBtn.setDisable(row == null || !row.hasUpdate() || busy.get());
+            if (row == null) {
+                setGraphic(null);
+                return;
+            }
+            updateBtn.setDisable(!row.hasUpdate() || busy.get());
             ignoreBtn.setDisable(busy.get());
-            if (row != null && row.candidate() != null && row.candidate().description() != null) {
-                updateBtn.setTooltip(new Tooltip(row.candidate().title()));
+            if (row.candidate() != null) {
+                String tooltipText = row.installed().friendlyName();
+                if (row.candidate().availableVersion() != null) {
+                    tooltipText += " \u2192 " + row.candidate().availableVersion();
+                }
+                updateBtn.setTooltip(new Tooltip(tooltipText));
             }
             setGraphic(container);
         }
