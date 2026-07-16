@@ -497,6 +497,37 @@
     -fx-padding: 4 16 4 0;
 }
 
+/* Overview summary cards */
+.sysinfo-overview-card {
+    -fx-background-color: #282a36;
+    -fx-border-color: #44475a;
+    -fx-border-width: 1;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+    -fx-padding: 12;
+    -fx-spacing: 4;
+    -fx-min-width: 160;
+    -fx-pref-width: 200;
+}
+
+.sysinfo-overview-card:hover {
+    -fx-border-color: #6272a4;
+}
+
+/* Temperature color coding */
+.sysinfo-temp-cool {
+    -fx-text-fill: #50fa7b;
+}
+
+.sysinfo-temp-warm {
+    -fx-text-fill: #ffb86c;
+}
+
+.sysinfo-temp-hot {
+    -fx-text-fill: #ff5555;
+    -fx-font-weight: bold;
+}
+
 /* ============================================
    DASHBOARD - Visual overhaul styles
    ============================================ */

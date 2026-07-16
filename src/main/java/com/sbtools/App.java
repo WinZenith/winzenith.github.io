@@ -5,7 +5,6 @@ import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
 import com.sbtools.ui.*;
 import com.sbtools.update.UpdateChecker;
-import com.sbtools.update.UpdateDialog;
 
 import atlantafx.base.theme.Dracula;
 import javafx.geometry.Insets;
@@ -13,7 +12,13 @@ import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
+import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBar;
+import javafx.scene.control.ButtonType;
+import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.ProgressBar;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Separator;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
@@ -27,7 +32,18 @@ import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 
+import java.awt.Desktop;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 import com.sbtools.util.ProcessManager;
 
 public class App extends Application {
@@ -48,10 +64,12 @@ public class App extends Application {
     private Node[] tabViews;
     private UIButton[] tabButtons;
     private UIButton helpBtn;
+    private UIButton updateBtn;
     private HelpTabView helpTab;
     private Image logoImage;
     private int selectedTab = 0;
     private AppSettings appSettings;
+    private volatile boolean checkingForUpdate = false;
 
     @Override
     public void start(Stage stage) {
@@ -112,8 +130,15 @@ public class App extends Application {
             updateChecker.checkForUpdateAsync(() -> {
                 UpdateChecker.UpdateResult result = updateChecker.getCachedResult();
                 if (result.isUpdateAvailable()) {
-                    UpdateDialog dialog = new UpdateDialog(result);
-                    dialog.showAndWait();
+                    Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                            "A new version v" + result.latestVersion() + " is available.\nDo you want to download it?",
+                            ButtonType.YES, ButtonType.NO);
+                    confirm.setTitle("Update Available");
+                    confirm.setHeaderText("Update Available");
+
+                    if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
+                        downloadAndExtract(result);
+                    }
                 }
             });
         }
@@ -155,9 +180,54 @@ public class App extends Application {
                 logoView, appTitle, sep
         );
         sidebar.getChildren().addAll(tabButtons);
+        Label versionLabel = new Label("v" + AppInfo.getVersion());
+        versionLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #6272a4; -fx-padding: 4 0 0 0;");
+
+        updateBtn = UIButton.secondary("\u2B50 Check for Updates");
+        updateBtn.setOnAction(e -> {
+            if (checkingForUpdate) return;
+            checkingForUpdate = true;
+            updateBtn.setDisable(true);
+            updateBtn.setText("Checking...");
+
+            updateChecker.checkForUpdateAsync(() -> {
+                checkingForUpdate = false;
+                updateBtn.setDisable(false);
+                updateBtn.setText("\u2B50 Check for Updates");
+
+                UpdateChecker.UpdateResult result = updateChecker.getCachedResult();
+
+                if (result.isUpdateAvailable()) {
+                    Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                            "A new version v" + result.latestVersion() + " is available.\nDo you want to download it?",
+                            ButtonType.YES, ButtonType.NO);
+                    confirm.setTitle("Update Available");
+                    confirm.setHeaderText("Update Available");
+
+                    if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
+                        downloadAndExtract(result);
+                    }
+                } else if (result.isUnknown()) {
+                    Alert warn = new Alert(Alert.AlertType.WARNING,
+                            "Could not check for updates.\nPlease check your internet connection and try again.");
+                    warn.setTitle("Update Check Failed");
+                    warn.setHeaderText(null);
+                    warn.showAndWait();
+                } else {
+                    Alert info = new Alert(Alert.AlertType.INFORMATION,
+                            "Your version is up to date.");
+                    info.setTitle("No Updates");
+                    info.setHeaderText(null);
+                    info.showAndWait();
+                }
+            });
+        });
+
         sidebar.getChildren().addAll(
                 new Separator(),
-                helpBtn
+                helpBtn,
+                updateBtn,
+                versionLabel
         );
 
         if (tabButtons.length > 0) {
@@ -187,7 +257,7 @@ public class App extends Application {
             case 7 -> new CleanerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore);
             case 8 -> new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin);
             case 9 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
-            case 10 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin);
+            case 10 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin, settingsStore);
             case 11 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings);
             default -> throw new IllegalArgumentException("Unknown tab index: " + index);
         };
@@ -200,6 +270,235 @@ public class App extends Application {
         }
         helpBtn.setStyleType(UIButton.ButtonStyle.SECONDARY);
         selected.setStyleType(UIButton.ButtonStyle.PRIMARY);
+    }
+
+    private void downloadAndExtract(UpdateChecker.UpdateResult result) {
+        Dialog<Void> progressDialog = new Dialog<>();
+        progressDialog.setTitle("Downloading Update");
+        progressDialog.setHeaderText("Downloading v" + result.latestVersion() + "...");
+        progressDialog.getDialogPane().getButtonTypes().add(ButtonType.CANCEL);
+
+        ProgressBar progressBar = new ProgressBar(0);
+        progressBar.setPrefWidth(360);
+        Label statusLabel = new Label("Connecting...");
+
+        VBox box = new VBox(12, progressBar, statusLabel);
+        box.setPadding(new Insets(20));
+        box.setMinWidth(400);
+        progressDialog.getDialogPane().setContent(box);
+
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+
+        progressDialog.getDialogPane().getButtonTypes().stream()
+                .filter(bt -> bt.getButtonData() == ButtonBar.ButtonData.CANCEL_CLOSE)
+                .findFirst()
+                .ifPresent(bt -> {
+                    Button cancelBtn = (Button) progressDialog.getDialogPane().lookupButton(bt);
+                    cancelBtn.setOnAction(e -> {
+                        cancelled.set(true);
+                        progressDialog.close();
+                    });
+                });
+
+        progressDialog.setOnCloseRequest(e -> {
+            cancelled.set(true);
+        });
+
+        Thread t = new Thread(() -> {
+            Path tempDir = null;
+            HttpURLConnection conn = null;
+            try {
+                String urlStr = result.downloadUrl();
+                if (urlStr == null || urlStr.isBlank()) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Download URL unavailable.");
+                        progressDialog.getDialogPane().getButtonTypes().clear();
+                        progressDialog.getDialogPane().getButtonTypes().add(ButtonType.OK);
+                    });
+                    return;
+                }
+
+                Platform.runLater(() -> statusLabel.setText("Downloading..."));
+
+                URL url = new URL(urlStr);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestProperty("User-Agent", AppInfo.DISPLAY_NAME + "/" + AppInfo.getVersion());
+                conn.setInstanceFollowRedirects(true);
+                conn.connect();
+
+                int contentLength = conn.getContentLength();
+                String raw = conn.getURL().getFile();
+                String filename = raw.substring(raw.lastIndexOf('/') + 1);
+                if (filename == null || filename.isBlank()) filename = "update.zip";
+
+                tempDir = Files.createTempDirectory("WinZenith-update-");
+                Path zipPath = tempDir.resolve(filename);
+
+                try (InputStream in = conn.getInputStream();
+                     java.io.OutputStream out = Files.newOutputStream(zipPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    long total = 0;
+                    while ((read = in.read(buffer)) != -1) {
+                        if (cancelled.get()) {
+                            Platform.runLater(() -> {
+                                statusLabel.setText("Download cancelled.");
+                                progressDialog.close();
+                            });
+                            return;
+                        }
+                        out.write(buffer, 0, read);
+                        total += read;
+                        if (contentLength > 0) {
+                            double prog = Math.min(1.0, (double) total / contentLength);
+                            final double p = prog;
+                            Platform.runLater(() -> progressBar.setProgress(p));
+                        } else {
+                            Platform.runLater(() -> progressBar.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS));
+                        }
+                    }
+                    if (contentLength > 0 && total != contentLength) {
+                        throw new IOException("Download incomplete: expected " + contentLength
+                                + " bytes but received " + total + " bytes.");
+                    }
+                }
+
+                if (cancelled.get()) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Download cancelled.");
+                        progressDialog.close();
+                    });
+                    return;
+                }
+
+                Platform.runLater(() -> statusLabel.setText("Extracting..."));
+
+                Path appDir = getAppDirectory();
+                String folderName = "WinZenith-v" + result.latestVersion();
+                Path extractDir = appDir.resolve(folderName);
+                Files.createDirectories(extractDir);
+
+                try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipPath))) {
+                    ZipEntry entry;
+                    while ((entry = zis.getNextEntry()) != null) {
+                        if (cancelled.get()) {
+                            Platform.runLater(() -> {
+                                statusLabel.setText("Extraction cancelled.");
+                                progressDialog.close();
+                            });
+                            return;
+                        }
+                        Path target = extractDir.resolve(entry.getName()).normalize();
+                        if (!target.startsWith(extractDir)) {
+                            throw new IOException("Zip entry path outside target directory: " + entry.getName());
+                        }
+                        if (entry.isDirectory()) {
+                            Files.createDirectories(target);
+                        } else {
+                            Files.createDirectories(target.getParent());
+                            try (java.io.OutputStream out = Files.newOutputStream(target, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                                byte[] buf = new byte[8192];
+                                int n;
+                                while ((n = zis.read(buf)) != -1) {
+                                    out.write(buf, 0, n);
+                                }
+                            }
+                        }
+                        zis.closeEntry();
+                    }
+                }
+
+                Path finalExe = extractDir.resolve("WinZenith.exe");
+                boolean hasExe = Files.exists(finalExe);
+
+                Platform.runLater(() -> {
+                    progressDialog.close();
+
+                    String message = "Update downloaded and extracted to:\n" + extractDir + "\n\n"
+                            + "Please close WinZenith and run the new version."
+                            + (hasExe ? "\n\nWinZenith.exe is ready in that folder." : "");
+
+                    Alert done = new Alert(Alert.AlertType.INFORMATION, message, ButtonType.OK);
+                    done.setTitle("Update Ready");
+                    done.setHeaderText("Update Downloaded");
+
+                    ButtonType openFolderBtn = new ButtonType("Open Folder", ButtonBar.ButtonData.OTHER);
+                    done.getDialogPane().getButtonTypes().add(1, openFolderBtn);
+
+                    done.showAndWait().ifPresent(btn -> {
+                        if (btn == openFolderBtn) {
+                            try {
+                                if (Desktop.isDesktopSupported()) {
+                                    Desktop.getDesktop().open(extractDir.toFile());
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                    });
+                });
+
+                if (tempDir != null) {
+                    cleanupTempDir(tempDir);
+                }
+
+            } catch (Exception ex) {
+                if (tempDir != null) {
+                    cleanupTempDir(tempDir);
+                }
+                Platform.runLater(() -> {
+                    statusLabel.setText("Failed: " + ex.getMessage());
+                    progressDialog.getDialogPane().getButtonTypes().clear();
+                    progressDialog.getDialogPane().getButtonTypes().add(ButtonType.OK);
+                });
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }, "UpdateDownloader");
+        t.setDaemon(true);
+        t.start();
+
+        progressDialog.showAndWait();
+    }
+
+    private Path getAppDirectory() {
+        try {
+            String command = ProcessHandle.current().info().command().orElse(null);
+            if (command != null) {
+                Path exePath = Path.of(command);
+                if (Files.exists(exePath)) {
+                    return exePath.getParent();
+                }
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            java.security.CodeSource cs = App.class.getProtectionDomain().getCodeSource();
+            if (cs != null) {
+                Path codePath = Path.of(cs.getLocation().toURI());
+                if (Files.isDirectory(codePath)) {
+                    return codePath;
+                }
+                return codePath.getParent();
+            }
+        } catch (Exception ignored) {}
+
+        return Path.of(System.getProperty("user.home"));
+    }
+
+    private static void cleanupTempDir(Path tempDir) {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(5000);
+                Files.walk(tempDir)
+                        .sorted((a, b) -> b.compareTo(a))
+                        .forEach(p -> {
+                            try { Files.deleteIfExists(p); } catch (Exception ignored) {}
+                        });
+            } catch (Exception ignored) {}
+        }, "TempDirCleanup");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void showEula(AppSettings settings) {
@@ -240,10 +539,13 @@ public class App extends Application {
                     stv.dispose();
                 } else if (view instanceof SystemInfoTabView sitv) {
                     sitv.dispose();
+                } else if (view instanceof BrowserExtensionsTabView betv) {
+                    betv.dispose();
                 }
             }
         }
         ProcessManager.shutdownAll();
+        AppExecutors.shutdown();
         super.stop();
     }
 }

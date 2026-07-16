@@ -524,7 +524,7 @@ public class SoftwareUpdateViewModel {
             confirm.setHeaderText(AppInfo.DISPLAY_NAME);
             confirm.showAndWait().ifPresent(result -> {
                 if (result == ButtonType.OK) {
-                    boolean created = restoreService.createRestorePoint("WinZenith software update");
+                    boolean created = restoreService.createRestorePoint("WinZenith software update").success();
                     if (!created) AppLogger.warning("Restore point creation failed or skipped.");
                 }
             });

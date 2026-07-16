@@ -28,7 +28,6 @@ public class StartupImpactService {
             case REGISTRY -> estimateRegistryImpact(item);
             case TASK -> estimateTaskImpact(item);
             case SERVICE -> estimateServiceImpact(item);
-            default -> 50;
         };
     }
 

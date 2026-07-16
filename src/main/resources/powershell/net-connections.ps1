@@ -15,7 +15,9 @@ foreach ($line in $netstat) {
         $local = $Matches[2]
         $remote = $Matches[3]
         $stateVal = $Matches[4]
-        if ($stateVal -eq "") { $stateVal = "-" }
+        if ($stateVal -eq "" -or $stateVal -match '^\d+$') {
+            $stateVal = "-"
+        }
 
         if ($State -and $stateVal -ne $State -and $State -ne "ALL") { continue }
 

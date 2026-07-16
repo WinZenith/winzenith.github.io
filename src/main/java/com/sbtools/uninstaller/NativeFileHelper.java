@@ -25,7 +25,11 @@ public class NativeFileHelper {
         if (file.isDirectory()) {
             boolean allChildrenDeleted = true;
             File[] children = file.listFiles();
-            if (children != null) {
+            if (children == null) {
+                // Cannot list children (security restriction) — treat as failure
+                // so the directory is queued for reboot deletion
+                allChildrenDeleted = false;
+            } else {
                 for (File child : children) {
                     if (!deleteOrQueue(child)) {
                         allChildrenDeleted = false;

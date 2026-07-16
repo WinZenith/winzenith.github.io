@@ -75,9 +75,33 @@ public class DriverScanService {
         }
         try {
             return LocalDate.parse(dateStr);
-        } catch (DateTimeParseException e) {
-            return null;
+        } catch (DateTimeParseException ignored) {
         }
+        try {
+            String cleaned = dateStr.contains("T") ? dateStr.substring(0, dateStr.indexOf('T')) : dateStr;
+            String[] parts = cleaned.split("[/\\-]");
+            if (parts.length == 3) {
+                int a = Integer.parseInt(parts[0]);
+                int b = Integer.parseInt(parts[1]);
+                int c = Integer.parseInt(parts[2]);
+                if (c > 0 && c < 100) {
+                    c += (c > 50) ? 1900 : 2000;
+                }
+                if (a > 12 && b <= 12 && c <= 31) {
+                    return LocalDate.of(a, b, c);
+                } else if (b > 12 && a <= 12 && c <= 31) {
+                    return LocalDate.of(c, a, b);
+                } else if (c > 31 && a <= 12 && b <= 12) {
+                    return LocalDate.of(c, a, b);
+                } else if (a <= 12 && b <= 12 && c > 31) {
+                    return LocalDate.of(c, a, b);
+                } else if (a <= 12 && b <= 12 && c > 100) {
+                    return LocalDate.of(c, a, b);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     private static String text(JsonNode n, String key) {

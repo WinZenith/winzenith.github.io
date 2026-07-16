@@ -56,10 +56,13 @@ public class HelpTabView extends VBox {
 
         getChildren().add(createFaqSection("System Information",
                 "The System Information tab displays detailed hardware and software data about your computer. " +
-                "Information is organized into sections: Operating System, CPU, GPU, RAM, Storage, BIOS, Motherboard, and Other Devices. " +
+                "It starts with an Overview tab showing key specifications at a glance. " +
+                "Information is organized into sections: Overview, Operating System, CPU, GPU, RAM, Storage, BIOS, Motherboard, Network Adapters, Audio Devices, Battery, Temperatures, and Other Devices. " +
                 "Each section shows key specifications such as model names, clock speeds, memory sizes, and firmware versions. " +
-                "Use the search bar at the top to filter the device list by name. " +
-                "Progress indicators may appear briefly while hardware details are being queried from the system. " +
+                "Use the search bar on the Others tab to filter devices by name. " +
+                "Click \"Export...\" to save system information as a TXT, JSON, or HTML file. " +
+                "Click \"Copy All\" to copy the full report to your clipboard for easy sharing. " +
+                "A Warnings tab appears if any data could not be collected. " +
                 "This tab is read-only and does not modify any system settings."));
 
         getChildren().add(createFaqSection("Uninstaller",

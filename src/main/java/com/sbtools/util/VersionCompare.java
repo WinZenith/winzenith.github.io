@@ -30,6 +30,13 @@ public final class VersionCompare {
         if (hasPrereleaseA != hasPrereleaseB) {
             return hasPrereleaseA ? -1 : 1;
         }
+        if (hasPrereleaseA && hasPrereleaseB) {
+            int cmp = baseA.compareToIgnoreCase(baseB);
+            if (cmp != 0) {
+                return cmp;
+            }
+            return Integer.compare(prereleaseWeight(a), prereleaseWeight(b));
+        }
         return baseA.compareToIgnoreCase(baseB);
     }
 
@@ -39,18 +46,43 @@ public final class VersionCompare {
         if (dashIdx > 0) {
             v = v.substring(0, dashIdx);
         }
+        for (String suffix : new String[]{"alpha", "beta", "rc", "preview", "test", "dev"}) {
+            int idx = v.toLowerCase().indexOf(suffix);
+            if (idx > 0) {
+                v = v.substring(0, idx);
+                break;
+            }
+        }
         return v;
     }
 
     private static boolean hasPrereleaseSuffix(String version) {
         if (version == null) return false;
-        String v = version.replace(',', '.');
+        String v = version.replace(',', '.').toLowerCase();
         int dashIdx = v.indexOf('-');
-        if (dashIdx <= 0) return false;
-        String suffix = v.substring(dashIdx + 1).toLowerCase();
-        return suffix.contains("alpha") || suffix.contains("beta")
-                || suffix.contains("rc") || suffix.contains("preview")
-                || suffix.contains("test") || suffix.contains("dev");
+        if (dashIdx > 0) {
+            String suffix = v.substring(dashIdx + 1);
+            if (suffix.contains("alpha") || suffix.contains("beta")
+                    || suffix.contains("rc") || suffix.contains("preview")
+                    || suffix.contains("test") || suffix.contains("dev")) {
+                return true;
+            }
+        }
+        String base = extractBaseVersion(version);
+        if (base.length() < v.length()) {
+            return true;
+        }
+        return false;
+    }
+
+    private static int prereleaseWeight(String version) {
+        if (version == null) return 0;
+        String v = version.replace(',', '.').toLowerCase();
+        if (v.contains("alpha") || v.contains("dev")) return 1;
+        if (v.contains("beta")) return 2;
+        if (v.contains("rc") || v.contains("preview")) return 3;
+        if (v.contains("test")) return 4;
+        return 0;
     }
 
     private static long parsePart(String part) {

@@ -51,6 +51,7 @@ public class InstalledApp implements Comparable<InstalledApp> {
     public String getInstallDate() { return installDate; }
     public int getEstimatedSize() { return estimatedSize; }
     public String getArchitecture() { return architecture; }
+    public boolean hasUninstallString() { return uninstallString != null && !uninstallString.isBlank(); }
 
     @Override
     public int compareTo(InstalledApp other) {

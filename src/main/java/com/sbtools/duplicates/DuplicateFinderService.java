@@ -5,6 +5,7 @@ import com.sun.jna.platform.win32.Shell32;
 import com.sun.jna.platform.win32.ShellAPI;
 import com.sun.jna.platform.win32.ShellAPI.SHFILEOPSTRUCT;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.FileVisitResult;
@@ -17,6 +18,7 @@ import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -26,6 +28,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
@@ -42,6 +45,12 @@ public class DuplicateFinderService {
     public List<DuplicateFileRow> scan(Path root, BiConsumer<Integer, Integer> progress,
                                        java.util.function.Consumer<String> phaseLabel,
                                        AtomicBoolean cancelled) {
+        return scan(Collections.singletonList(root), progress, phaseLabel, cancelled);
+    }
+
+    public List<DuplicateFileRow> scan(List<Path> roots, BiConsumer<Integer, Integer> progress,
+                                       java.util.function.Consumer<String> phaseLabel,
+                                       AtomicBoolean cancelled) {
         List<DuplicateFileRow> result = new ArrayList<>();
         ExecutorService executor = null;
 
@@ -53,53 +62,56 @@ public class DuplicateFinderService {
             Set<Object> seenFileKeys = new HashSet<>();
             long[] fileCount = {0};
 
-            Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
-                @Override
-                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                    if (cancelled.get()) return FileVisitResult.TERMINATE;
-                    if (dir != root) {
-                        String name = dir.getFileName().toString().toLowerCase();
-                        if (name.startsWith(".") || name.equals("node_modules")
-                                || name.equals("__pycache__")) {
-                            return FileVisitResult.SKIP_SUBTREE;
-                        }
-                        try {
-                            if ((Boolean) Files.getAttribute(dir, "dos:isReparsePoint")) {
+            for (Path root : roots) {
+                if (cancelled.get()) break;
+                Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+                    @Override
+                    public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                        if (cancelled.get()) return FileVisitResult.TERMINATE;
+                        if (dir != root) {
+                            String name = dir.getFileName().toString().toLowerCase();
+                            if (name.startsWith(".") || name.equals("node_modules")
+                                    || name.equals("__pycache__")) {
                                 return FileVisitResult.SKIP_SUBTREE;
                             }
-                        } catch (Exception ignored) {}
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    if (cancelled.get()) return FileVisitResult.TERMINATE;
-                    String fileName = file.getFileName().toString().toLowerCase();
-                    if (fileName.equals("ntuser.dat") || fileName.startsWith("ntuser.dat.")
-                            || fileName.equals("usrclass.dat") || fileName.startsWith("usrclass.dat.")
-                            || fileName.equals("desktop.ini")) {
+                            try {
+                                if ((Boolean) Files.getAttribute(dir, "dos:isReparsePoint")) {
+                                    return FileVisitResult.SKIP_SUBTREE;
+                                }
+                            } catch (Exception ignored) {}
+                        }
                         return FileVisitResult.CONTINUE;
                     }
-                    if (attrs.size() > 0) {
-                        Object fk = attrs.fileKey();
-                        if (fk != null && !seenFileKeys.add(fk)) {
+
+                    @Override
+                    public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                        if (cancelled.get()) return FileVisitResult.TERMINATE;
+                        String fileName = file.getFileName().toString().toLowerCase();
+                        if (fileName.equals("ntuser.dat") || fileName.startsWith("ntuser.dat.")
+                                || fileName.equals("usrclass.dat") || fileName.startsWith("usrclass.dat.")
+                                || fileName.equals("desktop.ini")) {
                             return FileVisitResult.CONTINUE;
                         }
-                        bySize.computeIfAbsent(attrs.size(), k -> new ArrayList<>()).add(file);
-                        fileCount[0]++;
-                        if (fileCount[0] % 500 == 0 && progress != null) {
-                            progress.accept((int) fileCount[0], -1);
+                        if (attrs.size() > 0) {
+                            Object fk = attrs.fileKey();
+                            if (fk != null && !seenFileKeys.add(fk)) {
+                                return FileVisitResult.CONTINUE;
+                            }
+                            bySize.computeIfAbsent(attrs.size(), k -> new ArrayList<>()).add(file);
+                            fileCount[0]++;
+                            if (fileCount[0] % 500 == 0 && progress != null) {
+                                progress.accept((int) fileCount[0], -1);
+                            }
                         }
+                        return FileVisitResult.CONTINUE;
                     }
-                    return FileVisitResult.CONTINUE;
-                }
 
-                @Override
-                public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                    return FileVisitResult.SKIP_SUBTREE;
-                }
-            });
+                    @Override
+                    public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+                });
+            }
 
             if (cancelled.get()) return result;
 
@@ -117,16 +129,19 @@ public class DuplicateFinderService {
 
             MessageDigest md;
             try {
-                md = MessageDigest.getInstance("MD5");
+                md = MessageDigest.getInstance("SHA-256");
             } catch (Exception e) {
-                AppLogger.warning("MD5 not available: " + e.getMessage());
+                AppLogger.warning("SHA-256 not available: " + e.getMessage());
                 return result;
             }
 
             HexFormat hex = HexFormat.of();
-            byte[] buf = new byte[8192];
             int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 8);
-            executor = Executors.newFixedThreadPool(threadCount);
+            executor = Executors.newFixedThreadPool(threadCount, r -> {
+                Thread t = new Thread(r, "duplicate-hash");
+                t.setDaemon(true);
+                return t;
+            });
 
             // ── Phase 2: quick-hash first 8KB (parallel) ───────────────────
             if (phaseLabel != null) phaseLabel.accept("Phase 2/3 — Quick hashing…");
@@ -139,8 +154,8 @@ public class DuplicateFinderService {
                 quickFutures.add(executor.submit(() -> {
                     if (cancelled.get()) return null;
                     byte[] localBuf = new byte[8192];
-                    MessageDigest localMd = MessageDigest.getInstance("MD5");
-                    try (InputStream is = Files.newInputStream(p)) {
+                    MessageDigest localMd = MessageDigest.getInstance("SHA-256");
+                    try (InputStream is = new BufferedInputStream(Files.newInputStream(p))) {
                         int read = is.read(localBuf);
                         localMd.update(localBuf, 0, Math.max(read, 0));
                         String key = Files.size(p) + ":" + hex.formatHex(localMd.digest());
@@ -154,7 +169,12 @@ public class DuplicateFinderService {
             Map<String, List<Path>> quickGroups = new HashMap<>();
             int quickProcessed = 0;
             for (Future<Map.Entry<String, Path>> future : quickFutures) {
-                if (cancelled.get()) return result;
+                if (cancelled.get()) {
+                    for (int i = quickFutures.indexOf(future); i < quickFutures.size(); i++) {
+                        quickFutures.get(i).cancel(true);
+                    }
+                    return result;
+                }
                 try {
                     Map.Entry<String, Path> entry = future.get();
                     if (entry != null) {
@@ -168,7 +188,7 @@ public class DuplicateFinderService {
 
             if (cancelled.get()) return result;
 
-            // ── Phase 3: full MD5 for groups still having 2+ files (parallel) ──
+            // ── Phase 3: full SHA-256 for groups still having 2+ files (parallel) ──
             if (phaseLabel != null) phaseLabel.accept("Phase 3/3 — Full hashing…");
 
             List<Path> toFullHash = new ArrayList<>();
@@ -190,8 +210,8 @@ public class DuplicateFinderService {
                 fullFutures.add(executor.submit(() -> {
                     if (cancelled.get()) return null;
                     byte[] localBuf = new byte[8192];
-                    MessageDigest localMd = MessageDigest.getInstance("MD5");
-                    try (InputStream is = Files.newInputStream(p)) {
+                    MessageDigest localMd = MessageDigest.getInstance("SHA-256");
+                    try (InputStream is = new BufferedInputStream(Files.newInputStream(p))) {
                         int read;
                         while ((read = is.read(localBuf)) != -1) {
                             localMd.update(localBuf, 0, read);
@@ -203,10 +223,15 @@ public class DuplicateFinderService {
                 }));
             }
 
-            Map<String, List<Path>> hashGroups = new HashMap<>();
+            Map<String, List<Path>> hashGroups = new LinkedHashMap<>();
             int combinedProcessed = quickTotal;
             for (Future<Map.Entry<String, Path>> future : fullFutures) {
-                if (cancelled.get()) return result;
+                if (cancelled.get()) {
+                    for (int i = fullFutures.indexOf(future); i < fullFutures.size(); i++) {
+                        fullFutures.get(i).cancel(true);
+                    }
+                    return result;
+                }
                 try {
                     Map.Entry<String, Path> entry = future.get();
                     if (entry != null) {
@@ -228,23 +253,18 @@ public class DuplicateFinderService {
                 String hash = entry.getKey();
                 if (group.size() < 2) continue;
 
-                Path keeper = group.get(0);
-                FileTime newestTime;
-                try {
-                    newestTime = Files.getLastModifiedTime(keeper);
-                } catch (Exception e) {
-                    continue;
-                }
-                for (int i = 1; i < group.size(); i++) {
-                    Path p = group.get(i);
+                Path keeper = null;
+                FileTime newestTime = null;
+                for (Path p : group) {
                     try {
                         FileTime ft = Files.getLastModifiedTime(p);
-                        if (ft.compareTo(newestTime) > 0) {
+                        if (newestTime == null || ft.compareTo(newestTime) > 0) {
                             newestTime = ft;
                             keeper = p;
                         }
                     } catch (Exception ignored) {}
                 }
+                if (keeper == null) continue;
 
                 List<String> deletablePaths = new ArrayList<>();
                 for (Path p : group) {
@@ -272,7 +292,15 @@ public class DuplicateFinderService {
             return result;
         } finally {
             if (executor != null) {
-                executor.shutdownNow();
+                executor.shutdown();
+                try {
+                    if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                        executor.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    executor.shutdownNow();
+                    Thread.currentThread().interrupt();
+                }
             }
         }
     }
@@ -284,34 +312,56 @@ public class DuplicateFinderService {
     public CleanResult clean(List<DuplicateFileRow> selectedRows, boolean useRecycleBin) {
         int deleted = 0;
         int failed = 0;
+        List<DuplicateFileRow> fullyCleanedRows = new ArrayList<>();
 
         for (DuplicateFileRow row : selectedRows) {
             if (!row.isSelected() || row.getDeletablePaths() == null) continue;
+            boolean rowFullyCleaned = true;
             for (String path : row.getDeletablePaths()) {
                 if (useRecycleBin) {
                     if (moveToRecycleBin(Collections.singletonList(path)) > 0) {
                         deleted++;
                     } else {
                         failed++;
+                        rowFullyCleaned = false;
                     }
                 } else {
                     try {
-                        Files.deleteIfExists(Paths.get(path));
-                        deleted++;
+                        if (Files.deleteIfExists(Paths.get(path))) {
+                            deleted++;
+                        } else {
+                            AppLogger.info("File already absent during clean: " + path);
+                            deleted++;
+                        }
                     } catch (Exception e) {
                         AppLogger.warning("Failed to delete duplicate: " + path + " — " + e.getMessage());
                         failed++;
+                        rowFullyCleaned = false;
                     }
                 }
             }
+            if (rowFullyCleaned) {
+                fullyCleanedRows.add(row);
+            }
         }
-        return new CleanResult(deleted, failed);
+        return new CleanResult(deleted, failed, fullyCleanedRows);
     }
 
     private int moveToRecycleBin(List<String> paths) {
         if (paths.isEmpty()) return 0;
-        StringBuilder sb = new StringBuilder();
+
+        List<String> validPaths = new ArrayList<>(paths.size());
         for (String p : paths) {
+            if (p.length() < 260) {
+                validPaths.add(p);
+            } else {
+                AppLogger.warning("Path exceeds MAX_PATH (260), cannot recycle: " + p);
+            }
+        }
+        if (validPaths.isEmpty()) return 0;
+
+        StringBuilder sb = new StringBuilder();
+        for (String p : validPaths) {
             sb.append(p).append('\0');
         }
         sb.append('\0');
@@ -322,7 +372,13 @@ public class DuplicateFinderService {
         op.fFlags = 0x40 | 0x10 | 0x400; // FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI
 
         int result = Shell32.INSTANCE.SHFileOperation(op);
-        if (result == 0) return paths.size();
+        if (result == 0) {
+            if (op.fAnyOperationsAborted) {
+                AppLogger.warning("SHFileOperationW: some operations were aborted");
+                return 0;
+            }
+            return validPaths.size();
+        }
 
         AppLogger.warning("SHFileOperationW returned " + result);
         return 0;
@@ -331,13 +387,16 @@ public class DuplicateFinderService {
     public static class CleanResult {
         private final int deleted;
         private final int failed;
+        private final List<DuplicateFileRow> fullyCleanedRows;
 
-        public CleanResult(int deleted, int failed) {
+        public CleanResult(int deleted, int failed, List<DuplicateFileRow> fullyCleanedRows) {
             this.deleted = deleted;
             this.failed = failed;
+            this.fullyCleanedRows = fullyCleanedRows;
         }
 
         public int getDeleted() { return deleted; }
         public int getFailed() { return failed; }
+        public List<DuplicateFileRow> getFullyCleanedRows() { return fullyCleanedRows; }
     }
 }

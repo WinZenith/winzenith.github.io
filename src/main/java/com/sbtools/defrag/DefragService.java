@@ -51,10 +51,9 @@ public class DefragService {
         if (!AppPaths.isWindows()) return;
         String letter = drive.getDriveLetter().replace(":", "");
         Path script = PowerShellScripts.resolve("analyze-fragmentation.ps1");
-        ProcessResult result = processRunner.run(
-                ProcessRunner.powershellScript(script.toString(), letter));
-
-        if (cancelled.get()) throw new CancellationException("Analysis cancelled");
+        ProcessResult result = processRunner.runStreaming(
+                ProcessRunner.powershellScript(script.toString(), letter),
+                null, null, cancelled);
 
         if (!result.success()) {
             throw new IOException("Analysis failed: " + result.combinedOutput());
@@ -65,7 +64,7 @@ public class DefragService {
             var parsed = JsonMapper.mapper().readTree(json);
             long fragments = parsed.get("fragmentsFound").asLong(0);
             long percent = parsed.get("fragmentationPercent").asLong(0);
-            drive.setFragmentsFound(fragments);
+            drive.setFragmentedSpaceBytes(fragments);
             drive.setFragmentationPercent(percent);
 
             long fragFiles = parsed.has("fragmentedFileCount") ? parsed.get("fragmentedFileCount").asLong(0) : 0;
@@ -87,7 +86,7 @@ public class DefragService {
             drive.setTotalDirectories(totalDirs);
 
             if (progressCallback != null) {
-                progressCallback.accept("Analysis complete - " + fragments + " fragments, " + percent + "% fragmented");
+                progressCallback.accept("Analysis complete - " + fragments + " bytes fragmented space, " + percent + "% fragmented");
             }
         } catch (Exception e) {
             AppLogger.error("Failed to parse analysis result", e);

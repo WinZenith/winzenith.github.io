@@ -78,11 +78,16 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                                     resolvedUrl,
                                     candidate.vendorPageUrl()
                             );
+                        } else {
+                            AppLogger.info(vendor.label() + ": Could not resolve download URL from catalog, falling back to web scraping");
+                            candidate = null;
                         }
                     }
 
-                    out.add(candidate);
-                    continue;
+                    if (candidate != null) {
+                        out.add(candidate);
+                        continue;
+                    }
                 }
             }
 
@@ -127,7 +132,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             try {
                 HttpRequest req = HttpRequest.newBuilder()
                         .uri(URI.create(url))
-                        .timeout(Duration.ofSeconds(20))
+                        .timeout(Duration.ofSeconds(30))
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
                         .GET()
                         .build();
@@ -190,7 +195,6 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
     protected static String decodeHtmlEntities(String s) {
         if (s == null) return null;
         String result = s;
-        // Numeric character references: &#58; → :  &#47; → /  &#46; → .  etc.
         StringBuilder sb = new StringBuilder(result.length());
         int i = 0;
         while (i < result.length()) {
@@ -199,7 +203,12 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                 if (semi > i + 2) {
                     String entity = result.substring(i + 2, semi);
                     try {
-                        int codePoint = Integer.parseInt(entity);
+                        int codePoint;
+                        if (entity.toLowerCase().startsWith("x")) {
+                            codePoint = Integer.parseInt(entity.substring(1), 16);
+                        } else {
+                            codePoint = Integer.parseInt(entity);
+                        }
                         sb.appendCodePoint(codePoint);
                         i = semi + 1;
                         continue;
@@ -211,7 +220,6 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             i++;
         }
         result = sb.toString();
-        // Named entities
         result = result.replace("&amp;", "&");
         result = result.replace("&lt;", "<");
         result = result.replace("&gt;", ">");

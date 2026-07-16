@@ -112,7 +112,7 @@ class AdapterSettingsPanel extends VBox {
                 AdapterProperties props = service.getAdapterProperties(adapter);
                 Platform.runLater(() -> {
                     propertyRows.clear();
-                    if (props != null && props.properties() != null) {
+                    if (props.properties() != null) {
                         propertyRows.addAll(props.properties().entrySet());
                     }
                     statusLabel.setText("Loaded " + propertyRows.size() + " properties.");

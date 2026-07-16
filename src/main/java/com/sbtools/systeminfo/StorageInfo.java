@@ -17,7 +17,7 @@ public record StorageInfo(
             @JsonProperty("model") String model,
             @JsonProperty("manufacturer") String manufacturer,
             @JsonProperty("sizeBytes") long sizeBytes,
-            @JsonProperty("mediType") String mediType,
+            @JsonProperty("mediaType") String mediaType,
             @JsonProperty("interfaceType") String interfaceType,
             @JsonProperty("serialNumber") String serialNumber,
             @JsonProperty("partitions") int partitions
@@ -45,12 +45,12 @@ public record StorageInfo(
         }
 
         public String formatUsed() {
-            if (sizeBytes <= 0 || freeBytes < 0) return "";
+            if (sizeBytes <= 0 || freeBytes < 0 || freeBytes > sizeBytes) return "";
             return DataSizeFormatter.formatBytes(sizeBytes - freeBytes);
         }
 
         public double usagePercent() {
-            if (sizeBytes <= 0) return 0;
+            if (sizeBytes <= 0 || freeBytes > sizeBytes) return 0;
             return (double) (sizeBytes - freeBytes) / sizeBytes * 100;
         }
     }

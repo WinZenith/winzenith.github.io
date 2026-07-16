@@ -43,7 +43,7 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                 AppLogger.debug("WindowsUpdate: PowerShell script failed: " + result.combinedOutput());
                 return List.of();
             }
-            AppLogger.debug("WindowsUpdate: Found " + result.stdout().length() + " bytes of output");
+            AppLogger.debug("WindowsUpdate: Found " + (result.stdout() != null ? result.stdout().length() : 0) + " bytes of output");
             return matchUpdates(installed, result.stdout());
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
@@ -125,11 +125,17 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                     }
                 }
             }
-            if (validTokensCount > 0 && matched > 0 && matched >= (validTokensCount + 1) / 2) {
-                return true;
-            }
-            if (matched >= 3) {
-                return true;
+            if (validTokensCount > 0 && matched == validTokensCount) {
+                String[] offerTokens = title.split("[\\s,\\-()]+");
+                int offerSignificantCount = 0;
+                for (String ot : offerTokens) {
+                    if (ot.length() >= 3 && !GENERIC_WORDS.contains(ot)) {
+                        offerSignificantCount++;
+                    }
+                }
+                if (offerSignificantCount - validTokensCount <= 1) {
+                    return true;
+                }
             }
         }
 

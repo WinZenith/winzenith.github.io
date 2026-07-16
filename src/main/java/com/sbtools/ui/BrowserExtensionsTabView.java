@@ -41,27 +41,36 @@ import javafx.scene.layout.VBox;
 
 import java.awt.Desktop;
 import java.io.File;
+import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.BooleanSupplier;
 
 public class BrowserExtensionsTabView extends BorderPane {
 
-    private static final List<String> ALL_BROWSERS = List.of(
-            "All", "Brave", "Chrome", "Chrome Canary",
-            "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
-            "Firefox", "Opera", "Opera GX", "Vivaldi"
-    );
+    private static final List<String> FILTER_BROWSERS;
+
+    static {
+        List<String> tmp = new ArrayList<>();
+        tmp.add("All");
+        tmp.addAll(BrowserExtensionService.ALL_BROWSERS);
+        FILTER_BROWSERS = List.copyOf(tmp);
+    }
 
     private final BrowserExtensionService service = new BrowserExtensionService();
-    private final SettingsStore settingsStore = new SettingsStore();
+    private final SettingsStore settingsStore;
     private final BooleanProperty busy = new SimpleBooleanProperty(false);
     private final BooleanSupplier adminCheck;
+    private volatile Thread scanThread;
+    private volatile Thread toggleThread;
 
     private final ObservableList<BrowserExtensionRow> allRows = FXCollections.observableArrayList();
     private final FilteredList<BrowserExtensionRow> filteredByBrowser = new FilteredList<>(allRows, r -> true);
     private final FilteredList<BrowserExtensionRow> filteredRows = new FilteredList<>(filteredByBrowser, r -> true);
     private final TableView<BrowserExtensionRow> table = new TableView<>(filteredRows);
+    private final Map<BrowserExtensionRow, javafx.beans.value.ChangeListener<Boolean>> selectedListeners = new HashMap<>();
 
     private final Button scanButton = UIButton.primary("Scan All Browsers");
     private final Button enableSelectedBtn = UIButton.primary("Enable");
@@ -69,14 +78,19 @@ public class BrowserExtensionsTabView extends BorderPane {
     private final Button selectAllBtn = UIButton.secondary("Select All");
     private final Button manageIgnoredBtn = UIButton.secondary("Manage Ignored");
     private final ComboBox<String> browserFilter = new ComboBox<>(
-            FXCollections.observableArrayList(ALL_BROWSERS));
+            FXCollections.observableArrayList(FILTER_BROWSERS));
     private final TextField searchField = new TextField();
     private final ProgressBar progressBar = new ProgressBar(0);
     private final Label statusLabel = new Label("Click Scan to list browser extensions.");
     private final Label selectionLabel = new Label("");
 
     public BrowserExtensionsTabView(BooleanSupplier adminCheck) {
+        this(adminCheck, new SettingsStore());
+    }
+
+    public BrowserExtensionsTabView(BooleanSupplier adminCheck, SettingsStore settingsStore) {
         this.adminCheck = adminCheck;
+        this.settingsStore = settingsStore;
 
         progressBar.setVisible(false);
         progressBar.setPrefWidth(200);
@@ -132,9 +146,19 @@ public class BrowserExtensionsTabView extends BorderPane {
 
         allRows.addListener((ListChangeListener<BrowserExtensionRow>) c -> {
             while (c.next()) {
+                if (c.wasRemoved()) {
+                    for (BrowserExtensionRow row : c.getRemoved()) {
+                        javafx.beans.value.ChangeListener<Boolean> listener = selectedListeners.remove(row);
+                        if (listener != null) {
+                            row.selectedProperty().removeListener(listener);
+                        }
+                    }
+                }
                 if (c.wasAdded()) {
                     for (BrowserExtensionRow row : c.getAddedSubList()) {
-                        row.selectedProperty().addListener((obs, ov, nv) -> updateActionButtons());
+                        javafx.beans.value.ChangeListener<Boolean> listener = (obs, ov, nv) -> updateActionButtons();
+                        row.selectedProperty().addListener(listener);
+                        selectedListeners.put(row, listener);
                     }
                 }
             }
@@ -274,6 +298,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                         case "Brave" -> "-fx-text-fill: #ff79c6; -fx-font-weight: bold;";
                         case "Opera" -> "-fx-text-fill: #ff5555; -fx-font-weight: bold;";
                         case "Opera GX" -> "-fx-text-fill: #ff5555; -fx-font-weight: bold; -fx-font-style: italic;";
+                        case "Vivaldi" -> "-fx-text-fill: #bd93f9; -fx-font-weight: bold;";
                         default -> "-fx-text-fill: #f8f8f2;";
                     });
                 }
@@ -287,7 +312,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             @Override
             protected void updateItem(String item, boolean empty) {
                 super.updateItem(item, empty);
-                if (empty || item == null) {
+                if (empty || item == null || getIndex() >= getTableView().getItems().size()) {
                     setText(null);
                     setStyle(null);
                 } else {
@@ -313,7 +338,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             @Override
             protected void updateItem(String item, boolean empty) {
                 super.updateItem(item, empty);
-                if (empty || item == null) {
+                if (empty || item == null || getIndex() >= getTableView().getItems().size()) {
                     setText(null);
                     setStyle(null);
                 } else {
@@ -424,13 +449,15 @@ public class BrowserExtensionsTabView extends BorderPane {
             File file = new File(path);
             if (file.exists()) {
                 Desktop.getDesktop().browseFileDirectory(file);
+                return;
             }
-        } catch (Exception e) {
-            try {
-                Runtime.getRuntime().exec(new String[]{"explorer", "/select,", path});
-            } catch (Exception ex) {
-                AppLogger.warning("Failed to open folder for: " + path + " — " + ex.getMessage());
-            }
+        } catch (Exception ignored) {}
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{"explorer", "/select,\"" + path + "\""});
+            p.getInputStream().transferTo(OutputStream.nullOutputStream());
+            p.getErrorStream().transferTo(OutputStream.nullOutputStream());
+        } catch (Exception ex) {
+            AppLogger.warning("Failed to open folder for: " + path + " — " + ex.getMessage());
         }
     }
 
@@ -446,9 +473,11 @@ public class BrowserExtensionsTabView extends BorderPane {
         statusLabel.setText("Scanning browser extensions...");
         allRows.clear();
 
-        new Thread(() -> {
+        Thread t = new Thread(() -> {
             try {
-                List<BrowserExtensionRow> results = service.scanAllBrowsers(() -> {});
+                List<BrowserExtensionRow> results = service.scanAllBrowsers(progress ->
+                        Platform.runLater(() -> statusLabel.setText("Scanning " + progress + "..."))
+                );
                 Platform.runLater(() -> {
                     allRows.setAll(results);
                     applyIgnoredFromSettings();
@@ -466,7 +495,10 @@ public class BrowserExtensionsTabView extends BorderPane {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "browser-extensions-scan").start();
+        }, "browser-extensions-scan");
+        scanThread = t;
+        t.setDaemon(true);
+        t.start();
     }
 
     private String buildStatusText(List<BrowserExtensionRow> results) {
@@ -474,8 +506,7 @@ public class BrowserExtensionsTabView extends BorderPane {
 
         StringBuilder sb = new StringBuilder("Found " + results.size() + " extensions (");
         boolean first = true;
-        for (String browser : ALL_BROWSERS) {
-            if ("All".equals(browser)) continue;
+        for (String browser : BrowserExtensionService.ALL_BROWSERS) {
             long count = results.stream().filter(r -> browser.equals(r.getBrowser())).count();
             if (count > 0) {
                 if (!first) sb.append(", ");
@@ -498,10 +529,14 @@ public class BrowserExtensionsTabView extends BorderPane {
                 action + " " + selected.size() + " extension(s)?");
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
-        new Thread(() -> {
+        busy.set(true);
+        statusLabel.setText(action.substring(0, 1).toUpperCase() + action.substring(1) + "ing extensions...");
+
+        Thread t = new Thread(() -> {
             int success = 0;
             int fail = 0;
             for (BrowserExtensionRow ext : selected) {
+                if (Thread.currentThread().isInterrupted()) break;
                 if (service.toggleExtension(ext, enable)) {
                     success++;
                 } else {
@@ -516,8 +551,19 @@ public class BrowserExtensionsTabView extends BorderPane {
                 if (f > 0) {
                     new Alert(Alert.AlertType.WARNING, s + " toggled, " + f + " failed.").showAndWait();
                 }
+                busy.set(false);
             });
-        }, "browser-extensions-toggle").start();
+        }, "browser-extensions-toggle");
+        toggleThread = t;
+        t.setDaemon(true);
+        t.setUncaughtExceptionHandler((thread, ex) -> {
+            AppLogger.error("Browser extension toggle failed", ex);
+            Platform.runLater(() -> {
+                statusLabel.setText("Toggle failed.");
+                busy.set(false);
+            });
+        });
+        t.start();
     }
 
     private void toggleSelectAll() {
@@ -565,5 +611,12 @@ public class BrowserExtensionsTabView extends BorderPane {
                 table.refresh();
             }
         });
+    }
+
+    public void dispose() {
+        Thread st = scanThread;
+        if (st != null) st.interrupt();
+        Thread tt = toggleThread;
+        if (tt != null) tt.interrupt();
     }
 }

@@ -17,35 +17,37 @@ function Scan-ChromiumExtensions {
         if ($vd) {
             $mp = Join-Path (Join-Path $_.FullName $vd.Name) "manifest.json"
             if (Test-Path $mp) {
-                $m = Get-Content $mp -Raw | ConvertFrom-Json
-                $rawName = if ($m.name) { $m.name } else { "Unknown" }
-                $resolvedName = $rawName
-                $rawDesc = if ($m.description) { $m.description } else { "" }
-                $resolvedDesc = $rawDesc
-                if ($rawName -match '^__MSG_(.+)__$') {
-                    $key = $matches[1]
-                    $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                    $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                    if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedName = $msgs.$key.message } } catch {} }
-                }
-                if ($rawDesc -match '^__MSG_(.+)__$') {
-                    $key = $matches[1]
-                    $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
-                    $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
-                    if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
-                }
-                $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
-                $entries += [PSCustomObject]@{
-                    id = $extId
-                    name = $resolvedName
-                    version = if ($m.version) { $m.version } else { "" }
-                    description = $resolvedDesc
-                    enabled = -not (Test-Path $disabledFile)
-                    browser = $BrowserName
-                    path = $ExtensionsDir
-                    installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                    permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
-                }
+                try {
+                    $m = Get-Content $mp -Raw | ConvertFrom-Json
+                    $rawName = if ($m.name) { $m.name } else { "Unknown" }
+                    $resolvedName = $rawName
+                    $rawDesc = if ($m.description) { $m.description } else { "" }
+                    $resolvedDesc = $rawDesc
+                    if ($rawName -match '^__MSG_(.+)__$') {
+                        $key = $matches[1]
+                        $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
+                        $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
+                        if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedName = $msgs.$key.message } } catch {} }
+                    }
+                    if ($rawDesc -match '^__MSG_(.+)__$') {
+                        $key = $matches[1]
+                        $locale = if ($m.default_locale) { $m.default_locale } else { "en" }
+                        $msgPath = Join-Path (Join-Path $vd.FullName "_locales") (Join-Path $locale "messages.json")
+                        if (Test-Path $msgPath) { try { $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json; if ($msgs.$key -and $msgs.$key.message) { $resolvedDesc = $msgs.$key.message } } catch {} }
+                    }
+                    $disabledFile = Join-Path (Join-Path $_.FullName $vd.Name) "Disabled"
+                    $entries += [PSCustomObject]@{
+                        id = $extId
+                        name = $resolvedName
+                        version = if ($m.version) { $m.version } else { "" }
+                        description = $resolvedDesc
+                        enabled = -not (Test-Path $disabledFile)
+                        browser = $BrowserName
+                        path = $ExtensionsDir
+                        installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
+                        permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
+                    }
+                } catch {}
             }
         }
     }
@@ -125,23 +127,25 @@ if ($Browser -eq "All" -or $Browser -eq "Firefox") {
         Get-ChildItem $ffProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             $extJson = Join-Path $_.FullName "extensions.json"
             if (Test-Path $extJson) {
-                $json = Get-Content $extJson -Raw | ConvertFrom-Json
-                $addons = $json.addons
-                if (-not $addons) { $addons = $json }
-                $addons | ForEach-Object {
-                    $addon = $_
-                    $result += [PSCustomObject]@{
-                        id = if ($addon.id) { $addon.id } else { if ($addon.defaultLocale) { $addon.defaultLocale.name } else { "" } }
-                        name = if ($addon.defaultLocale -and $addon.defaultLocale.name) { $addon.defaultLocale.name } else { $addon.name }
-                        version = if ($addon.version) { $addon.version } else { "" }
-                        description = if ($addon.defaultLocale -and $addon.defaultLocale.description) { $addon.defaultLocale.description } else { "" }
-                        enabled = if ($addon.disabled) { -not $addon.disabled } else { $true }
-                        browser = "Firefox"
-                        path = $_.FullName
-                        installTime = if ($addon.installDate) { $addon.installDate } else { "" }
-                        permissions = if ($addon.permissions) { ($addon.permissions -join ", ") } else { "" }
+                try {
+                    $json = Get-Content $extJson -Raw | ConvertFrom-Json
+                    $addons = $json.addons
+                    if ($null -eq $addons) { $addons = $json }
+                    $addons | ForEach-Object {
+                        $addon = $_
+                        $result += [PSCustomObject]@{
+                            id = if ($addon.id) { $addon.id } else { if ($addon.defaultLocale) { $addon.defaultLocale.name } else { "" } }
+                            name = if ($addon.defaultLocale -and $addon.defaultLocale.name) { $addon.defaultLocale.name } else { $addon.name }
+                            version = if ($addon.version) { $addon.version } else { "" }
+                            description = if ($addon.defaultLocale -and $addon.defaultLocale.description) { $addon.defaultLocale.description } else { "" }
+                            enabled = if ($addon.disabled) { -not $addon.disabled } else { $true }
+                            browser = "Firefox"
+                            path = Join-Path $_.FullName "extensions"
+                            installTime = if ($addon.installDate) { $addon.installDate } else { "" }
+                            permissions = if ($addon.permissions) { ($addon.permissions -join ", ") } else { "" }
+                        }
                     }
-                }
+                } catch {}
             }
         }
     }

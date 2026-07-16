@@ -84,11 +84,11 @@ class AdaptersPanel extends VBox {
         });
 
         busy.addListener((obs, old, nv) -> {
-            boolean notBusy = !nv;
             refreshBtn.setDisable(nv);
-            enableBtn.setDisable(notBusy || adapterTable.getSelectionModel().getSelectedItem() == null);
-            disableBtn.setDisable(notBusy || adapterTable.getSelectionModel().getSelectedItem() == null);
-            renewIpBtn.setDisable(notBusy || adapterTable.getSelectionModel().getSelectedItem() == null);
+            boolean hasSelection = adapterTable.getSelectionModel().getSelectedItem() != null;
+            enableBtn.setDisable(nv || !hasSelection);
+            disableBtn.setDisable(nv || !hasSelection);
+            renewIpBtn.setDisable(nv || !hasSelection);
         });
 
         HBox toolbar = new HBox(12, refreshBtn, enableBtn, disableBtn, renewIpBtn, statusLabel);
@@ -154,6 +154,7 @@ class AdaptersPanel extends VBox {
         new Thread(() -> {
             var result = service.setAdapterState(selected.getName(), enable);
             Platform.runLater(() -> {
+                busy.set(false);
                 if (result.success()) {
                     statusLabel.setText(result.message());
                     loadAdapters();
@@ -161,7 +162,6 @@ class AdaptersPanel extends VBox {
                     statusLabel.setText("Failed to " + action.toLowerCase() + " adapter.");
                     new Alert(Alert.AlertType.ERROR, result.message()).showAndWait();
                 }
-                busy.set(false);
             });
         }, "net-set-adapter-state").start();
     }
@@ -176,10 +176,10 @@ class AdaptersPanel extends VBox {
         new Thread(() -> {
             var result = service.renewIp(selected.getName());
             Platform.runLater(() -> {
+                busy.set(false);
                 statusLabel.setText(result.success() ? result.message() : "IP renewal failed.");
                 new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
                         result.message()).showAndWait();
-                busy.set(false);
             });
         }, "net-renew-ip").start();
     }

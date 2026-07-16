@@ -19,6 +19,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class StartupService {
 
@@ -26,11 +27,13 @@ public class StartupService {
     private static final String REG_RUN_ONCE = "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce";
     private static final String REG_RUN_DISABLED = "Software\\Microsoft\\Windows\\CurrentVersion\\RunDisabled";
     private static final String REG_STARTUP_APPROVED = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+    private static final String REG_WOW6432_RUN = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run";
+    private static final String REG_WOW6432_APPROVED = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+    private static final String REG_STARTUP_APPROVED_RUNONCE = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\RunOnce";
 
     private final ProcessRunner processRunner = new ProcessRunner(60);
+    private final ReentrantLock backupIndexLock = new ReentrantLock();
 
-    private volatile long lastScanTime = 0;
-    private volatile List<StartupItem> cachedItems = null;
     // Cache company name lookups to avoid repeated expensive native version queries
     private static final ConcurrentHashMap<String, String> COMPANY_NAME_CACHE = new ConcurrentHashMap<>();
 
@@ -134,8 +137,27 @@ public class StartupService {
     }
 
     public void invalidateCache() {
-        cachedItems = null;
-        lastScanTime = 0;
+        COMPANY_NAME_CACHE.clear();
+    }
+
+    private record RegistryPaths(HKEY hive, String keyPath, String approvedPath) {}
+
+    private RegistryPaths resolveRegistryPaths(StartupItem item) {
+        String location = item.getLocation();
+        boolean isHkcu = location.contains("HKCU");
+        HKEY hive = isHkcu ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
+
+        if (location.contains("32-bit")) {
+            return new RegistryPaths(hive, REG_WOW6432_RUN, REG_WOW6432_APPROVED);
+        } else if (location.contains("RunOnce (disabled)")) {
+            return new RegistryPaths(hive, REG_RUN, REG_STARTUP_APPROVED);
+        } else if (location.contains("RunOnce")) {
+            return new RegistryPaths(hive, REG_RUN_ONCE, REG_STARTUP_APPROVED_RUNONCE);
+        } else if (location.contains("(Disabled)")) {
+            return new RegistryPaths(hive, REG_RUN_DISABLED, REG_STARTUP_APPROVED);
+        } else {
+            return new RegistryPaths(hive, REG_RUN, REG_STARTUP_APPROVED);
+        }
     }
 
     public List<StartupItem> listRegistryApps() {
@@ -444,21 +466,16 @@ public class StartupService {
             }
             item.setEnabled(!item.isEnabled());
         } else if (item.getType() == StartupItemType.REGISTRY) {
-            boolean isHkcu = item.getLocation().contains("HKCU");
-            HKEY hive = isHkcu ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
+            RegistryPaths paths = resolveRegistryPaths(item);
+            String valName = item.getRegistryValueName();
+            String location = item.getLocation();
 
-            if (!Advapi32Util.registryKeyExists(hive, REG_STARTUP_APPROVED)) {
-                Advapi32Util.registryCreateKey(hive, REG_STARTUP_APPROVED);
-            }
-
-            if (item.isEnabled()) {
-                // Disable: write 03 to StartupApproved\Run
-                byte[] disableBytes = new byte[]{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-                Advapi32Util.registrySetBinaryValue(hive, REG_STARTUP_APPROVED, item.getRegistryValueName(), disableBytes);
+            if (location.contains("RunOnce")) {
+                toggleRunOnceItem(item, paths);
+            } else if (location.contains("(Disabled)")) {
+                toggleDisabledItem(item, paths);
             } else {
-                // Enable: write 02 to StartupApproved\Run
-                byte[] enableBytes = new byte[]{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-                Advapi32Util.registrySetBinaryValue(hive, REG_STARTUP_APPROVED, item.getRegistryValueName(), enableBytes);
+                toggleRegularItem(item, paths);
             }
             item.setEnabled(!item.isEnabled());
         } else if (item.getType() == StartupItemType.SERVICE) {
@@ -477,7 +494,11 @@ public class StartupService {
 
             ProcessResult result = processRunner.run(List.of("sc.exe", "config", serviceName, scConfigArg));
             if (!result.success()) {
-                throw new IOException("Failed to toggle service start type: " + result.combinedOutput());
+                String errMsg = result.combinedOutput();
+                if (errMsg.contains("577") || errMsg.contains("access") || errMsg.contains("denied")) {
+                    throw new IOException("Access denied. Please run as administrator to modify service start types.");
+                }
+                throw new IOException("Failed to toggle service start type: " + errMsg);
             }
 
             item.setServiceStartType(newStartType);
@@ -500,15 +521,108 @@ public class StartupService {
                 throw new IOException("Failed to delete Scheduled Task: " + result.combinedOutput());
             }
         } else if (item.getType() == StartupItemType.REGISTRY) {
-            boolean isHkcu = item.getLocation().contains("HKCU");
-            HKEY hive = isHkcu ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
-            String keyPath = item.getLocation().contains("(Disabled)") ? REG_RUN_DISABLED : REG_RUN;
+            RegistryPaths paths = resolveRegistryPaths(item);
+            String valName = item.getRegistryValueName();
 
-            if (Advapi32Util.registryValueExists(hive, keyPath, item.getRegistryValueName())) {
-                Advapi32Util.registryDeleteValue(hive, keyPath, item.getRegistryValueName());
+            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
+                Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
+            }
+
+            if (Advapi32Util.registryValueExists(paths.hive(), paths.approvedPath(), valName)) {
+                Advapi32Util.registryDeleteValue(paths.hive(), paths.approvedPath(), valName);
             }
         }
         invalidateCache();
+    }
+
+    private void toggleRegularItem(StartupItem item, RegistryPaths paths) throws Exception {
+        String valName = item.getRegistryValueName();
+        if (!Advapi32Util.registryKeyExists(paths.hive(), paths.approvedPath())) {
+            Advapi32Util.registryCreateKey(paths.hive(), paths.approvedPath());
+        }
+        if (item.isEnabled()) {
+            byte[] disableBytes = new byte[]{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, disableBytes);
+        } else {
+            byte[] enableBytes = new byte[]{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, enableBytes);
+        }
+    }
+
+    private void toggleDisabledItem(StartupItem item, RegistryPaths paths) throws Exception {
+        String valName = item.getRegistryValueName();
+        String location = item.getLocation();
+        boolean is32bit = location.contains("32-bit");
+        String enableKeyPath = is32bit ? REG_WOW6432_RUN : REG_RUN;
+
+        if (item.isEnabled()) {
+            byte[] disableBytes = new byte[]{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, disableBytes);
+        } else {
+            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
+                Object valData = Advapi32Util.registryGetValue(paths.hive(), paths.keyPath(), valName);
+                if (valData instanceof String cmd) {
+                    if (!Advapi32Util.registryKeyExists(paths.hive(), enableKeyPath)) {
+                        Advapi32Util.registryCreateKey(paths.hive(), enableKeyPath);
+                    }
+                    Advapi32Util.registrySetStringValue(paths.hive(), enableKeyPath, valName, cmd);
+                    Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
+                }
+            }
+            byte[] enableBytes = new byte[]{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, enableBytes);
+        }
+    }
+
+    private void toggleRunOnceItem(StartupItem item, RegistryPaths paths) throws Exception {
+        String valName = item.getRegistryValueName();
+        String location = item.getLocation();
+        boolean is32bit = location.contains("32-bit");
+        String runKeyPath = is32bit ? REG_WOW6432_RUN : REG_RUN;
+        String runOnceKeyPath = is32bit ? REG_WOW6432_RUN : REG_RUN_ONCE;
+
+        if (item.isEnabled()) {
+            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
+                Object valData = Advapi32Util.registryGetValue(paths.hive(), paths.keyPath(), valName);
+                if (valData instanceof String cmd) {
+                    if (!Advapi32Util.registryKeyExists(paths.hive(), runKeyPath)) {
+                        Advapi32Util.registryCreateKey(paths.hive(), runKeyPath);
+                    }
+                    Advapi32Util.registrySetStringValue(paths.hive(), runKeyPath, valName, cmd);
+                    Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
+                    String prefix = is32bit ? "HKLM (32-bit)" : (location.contains("HKCU") ? "HKCU" : "HKLM");
+                    item.setLocation(prefix + " RunOnce (disabled)");
+                }
+            }
+        } else {
+            boolean found = false;
+            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
+                Object valData = Advapi32Util.registryGetValue(paths.hive(), paths.keyPath(), valName);
+                if (valData instanceof String cmd) {
+                    if (!Advapi32Util.registryKeyExists(paths.hive(), runOnceKeyPath)) {
+                        Advapi32Util.registryCreateKey(paths.hive(), runOnceKeyPath);
+                    }
+                    Advapi32Util.registrySetStringValue(paths.hive(), runOnceKeyPath, valName, cmd);
+                    Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
+                    found = true;
+                }
+            }
+            if (!found && Advapi32Util.registryValueExists(paths.hive(), runKeyPath, valName)) {
+                Object valData = Advapi32Util.registryGetValue(paths.hive(), runKeyPath, valName);
+                if (valData instanceof String cmd) {
+                    if (!Advapi32Util.registryKeyExists(paths.hive(), runOnceKeyPath)) {
+                        Advapi32Util.registryCreateKey(paths.hive(), runOnceKeyPath);
+                    }
+                    Advapi32Util.registrySetStringValue(paths.hive(), runOnceKeyPath, valName, cmd);
+                    Advapi32Util.registryDeleteValue(paths.hive(), runKeyPath, valName);
+                    found = true;
+                }
+            }
+            if (found) {
+                String prefix = is32bit ? "HKLM (32-bit)" : (location.contains("HKCU") ? "HKCU" : "HKLM");
+                item.setLocation(prefix + " RunOnce");
+            }
+        }
     }
 
     // ── Backup / Restore Mechanism ────────────────────────────────────────────
@@ -564,15 +678,20 @@ public class StartupService {
             }
         } else if (item.getType() == StartupItemType.REGISTRY) {
             entry.setType("Registry");
-            boolean isHkcu = item.getLocation().contains("HKCU");
-            entry.setHive(isHkcu ? "HKCU" : "HKLM");
-            entry.setKeyPath(item.getLocation().contains("(Disabled)") ? REG_RUN_DISABLED : REG_RUN);
+            RegistryPaths paths = resolveRegistryPaths(item);
+            entry.setHive(paths.hive() == WinReg.HKEY_CURRENT_USER ? "HKCU" : "HKLM");
+            entry.setKeyPath(paths.keyPath());
             entry.setValueName(item.getRegistryValueName());
         }
 
-        List<StartupBackupEntry> index = listBackups();
-        index.add(entry);
-        saveBackupsIndex(index);
+        backupIndexLock.lock();
+        try {
+            List<StartupBackupEntry> index = listBackups();
+            index.add(entry);
+            saveBackupsIndex(index);
+        } finally {
+            backupIndexLock.unlock();
+        }
     }
 
     public void restoreBackup(StartupBackupEntry entry) throws Exception {
@@ -599,29 +718,40 @@ public class StartupService {
 
         deleteDirectoryRecursively(backupFolder);
 
-        List<StartupBackupEntry> index = listBackups();
-        index.removeIf(e -> e.getId().equals(entry.getId()));
-        saveBackupsIndex(index);
+        backupIndexLock.lock();
+        try {
+            List<StartupBackupEntry> index = listBackups();
+            index.removeIf(e -> e.getId().equals(entry.getId()));
+            saveBackupsIndex(index);
+        } finally {
+            backupIndexLock.unlock();
+        }
     }
 
     public void removeBackup(StartupBackupEntry entry) throws IOException {
         Path backupFolder = getBackupsDir().resolve(entry.getId());
         deleteDirectoryRecursively(backupFolder);
 
-        List<StartupBackupEntry> index = listBackups();
-        index.removeIf(e -> e.getId().equals(entry.getId()));
-        saveBackupsIndex(index);
+        backupIndexLock.lock();
+        try {
+            List<StartupBackupEntry> index = listBackups();
+            index.removeIf(e -> e.getId().equals(entry.getId()));
+            saveBackupsIndex(index);
+        } finally {
+            backupIndexLock.unlock();
+        }
     }
 
     private void deleteDirectoryRecursively(Path path) throws IOException {
         if (Files.exists(path)) {
-            Files.walk(path)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(p -> {
-                        try {
-                            Files.deleteIfExists(p);
-                        } catch (IOException ignored) {}
-                    });
+            try (var stream = Files.walk(path)) {
+                stream.sorted(Comparator.reverseOrder())
+                        .forEach(p -> {
+                            try {
+                                Files.deleteIfExists(p);
+                            } catch (IOException ignored) {}
+                        });
+            }
         }
     }
 
@@ -634,8 +764,9 @@ public class StartupService {
 
     private static String startTypeToScArg(String startType) {
         if (startType == null) return "demand";
-        return switch (startType.toLowerCase()) {
+        return switch (startType.toLowerCase(Locale.ROOT)) {
             case "automatic" -> "auto";
+            case "automatic (delayed start)" -> "delayed-auto";
             case "manual" -> "demand";
             case "disabled" -> "disabled";
             default -> "demand";

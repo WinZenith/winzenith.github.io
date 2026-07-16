@@ -52,8 +52,8 @@ public class DefragVisualization {
 
         long mftBytes = drive.getMftSizeBytes();
         long pageBytes = drive.getPageFileSizeBytes() + drive.getHiberFileSizeBytes() + drive.getSwapFileSizeBytes();
-        long fragBytes = drive.getFragmentsFound();
-        long dirBytes = drive.getTotalDirectories() * 4096L;
+        long fragBytes = drive.getFragmentedSpaceBytes();
+        long dirBytes = 0;
 
         long knownBytes = mftBytes + pageBytes + dirBytes + fragBytes;
         long remainingUsed = Math.max(0, used - knownBytes);
@@ -101,7 +101,7 @@ public class DefragVisualization {
                 + "  \u2014  " + drive.getSizeFormatted() + " total, "
                 + formatBytes(used) + " used (" + (total > 0 ? (int)(used * 100 / total) : 0) + "%)";
 
-        String fragCountText = "Fragments: " + drive.getFragmentsFormatted()
+        String fragCountText = "Fragmented Space: " + drive.getFragmentsFormatted()
                 + "  |  Fragmented files: " + drive.getFragmentedFileCount()
                 + "  |  Total files: " + drive.getTotalFileCount();
 

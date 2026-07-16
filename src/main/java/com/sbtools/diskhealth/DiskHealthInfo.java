@@ -9,6 +9,9 @@ import javafx.beans.property.SimpleLongProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class DiskHealthInfo {
 
@@ -31,6 +34,7 @@ public class DiskHealthInfo {
     private final LongProperty totalHostReads = new SimpleLongProperty(-1);
     private final LongProperty totalHostWrites = new SimpleLongProperty(-1);
     private final StringProperty dataSource = new SimpleStringProperty("wmi");
+    private List<SmartAttribute> rawSmartAttributes = new ArrayList<>();
 
     public DiskHealthInfo() {}
 
@@ -128,6 +132,9 @@ public class DiskHealthInfo {
     public String getDataSource() { return dataSource.get(); }
     public StringProperty dataSourceProperty() { return dataSource; }
     public void setDataSource(String v) { dataSource.set(v); }
+
+    public List<SmartAttribute> getRawSmartAttributes() { return rawSmartAttributes; }
+    public void setRawSmartAttributes(List<SmartAttribute> v) { rawSmartAttributes = v != null ? v : new ArrayList<>(); }
 
     public boolean isSsd() { return "SSD".equalsIgnoreCase(mediaType.get()); }
 

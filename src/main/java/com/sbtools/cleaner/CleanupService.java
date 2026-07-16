@@ -10,9 +10,12 @@ import com.sun.jna.platform.win32.WinReg;
 
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -61,6 +64,8 @@ public class CleanupService {
     }
 
     private final java.util.Map<CleanupCategory, Cleaner> cleaners = new java.util.HashMap<>();
+    private volatile List<BrowserProfile> cachedBrowserProfiles;
+    private volatile long browserProfilesCacheTime;
 
     public CleanupService() {
         initCleaners();
@@ -316,7 +321,7 @@ public class CleanupService {
         try {
             return scanWithExecutor(rows, categories, onProgress, executor);
         } finally {
-            executor.shutdown();
+            executor.shutdownNow();
         }
     }
 
@@ -338,9 +343,23 @@ public class CleanupService {
                 scanCategory(row);
                 if (onProgress != null)
                     onProgress.run();
-            }, executor);
+            }, executor).orTimeout(PER_CATEGORY_SCAN_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+                    .exceptionally(ex -> {
+                        if (ex instanceof java.util.concurrent.TimeoutException) {
+                            row.setSizeOrCountText("Timed out");
+                            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                            row.setErrorMessage("Scan timed out");
+                        }
+                        return null;
+                    });
         }
-        CompletableFuture.allOf(futures).join();
+        try {
+            CompletableFuture.allOf(futures).orTimeout(
+                    (long) categories.length * PER_CATEGORY_SCAN_TIMEOUT_SECONDS + 10,
+                    java.util.concurrent.TimeUnit.SECONDS).join();
+        } catch (Exception e) {
+            AppLogger.warning("Synchronous scan timed out or failed: " + e.getMessage());
+        }
         return List.of(rows);
     }
 
@@ -605,8 +624,13 @@ public class CleanupService {
     }
 
     private long cleanRegistryDefrag() {
+        long preDefragSize = RegistryDefragService.estimateSize();
         RegistryDefragService.DefragResult result = RegistryDefragService.defrag();
-        return result.defraggedCount() > 0 ? RegistryDefragService.estimateSize() : 0;
+        if (result.defraggedCount() > 0) {
+            long postDefragSize = RegistryDefragService.estimateSize();
+            return Math.max(0, preDefragSize - postDefragSize);
+        }
+        return 0;
     }
 
     private void scanRegistry(CleanupRow row) {
@@ -637,11 +661,8 @@ public class CleanupService {
                     if (value.startsWith("\"") && value.endsWith("\"")) {
                         value = value.substring(1, value.length() - 1);
                     }
-                    if (value.contains("\\") && !value.startsWith("-")) {
-                        String cleanPath = value;
-                        int spaceIdx = cleanPath.indexOf(" -");
-                        if (spaceIdx > 0)
-                            cleanPath = cleanPath.substring(0, spaceIdx);
+                    String cleanPath = extractPathFromRegistryValue(value);
+                    if (cleanPath != null) {
                         Path p = Paths.get(cleanPath);
                         if (!Files.exists(p)) {
                             count++;
@@ -708,16 +729,12 @@ public class CleanupService {
                                 String serverPath = Advapi32Util.registryGetStringValue(
                                         WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\LocalServer32", "");
                                 if (serverPath != null && !serverPath.isEmpty()) {
-                                    String cleanPath = serverPath;
-                                    if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
-                                        cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
-                                    }
-                                    int spaceIdx = cleanPath.indexOf(" -");
-                                    if (spaceIdx > 0)
-                                        cleanPath = cleanPath.substring(0, spaceIdx);
-                                    Path p = Paths.get(cleanPath);
-                                    if (!Files.exists(p)) {
-                                        count++;
+                                    String cleanPath = extractPathFromRegistryValue(serverPath);
+                                    if (cleanPath != null) {
+                                        Path p = Paths.get(cleanPath);
+                                        if (!Files.exists(p)) {
+                                            count++;
+                                        }
                                     }
                                 }
                             }
@@ -742,13 +759,12 @@ public class CleanupService {
                         String exePath = Advapi32Util.registryGetStringValue(
                                 WinReg.HKEY_LOCAL_MACHINE, keyPath + "\\" + appKey, "");
                         if (exePath != null && !exePath.isEmpty()) {
-                            String cleanPath = exePath;
-                            if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
-                                cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
-                            }
-                            Path p = Paths.get(cleanPath);
-                            if (!Files.exists(p)) {
-                                count++;
+                            String cleanPath = extractPathFromRegistryValue(exePath);
+                            if (cleanPath != null) {
+                                Path p = Paths.get(cleanPath);
+                                if (!Files.exists(p)) {
+                                    count++;
+                                }
                             }
                         }
                     } catch (Exception ignored) {
@@ -899,11 +915,8 @@ public class CleanupService {
                     if (value.startsWith("\"") && value.endsWith("\"")) {
                         value = value.substring(1, value.length() - 1);
                     }
-                    if (value.contains("\\") && !value.startsWith("-")) {
-                        String cleanPath = value;
-                        int spaceIdx = cleanPath.indexOf(" -");
-                        if (spaceIdx > 0)
-                            cleanPath = cleanPath.substring(0, spaceIdx);
+                    String cleanPath = extractPathFromRegistryValue(value);
+                    if (cleanPath != null) {
                         Path p = Paths.get(cleanPath);
                         if (!Files.exists(p)) {
                             toDelete.add(entry.getKey());
@@ -1000,9 +1013,11 @@ public class CleanupService {
                     }
                 }
                 if (!toDelete.isEmpty()) {
-                    backupRegKey(backupRootOrNull, "fileextensions", "HKCR", "");
                     for (String key : toDelete) {
                         try {
+                            if (backupRootOrNull != null) {
+                                backupRegKey(backupRootOrNull, "fileext-" + key.replace(".", "_"), "HKCR", key);
+                            }
                             if (regDeleteKeyRecursive("HKCR", key))
                                 count++;
                         } catch (Exception ignored) {
@@ -1039,16 +1054,12 @@ public class CleanupService {
                                 String serverPath = Advapi32Util.registryGetStringValue(
                                         WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\LocalServer32", "");
                                 if (serverPath != null && !serverPath.isEmpty()) {
-                                    String cleanPath = serverPath;
-                                    if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
-                                        cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
+                                    String cleanPath = extractPathFromRegistryValue(serverPath);
+                                    if (cleanPath != null) {
+                                        Path p = Paths.get(cleanPath);
+                                        if (!Files.exists(p))
+                                            invalid = true;
                                     }
-                                    int spaceIdx = cleanPath.indexOf(" -");
-                                    if (spaceIdx > 0)
-                                        cleanPath = cleanPath.substring(0, spaceIdx);
-                                    Path p = Paths.get(cleanPath);
-                                    if (!Files.exists(p))
-                                        invalid = true;
                                 }
                             }
                             if (invalid)
@@ -1143,16 +1154,12 @@ public class CleanupService {
                                 pathToCheck = uninstallString;
                             }
                             if (pathToCheck != null) {
-                                String cleanPath = pathToCheck;
-                                if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
-                                    cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
-                                }
-                                int spaceIdx = cleanPath.indexOf(" -");
-                                if (spaceIdx > 0)
-                                    cleanPath = cleanPath.substring(0, spaceIdx);
-                                Path p = Paths.get(cleanPath);
-                                if (!Files.exists(p)) {
-                                    toDelete.add(guid);
+                                String cleanPath = extractPathFromRegistryValue(pathToCheck);
+                                if (cleanPath != null) {
+                                    Path p = Paths.get(cleanPath);
+                                    if (!Files.exists(p)) {
+                                        toDelete.add(guid);
+                                    }
                                 }
                             }
                         } catch (Exception ignored) {
@@ -1272,13 +1279,15 @@ public class CleanupService {
     private long getRecycleBinSize() {
         long size = 0;
         try {
-            Path recycleBin = safeEnvPath("SYSTEMDRIVE", "$Recycle.Bin");
-            if (recycleBin != null && Files.isDirectory(recycleBin)) {
-                try (Stream<Path> walk = Files.walk(recycleBin)) {
-                    size = walk.filter(Files::isRegularFile)
-                            .filter(p -> !p.getFileName().toString().startsWith("$I"))
-                            .mapToLong(p -> p.toFile().length())
-                            .sum();
+            for (java.io.File root : java.io.File.listRoots()) {
+                Path recycleBin = root.toPath().resolve("$Recycle.Bin");
+                if (Files.isDirectory(recycleBin)) {
+                    try (Stream<Path> walk = Files.walk(recycleBin)) {
+                        size += walk.filter(Files::isRegularFile)
+                                .filter(p -> !p.getFileName().toString().startsWith("$I"))
+                                .mapToLong(p -> p.toFile().length())
+                                .sum();
+                    }
                 }
             }
         } catch (Exception ignored) {
@@ -1311,15 +1320,19 @@ public class CleanupService {
         } catch (Exception ex) {
             AppLogger.warning("Failed to empty Recycle Bin via PowerShell, trying fallback: " + ex.getMessage());
             try {
-                String sysdrive = safeEnv("SYSTEMDRIVE");
-                if (sysdrive != null) {
-                    ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
-                            "rd", "/s", "/q", sysdrive + "\\$Recycle.Bin");
-                    pb.redirectErrorStream(true);
-                    Process p = ProcessManager.start(pb);
-                    boolean finished = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-                    if (!finished) {
-                        p.destroyForcibly();
+                for (java.io.File root : java.io.File.listRoots()) {
+                    Path recycleBin = root.toPath().resolve("$Recycle.Bin");
+                    if (Files.isDirectory(recycleBin)) {
+                        try (Stream<Path> walk = Files.walk(recycleBin)) {
+                            walk.sorted(Comparator.reverseOrder()).forEach(f -> {
+                                if (!f.equals(recycleBin)) {
+                                    try {
+                                        deletePermanently(f);
+                                    } catch (Exception ignored) {
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
             } catch (Exception ex2) {
@@ -1334,10 +1347,9 @@ public class CleanupService {
     private List<Path> getJunkDirs() {
         List<Path> dirs = new ArrayList<>();
         addEnvPath(dirs, "TEMP");
-        addEnvPath(dirs, "TMP");
         addEnvPath(dirs, "WINDIR", "Temp");
         addEnvPath(dirs, "LOCALAPPDATA", "Temp");
-        return dirs;
+        return deduplicatePaths(dirs);
     }
 
     private void scanJunkFiles(CleanupRow row) {
@@ -1380,11 +1392,22 @@ public class CleanupService {
 
         // Count RecentDocs entries that will be cleaned
         try {
-            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER,
-                    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs")) {
-                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CURRENT_USER,
-                        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs");
-                itemCount += subKeys.length;
+            String recentDocsPath = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs";
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER, recentDocsPath)) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CURRENT_USER, recentDocsPath);
+                for (String ext : subKeys) {
+                    try {
+                        Object value = Advapi32Util.registryGetValue(WinReg.HKEY_CURRENT_USER,
+                                recentDocsPath + "\\" + ext, null);
+                        if (value != null) {
+                            byte[] bytes = (value instanceof byte[]) ? (byte[]) value : value.toString().getBytes();
+                            int docCount = countDocumentsInRecentDocsBinary(bytes);
+                            itemCount += Math.max(1, docCount);
+                        }
+                    } catch (Exception ignored) {
+                        itemCount++;
+                    }
+                }
             }
         } catch (Exception ignored) {
         }
@@ -1429,10 +1452,15 @@ public class CleanupService {
         }
 
         try {
-            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER,
-                    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs")) {
-                Advapi32Util.registryDeleteKey(WinReg.HKEY_CURRENT_USER,
-                        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs");
+            String recentDocsPath = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs";
+            if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER, recentDocsPath)) {
+                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CURRENT_USER, recentDocsPath);
+                for (String subKey : subKeys) {
+                    try {
+                        Advapi32Util.registryDeleteKey(WinReg.HKEY_CURRENT_USER, recentDocsPath + "\\" + subKey);
+                    } catch (Exception ignored) {
+                    }
+                }
             }
         } catch (Exception ignored) {
         }
@@ -1446,6 +1474,10 @@ public class CleanupService {
     }
 
     private List<BrowserProfile> getBrowserProfiles() {
+        long now = System.currentTimeMillis();
+        if (cachedBrowserProfiles != null && (now - browserProfilesCacheTime) < 60_000) {
+            return cachedBrowserProfiles;
+        }
         List<BrowserProfile> profiles = new ArrayList<>();
 
         String localAppData = safeEnv("LOCALAPPDATA");
@@ -1522,6 +1554,8 @@ public class CleanupService {
             profiles.addAll(getChromiumProfiles("Yandex Browser", yandexUserData));
         }
 
+        cachedBrowserProfiles = profiles;
+        browserProfilesCacheTime = System.currentTimeMillis();
         return profiles;
     }
 
@@ -1835,22 +1869,17 @@ public class CleanupService {
     private List<Path> getTempSystemDirs() {
         List<Path> dirs = new ArrayList<>();
         String windir = safeEnv("WINDIR");
-        String sysdrive = safeEnv("SYSTEMDRIVE");
         if (windir != null) {
             addPath(dirs, windir + "\\Prefetch");
         }
-        if (sysdrive != null) {
-            Path btDir = Paths.get(sysdrive + "\\$Windows.~BT");
-            Path wsDir = Paths.get(sysdrive + "\\$Windows.~WS");
-            Path resetDir = Paths.get(sysdrive + "\\$SysReset");
-            if (Files.exists(btDir) && !isUpgradeInProgress()) {
-                dirs.add(btDir);
-            }
-            if (Files.exists(wsDir) && !isUpgradeInProgress()) {
-                dirs.add(wsDir);
-            }
-            if (Files.exists(resetDir) && !isUpgradeInProgress()) {
-                dirs.add(resetDir);
+        if (!isUpgradeInProgress()) {
+            for (java.io.File root : java.io.File.listRoots()) {
+                Path btDir = root.toPath().resolve("$Windows.~BT");
+                Path wsDir = root.toPath().resolve("$Windows.~WS");
+                Path resetDir = root.toPath().resolve("$SysReset");
+                if (Files.exists(btDir)) dirs.add(btDir);
+                if (Files.exists(wsDir)) dirs.add(wsDir);
+                if (Files.exists(resetDir)) dirs.add(resetDir);
             }
         }
         return dirs;
@@ -1881,10 +1910,6 @@ public class CleanupService {
     private void scanMemoryDumps(CleanupRow row) {
         List<Path> dirs = new ArrayList<>();
         addEnvPath(dirs, "WINDIR", "Minidump");
-        String windir = safeEnv("WINDIR");
-        if (windir != null) {
-            addPath(dirs, windir);
-        }
         long totalSize = 0;
         int itemCount = 0;
         for (Path dir : dirs) {
@@ -1990,13 +2015,31 @@ public class CleanupService {
     private void scanWindowsUpdateCleanup(CleanupRow row) {
         long totalSize = 0;
         int itemCount = 0;
-        // Try fast DISM query with short timeout
+        // Scan SoftwareDistribution\Download first (fast, local files)
+        String windir = safeEnv("WINDIR");
+        if (windir != null) {
+            List<Path> dirs = new ArrayList<>();
+            addPath(dirs, windir + "\\SoftwareDistribution\\Download");
+            try {
+                for (Path dir : dirs) {
+                    if (dir != null && Files.isDirectory(dir)) {
+                        try (Stream<Path> walk = Files.walk(dir)) {
+                            var stats = walk.filter(Files::isRegularFile)
+                                    .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                            totalSize += stats.getSum();
+                            itemCount += (int) stats.getCount();
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+        // Try DISM query with short timeout to avoid blocking the thread pool
         try {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image",
                     "/AnalyzeComponentStore");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            boolean finished = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
             if (finished) {
                 String output = new String(p.getInputStream().readAllBytes(),
                         java.nio.charset.StandardCharsets.UTF_8);
@@ -2006,7 +2049,9 @@ public class CleanupService {
                         if (parts.length >= 2) {
                             String sizeStr = parts[1].replaceAll("[^0-9]", "").trim();
                             if (!sizeStr.isEmpty()) {
-                                totalSize = Long.parseLong(sizeStr) * 1024L * 1024L;
+                                long dismSize = Long.parseLong(sizeStr) * 1024L * 1024L;
+                                totalSize += dismSize;
+                                itemCount = Math.max(itemCount, 1);
                             }
                         }
                     }
@@ -2015,26 +2060,6 @@ public class CleanupService {
                 p.destroyForcibly();
             }
         } catch (Exception ignored) {}
-        // Fallback: scan SoftwareDistribution\Download
-        if (totalSize == 0) {
-            String windir = safeEnv("WINDIR");
-            if (windir != null) {
-                List<Path> dirs = new ArrayList<>();
-                addPath(dirs, windir + "\\SoftwareDistribution\\Download");
-                try {
-                    for (Path dir : dirs) {
-                        if (dir != null && Files.isDirectory(dir)) {
-                            try (Stream<Path> walk = Files.walk(dir)) {
-                                var stats = walk.filter(Files::isRegularFile)
-                                        .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                                totalSize += stats.getSum();
-                                itemCount += (int) stats.getCount();
-                            }
-                        }
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
         row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
@@ -2042,28 +2067,29 @@ public class CleanupService {
 
     private long cleanWindowsUpdateCleanup() {
         long cleaned = 0;
-        try {
-            ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image",
-                    "/StartComponentCleanup");
-            pb.redirectErrorStream(true);
-            Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(300, java.util.concurrent.TimeUnit.SECONDS);
-            if (finished) {
-                AppLogger.info("DISM component cleanup completed successfully");
-            } else {
-                AppLogger.warning("DISM cleanup timed out after 300 seconds");
-                p.destroyForcibly();
-            }
-        } catch (Exception e) {
-            AppLogger.warning("DISM cleanup failed: " + e.getMessage());
-        }
-        // Also clean SoftwareDistribution\Download
+        // Clean SoftwareDistribution\Download first (fast, immediate result)
         String windir = safeEnv("WINDIR");
         if (windir != null) {
             Path sd = Paths.get(windir, "SoftwareDistribution", "Download");
             if (Files.isDirectory(sd)) {
                 cleaned += deleteDirectoryContents(sd);
             }
+        }
+        // Run DISM component cleanup with reduced timeout
+        try {
+            ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image",
+                    "/StartComponentCleanup");
+            pb.redirectErrorStream(true);
+            Process p = ProcessManager.start(pb);
+            boolean finished = p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
+            if (finished) {
+                AppLogger.info("DISM component cleanup completed successfully");
+            } else {
+                AppLogger.warning("DISM cleanup timed out after 60 seconds");
+                p.destroyForcibly();
+            }
+        } catch (Exception e) {
+            AppLogger.warning("DISM cleanup failed: " + e.getMessage());
         }
         return cleaned;
     }
@@ -3080,7 +3106,6 @@ public class CleanupService {
         if (windir != null) {
             List<Path> dirs = new ArrayList<>();
             addPath(dirs, windir + "\\SoftwareDistribution\\DataStore");
-            addPath(dirs, windir + "\\SoftwareDistribution\\DataStore\\Logs");
 
             for (Path dir : dirs) {
                 if (dir != null && Files.isDirectory(dir)) {
@@ -3105,7 +3130,6 @@ public class CleanupService {
         if (windir != null) {
             List<Path> dirs = new ArrayList<>();
             addPath(dirs, windir + "\\SoftwareDistribution\\DataStore");
-            addPath(dirs, windir + "\\SoftwareDistribution\\DataStore\\Logs");
 
             for (Path dir : dirs) {
                 if (dir != null && Files.isDirectory(dir)) {
@@ -3151,12 +3175,57 @@ public class CleanupService {
         if (sysdrive != null) {
             Path windowsOld = Paths.get(sysdrive, "Windows.old");
             if (Files.isDirectory(windowsOld)) {
-                try (Stream<Path> walk = Files.walk(windowsOld)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                    totalSize += stats.getSum();
-                    itemCount += (int) stats.getCount();
+                // Fast OS-native size estimation via dir command
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
+                            "dir /s /a \"" + windowsOld.toString() + "\"");
+                    pb.redirectErrorStream(true);
+                    Process p = ProcessManager.start(pb);
+                    boolean finished = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
+                    if (finished) {
+                        String output = new String(p.getInputStream().readAllBytes(),
+                                java.nio.charset.StandardCharsets.UTF_8);
+                        for (String line : output.split("\\n")) {
+                            if (line.contains("File(s)")) {
+                                String noCommas = line.replaceAll(",", "");
+                                java.util.regex.Matcher m = java.util.regex.Pattern
+                                        .compile("(\\d+)\\s+File\\(s\\)\\s+(\\d+)\\s+bytes")
+                                        .matcher(noCommas);
+                                if (m.find()) {
+                                    itemCount = Integer.parseInt(m.group(1));
+                                    totalSize = Long.parseLong(m.group(2));
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        p.destroyForcibly();
+                    }
                 } catch (Exception ignored) {
+                }
+
+                // Fallback to Java walkFileTree if dir command failed or returned no data
+                if (totalSize == 0 && itemCount == 0) {
+                    try {
+                        java.util.concurrent.atomic.AtomicLong size = new java.util.concurrent.atomic.AtomicLong();
+                        java.util.concurrent.atomic.AtomicInteger count = new java.util.concurrent.atomic.AtomicInteger();
+                        Files.walkFileTree(windowsOld, new SimpleFileVisitor<>() {
+                            @Override
+                            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                                size.addAndGet(attrs.size());
+                                count.incrementAndGet();
+                                return FileVisitResult.CONTINUE;
+                            }
+
+                            @Override
+                            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                                return FileVisitResult.CONTINUE;
+                            }
+                        });
+                        totalSize = size.get();
+                        itemCount = count.get();
+                    } catch (Exception ignored) {
+                    }
                 }
             }
         }
@@ -3175,31 +3244,90 @@ public class CleanupService {
         if (sysdrive != null) {
             Path windowsOld = Paths.get(sysdrive, "Windows.old");
             if (Files.isDirectory(windowsOld)) {
-                try (Stream<Path> walk = Files.walk(windowsOld)) {
-                    cleaned = walk.filter(Files::isRegularFile)
-                            .mapToLong(p -> p.toFile().length())
-                            .sum();
+                // Calculate size via fast OS-native dir command
+                try {
+                    ProcessBuilder pbSize = new ProcessBuilder("cmd", "/c",
+                            "dir /s /a \"" + windowsOld.toString() + "\"");
+                    pbSize.redirectErrorStream(true);
+                    Process pSize = ProcessManager.start(pbSize);
+                    boolean sizeFinished = pSize.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
+                    if (sizeFinished) {
+                        String output = new String(pSize.getInputStream().readAllBytes(),
+                                java.nio.charset.StandardCharsets.UTF_8);
+                        for (String line : output.split("\\n")) {
+                            if (line.contains("File(s)")) {
+                                String noCommas = line.replaceAll(",", "");
+                                java.util.regex.Matcher m = java.util.regex.Pattern
+                                        .compile("(\\d+)\\s+File\\(s\\)\\s+(\\d+)\\s+bytes")
+                                        .matcher(noCommas);
+                                if (m.find()) {
+                                    cleaned = Long.parseLong(m.group(2));
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        pSize.destroyForcibly();
+                    }
                 } catch (Exception ignored) {
                 }
 
+                // Fallback size calculation via Java walkFileTree
+                if (cleaned == 0) {
+                    try {
+                        java.util.concurrent.atomic.AtomicLong size = new java.util.concurrent.atomic.AtomicLong();
+                        Files.walkFileTree(windowsOld, new SimpleFileVisitor<>() {
+                            @Override
+                            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                                size.addAndGet(attrs.size());
+                                return FileVisitResult.CONTINUE;
+                            }
+
+                            @Override
+                            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                                return FileVisitResult.CONTINUE;
+                            }
+                        });
+                        cleaned = size.get();
+                    } catch (Exception ignored) {
+                    }
+                }
+
+                // Try direct deletion first (works for admin accounts)
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
+                            "rd", "/s", "/q", windowsOld.toString());
+                    pb.redirectErrorStream(true);
+                    Process p = ProcessManager.start(pb);
+                    boolean finished = p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
+                    if (finished && !Files.isDirectory(windowsOld)) {
+                        return cleaned;
+                    }
+                    if (!finished) {
+                        p.destroyForcibly();
+                    }
+                } catch (Exception ignored) {
+                }
+
+                // Fallback: take ownership then delete with reduced timeouts
                 try {
                     ProcessBuilder pbTakeown = new ProcessBuilder("cmd", "/c",
-                            "takeown /F \"" + windowsOld.toString() + "\\*\" /R /A");
+                            "takeown /F \"" + windowsOld.toString() + "\" /R /A");
                     pbTakeown.redirectErrorStream(true);
                     Process pTakeown = ProcessManager.start(pbTakeown);
-                    pTakeown.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    pTakeown.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
 
                     ProcessBuilder pbIcacls = new ProcessBuilder("cmd", "/c",
-                            "icacls \"" + windowsOld.toString() + "\\*\" /grant administrators:F /T");
+                            "icacls \"" + windowsOld.toString() + "\" /grant administrators:F /T");
                     pbIcacls.redirectErrorStream(true);
                     Process pIcacls = ProcessManager.start(pbIcacls);
-                    pIcacls.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    pIcacls.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
 
                     ProcessBuilder pb = new ProcessBuilder("cmd", "/c",
                             "rd", "/s", "/q", windowsOld.toString());
                     pb.redirectErrorStream(true);
                     Process p = ProcessManager.start(pb);
-                    boolean finished = p.waitFor(300, java.util.concurrent.TimeUnit.SECONDS);
+                    boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
                     if (!finished) {
                         p.destroyForcibly();
                         AppLogger.warning("Windows.old deletion timed out");
@@ -3240,12 +3368,63 @@ public class CleanupService {
     }
 
     private void addPath(List<Path> list, String pathStr) {
-        if (pathStr != null && !pathStr.isBlank() && !pathStr.startsWith("null")) {
+        if (pathStr != null && !pathStr.isBlank()) {
             Path p = Paths.get(pathStr);
             if (Files.exists(p)) {
                 list.add(p);
             }
         }
+    }
+
+    private List<Path> deduplicatePaths(List<Path> paths) {
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        List<Path> result = new ArrayList<>();
+        for (Path p : paths) {
+            try {
+                String canonical = p.toRealPath().toString().toLowerCase();
+                if (seen.add(canonical)) {
+                    result.add(p);
+                }
+            } catch (Exception e) {
+                if (seen.add(p.toString().toLowerCase())) {
+                    result.add(p);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static String extractPathFromRegistryValue(String rawValue) {
+        if (rawValue == null || rawValue.isEmpty()) return null;
+        String path = rawValue;
+        if (path.startsWith("\"") && path.endsWith("\"")) {
+            path = path.substring(1, path.length() - 1);
+        }
+        if (path.startsWith("\\\\")) {
+            return null;
+        }
+        int spaceIdx = path.indexOf(" -");
+        if (spaceIdx > 0) {
+            path = path.substring(0, spaceIdx);
+        }
+        if (!path.contains("\\") && !path.contains("/")) {
+            return null;
+        }
+        return path;
+    }
+
+    private static int countDocumentsInRecentDocsBinary(byte[] data) {
+        if (data == null || data.length < 2) return 0;
+        int count = 0;
+        for (int i = 0; i < data.length - 1; i++) {
+            if (data[i] == 0x00 && data[i + 1] == 0x00) {
+                break;
+            }
+            if (data[i] == 0x20 && (i == 0 || data[i - 1] == 0x00)) {
+                count++;
+            }
+        }
+        return Math.max(count, 0);
     }
 
     private void scanDirectorySizes(CleanupRow row, List<Path> dirs) {
@@ -3265,7 +3444,7 @@ public class CleanupService {
                                     if (Files.isHidden(p))
                                         return false;
                                     long lastModified = p.toFile().lastModified();
-                                    return lastModified <= 0 || lastModified < cutoff;
+                                    return lastModified > 0 && lastModified < cutoff;
                                 } catch (Exception e) {
                                     return true;
                                 }
@@ -3356,26 +3535,38 @@ public class CleanupService {
     }
 
     private long deleteDirectoryContents(Path dir) {
-        long cleaned = 0;
-        try (Stream<Path> walk = Files.walk(dir)) {
-            List<Path> sorted = walk.sorted(Comparator.reverseOrder()).toList();
-            for (Path f : sorted) {
-                if (f.equals(dir))
-                    continue;
-                try {
-                    if (Files.isRegularFile(f) || Files.isSymbolicLink(f)) {
-                        long size = Files.size(f);
-                        deletePermanently(f);
-                        cleaned += size;
-                    } else if (Files.isDirectory(f)) {
-                        deletePermanently(f);
+        java.util.concurrent.atomic.AtomicLong cleaned = new java.util.concurrent.atomic.AtomicLong();
+        try {
+            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    try {
+                        cleaned.addAndGet(attrs.size());
+                        Files.deleteIfExists(file);
+                    } catch (Exception ignored) {
                     }
-                } catch (Exception ignored) {
+                    return FileVisitResult.CONTINUE;
                 }
-            }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path d, IOException exc) {
+                    if (!d.equals(dir)) {
+                        try {
+                            Files.deleteIfExists(d);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE;
+                }
+            });
         } catch (Exception ignored) {
         }
-        return cleaned;
+        return cleaned.get();
     }
 
     private void deletePermanently(Path source) {
@@ -3383,11 +3574,6 @@ public class CleanupService {
             Files.deleteIfExists(source);
         } catch (IOException e) {
             AppLogger.warning("Could not delete " + source + ": " + e.getMessage());
-            try {
-                Thread.sleep(100);
-                Files.deleteIfExists(source);
-            } catch (Exception ignored) {
-            }
         }
     }
 

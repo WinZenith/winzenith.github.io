@@ -39,6 +39,18 @@ try {
 try {
     $ErrorActionPreference = 'Stop'
     $gpus = @()
+    $nvidiaVramList = @()
+    try {
+        $nvidiaOut = & nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null
+        if ($nvidiaOut) {
+            foreach ($line in $nvidiaOut) {
+                $mbVal = 0
+                try { $mbVal = [int]($line.Trim()) } catch {}
+                if ($mbVal -gt 0) { $nvidiaVramList += [uint64]$mbVal * 1024 * 1024 }
+            }
+        }
+    } catch {}
+    $nvidiaIdx = 0
     $gpuSearcher = New-Object System.Management.ManagementObjectSearcher('root\cimv2', 'SELECT * FROM Win32_VideoController')
     foreach ($gpuObj in $gpuSearcher.Get()) {
         $vc = $gpuObj
@@ -52,19 +64,10 @@ try {
         $gpuName = ''
         try { $gpuName = [string]$vc['Name'] } catch {}
         if ($gpuName -match 'NVIDIA') {
-            try {
-                $nvidiaOut = & nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null
-                if ($nvidiaOut) {
-                    foreach ($line in $nvidiaOut) {
-                        $mbVal = 0
-                        try { $mbVal = [int]($line.Trim()) } catch {}
-                        if ($mbVal -gt 0) {
-                            $vramBytes = [uint64]$mbVal * 1024 * 1024
-                            break
-                        }
-                    }
-                }
-            } catch {}
+            if ($nvidiaIdx -lt $nvidiaVramList.Count) {
+                $vramBytes = $nvidiaVramList[$nvidiaIdx]
+                $nvidiaIdx++
+            }
         }
 
         $memoryType = ''
@@ -99,6 +102,16 @@ try {
             elseif ($nameLower -match 'gtx\s*10') { $memoryType = 'GDDR5' }
             elseif ($nameLower -match 'gtx\s*9') { $memoryType = 'GDDR5' }
             elseif ($nameLower -match 'gtx\s*7') { $memoryType = 'GDDR5' }
+            elseif ($nameLower -match 'radeon\s+rx\s+9[0-9]{2}') { $memoryType = 'GDDR6' }
+            elseif ($nameLower -match 'radeon\s+rx\s+8[0-9]{2}') { $memoryType = 'GDDR6' }
+            elseif ($nameLower -match 'radeon\s+rx\s+7[0-9]{3}') { $memoryType = 'GDDR6' }
+            elseif ($nameLower -match 'radeon\s+rx\s+6[0-9]{3}') { $memoryType = 'GDDR6' }
+            elseif ($nameLower -match 'radeon\s+rx\s+5[0-9]{3}') { $memoryType = 'GDDR6' }
+            elseif ($nameLower -match 'radeon\s+vii') { $memoryType = 'HBM2' }
+            elseif ($nameLower -match 'radeon\s+rx\s+vega') { $memoryType = 'HBM2' }
+            elseif ($nameLower -match 'radeon\s+pro\s+wx') { $memoryType = 'GDDR5' }
+            elseif ($nameLower -match 'radeon\s+pro\s+w[0-9]') { $memoryType = 'HBM2' }
+            elseif ($nameLower -match 'intel.*arc') { $memoryType = 'GDDR6' }
             elseif ($nameLower -match 'gddr6x') { $memoryType = 'GDDR6X' }
             elseif ($nameLower -match 'gddr6') { $memoryType = 'GDDR6' }
             elseif ($nameLower -match 'gddr5x') { $memoryType = 'GDDR5X' }
@@ -147,8 +160,8 @@ try {
 # ── RAM ──────────────────────────────────────────────────────────────────────
 try {
     $ErrorActionPreference = 'Stop'
-    $cs = Get-CimInstance Win32_ComputerSystem
-    $totalRamBytes = if ($cs.TotalPhysicalMemory) { [uint64]$cs.TotalPhysicalMemory } else { 0 }
+    $csRam = Get-CimInstance Win32_ComputerSystem
+    $totalRamBytes = if ($csRam.TotalPhysicalMemory) { [uint64]$csRam.TotalPhysicalMemory } else { 0 }
 
     function Get-DdrType {
         param([int]$smbiosType, [string]$memoryTypeCim)
@@ -233,6 +246,7 @@ try {
 try {
     $ErrorActionPreference = 'Stop'
     $os = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1
+    $cs = Get-CimInstance Win32_ComputerSystem
     $osSection = [ordered]@{
         name            = if ($os.Caption) { $os.Caption } else { '' }
         version         = if ($os.Version) { $os.Version } else { '' }
@@ -249,9 +263,9 @@ try {
         serialNumber    = ''
         productKey      = ''
     }
-    $bios = Get-CimInstance Win32_BIOS | Select-Object -First 1
-    if ($bios -and $bios.SerialNumber) {
-        $osSection['serialNumber'] = $bios.SerialNumber.Trim()
+    $osBios = Get-CimInstance Win32_BIOS | Select-Object -First 1
+    if ($osBios -and $osBios.SerialNumber) {
+        $osSection['serialNumber'] = $osBios.SerialNumber.Trim()
     }
     $result['os'] = $osSection
 } catch {
@@ -278,7 +292,7 @@ try {
             model       = if ($_.Model) { $_.Model.Trim() } else { '' }
             manufacturer = if ($_.Manufacturer) { $_.Manufacturer.Trim() } else { '' }
             sizeBytes   = $sizeBytes
-            mediType    = if ($_.MediaType) { $_.MediaType } else { '' }
+            mediaType    = if ($_.MediaType) { $_.MediaType } else { '' }
             interfaceType = if ($_.InterfaceType) { $_.InterfaceType } else { '' }
             serialNumber = $serial
             partitions  = if ($_.Partitions) { $_.Partitions } else { 0 }
@@ -290,12 +304,17 @@ try {
 
     # Build mapping: logical disk deviceID -> physical disk index
     $logicalToPhysical = @{}
+    $allLogicalToPartition = @(Get-CimInstance Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue)
     Get-CimInstance Win32_DiskDriveToDiskPartition -ErrorAction SilentlyContinue | ForEach-Object {
-        $physDisk = $_.Antecedent
-        $partition = $_.Dependent
+        $physDeviceId = ''
+        if ([string]$_.Antecedent -match 'DeviceID="(.+?)"') { $physDeviceId = $Matches[1] }
+        $partDeviceId = ''
+        if ([string]$_.Dependent -match 'DeviceID="(.+?)"') { $partDeviceId = $Matches[1] }
+        if (-not $physDeviceId -or -not $partDeviceId) { return }
+
         $physSerial = ''
         try {
-            $physObj = Get-CimInstance -Query "SELECT SerialNumber FROM Win32_DiskDrive WHERE DeviceID='$($physDisk.DeviceID)'" -ErrorAction SilentlyContinue
+            $physObj = Get-CimInstance -Query "SELECT SerialNumber FROM Win32_DiskDrive WHERE DeviceID='$physDeviceId'" -ErrorAction SilentlyContinue
             if ($physObj -and $physObj.SerialNumber) { $physSerial = $physObj.SerialNumber.Trim() }
         } catch {}
         if (-not $physSerial) { return }
@@ -303,12 +322,14 @@ try {
         if ($diskIndexMap.ContainsKey($physSerial)) { $physIdx = $diskIndexMap[$physSerial] }
         if ($physIdx -lt 0) { return }
 
-        # Find logical disks on this partition
-        Get-CimInstance Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue | Where-Object {
-            $_.Antecedent.DeviceID -eq $partition.DeviceID
-        } | ForEach-Object {
-            $logicalDiskId = $_.Dependent.DeviceID
-            $logicalToPhysical[$logicalDiskId] = $physIdx
+        $allLogicalToPartition | ForEach-Object {
+            $logPartId = ''
+            if ([string]$_.Antecedent -match 'DeviceID="(.+?)"') { $logPartId = $Matches[1] }
+            if ($logPartId -eq $partDeviceId) {
+                $logDevId = ''
+                if ([string]$_.Dependent -match 'DeviceID="(.+?)"') { $logDevId = $Matches[1] }
+                if ($logDevId) { $logicalToPhysical[$logDevId] = $physIdx }
+            }
         }
     }
 
@@ -396,14 +417,15 @@ try {
 # ── BIOS ─────────────────────────────────────────────────────────────────────
 try {
     $ErrorActionPreference = 'Stop'
+    $biosInfo = Get-CimInstance Win32_BIOS | Select-Object -First 1
     $biosSection = [ordered]@{
-        manufacturer = if ($bios.Manufacturer) { $bios.Manufacturer.Trim() } else { '' }
-        version      = if ($bios.SMBIOSBIOSVersion) { $bios.SMBIOSBIOSVersion.Trim() } else { '' }
-        releaseDate  = if ($bios.ReleaseDate) {
-            try { $bios.ReleaseDate.ToString('yyyy-MM-dd') } catch { '' }
+        manufacturer = if ($biosInfo.Manufacturer) { $biosInfo.Manufacturer.Trim() } else { '' }
+        version      = if ($biosInfo.SMBIOSBIOSVersion) { $biosInfo.SMBIOSBIOSVersion.Trim() } else { '' }
+        releaseDate  = if ($biosInfo.ReleaseDate) {
+            try { $biosInfo.ReleaseDate.ToString('yyyy-MM-dd') } catch { '' }
         } else { '' }
-        smbiosMajor  = if ($bios.SMBIOSMajorVersion) { $bios.SMBIOSMajorVersion } else { 0 }
-        smbiosMinor  = if ($bios.SMBIOSMinorVersion) { $bios.SMBIOSMinorVersion } else { 0 }
+        smbiosMajor  = if ($biosInfo.SMBIOSMajorVersion) { $biosInfo.SMBIOSMajorVersion } else { 0 }
+        smbiosMinor  = if ($biosInfo.SMBIOSMinorVersion) { $biosInfo.SMBIOSMinorVersion } else { 0 }
     }
     $result['bios'] = $biosSection
 } catch {
@@ -524,7 +546,165 @@ try {
     $result['others'] = @()
 }
 
+# ── NETWORK ADAPTERS ────────────────────────────────────────────────────────
+try {
+    $ErrorActionPreference = 'Stop'
+    $netAdapters = @()
+    Get-CimInstance Win32_NetworkAdapter | Where-Object { $_.PhysicalAdapter -or $_.NetConnectionID } | ForEach-Object {
+        $na = $_
+        $mac = ''
+        try { if ($na.MACAddress) { $mac = $na.MACAddress } } catch {}
+        $speed = ''
+        try {
+            if ($na.Speed) {
+                $speedBps = [uint64]$na.Speed
+                if ($speedBps -ge 1000000000) { $speed = [math]::Round($speedBps / 1000000000, 1).ToString() + ' Gbps' }
+                elseif ($speedBps -ge 1000000) { $speed = [math]::Round($speedBps / 1000000, 0).ToString() + ' Mbps' }
+                else { $speed = $speedBps.ToString() + ' bps' }
+            }
+        } catch {}
+        $status = ''
+        try { if ($na.NetConnectionStatus) {
+            $status = switch ([int]$na.NetConnectionStatus) {
+                0 { 'Disconnected' } 1 { 'Connecting' } 2 { 'Connected' }
+                3 { 'Media Disconnected' } 7 { 'Media Connected' } default { 'Unknown' }
+            }
+        } } catch {}
+        $adapterType = ''
+        try { if ($na.AdapterType) { $adapterType = $na.AdapterType } } catch {}
+
+        $ipAddresses = @()
+        $dhcpEnabled = $false
+        try {
+            $config = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "Index=$($na.Index)" -ErrorAction SilentlyContinue
+            if ($config) {
+                if ($config.IPAddress) { $ipAddresses = @($config.IPAddress) }
+                if ($null -ne $config.DHCPEnabled) { $dhcpEnabled = [bool]$config.DHCPEnabled }
+            }
+        } catch {}
+
+        $netAdapters += [ordered]@{
+            name           = if ($na.Name) { $na.Name.Trim() } else { '' }
+            manufacturer   = if ($na.Manufacturer) { $na.Manufacturer.Trim() } else { '' }
+            speed          = $speed
+            macAddress     = $mac
+            ipAddresses    = $ipAddresses
+            dhcpEnabled    = $dhcpEnabled
+            adapterType    = $adapterType
+            status         = $status
+        }
+    }
+    $result['networkAdapters'] = $netAdapters
+} catch {
+    $warnings += "Network Adapters: $($_.Exception.Message)"
+    $result['networkAdapters'] = @()
+}
+
+# ── AUDIO DEVICES ──────────────────────────────────────────────────────────
+try {
+    $ErrorActionPreference = 'Stop'
+    $audioDevices = @()
+    Get-CimInstance Win32_SoundDevice | ForEach-Object {
+        $audioDevices += [ordered]@{
+            name         = if ($_.Name) { $_.Name.Trim() } else { '' }
+            manufacturer = if ($_.Manufacturer) { $_.Manufacturer.Trim() } else { '' }
+            status       = if ($_.Status) { [string]$_.Status } else { '' }
+            deviceId     = if ($_.DeviceID) { [string]$_.DeviceID } else { '' }
+        }
+    }
+    $result['audioDevices'] = $audioDevices
+} catch {
+    $warnings += "Audio Devices: $($_.Exception.Message)"
+    $result['audioDevices'] = @()
+}
+
+# ── BATTERY ────────────────────────────────────────────────────────────────
+try {
+    $ErrorActionPreference = 'Stop'
+    $batterySection = $null
+    $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $batt) {
+        $batt = Get-CimInstance Win32_PortableBattery -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    if ($batt) {
+        $chargeLevel = 0
+        try { if ($batt.EstimatedChargeRemaining) { $chargeLevel = [int]$batt.EstimatedChargeRemaining } } catch {}
+        $remainingMwh = 0
+        try { if ($batt.RemainingCapacity) { $remainingMwh = [int]$batt.RemainingCapacity } } catch {}
+        $chargeRate = 0
+        try { if ($batt.ChargeRate) { $chargeRate = [int]$batt.ChargeRate } } catch {}
+        $chemistry = ''
+        try {
+            if ($batt.Chemistry) {
+                $chem = [int]$batt.Chemistry
+                $chemistry = switch ($chem) {
+                    1 { 'Other' } 2 { 'Unknown' } 3 { 'Lead Acid' } 4 { 'Nickel Cadmium' }
+                    5 { 'Nickel Metal Hydride' } 6 { 'Lithium Ion' } 7 { 'Zinc Air' } 8 { 'Zinc Carbon' }
+                    default { 'Unknown' }
+                }
+            }
+        } catch {}
+        $battStatus = ''
+        try {
+            if ($batt.BatteryStatus) {
+                $bs = [int]$batt.BatteryStatus
+                $battStatus = switch ($bs) {
+                    1 { 'Discharging' } 2 { 'AC Attached' } 3 { 'Fully Charged' }
+                    4 { 'Low' } 5 { 'Critical' } 6 { 'Charging' }
+                    7 { 'Charging and High' } 8 { 'Charging and Low' }
+                    9 { 'Charging and Critical' } 10 { 'Undefined' } 11 { 'Partially Attached' }
+                    default { 'Unknown' }
+                }
+            }
+        } catch {}
+        $batterySection = [ordered]@{
+            name             = if ($batt.Name) { $batt.Name.Trim() } else { '' }
+            chargeLevel      = $chargeLevel
+            remainingCapacityMwh = $remainingMwh
+            chargeRate       = $chargeRate
+            status           = $battStatus
+            chemistry        = $chemistry
+        }
+    }
+    $result['battery'] = $batterySection
+} catch {
+    $warnings += "Battery: $($_.Exception.Message)"
+    $result['battery'] = $null
+}
+
+# ── TEMPERATURES ───────────────────────────────────────────────────────────
+try {
+    $ErrorActionPreference = 'Stop'
+    $temps = @()
+    $thermalZones = Get-CimInstance MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue
+    if ($thermalZones) {
+        foreach ($tz in $thermalZones) {
+            $tempKelvin = 0
+            try {
+                if ($tz.CurrentTemperature) {
+                    $tempKelvin = [double]$tz.CurrentTemperature / 10.0
+                }
+            } catch {}
+            if ($tempKelvin -le 0) { continue }
+            $tempCelsius = [math]::Round($tempKelvin - 273.15, 1)
+            $zoneName = ''
+            try { if ($tz.InstanceName) {
+                $parts = $tz.InstanceName -split '\\'
+                $zoneName = $parts[-1] -replace '_', ' '
+            } } catch {}
+            $temps += [ordered]@{
+                zoneName          = $zoneName
+                temperatureCelsius = $tempCelsius
+            }
+        }
+    }
+    $result['temperatures'] = $temps
+} catch {
+    $warnings += "Temperatures: $($_.Exception.Message)"
+    $result['temperatures'] = @()
+}
+
 # ── OUTPUT ───────────────────────────────────────────────────────────────────
 $result['warnings'] = $warnings
-$result['version'] = '2.0'
+$result['version'] = '3.0'
 $result | ConvertTo-Json -Depth 6 -Compress

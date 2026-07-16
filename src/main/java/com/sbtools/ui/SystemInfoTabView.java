@@ -1,17 +1,23 @@
 package com.sbtools.ui;
 
+import com.sbtools.systeminfo.AudioDeviceInfo;
+import com.sbtools.systeminfo.BatteryInfo;
 import com.sbtools.systeminfo.BiosInfo;
 import com.sbtools.systeminfo.CpuInfo;
 import com.sbtools.systeminfo.GpuInfo;
 import com.sbtools.systeminfo.MotherboardInfo;
+import com.sbtools.systeminfo.NetworkAdapterInfo;
 import com.sbtools.systeminfo.OtherDevice;
 import com.sbtools.systeminfo.OsInfo;
 import com.sbtools.systeminfo.RamInfo;
 import com.sbtools.systeminfo.StorageInfo;
 import com.sbtools.systeminfo.SystemInfoData;
 import com.sbtools.systeminfo.SystemInfoService;
+import com.sbtools.systeminfo.TemperatureInfo;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
+import com.sbtools.util.DataSizeFormatter;
+import com.sbtools.util.JsonMapper;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
@@ -29,6 +35,8 @@ import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextField;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.ColumnConstraints;
 import javafx.scene.layout.GridPane;
@@ -36,7 +44,12 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.RowConstraints;
 import javafx.scene.layout.VBox;
+import javafx.stage.FileChooser;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeMap;
@@ -58,9 +71,13 @@ public class SystemInfoTabView extends BorderPane {
     private final Label statusLabel = new Label("Click Load to query system information.");
     private final Button loadButton = new Button("Load System Info");
     private final Button refreshButton = new Button("Refresh");
+    private final Button exportButton = new Button("Export...");
+    private final Button copyButton = new Button("Copy All");
     private final ProgressIndicator spinner = new ProgressIndicator();
     private final ProgressBar progressBar = new ProgressBar(0);
     private final TabPane tabPane = new TabPane();
+
+    private SystemInfoData currentData;
 
     public SystemInfoTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -76,8 +93,12 @@ public class SystemInfoTabView extends BorderPane {
         loadButton.setOnAction(e -> loadInfo());
         refreshButton.setOnAction(e -> { service.invalidateCache(); loadInfo(); });
         refreshButton.setDisable(true);
+        exportButton.setDisable(true);
+        exportButton.setOnAction(e -> exportToFile());
+        copyButton.setDisable(true);
+        copyButton.setOnAction(e -> copyToClipboard());
 
-        HBox top = new HBox(12, loadButton, refreshButton, spinner, progressBar, statusLabel);
+        HBox top = new HBox(12, loadButton, refreshButton, exportButton, copyButton, spinner, progressBar, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -99,6 +120,8 @@ public class SystemInfoTabView extends BorderPane {
         busy.set(true);
         loadButton.setDisable(true);
         refreshButton.setDisable(true);
+        exportButton.setDisable(true);
+        copyButton.setDisable(true);
         spinner.setVisible(true);
         progressBar.setProgress(0);
         progressBar.setVisible(true);
@@ -113,10 +136,13 @@ public class SystemInfoTabView extends BorderPane {
                         })
                 );
                 Platform.runLater(() -> {
+                    currentData = data;
                     buildTabs(data);
                     statusLabel.setText("System information loaded.");
                     progressBar.setProgress(1);
                     refreshButton.setDisable(false);
+                    exportButton.setDisable(false);
+                    copyButton.setDisable(false);
                 });
             } catch (Exception ex) {
                 AppLogger.error("Failed to load system info", ex);
@@ -138,6 +164,9 @@ public class SystemInfoTabView extends BorderPane {
     private void buildTabs(SystemInfoData data) {
         tabPane.getTabs().clear();
 
+        if (data.cpu() != null || data.os() != null) {
+            tabPane.getTabs().add(buildOverviewTab(data));
+        }
         if (data.cpu() != null) {
             tabPane.getTabs().add(buildCpuTab(data.cpu()));
         }
@@ -156,8 +185,24 @@ public class SystemInfoTabView extends BorderPane {
         if (data.motherboard() != null || data.bios() != null) {
             tabPane.getTabs().add(buildMotherboardTab(data.motherboard(), data.bios()));
         }
+        if (data.networkAdapters() != null && !data.networkAdapters().isEmpty()) {
+            tabPane.getTabs().add(buildNetworkTab(data.networkAdapters()));
+        }
+        if (data.audioDevices() != null && !data.audioDevices().isEmpty()) {
+            tabPane.getTabs().add(buildAudioTab(data.audioDevices()));
+        }
+        if (data.battery() != null) {
+            tabPane.getTabs().add(buildBatteryTab(data.battery()));
+        }
+        if (data.temperatures() != null && !data.temperatures().isEmpty()) {
+            tabPane.getTabs().add(buildTemperaturesTab(data.temperatures()));
+        }
         if (data.others() != null && !data.others().isEmpty()) {
             tabPane.getTabs().add(buildOthersTab(data.others()));
+        }
+
+        if (data.warnings() != null && !data.warnings().isEmpty()) {
+            tabPane.getTabs().add(buildWarningsTab(data.warnings()));
         }
     }
 
@@ -279,7 +324,7 @@ public class SystemInfoTabView extends BorderPane {
                 row = addRow(grid, row, "Model", disk.model());
                 row = addRow(grid, row, "Manufacturer", disk.manufacturer());
                 row = addRow(grid, row, "Size", disk.formatSize());
-                row = addRow(grid, row, "Media Type", disk.mediType());
+                row = addRow(grid, row, "Media Type", disk.mediaType());
                 row = addRow(grid, row, "Interface", disk.interfaceType());
                 row = addRow(grid, row, "Serial Number", disk.serialNumber());
                 row = addRow(grid, row, "Partitions", String.valueOf(disk.partitions()));
@@ -483,6 +528,262 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
+    // ── Overview ────────────────────────────────────────────────────────────
+
+    private Tab buildOverviewTab(SystemInfoData data) {
+        VBox container = new VBox(16);
+        container.setPadding(new Insets(12));
+
+        // Summary cards
+        HBox cards = new HBox(12);
+        cards.setAlignment(Pos.CENTER_LEFT);
+        if (data.os() != null) {
+            cards.getChildren().add(buildSmallInfoCard("OS",
+                    data.os().name() != null ? data.os().name() : "",
+                    data.os().buildNumber() != null ? "Build " + data.os().buildNumber() : ""));
+        }
+        if (data.cpu() != null) {
+            cards.getChildren().add(buildSmallInfoCard("CPU",
+                    data.cpu().name() != null ? data.cpu().name() : "",
+                    data.cpu().cores() + "C / " + data.cpu().logicalCpus() + "T"));
+        }
+        if (data.ram() != null) {
+            cards.getChildren().add(buildSmallInfoCard("RAM",
+                    data.ram().formatTotal(),
+                    data.ram().channel()));
+        }
+        if (data.gpu() != null && !data.gpu().isEmpty()) {
+            GpuInfo primaryGpu = data.gpu().get(0);
+            cards.getChildren().add(buildSmallInfoCard("GPU",
+                    primaryGpu.name() != null ? primaryGpu.name() : "",
+                    primaryGpu.formatVram()));
+        }
+        if (data.storage() != null && data.storage().disks() != null) {
+            long totalBytes = data.storage().disks().stream()
+                    .mapToLong(StorageInfo.Disk::sizeBytes)
+                    .sum();
+            cards.getChildren().add(buildSmallInfoCard("Storage",
+                    DataSizeFormatter.formatBytes(totalBytes),
+                    data.storage().disks().size() + " disk(s)"));
+        }
+        container.getChildren().add(cards);
+
+        // Key specs grid
+        GridPane grid = createInfoGrid();
+        int row = 0;
+        if (data.os() != null) {
+            row = addRow(grid, row, "OS", data.os().name());
+            row = addRow(grid, row, "Version", data.os().version());
+            row = addRow(grid, row, "Build", data.os().buildNumber());
+            row = addRow(grid, row, "Architecture", data.os().architecture());
+        }
+        if (data.cpu() != null) {
+            row = addRow(grid, row, "CPU", data.cpu().name());
+            row = addRow(grid, row, "Cores / Threads", data.cpu().cores() + " / " + data.cpu().logicalCpus());
+            row = addRow(grid, row, "Base Clock", data.cpu().formatBaseClock());
+            row = addRow(grid, row, "Socket", data.cpu().socket());
+        }
+        if (data.ram() != null) {
+            row = addRow(grid, row, "Total RAM", data.ram().formatTotal());
+            row = addRow(grid, row, "Channel", data.ram().channel());
+            if (data.ram().sticks() != null && !data.ram().sticks().isEmpty()) {
+                RamInfo.RamStick firstStick = data.ram().sticks().get(0);
+                row = addRow(grid, row, "RAM Type", firstStick.memoryType());
+                row = addRow(grid, row, "RAM Speed", firstStick.formatSpeed());
+            }
+        }
+        if (data.gpu() != null && !data.gpu().isEmpty()) {
+            GpuInfo primaryGpu = data.gpu().get(0);
+            row = addRow(grid, row, "GPU", primaryGpu.name());
+            row = addRow(grid, row, "VRAM", primaryGpu.formatVram());
+            row = addRow(grid, row, "Driver", primaryGpu.driverVersion());
+        }
+        if (data.storage() != null && data.storage().disks() != null && !data.storage().disks().isEmpty()) {
+            StorageInfo.Disk primaryDisk = data.storage().disks().get(0);
+            row = addRow(grid, row, "Primary Disk", primaryDisk.model());
+            row = addRow(grid, row, "Disk Size", primaryDisk.formatSize());
+            row = addRow(grid, row, "Interface", primaryDisk.interfaceType());
+        }
+        if (data.motherboard() != null) {
+            row = addRow(grid, row, "Motherboard", data.motherboard().manufacturer() + " " + data.motherboard().model());
+            row = addRow(grid, row, "Chipset", data.motherboard().chipset());
+        }
+        if (data.bios() != null) {
+            row = addRow(grid, row, "BIOS", data.bios().manufacturer() + " " + data.bios().version());
+            row = addRow(grid, row, "BIOS Date", data.bios().releaseDate());
+        }
+        container.getChildren().add(wrapGrid(grid));
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("Overview");
+        tab.setContent(scroll);
+        return tab;
+    }
+
+    private VBox buildSmallInfoCard(String title, String value, String subtitle) {
+        VBox card = new VBox(4);
+        card.getStyleClass().add("sysinfo-overview-card");
+        card.setPadding(new Insets(12));
+        card.setMinWidth(160);
+
+        Label titleLabel = new Label(title);
+        titleLabel.getStyleClass().addAll("label", "text-muted");
+        titleLabel.setStyle("-fx-font-size: 11px;");
+
+        Label valueLabel = new Label(value != null ? value : "");
+        valueLabel.getStyleClass().addAll("label", "large");
+        valueLabel.setWrapText(true);
+        valueLabel.setMaxWidth(180);
+
+        Label subLabel = new Label(subtitle != null ? subtitle : "");
+        subLabel.getStyleClass().addAll("label", "text-muted");
+        subLabel.setStyle("-fx-font-size: 11px;");
+
+        card.getChildren().addAll(titleLabel, valueLabel, subLabel);
+        return card;
+    }
+
+    // ── Network ─────────────────────────────────────────────────────────────
+
+    private Tab buildNetworkTab(List<NetworkAdapterInfo> adapters) {
+        VBox container = new VBox(16);
+        container.setPadding(new Insets(12));
+
+        for (int i = 0; i < adapters.size(); i++) {
+            NetworkAdapterInfo adapter = adapters.get(i);
+            container.getChildren().add(UILabel.sectionTitle("Adapter " + (i + 1) + ": " + adapter.name()));
+            GridPane grid = createInfoGrid();
+            int row = 0;
+            row = addRow(grid, row, "Name", adapter.name());
+            row = addRow(grid, row, "Manufacturer", adapter.manufacturer());
+            row = addRow(grid, row, "Type", adapter.adapterType());
+            row = addRow(grid, row, "Speed", adapter.speed());
+            row = addRow(grid, row, "MAC Address", adapter.macAddress());
+            row = addRow(grid, row, "IP Addresses", adapter.formatIpAddresses());
+            row = addRow(grid, row, "DHCP", adapter.dhcpEnabled() ? "Enabled" : "Disabled");
+            row = addRow(grid, row, "Status", adapter.status());
+            container.getChildren().add(wrapGrid(grid));
+        }
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("Network");
+        tab.setContent(scroll);
+        return tab;
+    }
+
+    // ── Audio ───────────────────────────────────────────────────────────────
+
+    private Tab buildAudioTab(List<AudioDeviceInfo> devices) {
+        VBox container = new VBox(16);
+        container.setPadding(new Insets(12));
+
+        for (int i = 0; i < devices.size(); i++) {
+            AudioDeviceInfo device = devices.get(i);
+            container.getChildren().add(UILabel.sectionTitle(device.name()));
+            GridPane grid = createInfoGrid();
+            int row = 0;
+            row = addRow(grid, row, "Name", device.name());
+            row = addRow(grid, row, "Manufacturer", device.manufacturer());
+            row = addRow(grid, row, "Status", device.status());
+            container.getChildren().add(wrapGrid(grid));
+        }
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("Audio");
+        tab.setContent(scroll);
+        return tab;
+    }
+
+    // ── Battery ─────────────────────────────────────────────────────────────
+
+    private Tab buildBatteryTab(BatteryInfo battery) {
+        GridPane grid = createInfoGrid();
+        int row = 0;
+        row = addRow(grid, row, "Name", battery.name());
+        row = addRow(grid, row, "Charge Level", battery.formatChargeLevel());
+        row = addRow(grid, row, "Status", battery.status());
+        row = addRow(grid, row, "Chemistry", battery.chemistry());
+        row = addRow(grid, row, "Remaining Capacity", battery.formatRemainingCapacity());
+        row = addRow(grid, row, "Charge Rate", battery.formatChargeRate());
+
+        if (battery.chargeLevel() > 0) {
+            row = addUsageRow(grid, row, battery.chargeLevel());
+        }
+
+        return new Tab("Battery", wrapGrid(grid));
+    }
+
+    // ── Temperatures ────────────────────────────────────────────────────────
+
+    private Tab buildTemperaturesTab(List<TemperatureInfo> temperatures) {
+        GridPane grid = createInfoGrid();
+        int row = 0;
+        for (TemperatureInfo temp : temperatures) {
+            String level = temp.temperatureLevel();
+            String cssClass = switch (level) {
+                case "hot" -> "sysinfo-temp-hot";
+                case "warm" -> "sysinfo-temp-warm";
+                default -> "sysinfo-temp-cool";
+            };
+            row = addTemperatureRow(grid, row, temp.zoneName(), temp.formatTemperature(), cssClass);
+        }
+        return new Tab("Temperatures", wrapGrid(grid));
+    }
+
+    private static int addTemperatureRow(GridPane grid, int row, String zoneName, String value, String cssClass) {
+        if (value == null || value.isBlank()) return row;
+
+        Label keyLabel = new Label(zoneName);
+        keyLabel.getStyleClass().addAll("label", "sysinfo-label");
+        keyLabel.setMaxWidth(Double.MAX_VALUE);
+
+        Label valueLabel = new Label(value);
+        valueLabel.getStyleClass().addAll("label", "sysinfo-value", cssClass);
+        valueLabel.setWrapText(true);
+        valueLabel.setMaxWidth(Double.MAX_VALUE);
+
+        RowConstraints rc = new RowConstraints();
+        rc.setMinHeight(20);
+        grid.getRowConstraints().add(rc);
+
+        grid.add(keyLabel, 0, row);
+        grid.add(valueLabel, 1, row);
+
+        String bgClass = row % 2 == 0 ? "sysinfo-row-even" : "sysinfo-row-odd";
+        keyLabel.getStyleClass().add(bgClass);
+        valueLabel.getStyleClass().add(bgClass);
+
+        return row + 1;
+    }
+
+    // ── Warnings ────────────────────────────────────────────────────────────
+
+    private Tab buildWarningsTab(List<String> warnings) {
+        VBox container = new VBox(8);
+        container.setPadding(new Insets(12));
+
+        Label header = UILabel.sectionTitle("Warnings");
+        container.getChildren().add(header);
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < warnings.size(); i++) {
+            sb.append(i + 1).append(". ").append(warnings.get(i));
+            if (i < warnings.size() - 1) sb.append("\n");
+        }
+
+        Label warningsLabel = new Label(sb.toString());
+        warningsLabel.getStyleClass().addAll("label", "warning");
+        warningsLabel.setWrapText(true);
+        warningsLabel.setMaxWidth(Double.MAX_VALUE);
+        warningsLabel.setStyle("-fx-padding: 8; -fx-background-color: #3d2e1a; -fx-background-radius: 4; -fx-border-color: #ffb86c; -fx-border-radius: 4;");
+        container.getChildren().add(warningsLabel);
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("Warnings");
+        tab.setContent(scroll);
+        return tab;
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static GridPane createInfoGrid() {
@@ -580,6 +881,457 @@ public class SystemInfoTabView extends BorderPane {
             setStyle("-fx-background-color: transparent; -fx-background: transparent; -fx-border-color: transparent;");
             setContent(content);
         }
+    }
+
+    // ── Export / Copy ──────────────────────────────────────────────────────
+
+    private void copyToClipboard() {
+        if (currentData == null) return;
+        String text = generatePlainTextReport(currentData);
+        ClipboardContent content = new ClipboardContent();
+        content.putString(text);
+        Clipboard.getSystemClipboard().setContent(content);
+        statusLabel.setText("System information copied to clipboard.");
+    }
+
+    private void exportToFile() {
+        if (currentData == null) return;
+
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Export System Information");
+        fileChooser.setInitialFileName("system-info");
+
+        FileChooser.ExtensionFilter txtFilter = new FileChooser.ExtensionFilter("Plain Text (*.txt)", "*.txt");
+        FileChooser.ExtensionFilter jsonFilter = new FileChooser.ExtensionFilter("JSON (*.json)", "*.json");
+        FileChooser.ExtensionFilter htmlFilter = new FileChooser.ExtensionFilter("HTML Report (*.html)", "*.html");
+        fileChooser.getExtensionFilters().addAll(txtFilter, jsonFilter, htmlFilter);
+        fileChooser.setSelectedExtensionFilter(txtFilter);
+
+        File file = fileChooser.showSaveDialog(getScene().getWindow());
+        if (file == null) return;
+
+        try {
+            String content;
+            FileChooser.ExtensionFilter selectedFilter = fileChooser.getSelectedExtensionFilter();
+            String ext = "";
+            if (selectedFilter != null) {
+                List<String> extensions = selectedFilter.getExtensions();
+                if (!extensions.isEmpty()) {
+                    ext = extensions.get(0).replace("*", "");
+                }
+            }
+            if (ext.isEmpty()) {
+                String name = file.getName().toLowerCase();
+                if (name.endsWith(".json")) ext = ".json";
+                else if (name.endsWith(".html")) ext = ".html";
+                else ext = ".txt";
+            }
+
+            if (".json".equals(ext)) {
+                content = JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValueAsString(currentData);
+            } else if (".html".equals(ext)) {
+                content = generateHtmlReport(currentData);
+            } else {
+                content = generatePlainTextReport(currentData);
+                ext = ".txt";
+            }
+
+            String fileName = file.getName();
+            if (!fileName.toLowerCase().endsWith(ext)) {
+                file = new File(file.getAbsolutePath() + ext);
+            }
+
+            Files.writeString(file.toPath(), content, StandardCharsets.UTF_8);
+            statusLabel.setText("Exported to: " + file.getName());
+        } catch (IOException ex) {
+            AppLogger.error("Failed to export system info", ex);
+            new Alert(Alert.AlertType.ERROR, "Failed to export: " + ex.getMessage()).showAndWait();
+        }
+    }
+
+    private static String generatePlainTextReport(SystemInfoData data) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== System Information ===\n");
+        sb.append("Generated by WinZenith\n\n");
+
+        if (data.os() != null) {
+            sb.append("--- Operating System ---\n");
+            sb.append("OS: ").append(data.os().name()).append("\n");
+            sb.append("Version: ").append(data.os().version()).append("\n");
+            sb.append("Build: ").append(data.os().buildNumber()).append("\n");
+            sb.append("Architecture: ").append(data.os().architecture()).append("\n");
+            sb.append("Computer Name: ").append(data.os().computerName()).append("\n");
+            sb.append("Install Date: ").append(data.os().installDate()).append("\n");
+            sb.append("Last Boot: ").append(data.os().lastBoot()).append("\n");
+            sb.append("Serial Number: ").append(data.os().serialNumber()).append("\n\n");
+        }
+
+        if (data.cpu() != null) {
+            sb.append("--- CPU ---\n");
+            sb.append("Name: ").append(data.cpu().name()).append("\n");
+            sb.append("Manufacturer: ").append(data.cpu().manufacturer()).append("\n");
+            sb.append("Architecture: ").append(data.cpu().architecture()).append("\n");
+            sb.append("Socket: ").append(data.cpu().socket()).append("\n");
+            sb.append("Cores: ").append(data.cpu().cores()).append("\n");
+            sb.append("Threads: ").append(data.cpu().logicalCpus()).append("\n");
+            sb.append("Base Clock: ").append(data.cpu().formatBaseClock()).append("\n");
+            sb.append("Current Clock: ").append(data.cpu().formatCurrentClock()).append("\n");
+            sb.append("L2 Cache: ").append(data.cpu().formatL2Cache()).append("\n");
+            sb.append("L3 Cache: ").append(data.cpu().formatL3Cache()).append("\n");
+            sb.append("Voltage: ").append(data.cpu().voltage()).append("\n\n");
+        }
+
+        if (data.gpu() != null) {
+            for (int i = 0; i < data.gpu().size(); i++) {
+                GpuInfo gpu = data.gpu().get(i);
+                sb.append("--- GPU").append(data.gpu().size() > 1 ? " " + (i + 1) : "").append(" ---\n");
+                sb.append("Name: ").append(gpu.name()).append("\n");
+                sb.append("Manufacturer: ").append(gpu.manufacturer()).append("\n");
+                sb.append("VRAM: ").append(gpu.formatVram()).append("\n");
+                sb.append("Memory Type: ").append(gpu.memoryType()).append("\n");
+                sb.append("Driver Version: ").append(gpu.driverVersion()).append("\n");
+                sb.append("Driver Date: ").append(gpu.driverDate()).append("\n");
+                sb.append("Resolution: ").append(gpu.resolution()).append("\n\n");
+            }
+        }
+
+        if (data.ram() != null) {
+            sb.append("--- RAM ---\n");
+            sb.append("Total: ").append(data.ram().formatTotal()).append("\n");
+            sb.append("Channel: ").append(data.ram().channel()).append("\n");
+            if (data.ram().sticks() != null) {
+                for (int i = 0; i < data.ram().sticks().size(); i++) {
+                    RamInfo.RamStick stick = data.ram().sticks().get(i);
+                    sb.append("  Slot ").append(i + 1).append(": ").append(stick.formatCapacity())
+                            .append(" ").append(stick.memoryType()).append(" ").append(stick.formatSpeed())
+                            .append(" ").append(stick.manufacturer()).append("\n");
+                }
+            }
+            sb.append("\n");
+        }
+
+        if (data.storage() != null) {
+            sb.append("--- Storage ---\n");
+            if (data.storage().disks() != null) {
+                for (int i = 0; i < data.storage().disks().size(); i++) {
+                    StorageInfo.Disk disk = data.storage().disks().get(i);
+                    sb.append("Disk ").append(i + 1).append(": ").append(disk.model())
+                            .append(" (").append(disk.formatSize()).append(") ").append(disk.interfaceType())
+                            .append(" [").append(disk.mediaType()).append("]\n");
+                    if (data.storage().partitions() != null) {
+                        final int diskIdx = i;
+                        data.storage().partitions().stream()
+                                .filter(p -> p.diskIndex() == diskIdx)
+                                .forEach(part -> sb.append("  ").append(part.deviceID()).append(": ").append(part.volumeName())
+                                        .append(" ").append(part.fsType())
+                                        .append(" ").append(part.formatSize())
+                                        .append(" (").append(String.format("%.1f%% used", part.usagePercent())).append(")\n"));
+                    }
+                }
+            }
+            if (data.storage().nvmes() != null && !data.storage().nvmes().isEmpty()) {
+                sb.append("NVMe Drives:\n");
+                for (StorageInfo.Nvme nvme : data.storage().nvmes()) {
+                    sb.append("  Serial: ").append(nvme.serialNumber())
+                            .append(" | Media: ").append(nvme.mediaType())
+                            .append(" | Bus: ").append(nvme.busType()).append("\n");
+                }
+            }
+            sb.append("\n");
+        }
+
+        if (data.motherboard() != null) {
+            sb.append("--- Motherboard ---\n");
+            sb.append("Manufacturer: ").append(data.motherboard().manufacturer()).append("\n");
+            sb.append("Model: ").append(data.motherboard().model()).append("\n");
+            sb.append("Version: ").append(data.motherboard().version()).append("\n");
+            sb.append("Chipset: ").append(data.motherboard().chipset()).append("\n\n");
+        }
+
+        if (data.bios() != null) {
+            sb.append("--- BIOS ---\n");
+            sb.append("Manufacturer: ").append(data.bios().manufacturer()).append("\n");
+            sb.append("Version: ").append(data.bios().version()).append("\n");
+            sb.append("Release Date: ").append(data.bios().releaseDate()).append("\n");
+            sb.append("SMBIOS: ").append(data.bios().formatSmbios()).append("\n\n");
+        }
+
+        if (data.networkAdapters() != null && !data.networkAdapters().isEmpty()) {
+            sb.append("--- Network Adapters ---\n");
+            for (NetworkAdapterInfo na : data.networkAdapters()) {
+                sb.append(na.name()).append(" (").append(na.status()).append(")\n");
+                sb.append("  Speed: ").append(na.speed()).append("\n");
+                sb.append("  MAC: ").append(na.macAddress()).append("\n");
+                sb.append("  IP: ").append(na.formatIpAddresses()).append("\n");
+                sb.append("  DHCP: ").append(na.dhcpEnabled() ? "Yes" : "No").append("\n\n");
+            }
+        }
+
+        if (data.audioDevices() != null && !data.audioDevices().isEmpty()) {
+            sb.append("--- Audio Devices ---\n");
+            for (AudioDeviceInfo audio : data.audioDevices()) {
+                sb.append(audio.name()).append(" - ").append(audio.manufacturer())
+                        .append(" (").append(audio.status()).append(")\n");
+            }
+            sb.append("\n");
+        }
+
+        if (data.battery() != null) {
+            BatteryInfo batt = data.battery();
+            sb.append("--- Battery ---\n");
+            sb.append("Name: ").append(batt.name()).append("\n");
+            sb.append("Charge: ").append(batt.formatChargeLevel()).append("\n");
+            sb.append("Status: ").append(batt.status()).append("\n");
+            sb.append("Chemistry: ").append(batt.chemistry()).append("\n");
+            sb.append("Remaining: ").append(batt.formatRemainingCapacity()).append("\n\n");
+        }
+
+        if (data.temperatures() != null && !data.temperatures().isEmpty()) {
+            sb.append("--- Temperatures ---\n");
+            for (TemperatureInfo temp : data.temperatures()) {
+                sb.append(temp.zoneName()).append(": ").append(temp.formatTemperature()).append("\n");
+            }
+            sb.append("\n");
+        }
+
+        if (data.others() != null && !data.others().isEmpty()) {
+            sb.append("--- Other Devices ---\n");
+            for (OtherDevice dev : data.others()) {
+                sb.append(dev.name()).append(" [").append(dev.deviceClass()).append("]\n");
+            }
+            sb.append("\n");
+        }
+
+        if (data.warnings() != null && !data.warnings().isEmpty()) {
+            sb.append("--- Warnings ---\n");
+            for (String w : data.warnings()) {
+                sb.append("! ").append(w).append("\n");
+            }
+        }
+
+        return sb.toString();
+    }
+
+    private static String generateHtmlReport(SystemInfoData data) {
+        StringBuilder html = new StringBuilder();
+        html.append("<!DOCTYPE html><html><head><meta charset=\"UTF-8\">");
+        html.append("<title>System Information - WinZenith</title>");
+        html.append("<style>");
+        html.append("body{font-family:'Segoe UI',sans-serif;background:#1e1f29;color:#f8f8f2;margin:24px;}");
+        html.append("h1{color:#50fa7b;border-bottom:2px solid #44475a;padding-bottom:8px;}");
+        html.append("h2{color:#8be9fd;margin-top:24px;}");
+        html.append("table{border-collapse:collapse;width:100%;margin:8px 0 20px 0;}");
+        html.append("td{padding:6px 12px;border-bottom:1px solid #44475a;}");
+        html.append("td:first-child{color:#6272a4;font-weight:bold;width:180px;}");
+        html.append("tr:nth-child(even){background:#21222c;}");
+        html.append(".warning{color:#ffb86c;background:#3d2e1a;padding:8px;border-radius:4px;margin:8px 0;}");
+        html.append("</style></head><body>");
+        html.append("<h1>System Information</h1>");
+
+        if (data.os() != null) {
+            html.append("<h2>Operating System</h2><table>");
+            html.append(row("OS", data.os().name()));
+            html.append(row("Version", data.os().version()));
+            html.append(row("Build", data.os().buildNumber()));
+            html.append(row("Architecture", data.os().architecture()));
+            html.append(row("Computer Name", data.os().computerName()));
+            html.append(row("Install Date", data.os().installDate()));
+            html.append(row("Last Boot", data.os().lastBoot()));
+            html.append(row("Serial Number", data.os().serialNumber()));
+            html.append("</table>");
+        }
+
+        if (data.cpu() != null) {
+            html.append("<h2>CPU</h2><table>");
+            html.append(row("Name", data.cpu().name()));
+            html.append(row("Manufacturer", data.cpu().manufacturer()));
+            html.append(row("Architecture", data.cpu().architecture()));
+            html.append(row("Socket", data.cpu().socket()));
+            html.append(row("Cores", String.valueOf(data.cpu().cores())));
+            html.append(row("Threads", String.valueOf(data.cpu().logicalCpus())));
+            html.append(row("Base Clock", data.cpu().formatBaseClock()));
+            html.append(row("Current Clock", data.cpu().formatCurrentClock()));
+            html.append(row("L2 Cache", data.cpu().formatL2Cache()));
+            html.append(row("L3 Cache", data.cpu().formatL3Cache()));
+            html.append(row("Voltage", data.cpu().voltage()));
+            html.append("</table>");
+        }
+
+        if (data.gpu() != null) {
+            for (int i = 0; i < data.gpu().size(); i++) {
+                GpuInfo gpu = data.gpu().get(i);
+                html.append("<h2>GPU").append(data.gpu().size() > 1 ? " " + (i + 1) : "").append("</h2><table>");
+                html.append(row("Name", gpu.name()));
+                html.append(row("Manufacturer", gpu.manufacturer()));
+                html.append(row("VRAM", gpu.formatVram()));
+                html.append(row("Memory Type", gpu.memoryType()));
+                html.append(row("Driver Version", gpu.driverVersion()));
+                html.append(row("Driver Date", gpu.driverDate()));
+                html.append(row("Resolution", gpu.resolution()));
+                html.append("</table>");
+            }
+        }
+
+        if (data.ram() != null) {
+            html.append("<h2>RAM</h2><table>");
+            html.append(row("Total", data.ram().formatTotal()));
+            html.append(row("Channel", data.ram().channel()));
+            html.append("</table>");
+            if (data.ram().sticks() != null) {
+                for (int i = 0; i < data.ram().sticks().size(); i++) {
+                    RamInfo.RamStick stick = data.ram().sticks().get(i);
+                    html.append("<h3>Slot ").append(i + 1).append("</h3><table>");
+                    html.append(row("Capacity", stick.formatCapacity()));
+                    html.append(row("Type", stick.memoryType()));
+                    html.append(row("Speed", stick.formatSpeed()));
+                    html.append(row("Manufacturer", stick.manufacturer()));
+                    html.append(row("Part Number", stick.partNumber()));
+                    html.append("</table>");
+                }
+            }
+        }
+
+        if (data.storage() != null && data.storage().disks() != null) {
+            html.append("<h2>Storage</h2>");
+            for (int i = 0; i < data.storage().disks().size(); i++) {
+                StorageInfo.Disk disk = data.storage().disks().get(i);
+                html.append("<h3>Disk ").append(i + 1).append("</h3><table>");
+                html.append(row("Model", disk.model()));
+                html.append(row("Manufacturer", disk.manufacturer()));
+                html.append(row("Size", disk.formatSize()));
+                html.append(row("Media Type", disk.mediaType()));
+                html.append(row("Interface", disk.interfaceType()));
+                html.append(row("Serial", disk.serialNumber()));
+                html.append(row("Partitions", String.valueOf(disk.partitions())));
+                html.append("</table>");
+
+                if (data.storage().partitions() != null) {
+                    final int diskIdx = i;
+                    List<StorageInfo.Partition> diskParts = data.storage().partitions().stream()
+                            .filter(p -> p.diskIndex() == diskIdx)
+                            .toList();
+                    if (!diskParts.isEmpty()) {
+                        html.append("<h4>Partitions on Disk ").append(i + 1).append("</h4><table>");
+                        for (StorageInfo.Partition part : diskParts) {
+                            html.append("<tr><td>").append(escapeHtml(part.deviceID())).append("</td><td>")
+                                    .append(escapeHtml(part.volumeName())).append(" | ")
+                                    .append(escapeHtml(part.fsType())).append(" | ")
+                                    .append(part.formatSize()).append(" | ")
+                                    .append(String.format("%.1f%% used", part.usagePercent()))
+                                    .append("</td></tr>");
+                        }
+                        html.append("</table>");
+                    }
+                }
+            }
+
+            List<StorageInfo.Partition> unassigned = data.storage().partitions() != null
+                    ? data.storage().partitions().stream().filter(p -> p.diskIndex() < 0).toList()
+                    : List.of();
+            if (!unassigned.isEmpty()) {
+                html.append("<h3>Other Partitions</h3><table>");
+                for (StorageInfo.Partition part : unassigned) {
+                    html.append("<tr><td>").append(escapeHtml(part.deviceID())).append("</td><td>")
+                            .append(escapeHtml(part.volumeName())).append(" | ")
+                            .append(escapeHtml(part.fsType())).append(" | ")
+                            .append(part.formatSize()).append(" | ")
+                            .append(String.format("%.1f%% used", part.usagePercent()))
+                            .append("</td></tr>");
+                }
+                html.append("</table>");
+            }
+        }
+
+        if (data.storage() != null && data.storage().nvmes() != null && !data.storage().nvmes().isEmpty()) {
+            html.append("<h2>NVMe Drives</h2><table>");
+            for (StorageInfo.Nvme nvme : data.storage().nvmes()) {
+                html.append(row("Serial Number", nvme.serialNumber()));
+                html.append(row("Media Type", nvme.mediaType()));
+                html.append(row("Bus Type", nvme.busType()));
+            }
+            html.append("</table>");
+        }
+
+        if (data.motherboard() != null) {
+            html.append("<h2>Motherboard</h2><table>");
+            html.append(row("Manufacturer", data.motherboard().manufacturer()));
+            html.append(row("Model", data.motherboard().model()));
+            html.append(row("Version", data.motherboard().version()));
+            html.append(row("Chipset", data.motherboard().chipset()));
+            html.append("</table>");
+        }
+
+        if (data.bios() != null) {
+            html.append("<h2>BIOS</h2><table>");
+            html.append(row("Manufacturer", data.bios().manufacturer()));
+            html.append(row("Version", data.bios().version()));
+            html.append(row("Release Date", data.bios().releaseDate()));
+            html.append(row("SMBIOS", data.bios().formatSmbios()));
+            html.append("</table>");
+        }
+
+        if (data.networkAdapters() != null && !data.networkAdapters().isEmpty()) {
+            html.append("<h2>Network Adapters</h2>");
+            for (NetworkAdapterInfo na : data.networkAdapters()) {
+                html.append("<h3>").append(escapeHtml(na.name())).append("</h3><table>");
+                html.append(row("Name", na.name()));
+                html.append(row("Manufacturer", na.manufacturer()));
+                html.append(row("Type", na.adapterType()));
+                html.append(row("Speed", na.speed()));
+                html.append(row("MAC Address", na.macAddress()));
+                html.append(row("IP Addresses", na.formatIpAddresses()));
+                html.append(row("DHCP", na.dhcpEnabled() ? "Enabled" : "Disabled"));
+                html.append(row("Status", na.status()));
+                html.append("</table>");
+            }
+        }
+
+        if (data.audioDevices() != null && !data.audioDevices().isEmpty()) {
+            html.append("<h2>Audio Devices</h2><table>");
+            for (AudioDeviceInfo audio : data.audioDevices()) {
+                html.append(row("Name", audio.name()));
+                html.append(row("Manufacturer", audio.manufacturer()));
+                html.append(row("Status", audio.status()));
+            }
+            html.append("</table>");
+        }
+
+        if (data.battery() != null) {
+            html.append("<h2>Battery</h2><table>");
+            html.append(row("Name", data.battery().name()));
+            html.append(row("Charge Level", data.battery().formatChargeLevel()));
+            html.append(row("Status", data.battery().status()));
+            html.append(row("Chemistry", data.battery().chemistry()));
+            html.append(row("Remaining", data.battery().formatRemainingCapacity()));
+            html.append("</table>");
+        }
+
+        if (data.temperatures() != null && !data.temperatures().isEmpty()) {
+            html.append("<h2>Temperatures</h2><table>");
+            for (TemperatureInfo temp : data.temperatures()) {
+                html.append(row(temp.zoneName(), temp.formatTemperature()));
+            }
+            html.append("</table>");
+        }
+
+        if (data.warnings() != null && !data.warnings().isEmpty()) {
+            html.append("<h2>Warnings</h2>");
+            for (String w : data.warnings()) {
+                html.append("<div class=\"warning\">").append(escapeHtml(w)).append("</div>");
+            }
+        }
+
+        html.append("</body></html>");
+        return html.toString();
+    }
+
+    private static String row(String label, String value) {
+        return "<tr><td>" + escapeHtml(label) + "</td><td>" + escapeHtml(value != null ? value : "") + "</td></tr>";
+    }
+
+    private static String escapeHtml(String text) {
+        if (text == null) return "";
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     public void dispose() {

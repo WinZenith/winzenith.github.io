@@ -9,9 +9,12 @@ if (-not $infs) {
     exit 1
 }
 $failed = 0
+$installed = 0
 foreach ($inf in $infs) {
     & pnputil.exe /add-driver $inf.FullName /install
-    if ($LASTEXITCODE -ne 0) { $failed++ }
+    if ($LASTEXITCODE -ne 0) { $failed++ } else { $installed++ }
 }
 if ($failed -eq $infs.Count) { exit 1 }
-@{ success = $true; installed = ($infs.Count - $failed); failed = $failed } | ConvertTo-Json -Compress
+@{ success = ($failed -eq 0); installed = $installed; failed = $failed } | ConvertTo-Json -Compress
+if ($failed -gt 0) { exit 1 }
+exit 0

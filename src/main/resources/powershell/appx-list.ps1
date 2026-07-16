@@ -1,4 +1,10 @@
-$apps = Get-AppxPackage -AllUsers | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.InstallLocation } | ForEach-Object {
+try {
+    $apps = Get-AppxPackage -AllUsers -ErrorAction Stop | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.InstallLocation }
+} catch {
+    $apps = Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.InstallLocation }
+}
+
+$results = $apps | ForEach-Object {
     $installDate = ""
     $sizeKB = 0
     if ($_.InstallLocation -and (Test-Path $_.InstallLocation)) {
@@ -20,8 +26,8 @@ $apps = Get-AppxPackage -AllUsers | Where-Object { -not $_.IsFramework -and -not
         InstalledSize = $sizeKB
     }
 }
-if ($null -eq $apps) {
+if ($null -eq $results) {
     "[]"
 } else {
-    @($apps) | ConvertTo-Json -Depth 3
+    @($results) | ConvertTo-Json -Depth 3
 }

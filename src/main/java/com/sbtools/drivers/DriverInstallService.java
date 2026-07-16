@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.util.Comparator;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class DriverInstallService {
@@ -69,13 +70,15 @@ public class DriverInstallService {
 
     public InstallResult install(DriverUpdateCandidate candidate, AppSettings settings)
             throws IOException, InterruptedException {
+        int restorePointSeq = -1;
         if (settings.createSystemRestorePoint()) {
             reportStatus("Creating system restore point…");
             AppLogger.info("Creating system restore point before driver update");
-            boolean created = restoreService.createRestorePoint(
+            var rpResult = restoreService.createRestorePoint(
                     "WinZenith driver update: " + candidate.installed().friendlyName());
-            if (created) {
-                AppLogger.info("System restore point created successfully");
+            if (rpResult.success()) {
+                restorePointSeq = rpResult.sequenceNumber();
+                AppLogger.info("System restore point created successfully (seq=" + restorePointSeq + ")");
             } else {
                 AppLogger.warning("System restore point creation failed or was skipped");
             }
@@ -89,6 +92,7 @@ public class DriverInstallService {
         String availVer = candidate.availableVersion();
         if (availVer != null && availVer.matches("(?i).*\\b(alpha|beta|rc|preview|test)\\b.*")) {
             removeBackupIfPresent(backupEntry);
+            removeRestorePointIfPresent(restorePointSeq);
             return new InstallResult(InstallStatus.BLOCKED_PRE_RELEASE, false,
                     "Blocked: candidate appears to be a pre-release (alpha/beta/rc/preview). Only stable releases are installed.");
         }
@@ -106,8 +110,25 @@ public class DriverInstallService {
                     return new InstallResult(InstallStatus.INSTALL_FAILED, false,
                             "Windows Update install failed: " + result.combinedOutput());
                 }
-                boolean reboot = result.stdout() != null && result.stdout().contains("\"rebootRequired\":true");
-                return new InstallResult(InstallStatus.SUCCESS, reboot, result.stdout());
+                boolean reboot = false;
+                String message = "Driver installed via Windows Update.";
+                if (result.stdout() != null && !result.stdout().isBlank()) {
+                    try {
+                        com.fasterxml.jackson.databind.JsonNode root = com.sbtools.util.JsonMapper.parseTree(result.stdout());
+                        if (root.has("rebootRequired")) {
+                            reboot = root.get("rebootRequired").asBoolean(false);
+                        }
+                        if (reboot) {
+                            message = "Driver installed via Windows Update. A restart is required to complete the installation.";
+                        }
+                    } catch (Exception parseEx) {
+                        if (result.stdout().contains("\"rebootRequired\":true")) {
+                            reboot = true;
+                            message = "Driver installed via Windows Update. A restart is required to complete the installation.";
+                        }
+                    }
+                }
+                return new InstallResult(InstallStatus.SUCCESS, reboot, message);
             } catch (Exception e) {
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
@@ -117,6 +138,7 @@ public class DriverInstallService {
             String downloadUrl = candidate.downloadUrl();
             if (!isTrustedSource(downloadUrl, candidate.source())) {
                 removeBackupIfPresent(backupEntry);
+                removeRestorePointIfPresent(restorePointSeq);
                 return new InstallResult(InstallStatus.BLOCKED_UNTRUSTED, false,
                         "Blocked: download URL is not from a trusted vendor. URL: " + downloadUrl);
             }
@@ -129,6 +151,7 @@ public class DriverInstallService {
         }
 
         removeBackupIfPresent(backupEntry);
+        removeRestorePointIfPresent(restorePointSeq);
         return new InstallResult(InstallStatus.NO_DOWNLOAD_URL, false,
                 "No download URL available for " + candidate.source() + ". Check vendor website manually.");
     }
@@ -139,6 +162,16 @@ public class DriverInstallService {
                 backupService.removeBackupEntry(backupEntry);
             } catch (Exception e) {
                 AppLogger.warning("Failed to remove backup entry: " + e.getMessage());
+            }
+        }
+    }
+
+    private void removeRestorePointIfPresent(int sequenceNumber) {
+        if (sequenceNumber > 0) {
+            try {
+                restoreService.deleteRestorePoint(sequenceNumber);
+            } catch (Exception e) {
+                AppLogger.warning("Failed to remove restore point: " + e.getMessage());
             }
         }
     }
@@ -249,30 +282,39 @@ public class DriverInstallService {
                 if (msiFile != null) {
                     AppLogger.info("Extracted MSI: " + msiFile);
                     ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
-                            "msiexec.exe", "/i", msiFile.toString(), "/qn", "/norestart"
+                            "msiexec.exe", "/i", msiFile.toString(), "/qn"
                     ).command().toArray(new String[0])));
-                    if (result.success()) {
+                    boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
+                    if (result.success() || msiReboot) {
                         cleanupTempFiles(driverFile);
-                        return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed silently via MSI.");
+                        return new InstallResult(InstallStatus.SUCCESS, msiReboot,
+                                msiReboot ? "Driver installed silently via MSI. A restart is required."
+                                        : "Driver installed silently via MSI.");
                     }
                     AppLogger.warning("MSI install failed, falling back to EXE: " + result.combinedOutput());
                 }
 
                 ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
-                        driverFile.toString(), "/quiet", "/norestart"
+                        driverFile.toString(), "/quiet"
                 ).command().toArray(new String[0])));
-                if (result.success()) {
+                boolean exeReboot = isRebootRequiredExitCode(result.exitCode());
+                if (result.success() || exeReboot) {
                     cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed silently.");
+                    return new InstallResult(InstallStatus.SUCCESS, exeReboot,
+                            exeReboot ? "Driver installed silently. A restart is required."
+                                    : "Driver installed silently.");
                 }
 
                 AppLogger.warning("EXE /quiet failed, trying /S: " + result.combinedOutput());
                 ProcessResult fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
                         driverFile.toString(), "/S"
                 ).command().toArray(new String[0])));
-                if (fallbackResult.success()) {
+                boolean fallbackReboot = isRebootRequiredExitCode(fallbackResult.exitCode());
+                if (fallbackResult.success() || fallbackReboot) {
                     cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed silently via fallback installer.");
+                    return new InstallResult(InstallStatus.SUCCESS, fallbackReboot,
+                            fallbackReboot ? "Driver installed silently via fallback installer. A restart is required."
+                                    : "Driver installed silently via fallback installer.");
                 }
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Silent installation failed: " + fallbackResult.combinedOutput());
             }
@@ -339,11 +381,12 @@ public class DriverInstallService {
             Path extractDir = driverFile.getParent().resolve(
                     name.replaceFirst("\\.(?:zip|cab)(?:\\.exe)?$", "_extracted"));
             if (Files.isDirectory(extractDir)) {
-                Files.walk(extractDir)
-                        .sorted((a, b) -> -a.compareTo(b))
-                        .forEach(p -> {
-                            try { Files.deleteIfExists(p); } catch (IOException ignored) {}
-                        });
+                try (var walk = Files.walk(extractDir)) {
+                    walk.sorted(Comparator.reverseOrder())
+                            .forEach(p -> {
+                                try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                            });
+                }
             }
         } catch (Exception e) {
             AppLogger.debug("Could not clean up temp files: " + e.getMessage());
@@ -590,15 +633,23 @@ public class DriverInstallService {
         }
     }
 
+    private static boolean isRebootRequiredExitCode(int exitCode) {
+        return exitCode == 3010 || exitCode == 1641 || exitCode == 5103;
+    }
+
     private String extractFilename(String url) {
         try {
             URI uri = new URI(url);
             String path = uri.getPath();
+            if (path == null || path.isEmpty()) {
+                return "driver_" + System.currentTimeMillis() + ".exe";
+            }
             String name = path.substring(path.lastIndexOf('/') + 1);
             if (name.isEmpty()) {
                 return "driver_" + System.currentTimeMillis() + ".exe";
             }
-            return name;
+            String decoded = java.net.URLDecoder.decode(name, java.nio.charset.StandardCharsets.UTF_8);
+            return decoded.isEmpty() ? "driver_" + System.currentTimeMillis() + ".exe" : decoded;
         } catch (Exception e) {
             return "driver_" + System.currentTimeMillis() + ".exe";
         }
@@ -610,24 +661,32 @@ public class DriverInstallService {
             java.net.URL u = new java.net.URL(url);
             String host = u.getHost().toLowerCase();
             return switch (source) {
-                case "Intel" -> host.equals("intel.com") || host.endsWith(".intel.com");
+                case "Intel" -> host.equals("intel.com") || host.endsWith(".intel.com")
+                        || host.equals("downloadmirror.intel.com");
                 case "Nvidia" -> host.equals("nvidia.com") || host.endsWith(".nvidia.com")
-                        || host.equals("geforce.com") || host.endsWith(".geforce.com");
-                case "AMD" -> host.equals("amd.com") || host.endsWith(".amd.com");
+                        || host.equals("geforce.com") || host.endsWith(".geforce.com")
+                        || host.endsWith(".nvdlcdn.com");
+                case "AMD" -> host.equals("amd.com") || host.endsWith(".amd.com")
+                        || host.endsWith(".amd.com.co");
                 case "Realtek" -> host.equals("realtek.com") || host.endsWith(".realtek.com");
                 case "Broadcom" -> host.equals("broadcom.com") || host.endsWith(".broadcom.com");
                 case "Qualcomm" -> host.equals("qualcomm.com") || host.endsWith(".qualcomm.com");
                 case "Synaptics" -> host.equals("synaptics.com") || host.endsWith(".synaptics.com");
                 case "Lenovo" -> host.equals("lenovo.com") || host.endsWith(".lenovo.com")
-                        || host.equals("lenovo-images.com") || host.endsWith(".lenovo-images.com");
+                        || host.equals("lenovo-images.com") || host.endsWith(".lenovo-images.com")
+                        || host.endsWith(".lenovo.net");
                 case "Dell" -> host.equals("dell.com") || host.endsWith(".dell.com")
-                        || host.equals("dellcdn.com") || host.endsWith(".dellcdn.com");
+                        || host.equals("dellcdn.com") || host.endsWith(".dellcdn.com")
+                        || host.endsWith(".dell-cdn.com");
                 case "HP" -> host.equals("hp.com") || host.endsWith(".hp.com")
-                        || host.equals("hpe.com") || host.endsWith(".hpe.com");
+                        || host.equals("hpe.com") || host.endsWith(".hpe.com")
+                        || host.endsWith(".hp.com.cn");
                 case "ASUS" -> host.equals("asus.com") || host.endsWith(".asus.com")
-                        || host.equals("asusnet.net") || host.endsWith(".asusnet.net");
+                        || host.equals("asusnet.net") || host.endsWith(".asusnet.net")
+                        || host.endsWith(".asus.com.cn");
                 case "WindowsUpdate" -> host.equals("microsoft.com") || host.endsWith(".microsoft.com")
-                        || host.equals("windowsupdate.com") || host.endsWith(".windowsupdate.com");
+                        || host.equals("windowsupdate.com") || host.endsWith(".windowsupdate.com")
+                        || host.endsWith(".windowsupdate.microsoft.com");
                 default -> false;
             };
         } catch (Exception e) {

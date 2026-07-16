@@ -15,7 +15,7 @@ public final class AdminCheck {
         }
         try {
             ProcessBuilder pb = new ProcessBuilder(
-                    "powershell", "-NoProfile", "-Command",
+                    "powershell.exe", "-NoProfile", "-Command",
                     "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"
             );
             Process p = pb.start();
@@ -35,7 +35,7 @@ public final class AdminCheck {
                     "Start-Process -FilePath '%s' -Verb RunAs -WindowStyle Hidden",
                     exePath.replace("'", "''")
             );
-            new ProcessBuilder("powershell", "-NoProfile", "-Command", cmd).start();
+            new ProcessBuilder("powershell.exe", "-NoProfile", "-Command", cmd).start();
         } else {
             String javaHome = System.getProperty("java.home");
             String javaBin = javaHome + "\\bin\\javaw.exe";
@@ -59,7 +59,7 @@ public final class AdminCheck {
                     "Start-Process -FilePath '%s' -ArgumentList '%s' -Verb RunAs -WindowStyle Hidden",
                     psJavaBin, psArgs
             );
-            new ProcessBuilder("powershell", "-NoProfile", "-Command", cmd).start();
+            new ProcessBuilder("powershell.exe", "-NoProfile", "-Command", cmd).start();
         }
     }
     

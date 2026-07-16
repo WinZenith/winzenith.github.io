@@ -44,9 +44,12 @@ public class DriverBackupService {
             inf = "driver.inf";
         }
         String safeId = driver.deviceId().replaceAll("[^a-zA-Z0-9_-]", "_");
-        Path folder = AppPaths.backupsRoot()
+        Path root = (settings.backupDirectory() != null && !settings.backupDirectory().isBlank())
+                ? Path.of(settings.backupDirectory())
+                : AppPaths.backupsRoot();
+        Path folder = root
                 .resolve(safeId)
-                .resolve(Instant.now().toEpochMilli() + "");
+                .resolve(Instant.now().toEpochMilli() + "_" + UUID.randomUUID().toString().substring(0, 8));
         Files.createDirectories(folder);
 
         Path script = PowerShellScripts.resolve("pnputil-backup.ps1");
@@ -118,6 +121,14 @@ public class DriverBackupService {
             Path folder = Path.of(entry.backupFolder());
             if (Files.isDirectory(folder)) {
                 deleteDirectory(folder);
+                Path parent = folder.getParent();
+                if (parent != null && Files.isDirectory(parent)) {
+                    try (var stream = Files.list(parent)) {
+                        if (stream.findFirst().isEmpty()) {
+                            Files.deleteIfExists(parent);
+                        }
+                    }
+                }
             }
         } catch (IOException e) {
             AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
@@ -125,24 +136,33 @@ public class DriverBackupService {
     }
 
     public void removeAll() throws IOException {
+        List<DriverBackupEntry> entriesToDelete;
         INDEX_LOCK.lock();
         try {
             BackupIndex index = loadIndex();
-            List<DriverBackupEntry> entries = index.getEntries();
-            for (DriverBackupEntry entry : entries) {
-                try {
-                    Path folder = Path.of(entry.backupFolder());
-                    if (Files.isDirectory(folder)) {
-                        deleteDirectory(folder);
-                    }
-                } catch (IOException e) {
-                    AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
-                }
-            }
+            entriesToDelete = new java.util.ArrayList<>(index.getEntries());
             index.getEntries().clear();
             saveIndex(index);
         } finally {
             INDEX_LOCK.unlock();
+        }
+        for (DriverBackupEntry entry : entriesToDelete) {
+            try {
+                Path folder = Path.of(entry.backupFolder());
+                if (Files.isDirectory(folder)) {
+                    deleteDirectory(folder);
+                    Path parent = folder.getParent();
+                    if (parent != null && Files.isDirectory(parent)) {
+                        try (var stream = Files.list(parent)) {
+                            if (stream.findFirst().isEmpty()) {
+                                Files.deleteIfExists(parent);
+                            }
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
+            }
         }
         AppLogger.info("All driver backups removed");
     }
@@ -182,15 +202,16 @@ public class DriverBackupService {
 
     private void deleteDirectory(Path directory) throws IOException {
         if (Files.exists(directory)) {
-            Files.walk(directory)
-                    .sorted((a, b) -> -a.compareTo(b))
-                    .forEach(path -> {
-                        try {
-                            Files.deleteIfExists(path);
-                        } catch (IOException e) {
-                            AppLogger.warning("Could not delete: " + path, e);
-                        }
-                    });
+            try (var stream = Files.walk(directory)) {
+                stream.sorted(Comparator.reverseOrder())
+                        .forEach(path -> {
+                            try {
+                                Files.deleteIfExists(path);
+                            } catch (IOException e) {
+                                AppLogger.warning("Could not delete: " + path, e);
+                            }
+                        });
+            }
         }
     }
 

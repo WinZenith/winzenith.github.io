@@ -41,6 +41,25 @@ public class ShredderService {
         return parseResult(result, filePath);
     }
 
+    public FolderDeleteResult secureDeleteFolder(String folderPath, int passCount) throws IOException, InterruptedException {
+        if (!AppPaths.isWindows()) {
+            throw new UnsupportedOperationException("Secure erase is only available on Windows.");
+        }
+        Path script = PowerShellScripts.resolve("secure-delete-folder.ps1");
+        ProcessResult result = processRunner.run(
+                ProcessRunner.powershellScript(script.toString(), folderPath, String.valueOf(passCount)));
+        if (!result.success()) {
+            return new FolderDeleteResult(false, "Process failed: " + result.combinedOutput(), 0, 0, List.of());
+        }
+        String json = result.stdout().trim();
+        try {
+            return JsonMapper.mapper().readValue(json, FolderDeleteResult.class);
+        } catch (Exception e) {
+            AppLogger.error("Failed to parse folder delete result", e);
+            return new FolderDeleteResult(false, "Parse error: " + e.getMessage(), 0, 0, List.of());
+        }
+    }
+
     public ShredderResult scheduleForReboot(String filePath) throws IOException, InterruptedException {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Reboot scheduling is only available on Windows.");
@@ -120,14 +139,18 @@ public class ShredderService {
     public static void sweepOrphanedTempFiles() {
         try {
             for (File root : File.listRoots()) {
-                File[] orphans = root.listFiles((dir, name) ->
-                        name.startsWith("~winzenith-wipe-") && name.endsWith(".tmp"));
-                if (orphans != null) {
-                    for (File f : orphans) {
-                        if (f.delete()) {
-                            AppLogger.info("Cleaned up orphaned temp file: " + f.getAbsolutePath());
+                if (!root.exists() || !root.canRead()) continue;
+                try {
+                    File[] orphans = root.listFiles((dir, name) ->
+                            name.startsWith("~winzenith-wipe-") && name.endsWith(".tmp"));
+                    if (orphans != null) {
+                        for (File f : orphans) {
+                            if (f.delete()) {
+                                AppLogger.info("Cleaned up orphaned temp file: " + f.getAbsolutePath());
+                            }
                         }
                     }
+                } catch (Exception ignored) {
                 }
             }
         } catch (Exception e) {
@@ -157,7 +180,7 @@ public class ShredderService {
                     while ((line = reader.readLine()) != null) {
                         if (cancelled.get()) {
                             try { stopFlag.createNewFile(); } catch (Exception ignored) {}
-                            process.destroy();
+                            process.destroyForcibly();
                             break;
                         }
                         line = line.trim();

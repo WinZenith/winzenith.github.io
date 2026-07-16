@@ -1,6 +1,14 @@
 $services = Get-CimInstance Win32_Service | ForEach-Object {
     $startMode = switch ($_.StartMode) {
-        'Auto'   { 'Automatic' }
+        'Auto'   {
+            $svcPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($_.Name)"
+            $delayed = Get-ItemProperty -Path $svcPath -Name 'DelayedAutostart' -ErrorAction SilentlyContinue
+            if ($delayed -and $delayed.DelayedAutostart -eq 1) {
+                'Automatic (Delayed Start)'
+            } else {
+                'Automatic'
+            }
+        }
         'Manual' { 'Manual' }
         'Disabled' { 'Disabled' }
         default  { $_.StartMode }

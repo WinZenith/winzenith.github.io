@@ -39,7 +39,15 @@ public class DiskHealthService {
             JsonNode drivesNode = root.has("drives") ? root.get("drives") : root;
             if (drivesNode.isArray()) {
                 for (JsonNode node : drivesNode) {
-                    drives.add(JsonMapper.mapper().treeToValue(node, DiskHealthInfo.class));
+                    DiskHealthInfo info = JsonMapper.mapper().treeToValue(node, DiskHealthInfo.class);
+                    if (node.has("rawSmartAttributes") && node.get("rawSmartAttributes").isArray()) {
+                        List<SmartAttribute> attrs = new ArrayList<>();
+                        for (JsonNode attrNode : node.get("rawSmartAttributes")) {
+                            attrs.add(JsonMapper.mapper().treeToValue(attrNode, SmartAttribute.class));
+                        }
+                        info.setRawSmartAttributes(attrs);
+                    }
+                    drives.add(info);
                 }
             }
             return new HealthResult(drives, smartctlAvailable);

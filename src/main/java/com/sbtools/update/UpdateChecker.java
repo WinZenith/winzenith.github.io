@@ -115,6 +115,14 @@ public class UpdateChecker {
             return status == Status.UPDATE_AVAILABLE;
         }
 
+        public boolean isUpToDate() {
+            return status == Status.UP_TO_DATE;
+        }
+
+        public boolean isUnknown() {
+            return status == Status.UNKNOWN;
+        }
+
         enum Status {
             UNKNOWN, UP_TO_DATE, UPDATE_AVAILABLE
         }

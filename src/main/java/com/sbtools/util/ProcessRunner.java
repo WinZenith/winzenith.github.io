@@ -139,7 +139,7 @@ public class ProcessRunner {
 
     public static List<String> powershellScript(String scriptPath, String... args) {
         List<String> cmd = new ArrayList<>();
-        cmd.add("powershell");
+        cmd.add("powershell.exe");
         cmd.add("-NoProfile");
         cmd.add("-ExecutionPolicy");
         cmd.add("Bypass");

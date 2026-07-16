@@ -42,6 +42,10 @@ import java.util.function.BooleanSupplier;
 
 public class StartupTabView extends BorderPane {
 
+    private static final String TAB_REGISTRY = "Startup apps";
+    private static final String TAB_TASKS = "Scheduled tasks";
+    private static final String TAB_SERVICES = "Windows services";
+
     private final StartupService service = new StartupService();
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
@@ -124,9 +128,9 @@ public class StartupTabView extends BorderPane {
         sortedTasks.comparatorProperty().bind(taskTable.comparatorProperty());
         sortedServices.comparatorProperty().bind(serviceTable.comparatorProperty());
 
-        Tab registryTab = createTab("Startup apps", registryTable, registrySearch);
-        Tab taskTab = createTab("Scheduled tasks", taskTable, taskSearch);
-        Tab serviceTab = createTab("Windows services", serviceTable, serviceSearch);
+        Tab registryTab = createTab(TAB_REGISTRY, registryTable, registrySearch);
+        Tab taskTab = createTab(TAB_TASKS, taskTable, taskSearch);
+        Tab serviceTab = createTab(TAB_SERVICES, serviceTable, serviceSearch);
 
         tabPane.getTabs().addAll(registryTab, taskTab, serviceTab);
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
@@ -163,6 +167,19 @@ public class StartupTabView extends BorderPane {
             scanButton.setDisable(true);
             statusLabel.setText("Startup manager is only available on Windows.");
         }
+
+        setOnKeyPressed(event -> {
+            if (event.isControlDown()) {
+                switch (event.getCode()) {
+                    case R -> scan();
+                    case E -> triggerToggle();
+                    case B -> showBackupsDialog();
+                }
+            } else if (event.getCode() == javafx.scene.input.KeyCode.DELETE) {
+                triggerDelete();
+            }
+        });
+        setFocusTraversable(true);
     }
 
     private Tab createTab(String title, TableView<StartupItem> table, TextField searchField) {
@@ -332,9 +349,9 @@ public class StartupTabView extends BorderPane {
         if (selectedTab == null) return registryTable;
         String title = selectedTab.getText();
         return switch (title) {
-            case "Startup apps" -> registryTable;
-            case "Scheduled tasks" -> taskTable;
-            case "Windows services" -> serviceTable;
+            case TAB_REGISTRY -> registryTable;
+            case TAB_TASKS -> taskTable;
+            case TAB_SERVICES -> serviceTable;
             default -> registryTable;
         };
     }
@@ -346,7 +363,7 @@ public class StartupTabView extends BorderPane {
         deleteButton.setDisable(!hasSelection || busy.get());
 
         Tab selectedTab = tabPane.getSelectionModel().getSelectedItem();
-        if (selectedTab != null && "Windows services".equals(selectedTab.getText())) {
+        if (selectedTab != null && TAB_SERVICES.equals(selectedTab.getText())) {
             deleteButton.setDisable(true);
         }
     }
@@ -428,6 +445,31 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> selected = new ArrayList<>(getSelectedTable().getSelectionModel().getSelectedItems());
         if (selected.isEmpty() || busy.get()) return;
 
+        boolean hasServices = selected.stream().anyMatch(i -> i.getType() == StartupItemType.SERVICE);
+        if (hasServices && !adminCheck.getAsBoolean()) {
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setTitle("Administrator Required");
+            alert.setHeaderText("Service modification requires elevation");
+            alert.setContentText("Modifying Windows service start types requires administrator privileges.\n" +
+                    "Please run the application as administrator.");
+            alert.initModality(Modality.APPLICATION_MODAL);
+            alert.showAndWait();
+            return;
+        }
+
+        if (selected.size() == 1) {
+            StartupItem item = selected.get(0);
+            String action = item.isEnabled() ? "disable" : "enable";
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle("Confirm Toggle");
+            confirm.setHeaderText("Change startup item status");
+            confirm.setContentText("Are you sure you want to " + action + " \"" + item.getName() + "\"?");
+            confirm.initModality(Modality.APPLICATION_MODAL);
+            if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
+                return;
+            }
+        }
+
         busy.set(true);
         progress.setVisible(true);
         statusLabel.setText("Toggling " + selected.size() + " item(s)...");
@@ -444,6 +486,9 @@ public class StartupTabView extends BorderPane {
             }
 
             Platform.runLater(() -> {
+                applyRegistryFilter();
+                applyTaskFilter();
+                applyServiceFilter();
                 getSelectedTable().refresh();
                 if (errors.isEmpty()) {
                     statusLabel.setText("Toggled " + selected.size() + " item(s) successfully.");

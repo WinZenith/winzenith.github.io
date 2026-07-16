@@ -127,8 +127,13 @@ class OptimizationPanel extends VBox {
                         : "Optimization failed.");
                 new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
                         result.message()).showAndWait();
-                if (result.success()) savePreset(preset);
-                busy.set(false);
+                if (result.success()) {
+                    savePreset(preset);
+                    busy.set(false);
+                    showCurrentSettings();
+                } else {
+                    busy.set(false);
+                }
             });
         }, "net-optimize-apply").start();
     }

@@ -13,17 +13,17 @@ if ($wifi) {
     if ($wifi.Status -eq "Up") { $info.state = "connected" }
     else { $info.state = $wifi.Status.ToLower() }
     if ($wifi.LinkSpeed) { $info.receiveRate = $wifi.LinkSpeed }
-}
 
-$props = Get-NetAdapterAdvancedProperty -Name $wifi.Name -ErrorAction SilentlyContinue
-foreach ($p in $props) {
-    if ($p.DisplayName -eq "802.11n/ac Wireless Mode") { $info.radioType = $p.DisplayValue }
-}
+    $props = Get-NetAdapterAdvancedProperty -Name $wifi.Name -ErrorAction SilentlyContinue
+    foreach ($p in $props) {
+        if ($p.DisplayName -eq "802.11n/ac Wireless Mode") { $info.radioType = $p.DisplayValue }
+    }
 
-$connProfile = Get-NetConnectionProfile -ErrorAction SilentlyContinue |
-    Where-Object { $_.InterfaceAlias -eq $wifi.Name } | Select-Object -First 1
-if ($connProfile) {
-    $info.ssid = $connProfile.Name
+    $connProfile = Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+        Where-Object { $_.InterfaceAlias -eq $wifi.Name } | Select-Object -First 1
+    if ($connProfile) {
+        $info.ssid = $connProfile.Name
+    }
 }
 
 try {
@@ -51,6 +51,8 @@ try {
             }
         }
     }
-} catch {}
+} catch {
+    $info.state = "error"
+}
 
 ConvertTo-Json -Compress $info

@@ -11,8 +11,13 @@ if ($InfName -match '^oem\d+\.inf$') {
     # Try to find oem inf from enum-drivers matching published name
     $enum = & pnputil.exe /enum-drivers 2>&1 | Out-String
     $oem = $null
-    if ($enum -match "Published Name\s*:\s*(oem\d+\.inf)[\s\S]*?Original Name\s*:\s*$([regex]::Escape($InfName))") {
-        $oem = $Matches[1]
+    $escapedInf = [regex]::Escape($InfName)
+    $entries = $enum -split '\r?\n\r?\n'
+    foreach ($entry in $entries) {
+        if ($entry -match "Published Name\s*:\s*(oem\d+\.inf)" -and $entry -match "Original Name\s*:\s*$escapedInf") {
+            $oem = $Matches[1]
+            break
+        }
     }
     if (-not $oem) {
         Write-Error "Could not resolve OEM INF for $InfName"

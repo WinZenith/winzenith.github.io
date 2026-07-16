@@ -118,7 +118,7 @@ public class UninstallerService {
             }
         }
 
-        int spaceIdx = trimmed.indexOf(' ');
+        int spaceIdx = findFirstUnquotedSpace(trimmed);
         if (spaceIdx > 0) {
             String exe = trimmed.substring(0, spaceIdx);
             String args = trimmed.substring(spaceIdx + 1).trim();
@@ -129,6 +129,19 @@ public class UninstallerService {
         }
 
         return List.of("cmd.exe", "/c", trimmed);
+    }
+
+    private static int findFirstUnquotedSpace(String s) {
+        boolean inQuote = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"') {
+                inQuote = !inQuote;
+            } else if (c == ' ' && !inQuote) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -269,14 +282,14 @@ public class UninstallerService {
         }
 
         // Substring match for App Name
-        if (aName.length() >= 4 && (fName.contains(aName) || aName.contains(fName))) {
+        if (aName.length() >= 4 && fName.contains(aName)) {
             if (!isGenericName(fName)) {
                 return true;
             }
         }
 
         // Substring match for Publisher
-        if (pName.length() >= 4 && (fName.contains(pName) || pName.contains(fName))) {
+        if (pName.length() >= 4 && fName.contains(pName)) {
             if (!isGenericName(fName)) {
                 return true;
             }
@@ -298,8 +311,8 @@ public class UninstallerService {
             return true;
         }
 
-        // Substring match
-        if (aName.length() >= 4 && (kName.contains(aName) || aName.contains(kName))) {
+        // Substring match (key name contains app name)
+        if (aName.length() >= 4 && kName.contains(aName)) {
             return !isGenericName(kName);
         }
 
@@ -352,8 +365,9 @@ public class UninstallerService {
      * Paths must be formatted as "HKLM\SOFTWARE\..." or "HKCU\SOFTWARE\...".
      *
      * @param registryPaths List of full registry paths.
+     * @param failedDeletions Output list to append paths that could not be deleted.
      */
-    public void deleteRegistryLeftovers(List<String> registryPaths) {
+    public void deleteRegistryLeftovers(List<String> registryPaths, List<String> failedDeletions) {
         for (String fullPath : registryPaths) {
             int separatorIdx = fullPath.indexOf('\\');
             if (separatorIdx == -1) continue;
@@ -362,7 +376,9 @@ public class UninstallerService {
             String subKeyPath = fullPath.substring(separatorIdx + 1);
 
             HKEY hive = "HKLM".equalsIgnoreCase(hiveStr) ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
-            deleteRegistryKeyRecursively(hive, subKeyPath);
+            if (!deleteRegistryKeyRecursively(hive, subKeyPath)) {
+                failedDeletions.add(fullPath);
+            }
         }
     }
 
@@ -432,7 +448,14 @@ public class UninstallerService {
                 File[] children = rootDir.listFiles(File::isDirectory);
                 if (children == null) continue;
                 for (File child : children) {
-                    if (child.getName().toLowerCase().contains(lowerAppName)) {
+                    String childName = child.getName().toLowerCase();
+                    String publisherLower = app.getPublisher() != null ? app.getPublisher().toLowerCase().trim() : "";
+                    boolean nameMatch = childName.equals(lowerAppName)
+                            || childName.startsWith(lowerAppName)
+                            || (lowerAppName.length() >= 4 && childName.contains(lowerAppName));
+                    boolean publisherMatch = !publisherLower.isEmpty() && publisherLower.length() >= 4
+                            && (childName.equals(publisherLower) || childName.startsWith(publisherLower));
+                    if (nameMatch || publisherMatch) {
                         if (NativeFileHelper.deleteOrQueue(child)) {
                             summary.add("Deleted directory: " + child.getAbsolutePath());
                         } else {
@@ -452,7 +475,9 @@ public class UninstallerService {
                     try {
                         Advapi32Util.registryDeleteKey(hive, app.getRegistryKeyPath());
                     } catch (Exception ex) {
-                        deleteRegistryKeyRecursively(hive, app.getRegistryKeyPath());
+                        if (!deleteRegistryKeyRecursively(hive, app.getRegistryKeyPath())) {
+                            errors.add("Failed to delete registry key for " + appName + ": " + app.getRegistryKeyPath());
+                        }
                     }
                     summary.add("Deleted registry key: " + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
                 }
@@ -479,15 +504,37 @@ public class UninstallerService {
                 if (subkeys == null) continue;
 
                 for (String subkey : subkeys) {
-                    if (subkey.toLowerCase().contains(lowerAppName)) {
-                        String fullSubKey = keyPath + "\\" + subkey;
+                    String fullSubKey = keyPath + "\\" + subkey;
+                    boolean shouldDelete = false;
+
+                    // First: exact match against the app's known registry key path
+                    if (app.isWin32() && app.getRegistryKeyPath().equals(fullSubKey)) {
+                        shouldDelete = true;
+                    }
+
+                    // Second: read DisplayName from the subkey and match precisely
+                    if (!shouldDelete) {
+                        try {
+                            if (Advapi32Util.registryValueExists(hive, fullSubKey, "DisplayName")) {
+                                String displayName = Advapi32Util.registryGetStringValue(hive, fullSubKey, "DisplayName");
+                                if (displayName != null && displayName.equalsIgnoreCase(appName)) {
+                                    shouldDelete = true;
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+
+                    if (shouldDelete) {
                         String formatted = hiveLabel + "\\" + fullSubKey;
                         try {
                             Advapi32Util.registryDeleteKey(hive, fullSubKey);
                             summary.add("Deleted registry key: " + formatted);
                         } catch (Exception ex) {
-                            deleteRegistryKeyRecursively(hive, fullSubKey);
-                            summary.add("Deleted registry key: " + formatted);
+                            if (deleteRegistryKeyRecursively(hive, fullSubKey)) {
+                                summary.add("Deleted registry key: " + formatted);
+                            } else {
+                                errors.add("Failed to delete registry key: " + formatted);
+                            }
                         }
                     }
                 }
@@ -497,13 +544,17 @@ public class UninstallerService {
         }
 
         // Delete Start Menu shortcuts
-        String[] startMenuRoots = {
-                System.getenv("ProgramData") + "\\Microsoft\\Windows\\Start Menu",
-                System.getenv("AppData") + "\\Microsoft\\Windows\\Start Menu"
-        };
+        List<String> startMenuRoots = new ArrayList<>();
+        String programData = System.getenv("ProgramData");
+        String appData = System.getenv("AppData");
+        if (programData != null && !programData.isBlank()) {
+            startMenuRoots.add(programData + "\\Microsoft\\Windows\\Start Menu");
+        }
+        if (appData != null && !appData.isBlank()) {
+            startMenuRoots.add(appData + "\\Microsoft\\Windows\\Start Menu");
+        }
 
         for (String root : startMenuRoots) {
-            if (root == null || root.isBlank()) continue;
             File startMenuDir = new File(root);
             if (startMenuDir.exists() && startMenuDir.isDirectory()) {
                 deleteMatchingFiles(startMenuDir, lowerAppName, summary, errors);
@@ -521,14 +572,21 @@ public class UninstallerService {
                 psScript = "Get-Process | Where-Object { $_.Path -like '" + escapedPath + "*' } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                         "Write-Output 'done'";
             } else {
-                String safeName = appName.replaceAll("[^a-zA-Z0-9._-]", "");
-                psScript = "Get-Process | Where-Object { $_.ProcessName -like '" + safeName + "' } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
+                String escapedName = appName.replace("'", "''").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?");
+                psScript = "Get-Process | Where-Object { $_.ProcessName -like '" + escapedName + "' } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                         "Write-Output 'done'";
             }
             ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-Command", psScript);
             pb.redirectErrorStream(true);
             Process proc = pb.start();
+            // Drain the output stream to prevent deadlock if the buffer fills up
+            Thread drainThread = new Thread(() -> {
+                try { proc.getInputStream().readAllBytes(); } catch (Exception ignored) {}
+            }, "ps-drain");
+            drainThread.setDaemon(true);
+            drainThread.start();
             proc.waitFor(10, TimeUnit.SECONDS);
+            proc.destroy();
             summary.add("Killed processes matching " + (installLoc != null && !installLoc.isBlank() ? "install path" : "app name") + " for: " + appName);
         } catch (Exception e) {
             errors.add("Failed to kill processes for " + appName + ": " + e.getMessage());

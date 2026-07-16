@@ -384,26 +384,22 @@ public class CleanerTabView extends BorderPane {
 
         AppSettings settings = settingsStore.load();
         if (settings.autoCreateRestoreBeforeCleanup()) {
-            CompletableFuture.runAsync(() -> {
-                Platform.runLater(() -> {
-                    statusLabel.setText("Creating System Restore point...");
-                    progressBar.setProgress(-1);
-                    progressBar.setVisible(true);
-                });
-                try {
-                    ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
-                            "Checkpoint-Computer -Description 'WinZenith Cleanup Pre-Clean' -RestorePointType MODIFY_SETTINGS");
-                    pb.redirectErrorStream(true);
-                    Process p = pb.start();
-                    boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
-                    if (!finished) {
-                        p.destroyForcibly();
-                        AppLogger.warning("System Restore point creation timed out");
-                    }
-                } catch (Exception e) {
-                    AppLogger.warning("Failed to create System Restore point: " + e.getMessage());
+            statusLabel.setText("Creating System Restore point...");
+            progressBar.setProgress(-1);
+            progressBar.setVisible(true);
+            try {
+                ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
+                        "Checkpoint-Computer -Description 'WinZenith Cleanup Pre-Clean' -RestorePointType MODIFY_SETTINGS");
+                pb.redirectErrorStream(true);
+                Process p = pb.start();
+                boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                if (!finished) {
+                    p.destroyForcibly();
+                    AppLogger.warning("System Restore point creation timed out");
                 }
-            });
+            } catch (Exception e) {
+                AppLogger.warning("Failed to create System Restore point: " + e.getMessage());
+            }
         }
 
         statusLabel.setText("Cleaning...");

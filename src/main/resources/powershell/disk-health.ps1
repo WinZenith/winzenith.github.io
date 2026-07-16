@@ -70,7 +70,7 @@ function Parse-SmartctlNvme {
         if ($nvme.data_units_written -ne $null) { $attrs.totalHostWrites = [uint64]$nvme.data_units_written * 512000 }
         if ($nvme.media_errors -ne $null) { $attrs.mediaErrors = [long]$nvme.media_errors }
         if ($nvme.critical_warning -ne $null) { $attrs.criticalWarning = $nvme.critical_warning }
-        if ($nvmeunsafe_shutdowns -ne $null) { $attrs.unsafeShutdowns = [long]$nvme.unsafe_shutdowns }
+        if ($nvme.unsafe_shutdowns -ne $null) { $attrs.unsafeShutdowns = [long]$nvme.unsafe_shutdowns }
         if ($nvme.error_information_log_entries -ne $null) { $attrs.errorLogEntries = [long]$nvme.error_information_log_entries }
     }
     return $attrs
@@ -291,6 +291,81 @@ foreach ($phys in $physicalDisks) {
         }
     }
 
+    $rawAttrs = @()
+    if ($smartctlData) {
+        if ($smartctlData.ata_smart_attributes -and $smartctlData.ata_smart_attributes.table) {
+            foreach ($attr in $smartctlData.ata_smart_attributes.table) {
+                $rawVal = if ($attr.raw -and $attr.raw.string) { $attr.raw.string } else { if ($attr.raw -and $attr.raw.value -ne $null) { [string]$attr.raw.value } else { '0' } }
+                $rawAttrs += [ordered]@{
+                    id        = [int]$attr.id
+                    name      = if ($attr.name) { $attr.name } else { "Attribute $($attr.id)" }
+                    value     = if ($attr.value -ne $null) { [string]$attr.value } else { '-' }
+                    worst     = if ($attr.worst -ne $null) { [string]$attr.worst } else { '-' }
+                    threshold = if ($attr.thresh -ne $null) { [string]$attr.thresh } else { '-' }
+                    rawValue  = $rawVal
+                    flags     = if ($attr.flags) { $attr.flags } else { '' }
+                }
+            }
+        } elseif ($smartctlData.nvme_smart_health_information) {
+            $nvme = $smartctlData.nvme_smart_health_information
+            $nvmeMap = [ordered]@{
+                'Critical Warning'     = if ($nvme.critical_warning -ne $null) { [string]$nvme.critical_warning } else { '0' }
+                'Temperature'          = if ($nvme.temperature -ne $null) { [string]$nvme.temperature } else { '-' }
+                'Available Spare'      = if ($nvme.available_spare -ne $null) { [string]$nvme.available_spare } else { '-' }
+                'Available Spare Threshold' = if ($nvme.available_spare_threshold -ne $null) { [string]$nvme.available_spare_threshold } else { '-' }
+                'Percentage Used'      = if ($nvme.percentage_used -ne $null) { [string]$nvme.percentage_used } else { '-' }
+                'Data Units Read'      = if ($nvme.data_units_read -ne $null) { [string]$nvme.data_units_read } else { '-' }
+                'Data Units Written'   = if ($nvme.data_units_written -ne $null) { [string]$nvme.data_units_written } else { '-' }
+                'Host Read Commands'   = if ($nvme.host_reads -ne $null) { [string]$nvme.host_reads } else { '-' }
+                'Host Write Commands'  = if ($nvme.host_writes -ne $null) { [string]$nvme.host_writes } else { '-' }
+                'Controller Busy Time' = if ($nvme.controller_busy_time -ne $null) { [string]$nvme.controller_busy_time } else { '-' }
+                'Power Cycles'         = if ($nvme.power_cycles -ne $null) { [string]$nvme.power_cycles } else { '-' }
+                'Power On Hours'       = if ($nvme.power_on_hours -ne $null) { [string]$nvme.power_on_hours } else { '-' }
+                'Unsafe Shutdowns'     = if ($nvme.unsafe_shutdowns -ne $null) { [string]$nvme.unsafe_shutdowns } else { '-' }
+                'Media Errors'         = if ($nvme.media_errors -ne $null) { [string]$nvme.media_errors } else { '-' }
+                'Error Information Log Entries' = if ($nvme.error_information_log_entries -ne $null) { [string]$nvme.error_information_log_entries } else { '-' }
+            }
+            $nvmeId = 1
+            foreach ($kv in $nvmeMap.GetEnumerator()) {
+                $rawAttrs += [ordered]@{
+                    id        = $nvmeId
+                    name      = $kv.Key
+                    value     = '-'
+                    worst     = '-'
+                    threshold = '-'
+                    rawValue  = $kv.Value
+                    flags     = ''
+                }
+                $nvmeId++
+            }
+        }
+    } else {
+        $ataSmart = Get-SmartFromWmi -ClassName 'MSStorageDriver_SmartData' -DiskNumber $diskNum -SizeBytes $sizeBytes
+        if (-not $ataSmart) { $ataSmart = Get-SmartFromWmi -ClassName 'MSStorageDriver_FailurePredictData' -DiskNumber $diskNum -SizeBytes $sizeBytes }
+        if ($ataSmart -and $ataSmart.PSObject.Properties['VendorSpecific']) {
+            $vendorData = $ataSmart.VendorSpecific
+            if ($vendorData -and $vendorData.Count -gt 12) {
+                for ($i = 0; $i -lt $vendorData.Count - 11; $i += 12) {
+                    $attrId = [int]$vendorData[$i]
+                    $attrVal = [int]$vendorData[$i+3]
+                    $attrWorst = [int]$vendorData[$i+4]
+                    $rawValue = [long]([int]$vendorData[$i+7]) -bor ([long]([int]$vendorData[$i+8]) -shl 8) -bor ([long]([int]$vendorData[$i+9]) -shl 16) -bor ([long]([int]$vendorData[$i+10]) -shl 24)
+                    if ($attrId -gt 0) {
+                        $rawAttrs += [ordered]@{
+                            id        = $attrId
+                            name      = "Attribute $attrId"
+                            value     = [string]$attrVal
+                            worst     = [string]$attrWorst
+                            threshold = '-'
+                            rawValue  = [string]$rawValue
+                            flags     = ''
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     $results += [ordered]@{
         driveLetter               = if ($driveLetters.Count -gt 0) { $driveLetters[0] } else { '' }
         driveLetters              = $driveLetters
@@ -312,6 +387,7 @@ foreach ($phys in $physicalDisks) {
         totalHostReads            = $totalHostReads
         totalHostWrites           = $totalHostWrites
         dataSource                = $dataSource
+        rawSmartAttributes        = $rawAttrs
     }
 }
 

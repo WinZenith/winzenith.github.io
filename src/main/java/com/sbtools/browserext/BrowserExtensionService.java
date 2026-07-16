@@ -7,6 +7,8 @@ import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessRunner;
 import com.sbtools.util.ProcessResult;
 
+import javafx.application.Platform;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -14,8 +16,15 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 public class BrowserExtensionService {
+
+    public static final List<String> ALL_BROWSERS = List.of(
+            "Chrome", "Chrome Canary",
+            "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
+            "Firefox", "Brave", "Opera", "Opera GX", "Vivaldi"
+    );
 
     private static final List<String> CHROMIUM_BROWSERS = List.of(
             "Chrome", "Chrome Canary", "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
@@ -26,17 +35,28 @@ public class BrowserExtensionService {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public List<BrowserExtensionRow> scanAllBrowsers(Runnable onProgress) {
+    /**
+     * Scan all browsers individually, calling onProgress(browserName, completedCount, totalCount)
+     * after each browser completes. This enables real-time progress UI updates.
+     */
+    public List<BrowserExtensionRow> scanAllBrowsers(java.util.function.Consumer<String> onProgress) {
         List<BrowserExtensionRow> all = new ArrayList<>();
-        all.addAll(scanBrowser("All", onProgress));
+        int total = ALL_BROWSERS.size();
+        for (int i = 0; i < total; i++) {
+            String browser = ALL_BROWSERS.get(i);
+            all.addAll(scanBrowser(browser));
+            if (onProgress != null) {
+                onProgress.accept(browser + " (" + (i + 1) + "/" + total + ")");
+            }
+        }
         return all;
     }
 
-    public List<BrowserExtensionRow> scanBrowser(String browser, Runnable onProgress) {
+    public List<BrowserExtensionRow> scanBrowser(String browser) {
         List<BrowserExtensionRow> results = new ArrayList<>();
         try {
             Path script = PowerShellScripts.resolve("browser-extensions.ps1");
-            ProcessResult pr = new ProcessRunner(30).run(
+            ProcessResult pr = new ProcessRunner(120).run(
                     ProcessRunner.powershellScript(script.toString(), "-Browser", browser));
             int exitCode = pr.exitCode();
             String stdout = pr.stdout();
@@ -44,13 +64,12 @@ public class BrowserExtensionService {
             if (!stderr.isEmpty()) {
                 AppLogger.warning("Script stderr for " + browser + ": " + stderr);
             }
-            if (exitCode != 0 || stderr.contains("error")) {
-                System.err.println("[BrowserExtensionService] Exit=" + exitCode + " stderr=" + stderr);
+            if (exitCode != 0 || stderr.toLowerCase().contains("error")) {
+                AppLogger.warning("[BrowserExtensionService] Exit=" + exitCode + " stderr=" + stderr);
             }
             String trimmed = stdout.trim();
             if (trimmed.isEmpty() || "[]".equals(trimmed)) {
-                System.err.println("[BrowserExtensionService] EMPTY stdout for " + browser + " (exit=" + exitCode + ") raw_hex=" + bytesToHex(stdout.getBytes(StandardCharsets.UTF_8)));
-                if (onProgress != null) onProgress.run();
+                AppLogger.warning("[BrowserExtensionService] EMPTY stdout for " + browser + " (exit=" + exitCode + ") raw_hex=" + bytesToHex(stdout.getBytes(StandardCharsets.UTF_8)));
                 return results;
             }
             stdout = trimmed;
@@ -78,7 +97,6 @@ public class BrowserExtensionService {
         } catch (Exception e) {
             AppLogger.warning("Failed to scan browser " + browser + ": " + e.getMessage());
         }
-        if (onProgress != null) onProgress.run();
         return results;
     }
 
@@ -89,38 +107,59 @@ public class BrowserExtensionService {
             String browser = ext.getBrowser();
             if (CHROMIUM_BROWSERS.contains(browser)) {
                 Path extFolder = extPath.resolve(ext.getExtensionId());
-                Path versionDir = Files.list(extFolder)
-                        .filter(Files::isDirectory)
-                        .findFirst().orElse(null);
+                Path versionDir;
+                try (Stream<Path> stream = Files.list(extFolder)) {
+                    versionDir = stream
+                            .filter(Files::isDirectory)
+                            .findFirst().orElse(null);
+                }
                 if (versionDir == null) return false;
                 Path disabledMarker = versionDir.resolve("Disabled");
                 if (enable) {
                     Files.deleteIfExists(disabledMarker);
                 } else {
-                    Files.createFile(disabledMarker);
+                    if (!Files.exists(disabledMarker)) {
+                        Files.createFile(disabledMarker);
+                    }
                 }
-                ext.setEnabled(enable);
+                Platform.runLater(() -> ext.setEnabled(enable));
                 return true;
             } else if ("Firefox".equals(browser)) {
-                Path extFilePath = extPath.resolve(ext.getExtensionId() + ".xpi");
-                if (!Files.exists(extFilePath)) {
-                    extFilePath = extPath.resolve(ext.getExtensionId() + ".json");
-                }
                 if (enable) {
-                    Path disabledExt = extPath.resolve(ext.getExtensionId() + ".xpi.disabled");
-                    if (Files.exists(disabledExt)) {
-                        Files.move(disabledExt, disabledExt.resolveSibling(ext.getExtensionId() + ".xpi"));
+                    Path disabledXpi = extPath.resolve(ext.getExtensionId() + ".xpi.disabled");
+                    if (Files.exists(disabledXpi)) {
+                        Files.move(disabledXpi, disabledXpi.resolveSibling(ext.getExtensionId() + ".xpi"));
+                        Platform.runLater(() -> ext.setEnabled(true));
+                        return true;
                     }
+                    Path disabledJson = extPath.resolve(ext.getExtensionId() + ".json.disabled");
+                    if (Files.exists(disabledJson)) {
+                        Files.move(disabledJson, disabledJson.resolveSibling(ext.getExtensionId() + ".json"));
+                        Platform.runLater(() -> ext.setEnabled(true));
+                        return true;
+                    }
+                    return false;
                 } else {
-                    if (Files.exists(extFilePath) && extFilePath.toString().endsWith(".xpi")) {
+                    Path xpiPath = extPath.resolve(ext.getExtensionId() + ".xpi");
+                    if (Files.exists(xpiPath)) {
                         Path disabledPath = extPath.resolve(ext.getExtensionId() + ".xpi.disabled");
                         if (!Files.exists(disabledPath)) {
-                            Files.move(extFilePath, disabledPath);
+                            Files.move(xpiPath, disabledPath);
                         }
+                        Platform.runLater(() -> ext.setEnabled(false));
+                        return true;
                     }
+                    Path jsonPath = extPath.resolve(ext.getExtensionId() + ".json");
+                    if (Files.exists(jsonPath)) {
+                        Path disabledPath = extPath.resolve(ext.getExtensionId() + ".json.disabled");
+                        if (!Files.exists(disabledPath)) {
+                            Files.move(jsonPath, disabledPath);
+                        }
+                        Platform.runLater(() -> ext.setEnabled(false));
+                        return true;
+                    }
+                    return false;
                 }
-                ext.setEnabled(enable);
-                return true;
             }
             return false;
         } catch (Exception e) {

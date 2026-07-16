@@ -79,6 +79,23 @@ public final class ProviderCache {
         }
     }
 
+    public void clearAll() {
+        try {
+            if (Files.exists(cacheDir)) {
+                try (var walk = Files.walk(cacheDir)) {
+                    walk.filter(Files::isRegularFile)
+                            .filter(p -> p.toString().endsWith(".json"))
+                            .forEach(p -> {
+                                try { Files.deleteIfExists(p); } catch (Exception ignored) {}
+                            });
+                }
+            }
+            AppLogger.info("ProviderCache: Cleared all cached results");
+        } catch (Exception e) {
+            AppLogger.warning("ProviderCache: Failed to clear cache: " + e.getMessage());
+        }
+    }
+
     private Path pathFor(String providerId) {
         String safe = providerId.replaceAll("[^A-Za-z0-9_.-]", "_");
         return cacheDir.resolve(safe + ".json");

@@ -38,7 +38,10 @@ public class IconExtractor {
             if (hicon == null) {
                 hicon = smallIcons[0];
             }
-            if (hicon == null) return null;
+            if (hicon == null) {
+                cleanupIcons(largeIcons, smallIcons);
+                return null;
+            }
 
             try {
                 return hiconToBufferedImage(hicon);
@@ -47,6 +50,8 @@ public class IconExtractor {
                 if (smallIcons[0] != null && smallIcons[0] != hicon) {
                     User32.INSTANCE.DestroyIcon(smallIcons[0]);
                 }
+                largeIcons[0] = null;
+                smallIcons[0] = null;
             }
         } catch (Exception e) {
             cleanupIcons(largeIcons, smallIcons);

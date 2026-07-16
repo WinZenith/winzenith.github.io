@@ -81,7 +81,7 @@ public class Win32AppDiscoverer {
         String releaseType = getStringValue(hive, keyPath, "ReleaseType");
         String publisher = getStringValue(hive, keyPath, "Publisher");
 
-        if (displayName.isEmpty() || uninstallString.isEmpty()) {
+        if (displayName.isEmpty()) {
             return false;
         }
         if (systemComponent == 1) {

@@ -77,14 +77,14 @@ public class DriverHealthService {
         if (parts.length >= 2) {
             try {
                 int major = Integer.parseInt(parts[0].replaceAll("[^0-9]", ""));
-                int minor = Integer.parseInt(parts[1].replaceAll("[^0-9]", ""));
-                if (major < 10) return 15;
-                if (major < 20) return 10;
-                if (major < 30) return 5;
+                int minor = parts.length >= 2 ? Integer.parseInt(parts[1].replaceAll("[^0-9]", "")) : 0;
+                if (major == 0) return 10;
+                if (major < 5 && minor == 0) return 8;
+                if (major < 10) return 5;
                 return 0;
             } catch (NumberFormatException ignored) {}
         }
-        return 5;
+        return 3;
     }
 
     public record DriverHealthScore(int score, String details) {

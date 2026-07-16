@@ -86,6 +86,7 @@ public class DriversTabView extends BorderPane {
     private final ProgressBar progressBar = new ProgressBar(0);
     private final Label progressLabel = new Label("0%");
     private final Button scanButton = new Button("Scan");
+    private final Button forceScanButton = new Button("Force Scan");
     private final Button stopScanButton = new Button("Stop");
     private final Button updateAllButton = new Button("Update All");
     private final Button updateSelectedButton = new Button("Update Selected");
@@ -116,6 +117,8 @@ public class DriversTabView extends BorderPane {
         scanButton.setOnAction(e -> startScan());
         stopScanButton.setOnAction(e -> stopScan());
         stopScanButton.setDisable(true);
+        forceScanButton.setOnAction(e -> startForceScan());
+        forceScanButton.setTooltip(new Tooltip("Clear cache and scan for outdated drivers"));
 
         updateAllButton.setDisable(true);
         updateAllButton.setOnAction(e -> startBatchUpdate());
@@ -147,7 +150,7 @@ public class DriversTabView extends BorderPane {
         historyButton.setTooltip(new Tooltip("View past driver update history"));
         detailsButton.setTooltip(new Tooltip("View details of the selected driver"));
 
-        HBox row1 = new HBox(8, scanButton, stopScanButton, updateAllButton, updateSelectedButton,
+        HBox row1 = new HBox(8, scanButton, forceScanButton, stopScanButton, updateAllButton, updateSelectedButton,
                 backupButton, stopBackupButton, ignoredListButton, historyButton, detailsButton);
         row1.setAlignment(Pos.CENTER_LEFT);
         row1.setPadding(new Insets(8, 16, 0, 16));
@@ -524,15 +527,38 @@ public class DriversTabView extends BorderPane {
     }
 
     private void startScan() {
+        startScanInternal(false);
+    }
+
+    private void startForceScan() {
+        startScanInternal(true);
+    }
+
+    private void startScanInternal(boolean forceRefresh) {
         if (busy.get()) {
             return;
+        }
+        if (forceRefresh) {
+            catalog.clearCache();
         }
         final CancellationToken token = new CancellationToken();
         scanToken = token;
         busy.set(true);
         setStatus("Enumerating installed drivers…");
         scanButton.setDisable(true);
+        forceScanButton.setDisable(true);
         stopScanButton.setDisable(false);
+        Set<String> previouslySelected = new HashSet<>();
+        for (DriverRow row : outdatedRows) {
+            if (row.isSelected()) {
+                previouslySelected.add(row.installed().deviceId());
+            }
+        }
+        for (DriverRow row : upToDateRows) {
+            if (row.isSelected()) {
+                previouslySelected.add(row.installed().deviceId());
+            }
+        }
         outdatedRows.clear();
         upToDateRows.clear();
         progressBar.setProgress(0);
@@ -557,6 +583,9 @@ public class DriversTabView extends BorderPane {
                     // Seed the up-to-date list immediately so users get feedback before any provider replies.
                     for (DriverRow row : rowByDevice.values()) {
                         if (!excludedIdSet.contains(row.installed().deviceId())) {
+                            if (previouslySelected.contains(row.installed().deviceId())) {
+                                row.setSelected(true);
+                            }
                             upToDateRows.add(row);
                         }
                     }
@@ -612,6 +641,7 @@ public class DriversTabView extends BorderPane {
                     progressBar.setVisible(false);
                     progressLabel.setVisible(false);
                     scanButton.setDisable(false);
+                    forceScanButton.setDisable(false);
                     stopScanButton.setDisable(true);
                     updateButtonStates();
                 });
@@ -638,15 +668,21 @@ public class DriversTabView extends BorderPane {
         for (DriverUpdateCandidate c : candidates) {
             candidateMap.put(c.installed().deviceId(), c);
         }
-        for (Map.Entry<String, DriverRow> entry : rowByDevice.entrySet()) {
-            DriverRow row = entry.getValue();
-            DriverUpdateCandidate newCandidate = candidateMap.get(entry.getKey());
+        for (Map.Entry<String, DriverUpdateCandidate> entry : candidateMap.entrySet()) {
+            DriverRow row = rowByDevice.get(entry.getKey());
+            if (row == null) continue;
+            DriverUpdateCandidate newCandidate = entry.getValue();
             DriverUpdateCandidate oldCandidate = row.candidate();
-            if (newCandidate == null && oldCandidate != null) {
-                row.setCandidate(null);
-            } else if (newCandidate != null && (oldCandidate == null
-                    || !newCandidate.availableVersion().equals(oldCandidate.availableVersion()))) {
+            if (oldCandidate == null || !newCandidate.availableVersion().equals(oldCandidate.availableVersion())) {
                 row.setCandidate(newCandidate);
+            }
+        }
+        for (Map.Entry<String, DriverRow> rowEntry : rowByDevice.entrySet()) {
+            if (!candidateMap.containsKey(rowEntry.getKey())) {
+                DriverRow row = rowEntry.getValue();
+                if (row.candidate() != null) {
+                    row.setCandidate(null);
+                }
             }
         }
     }
@@ -660,6 +696,7 @@ public class DriversTabView extends BorderPane {
         Set<String> ids = new HashSet<>();
         for (String e : settings.excludedDriverIds()) {
             int t = e.lastIndexOf('\t');
+            if (t < 0) t = e.lastIndexOf('\u001F');
             ids.add(t >= 0 ? e.substring(t + 1) : e);
         }
         return ids;
@@ -672,30 +709,34 @@ public class DriversTabView extends BorderPane {
      * callbacks during a scan.
      */
     private void reconcileRows(Map<String, DriverRow> rowByDevice, Set<String> excludedIds) {
+        java.util.Set<DriverRow> outdatedSet = new java.util.HashSet<>(outdatedRows);
+        java.util.Set<DriverRow> upToDateSet = new java.util.HashSet<>(upToDateRows);
+        java.util.List<DriverRow> toAddOutdated = new java.util.ArrayList<>();
+        java.util.List<DriverRow> toRemoveOutdated = new java.util.ArrayList<>();
+        java.util.List<DriverRow> toAddUpToDate = new java.util.ArrayList<>();
+        java.util.List<DriverRow> toRemoveUpToDate = new java.util.ArrayList<>();
+
         for (DriverRow row : rowByDevice.values()) {
             String deviceId = row.installed().deviceId();
             boolean excluded = excludedIds.contains(deviceId);
             if (excluded) {
-                outdatedRows.remove(row);
-                upToDateRows.remove(row);
+                if (outdatedSet.contains(row)) toRemoveOutdated.add(row);
+                if (upToDateSet.contains(row)) toRemoveUpToDate.add(row);
                 continue;
             }
             if (row.hasUpdate()) {
-                if (upToDateRows.contains(row)) {
-                    upToDateRows.remove(row);
-                }
-                if (!outdatedRows.contains(row)) {
-                    outdatedRows.add(row);
-                }
+                if (upToDateSet.contains(row)) toRemoveUpToDate.add(row);
+                if (!outdatedSet.contains(row)) toAddOutdated.add(row);
             } else {
-                if (outdatedRows.contains(row)) {
-                    outdatedRows.remove(row);
-                }
-                if (!upToDateRows.contains(row)) {
-                    upToDateRows.add(row);
-                }
+                if (outdatedSet.contains(row)) toRemoveOutdated.add(row);
+                if (!upToDateSet.contains(row)) toAddUpToDate.add(row);
             }
         }
+
+        outdatedRows.removeAll(toRemoveOutdated);
+        outdatedRows.addAll(toAddOutdated);
+        upToDateRows.removeAll(toRemoveUpToDate);
+        upToDateRows.addAll(toAddUpToDate);
     }
 
     private void showIgnoredListDialog() {
@@ -715,6 +756,7 @@ public class DriversTabView extends BorderPane {
                     setText(null);
                 } else {
                     int t = item.lastIndexOf('\t');
+                    if (t < 0) t = item.lastIndexOf('\u001F');
                     setText(t >= 0 ? item.substring(0, t) : item);
                 }
             }
@@ -910,8 +952,14 @@ public class DriversTabView extends BorderPane {
     private void excludeDriver(DriverRow row) {
         AppSettings current = settingsStore.load();
         List<String> excluded = new ArrayList<>(current.excludedDriverIds());
-        String stored = row.installed().friendlyName() + "\t" + row.installed().deviceId();
-        if (excluded.stream().noneMatch(s -> s.endsWith("\t" + row.installed().deviceId()))) {
+        String deviceId = row.installed().deviceId();
+        boolean alreadyExcluded = excluded.stream().anyMatch(s -> {
+            int t = s.lastIndexOf('\t');
+            if (t < 0) t = s.lastIndexOf('\u001F');
+            return t >= 0 && s.substring(t + 1).equals(deviceId);
+        });
+        if (!alreadyExcluded) {
+            String stored = row.installed().friendlyName() + "\u001F" + deviceId;
             excluded.add(stored);
         }
         try {

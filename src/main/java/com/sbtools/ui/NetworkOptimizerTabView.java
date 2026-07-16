@@ -15,10 +15,12 @@ public class NetworkOptimizerTabView extends BorderPane {
 
     private final NetworkOptimizerService service = new NetworkOptimizerService();
     private final AdaptersPanel adaptersPanel;
+    private final OptimizationPanel optimizationPanel;
     private final DnsCachePanel dnsCachePanel;
     private final AdapterSettingsPanel adapterSettingsPanel;
     private final WiFiPanel wiFiPanel;
     private final ConnectionMonitorPanel connectionMonitorPanel;
+    private final ConnectionOverviewPanel connectionOverviewPanel;
     private final ChangeLogPanel changeLogPanel;
 
     public NetworkOptimizerTabView(BooleanProperty busy, BooleanSupplier adminCheck,
@@ -29,41 +31,44 @@ public class NetworkOptimizerTabView extends BorderPane {
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
         adaptersPanel = new AdaptersPanel(service, busy);
+        optimizationPanel = new OptimizationPanel(service, busy, settingsStore, currentSettings, statusLabel);
         dnsCachePanel = new DnsCachePanel(service, busy, statusLabel);
         adapterSettingsPanel = new AdapterSettingsPanel(service, busy);
         wiFiPanel = new WiFiPanel(service, busy);
         connectionMonitorPanel = new ConnectionMonitorPanel(service, busy);
+        connectionOverviewPanel = new ConnectionOverviewPanel(service, busy);
         changeLogPanel = new ChangeLogPanel(service, busy);
 
+        Tab adaptersTab = new Tab("Network Adapters", adaptersPanel);
+        Tab optimizationTab = new Tab("Optimization", optimizationPanel);
+        Tab dnsTab = new Tab("DNS & Cache", dnsCachePanel);
+        Tab adapterSettingsTab = new Tab("Adapter Settings", adapterSettingsPanel);
+        Tab wifiTab = new Tab("Wi-Fi", wiFiPanel);
+        Tab connectionMonitorTab = new Tab("Connection Monitor", connectionMonitorPanel);
+        Tab connectionOverviewTab = new Tab("Connection Overview", connectionOverviewPanel);
+        Tab changeHistoryTab = new Tab("Change History", changeLogPanel);
+
         tabPane.getTabs().addAll(
-                new Tab("Network Adapters", adaptersPanel),
-                new Tab("Optimization", new OptimizationPanel(service, busy, settingsStore, currentSettings, statusLabel)),
-                new Tab("DNS & Cache", dnsCachePanel),
-                new Tab("Adapter Settings", adapterSettingsPanel),
-                new Tab("Wi-Fi", wiFiPanel),
-                new Tab("Connection Monitor", connectionMonitorPanel),
-                new Tab("Connection Overview", new ConnectionOverviewPanel(service, busy)),
-                new Tab("Change History", changeLogPanel)
+                adaptersTab, optimizationTab, dnsTab, adapterSettingsTab,
+                wifiTab, connectionMonitorTab, connectionOverviewTab, changeHistoryTab
         );
 
         tabPane.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
-            if (sel != null && sel.getText().equals("Network Adapters") && adaptersPanel.lookup(".table-view") != null) {
+            if (sel == null) return;
+            if (sel == adaptersTab && adaptersPanel.lookup(".table-view") != null) {
                 adaptersPanel.loadAdapters();
-            }
-            if (sel != null && sel.getText().equals("DNS & Cache")) {
+            } else if (sel == dnsTab) {
                 dnsCachePanel.refreshAdapters();
-            }
-            if (sel != null && sel.getText().equals("Adapter Settings")) {
+            } else if (sel == adapterSettingsTab) {
                 adapterSettingsPanel.refreshAdapters();
-            }
-            if (sel != null && sel.getText().equals("Wi-Fi")) {
+            } else if (sel == wifiTab) {
                 wiFiPanel.loadCurrentInfo();
                 wiFiPanel.loadProfiles();
-            }
-            if (sel != null && sel.getText().equals("Connection Monitor")) {
+            } else if (sel == connectionMonitorTab) {
                 connectionMonitorPanel.loadConnections();
-            }
-            if (sel != null && sel.getText().equals("Change History")) {
+            } else if (sel == connectionOverviewTab) {
+                connectionOverviewPanel.loadOverview();
+            } else if (sel == changeHistoryTab) {
                 changeLogPanel.loadEntries();
             }
         });

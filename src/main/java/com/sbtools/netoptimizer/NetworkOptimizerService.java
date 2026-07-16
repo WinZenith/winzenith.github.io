@@ -20,6 +20,7 @@ public class NetworkOptimizerService {
     private final ObjectMapper mapper = new ObjectMapper();
     private final NetworkChangeLog changeLog = new NetworkChangeLog();
     private static final Pattern SAFE_NAME = Pattern.compile("^[a-zA-Z0-9 _\\-().]+$");
+    private static final Pattern SAFE_HOST = Pattern.compile("^[a-zA-Z0-9.\\-]+$");
 
     private static List<String> powershellCommand(String command) {
         return List.of("powershell", "-NoProfile", "-Command", command);
@@ -70,7 +71,7 @@ public class NetworkOptimizerService {
     public OperationResult applyOptimization(OptimizationPreset preset) {
         try {
             Path script = PowerShellScripts.resolve("net-optimize.ps1");
-            String presetArg = preset.name();
+            String presetArg = preset.getScriptName();
             ProcessResult pr = new ProcessRunner(60).run(
                     ProcessRunner.powershellScript(script.toString(), "-Preset", presetArg));
             if (pr.exitCode() != 0) {
@@ -167,6 +168,7 @@ public class NetworkOptimizerService {
                 return OperationResult.fail("IP renewal failed.",
                         "release: " + release.combinedOutput() + "\nrenew: " + renew.combinedOutput());
             }
+            logChange("Renew IP", adapterName, "ipconfig /release + /renew", true);
             return OperationResult.ok("IP address renewed for " + adapterName + ".");
         } catch (Exception e) {
             AppLogger.warning("Failed to renew IP: " + e.getMessage());
@@ -424,6 +426,9 @@ public class NetworkOptimizerService {
         if (ssid == null || ssid.isBlank()) {
             return OperationResult.fail("SSID is required.");
         }
+        if (ssid.length() > 32) {
+            return OperationResult.fail("SSID must be 32 characters or less.");
+        }
         try {
             Path script = PowerShellScripts.resolve("net-wifi-forget.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
@@ -446,6 +451,130 @@ public class NetworkOptimizerService {
         } catch (Exception e) {
             AppLogger.warning("Failed to forget Wi-Fi profile: " + e.getMessage());
             return OperationResult.fail("Failed to forget Wi-Fi profile: " + e.getMessage());
+        }
+    }
+
+    private String sanitizeHost(String host) {
+        if (host == null || host.isBlank()) {
+            throw new IllegalArgumentException("Host is required");
+        }
+        if (!SAFE_HOST.matcher(host).matches()) {
+            throw new IllegalArgumentException("Invalid host: " + host);
+        }
+        return host;
+    }
+
+    public PingResult ping(String host, int count) {
+        sanitizeHost(host);
+        try {
+            Path script = PowerShellScripts.resolve("net-ping.ps1");
+            ProcessResult pr = new ProcessRunner(30 + (long) count * 5).run(
+                    ProcessRunner.powershellScript(script.toString(), "-Host", host, "-Count", String.valueOf(count)));
+            String stdout = pr.stdout().trim();
+            if (!stdout.isEmpty() && !stdout.contains("\"error\"")) {
+                Map<String, Object> data = mapper.readValue(stdout,
+                        new TypeReference<Map<String, Object>>() {});
+                return new PingResult(
+                        host,
+                        data.get("packetsSent") instanceof Number n ? n.intValue() : 0,
+                        data.get("packetsReceived") instanceof Number n ? n.intValue() : 0,
+                        data.get("packetLossPercent") instanceof Number n ? n.intValue() : 100,
+                        data.get("minMs") instanceof Number n ? n.doubleValue() : 0,
+                        data.get("maxMs") instanceof Number n ? n.doubleValue() : 0,
+                        data.get("avgMs") instanceof Number n ? n.doubleValue() : 0,
+                        str(data, "rawOutput"));
+            }
+            return PingResult.fail(host, stdout.isEmpty() ? "No output from ping." : stdout);
+        } catch (IllegalArgumentException e) {
+            return PingResult.fail(host, e.getMessage());
+        } catch (Exception e) {
+            AppLogger.warning("Failed to ping: " + e.getMessage());
+            return PingResult.fail(host, "Error: " + e.getMessage());
+        }
+    }
+
+    public List<TracerouteHop> traceroute(String host, int maxHops) {
+        sanitizeHost(host);
+        try {
+            Path script = PowerShellScripts.resolve("net-traceroute.ps1");
+            ProcessResult pr = new ProcessRunner(60 + (long) maxHops * 5).run(
+                    ProcessRunner.powershellScript(script.toString(), "-Host", host, "-MaxHops", String.valueOf(maxHops)));
+            String stdout = pr.stdout().trim();
+            if (!stdout.isEmpty() && !"[]".equals(stdout)) {
+                List<Map<String, Object>> raw = mapper.readValue(stdout,
+                        new TypeReference<List<Map<String, Object>>>() {});
+                List<TracerouteHop> hops = new ArrayList<>();
+                for (Map<String, Object> entry : raw) {
+                    try {
+                        hops.add(new TracerouteHop(
+                                entry.get("hopNumber") instanceof Number n ? n.intValue() : 0,
+                                str(entry, "address"),
+                                str(entry, "latency1"),
+                                str(entry, "latency2"),
+                                str(entry, "latency3")));
+                    } catch (Exception e) {
+                        AppLogger.warning("Failed to parse traceroute hop: " + e.getMessage());
+                    }
+                }
+                return hops;
+            }
+        } catch (IllegalArgumentException e) {
+            AppLogger.warning("Invalid host for traceroute: " + e.getMessage());
+        } catch (Exception e) {
+            AppLogger.warning("Failed to traceroute: " + e.getMessage());
+        }
+        return List.of();
+    }
+
+    public PortScanResult scanPort(String host, int port) {
+        sanitizeHost(host);
+        if (port < 1 || port > 65535) {
+            return new PortScanResult(host, port, false, 0, "Invalid port number.");
+        }
+        try {
+            Path script = PowerShellScripts.resolve("net-portscan.ps1");
+            ProcessResult pr = new ProcessRunner(30).run(
+                    ProcessRunner.powershellScript(script.toString(), "-Host", host, "-Port", String.valueOf(port)));
+            String stdout = pr.stdout().trim();
+            if (!stdout.isEmpty() && !stdout.contains("\"error\"")) {
+                Map<String, Object> data = mapper.readValue(stdout,
+                        new TypeReference<Map<String, Object>>() {});
+                return new PortScanResult(
+                        host,
+                        port,
+                        data.get("open") instanceof Boolean b && b,
+                        data.get("latencyMs") instanceof Number n ? n.longValue() : 0,
+                        str(data, "rawOutput"));
+            }
+            return new PortScanResult(host, port, false, 0, stdout.isEmpty() ? "No output." : stdout);
+        } catch (IllegalArgumentException e) {
+            return new PortScanResult(host, port, false, 0, e.getMessage());
+        } catch (Exception e) {
+            AppLogger.warning("Failed to scan port: " + e.getMessage());
+            return new PortScanResult(host, port, false, 0, "Error: " + e.getMessage());
+        }
+    }
+
+    public SpeedTestResult runSpeedTest() {
+        try {
+            Path script = PowerShellScripts.resolve("net-speedtest.ps1");
+            ProcessResult pr = new ProcessRunner(120).run(
+                    ProcessRunner.powershellScript(script.toString()));
+            String stdout = pr.stdout().trim();
+            if (!stdout.isEmpty() && !stdout.contains("\"error\"")) {
+                Map<String, Object> data = mapper.readValue(stdout,
+                        new TypeReference<Map<String, Object>>() {});
+                return new SpeedTestResult(
+                        data.get("downloadMbps") instanceof Number n ? n.doubleValue() : 0,
+                        data.get("uploadMbps") instanceof Number n ? n.doubleValue() : 0,
+                        data.get("latencyMs") instanceof Number n ? n.longValue() : 0,
+                        str(data, "serverInfo"),
+                        str(data, "rawOutput"));
+            }
+            return SpeedTestResult.fail(stdout.isEmpty() ? "No output from speed test." : stdout);
+        } catch (Exception e) {
+            AppLogger.warning("Failed to run speed test: " + e.getMessage());
+            return SpeedTestResult.fail("Error: " + e.getMessage());
         }
     }
 }

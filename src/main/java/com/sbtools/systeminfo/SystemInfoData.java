@@ -15,6 +15,10 @@ public record SystemInfoData(
         @JsonProperty("motherboard") MotherboardInfo motherboard,
         @JsonProperty("bios") BiosInfo bios,
         @JsonProperty("others") List<OtherDevice> others,
+        @JsonProperty("networkAdapters") List<NetworkAdapterInfo> networkAdapters,
+        @JsonProperty("audioDevices") List<AudioDeviceInfo> audioDevices,
+        @JsonProperty("battery") BatteryInfo battery,
+        @JsonProperty("temperatures") List<TemperatureInfo> temperatures,
         @JsonProperty("version") String version,
         @JsonProperty("warnings") List<String> warnings
 ) {

@@ -19,6 +19,7 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListView;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.SelectionMode;
@@ -54,6 +55,9 @@ public class DuplicateFilesTabView extends BorderPane {
     private final BooleanSupplier adminCheck;
 
     private final ObservableList<DuplicateFileRow> rows = FXCollections.observableArrayList();
+    private final ObservableList<Path> scanRoots = FXCollections.observableArrayList();
+    private final Map<String, Integer> groupColorMap = new HashMap<>();
+    private final Map<DuplicateFileRow, javafx.beans.value.ChangeListener<Boolean>> rowListenerMap = new HashMap<>();
     private final Label statusLabel = new Label("Click Scan to find duplicate files.");
     private final Label progressLabel = new Label("");
     private final ProgressBar progressBar = new ProgressBar(0);
@@ -61,19 +65,16 @@ public class DuplicateFilesTabView extends BorderPane {
     private final Button stopButton = new Button("Stop");
     private final Button selectAllButton = new Button("Select All");
     private final Button cleanButton = new Button("Clean Selected");
-    private final Button browseButton = new Button("Browse...");
-    private final Label scanPathLabel = new Label();
+    private final Button addDirButton = new Button("Add...");
+    private final Button removeDirButton = new Button("Remove");
+    private final ListView<Path> dirListView = new ListView<>(scanRoots);
     private final TableView<DuplicateFileRow> table = new TableView<>(rows);
 
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
-    private Path scanRoot;
 
     public DuplicateFilesTabView(BooleanSupplier adminCheck) {
         this.adminCheck = adminCheck;
-        this.scanRoot = Paths.get(System.getenv("SystemDrive") + "\\");
-        scanPathLabel.setText(truncatePath(scanRoot.toString()));
-        scanPathLabel.getStyleClass().add("label.text-muted");
-        scanPathLabel.setTooltip(new Tooltip(scanRoot.toString()));
+        scanRoots.add(Paths.get(System.getenv("SystemDrive") + "\\"));
 
         progressBar.setVisible(false);
         progressBar.setPrefWidth(200);
@@ -82,18 +83,42 @@ public class DuplicateFilesTabView extends BorderPane {
         cleanButton.setDisable(true);
         stopButton.getStyleClass().add("danger");
         cleanButton.getStyleClass().add("danger");
-        browseButton.getStyleClass().add("button-outlined");
+        addDirButton.getStyleClass().add("button-outlined");
+        removeDirButton.getStyleClass().add("button-outlined");
+
+        dirListView.setPrefHeight(80);
+        dirListView.setCellFactory(lv -> new javafx.scene.control.ListCell<>() {
+            @Override
+            protected void updateItem(Path item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                    setTooltip(null);
+                } else {
+                    String display = item.toString();
+                    if (display.length() > 60) {
+                        display = "..." + display.substring(display.length() - 57);
+                    }
+                    setText(display);
+                    setTooltip(new Tooltip(item.toString()));
+                }
+            }
+        });
 
         scanButton.setOnAction(e -> startScan());
         stopButton.setOnAction(e -> cancelled.set(true));
         selectAllButton.setOnAction(e -> toggleSelectAll());
         cleanButton.setOnAction(e -> startClean());
-        browseButton.setOnAction(e -> chooseDirectory());
+        addDirButton.setOnAction(e -> addDirectory());
+        removeDirButton.setOnAction(e -> removeSelectedDirectory());
 
-        HBox pathBox = new HBox(6, browseButton, scanPathLabel);
-        pathBox.setAlignment(Pos.CENTER_LEFT);
+        HBox dirButtons = new HBox(4, addDirButton, removeDirButton);
+        dirButtons.setAlignment(Pos.CENTER_LEFT);
 
-        HBox top = new HBox(12, pathBox, scanButton, stopButton, selectAllButton, cleanButton,
+        VBox dirBox = new VBox(4, dirListView, dirButtons);
+        dirBox.setPrefWidth(220);
+
+        HBox top = new HBox(12, dirBox, scanButton, stopButton, selectAllButton, cleanButton,
                 progressBar, progressLabel, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
@@ -113,14 +138,27 @@ public class DuplicateFilesTabView extends BorderPane {
             stopButton.setDisable(!newVal);
             selectAllButton.setDisable(newVal);
             cleanButton.setDisable(newVal || getSelectedCount() == 0);
-            browseButton.setDisable(newVal);
+            addDirButton.setDisable(newVal);
+            removeDirButton.setDisable(newVal);
+            dirListView.setDisable(newVal);
         });
 
         rows.addListener((ListChangeListener<DuplicateFileRow>) c -> {
             while (c.next()) {
                 if (c.wasAdded()) {
                     for (DuplicateFileRow row : c.getAddedSubList()) {
-                        row.selectedProperty().addListener((obs, ov, nv) -> updateCleanButtonState());
+                        javafx.beans.value.ChangeListener<Boolean> listener =
+                                (obs, ov, nv) -> updateCleanButtonState();
+                        row.selectedProperty().addListener(listener);
+                        rowListenerMap.put(row, listener);
+                    }
+                }
+                if (c.wasRemoved()) {
+                    for (DuplicateFileRow row : c.getRemoved()) {
+                        javafx.beans.value.ChangeListener<Boolean> listener = rowListenerMap.remove(row);
+                        if (listener != null) {
+                            row.selectedProperty().removeListener(listener);
+                        }
                     }
                 }
             }
@@ -128,20 +166,25 @@ public class DuplicateFilesTabView extends BorderPane {
         });
     }
 
-    private static String truncatePath(String path) {
-        if (path.length() <= 50) return path;
-        return "..." + path.substring(path.length() - 47);
-    }
-
-    private void chooseDirectory() {
+    private void addDirectory() {
         DirectoryChooser dc = new DirectoryChooser();
         dc.setTitle("Select folder to scan for duplicates");
-        dc.setInitialDirectory(scanRoot.toFile());
+        if (!scanRoots.isEmpty()) {
+            dc.setInitialDirectory(scanRoots.get(0).toFile());
+        }
         File chosen = dc.showDialog(getScene().getWindow());
         if (chosen != null) {
-            scanRoot = chosen.toPath();
-            scanPathLabel.setText(truncatePath(scanRoot.toString()));
-            scanPathLabel.setTooltip(new Tooltip(scanRoot.toString()));
+            Path chosenPath = chosen.toPath();
+            if (scanRoots.stream().noneMatch(p -> p.equals(chosenPath))) {
+                scanRoots.add(chosenPath);
+            }
+        }
+    }
+
+    private void removeSelectedDirectory() {
+        Path selected = dirListView.getSelectionModel().getSelectedItem();
+        if (selected != null) {
+            scanRoots.remove(selected);
         }
     }
 
@@ -246,7 +289,6 @@ public class DuplicateFilesTabView extends BorderPane {
         table.getColumns().addAll(checkCol, nameCol, pathCol, sizeCol, totalCol, wasteCol);
 
         // Row factory for context menu + group coloring
-        Map<String, Integer> groupColorMap = new HashMap<>();
         table.setRowFactory(tv -> {
             TableRow<DuplicateFileRow> row = new TableRow<>() {
                 @Override
@@ -254,7 +296,7 @@ public class DuplicateFilesTabView extends BorderPane {
                     super.updateItem(item, empty);
                     getStyleClass().removeAll("group-even", "group-odd");
                     if (item != null && !empty) {
-                        String hash = item.getChecksumMd5();
+                        String hash = item.getChecksumSha256();
                         int groupNum = groupColorMap.computeIfAbsent(hash,
                                 k -> groupColorMap.size() + 1);
                         if (groupNum % 2 == 0) {
@@ -338,6 +380,10 @@ public class DuplicateFilesTabView extends BorderPane {
 
     private void startScan() {
         if (busy.get()) return;
+        if (scanRoots.isEmpty()) {
+            new Alert(Alert.AlertType.WARNING, "Please add at least one directory to scan.").showAndWait();
+            return;
+        }
         cancelled.set(false);
         busy.set(true);
         statusLabel.setText("Scanning for duplicates...");
@@ -345,18 +391,19 @@ public class DuplicateFilesTabView extends BorderPane {
         stopButton.setDisable(false);
         cleanButton.setDisable(true);
         rows.clear();
+        groupColorMap.clear();
         progressBar.setProgress(0);
         progressBar.setVisible(true);
         progressLabel.setVisible(true);
         progressLabel.setText("Preparing...");
 
-        Path rootToScan = scanRoot;
+        List<Path> rootsToScan = List.copyOf(scanRoots);
 
         new Thread(() -> {
             try {
                 long[] lastProgressUpdate = {0};
                 List<DuplicateFileRow> results = service.scan(
-                        rootToScan,
+                        rootsToScan,
                         (processed, total) -> {
                             long now = System.currentTimeMillis();
                             boolean isFinal = total > 0 && processed >= total;
@@ -417,6 +464,10 @@ public class DuplicateFilesTabView extends BorderPane {
 
     private void startClean() {
         if (busy.get()) return;
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING, "Administrator privileges are required to delete files.").showAndWait();
+            return;
+        }
         List<DuplicateFileRow> selected = rows.stream().filter(DuplicateFileRow::isSelected).toList();
         if (selected.isEmpty()) return;
 
@@ -455,8 +506,8 @@ public class DuplicateFilesTabView extends BorderPane {
                 Platform.runLater(() -> {
                     statusLabel.setText(msg);
                     new Alert(failed > 0 ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, msg).showAndWait();
-                    rows.removeAll(selected);
-                    cleanButton.setDisable(true);
+                    rows.removeAll(result.getFullyCleanedRows());
+                    cleanButton.setDisable(getSelectedCount() == 0);
                 });
             } catch (Exception e) {
                 AppLogger.error("Duplicate clean failed", e);

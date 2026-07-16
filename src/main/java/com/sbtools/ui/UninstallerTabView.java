@@ -6,6 +6,7 @@ import com.sbtools.uninstaller.UninstallerService;
 import com.sbtools.util.AppIconResolver;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
+import com.sbtools.util.CancellationToken;
 import com.sbtools.util.FormatUtils;
 import com.sbtools.util.ProcessResult;
 import javafx.application.Platform;
@@ -44,6 +45,7 @@ public class UninstallerTabView extends BorderPane {
     private final ObservableList<InstalledApp> allApps = FXCollections.observableArrayList();
     private final FilteredList<InstalledApp> filteredApps = new FilteredList<>(allApps);
     private final SortedList<InstalledApp> sortedApps = new SortedList<>(filteredApps);
+    private volatile CancellationToken scanCancellationToken = new CancellationToken();
 
     private final Label statusLabel = new Label("Scan system to list installed software.");
     private final ProgressIndicator progress = new ProgressIndicator();
@@ -314,6 +316,11 @@ public class UninstallerTabView extends BorderPane {
 
         boolean scanWin32 = win32Toggle.isSelected();
 
+        // Cancel any previous scan
+        scanCancellationToken.cancel();
+        CancellationToken ct = new CancellationToken();
+        scanCancellationToken = ct;
+
         new Thread(() -> {
             try {
                 List<InstalledApp> apps;
@@ -323,22 +330,27 @@ public class UninstallerTabView extends BorderPane {
                     apps = service.listAppxApps();
                 }
 
+                if (ct.isCancelled()) return;
+
                 Platform.runLater(() -> {
                     allApps.setAll(apps);
                     applyFilter();
                     statusLabel.setText("Found " + apps.size() + " app(s).");
                 });
             } catch (Exception e) {
+                if (ct.isCancelled()) return;
                 AppLogger.error("Failed to scan apps", e);
                 Platform.runLater(() -> {
                     statusLabel.setText("Scan failed.");
                     new Alert(Alert.AlertType.ERROR, "Failed to scan installed apps:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> {
-                    busy.set(false);
-                    progress.setVisible(false);
-                });
+                if (!ct.isCancelled()) {
+                    Platform.runLater(() -> {
+                        busy.set(false);
+                        progress.setVisible(false);
+                    });
+                }
             }
         }, "uninstaller-scan").start();
     }
@@ -346,7 +358,9 @@ public class UninstallerTabView extends BorderPane {
     private void updateButtonStates() {
         boolean hasSelection = table.getSelectionModel().getSelectedItem() != null;
         boolean isBusy = busy.get();
-        uninstallButton.setDisable(!hasSelection || isBusy);
+        InstalledApp selected = table.getSelectionModel().getSelectedItem();
+        boolean canUninstall = selected != null && selected.hasUninstallString();
+        uninstallButton.setDisable(!hasSelection || isBusy || !canUninstall);
         forceUninstallButton.setDisable(!hasSelection || isBusy);
     }
 
@@ -451,9 +465,21 @@ public class UninstallerTabView extends BorderPane {
                 AppLogger.info("Uninstaller completed with exit code: " + result.exitCode());
                 boolean uninstallSucceeded = result.success();
 
-                Thread.sleep(2000);
+                // Wait briefly for the uninstaller to release file locks.
+                // Poll the install location: if it's removed, proceed immediately.
+                // Otherwise wait up to 5 seconds total.
+                String installLoc = app.getInstallLocation();
+                long deadline = System.currentTimeMillis() + 5000;
+                while (System.currentTimeMillis() < deadline) {
+                    if (installLoc != null && !installLoc.isBlank()) {
+                        File installDir = new File(installLoc);
+                        if (!installDir.exists()) break;
+                    }
+                    Thread.sleep(250);
+                }
 
                 if (!uninstallSucceeded) {
+                    AtomicReference<ButtonType> userChoice = new AtomicReference<>();
                     Platform.runLater(() -> {
                         progress.setVisible(false);
                         busy.set(false);
@@ -469,12 +495,18 @@ public class UninstallerTabView extends BorderPane {
                         ButtonType skipBtn = new ButtonType("Skip");
                         warn.getButtonTypes().setAll(scanBtn, skipBtn);
 
-                        if (warn.showAndWait().orElse(skipBtn) == scanBtn) {
-                            scanAndShowLeftovers(app);
-                        } else {
-                            statusLabel.setText("Uninstallation cancelled.");
-                        }
+                        userChoice.set(warn.showAndWait().orElse(skipBtn));
                     });
+                    // Wait for the dialog to close (FX thread handles it), with timeout
+                    long dialogDeadline = System.currentTimeMillis() + 60_000;
+                    while (userChoice.get() == null && System.currentTimeMillis() < dialogDeadline) {
+                        Thread.sleep(50);
+                    }
+                    if (userChoice.get() != null && userChoice.get().getText().equals("Scan Anyway")) {
+                        scanAndShowLeftovers(app);
+                    } else {
+                        Platform.runLater(() -> statusLabel.setText("Uninstallation cancelled."));
+                    }
                     return;
                 }
 
@@ -571,13 +603,18 @@ public class UninstallerTabView extends BorderPane {
         Button okBtn = (Button) dialog.getDialogPane().lookupButton(ButtonType.OK);
         okBtn.setText("Delete Selected");
 
-        dialog.showAndWait().ifPresent(response -> {
-            if (response == ButtonType.OK) {
-                busy.set(true);
-                progress.setVisible(true);
-                statusLabel.setText("Deleting leftovers...");
+        java.util.Optional<ButtonType> dialogResult = dialog.showAndWait();
+        if (dialogResult.isEmpty() || dialogResult.get() != ButtonType.OK) {
+            busy.set(false);
+            scan();
+            return;
+        }
 
-                new Thread(() -> {
+        busy.set(true);
+        progress.setVisible(true);
+        statusLabel.setText("Deleting leftovers...");
+
+        new Thread(() -> {
                     List<String> registryKeysToDelete = new ArrayList<>();
                     for (LeftoverItem item : registryItems) {
                         if (item.isSelected()) {
@@ -592,9 +629,8 @@ public class UninstallerTabView extends BorderPane {
                         }
                     }
 
-                    service.deleteRegistryLeftovers(registryKeysToDelete);
-
                     List<String> failedDeletions = new ArrayList<>();
+                    service.deleteRegistryLeftovers(registryKeysToDelete, failedDeletions);
                     service.deleteFilesystemLeftovers(filePathsToDelete, failedDeletions);
 
                     Platform.runLater(() -> {
@@ -607,11 +643,12 @@ public class UninstallerTabView extends BorderPane {
                             for (String path : failedDeletions) {
                                 sb.append("- ").append(path).append("\n");
                             }
-                            Alert failedAlert = new Alert(Alert.AlertType.INFORMATION);
-                            failedAlert.setTitle("Files Scheduled for Reboot Deletion");
-                            failedAlert.setHeaderText("Some files are currently locked or in use");
-                            failedAlert.setContentText("The following items could not be deleted immediately. " +
-                                    "They have been successfully scheduled to be deleted automatically when the system restarts:\n\n" + sb.toString());
+                            Alert failedAlert = new Alert(Alert.AlertType.WARNING);
+                            failedAlert.setTitle("Partial Cleanup");
+                            failedAlert.setHeaderText("Some items could not be deleted");
+                            failedAlert.setContentText("The following items could not be deleted immediately " +
+                                    "(e.g. locked files or permission-denied registry keys). " +
+                                    "Files have been scheduled for deletion on next reboot where possible:\n\n" + sb.toString());
                             failedAlert.initModality(Modality.APPLICATION_MODAL);
                             failedAlert.showAndWait();
                         } else {
@@ -625,11 +662,6 @@ public class UninstallerTabView extends BorderPane {
                         scan();
                     });
                 }, "leftovers-cleanup").start();
-            } else {
-                busy.set(false);
-                scan();
-            }
-        });
     }
 
     private ListView<LeftoverItem> buildLeftoverListView(ObservableList<LeftoverItem> items) {

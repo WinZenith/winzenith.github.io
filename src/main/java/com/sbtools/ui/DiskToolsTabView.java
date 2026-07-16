@@ -1,9 +1,13 @@
 package com.sbtools.ui;
 
+import com.sbtools.defrag.BenchmarkResult;
+import com.sbtools.defrag.BenchmarkService;
 import com.sbtools.defrag.DefragService;
 import com.sbtools.defrag.DriveInfo;
 import com.sbtools.diskhealth.DiskHealthInfo;
 import com.sbtools.diskhealth.DiskHealthService;
+import com.sbtools.diskhealth.SmartAttribute;
+import com.sbtools.shredder.FolderDeleteResult;
 import com.sbtools.shredder.ShredderFileEntry;
 import com.sbtools.shredder.ShredderResult;
 import com.sbtools.shredder.ShredderService;
@@ -35,32 +39,39 @@ import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
+import javafx.scene.input.Dragboard;
+import javafx.scene.input.TransferMode;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
+import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 
 import java.io.File;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
 public class DiskToolsTabView extends BorderPane {
 
-    private final BooleanProperty busy = new SimpleBooleanProperty(false);
+    private final BooleanProperty defragBusy = new SimpleBooleanProperty(false);
+    private final BooleanProperty wipeBusy = new SimpleBooleanProperty(false);
+    private final BooleanProperty secureBusy = new SimpleBooleanProperty(false);
     private final BooleanSupplier adminCheck;
     private final DefragService defragService = new DefragService();
     private final ShredderService shredderService = new ShredderService();
     private final DiskHealthService diskHealthService = new DiskHealthService();
+    private final BenchmarkService benchmarkService = new BenchmarkService();
 
     private final AtomicBoolean defragCancelled = new AtomicBoolean(false);
     private final AtomicBoolean wipeCancelled = new AtomicBoolean(false);
@@ -88,9 +99,9 @@ public class DiskToolsTabView extends BorderPane {
     private final Label fragPercentLabel = new Label();
     private final HBox legendBox = new HBox(8);
     private final VBox visualizationPanel = new VBox(8);
-    private final Set<String> analyzedDrives = new HashSet<>();
-    private final Map<String, Instant> lastAnalyzed = new HashMap<>();
-    private final Map<String, Instant> lastDefragged = new HashMap<>();
+    private final Set<String> analyzedDrives = new CopyOnWriteArraySet<>();
+    private final Map<String, Instant> lastAnalyzed = new ConcurrentHashMap<>();
+    private final Map<String, Instant> lastDefragged = new ConcurrentHashMap<>();
 
     /* ───── Secure Erase tab components ───── */
     private final TableView<ShredderFileEntry> shredderTable = new TableView<>();
@@ -123,6 +134,24 @@ public class DiskToolsTabView extends BorderPane {
     private final GridPane smartGrid = new GridPane();
     private final Label overallHealthLabel = new Label();
     private boolean smartctlAvailable = false;
+    private final TableView<SmartAttribute> rawSmartTable = new TableView<>();
+    private final ObservableList<SmartAttribute> rawSmartEntries = FXCollections.observableArrayList();
+    private final Button toggleSmartBtn = new Button("Show All SMART Attributes");
+    private boolean rawSmartVisible = false;
+
+    /* ───── Benchmark tab components ───── */
+    private final ComboBox<String> benchDriveCombo = new ComboBox<>();
+    private final ComboBox<String> benchSizeCombo = new ComboBox<>(
+            FXCollections.observableArrayList("32 MB", "64 MB", "128 MB", "256 MB"));
+    private final Button benchStartBtn = new Button("Start Benchmark");
+    private final Button benchStopBtn = new Button("Stop");
+    private final ProgressBar benchProgress = new ProgressBar(0);
+    private final Label benchStatus = new Label("Select a drive and click Start Benchmark.");
+    private final AtomicBoolean benchCancelled = new AtomicBoolean(false);
+    private Thread currentBenchThread;
+    private final Label benchSeqWriteLabel = new Label("-");
+    private final Label benchSeqReadLabel = new Label("-");
+    private final Label benchRandomReadLabel = new Label("-");
 
     public DiskToolsTabView(BooleanSupplier adminCheck) {
         this.adminCheck = adminCheck;
@@ -134,9 +163,10 @@ public class DiskToolsTabView extends BorderPane {
 
         Tab defragTab = new Tab("Defrag", buildDefragContent());
         Tab healthTab = new Tab("Disk Health", buildDiskHealthContent());
+        Tab benchmarkTab = new Tab("Benchmark", buildBenchmarkContent());
         Tab secureEraseTab = new Tab("Secure Erase", buildSecureEraseContent());
 
-        tabPane.getTabs().addAll(defragTab, healthTab, secureEraseTab);
+        tabPane.getTabs().addAll(defragTab, healthTab, benchmarkTab, secureEraseTab);
         setCenter(tabPane);
 
         loadDrives();
@@ -207,14 +237,15 @@ public class DiskToolsTabView extends BorderPane {
 
         visualizationPanel.getChildren().addAll(driveAnalysisLabel, blockBox, legendBox, statsBox);
 
-        busy.addListener((obs, oldVal, newVal) -> {
+        defragBusy.addListener((obs, oldVal, newVal) -> {
             stopBtn.setVisible(newVal);
             if (newVal) {
+                stopBtn.setDisable(false);
                 analyzeBtn.setDisable(true);
                 intelligentDefragBtn.setDisable(true);
             } else {
                 defragProgress.setProgress(0);
-                stopBtn.setDisable(false);
+                stopBtn.setDisable(true);
                 updateDefragButtons();
             }
         });
@@ -287,9 +318,9 @@ public class DiskToolsTabView extends BorderPane {
         freeCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getFreeFormatted()));
         freeCol.setPrefWidth(100);
 
-        TableColumn<DriveInfo, String> fragCol = new TableColumn<>("Fragments");
+        TableColumn<DriveInfo, String> fragCol = new TableColumn<>("Frag. Space");
         fragCol.setCellValueFactory(c -> new SimpleObjectProperty<>(
-                c.getValue().getFragmentsFound() == 0 ? "-" : c.getValue().getFragmentsFormatted()));
+                c.getValue().getFragmentedSpaceBytes() == 0 ? "-" : c.getValue().getFragmentsFormatted()));
         fragCol.setPrefWidth(90);
 
         TableColumn<DriveInfo, Number> fragPctCol = new TableColumn<>("Frag. %");
@@ -375,7 +406,7 @@ public class DiskToolsTabView extends BorderPane {
     private void updateDefragButtons() {
         boolean anySelected = allDrives.stream()
                 .anyMatch(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get());
-        boolean isBusy = busy.get();
+        boolean isBusy = defragBusy.get();
         analyzeBtn.setDisable(isBusy || !anySelected);
         intelligentDefragBtn.setDisable(isBusy || !anySelected);
     }
@@ -391,6 +422,12 @@ public class DiskToolsTabView extends BorderPane {
                     allDrives.setAll(drives);
                     wipeDrives.setAll(drives);
                     driveTable.refresh();
+                    benchDriveCombo.getItems().clear();
+                    for (DriveInfo d : drives) {
+                        String display = d.getDriveLetter() + " - " + d.getVolumeLabel()
+                                + " (" + d.getMediaType() + ", " + d.getSizeFormatted() + ")";
+                        benchDriveCombo.getItems().add(display);
+                    }
                     defragStatus.setText("Found " + drives.size() + " drive(s). Select drives and click Analyze Selected.");
                 });
             } catch (Exception e) {
@@ -427,14 +464,14 @@ public class DiskToolsTabView extends BorderPane {
         List<DriveInfo> selected = allDrives.stream()
                 .filter(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get())
                 .toList();
-        if (selected.isEmpty() || busy.get()) return;
+        if (selected.isEmpty() || defragBusy.get()) return;
 
         if (currentAnalyzeThread != null && currentAnalyzeThread.isAlive()) {
             new Alert(Alert.AlertType.WARNING, "An analysis is already running. Please wait or stop it first.").showAndWait();
             return;
         }
 
-        busy.set(true);
+        defragBusy.set(true);
         defragCancelled.set(false);
         defragProgress.setProgress(-1);
         defragProgress.setVisible(true);
@@ -465,7 +502,7 @@ public class DiskToolsTabView extends BorderPane {
                         driveTable.refresh();
                         String elapsed = formatElapsed(Duration.between(startTime, Instant.now()));
                         defragStatus.setText("Analysis complete - "
-                                + driveCopy.getFragmentsFormatted() + " fragments, "
+                                + driveCopy.getFragmentsFormatted() + " fragmented space, "
                                 + driveCopy.getFragmentationPercent() + "% fragmentation on " + letter
                                 + " (" + elapsed + ")");
                         updateRichBlockVisualization(driveCopy);
@@ -481,7 +518,7 @@ public class DiskToolsTabView extends BorderPane {
                 });
             } finally {
                 Platform.runLater(() -> {
-                    busy.set(false);
+                    defragBusy.set(false);
                     defragProgress.setVisible(false);
                 });
             }
@@ -493,7 +530,7 @@ public class DiskToolsTabView extends BorderPane {
         List<DriveInfo> selected = allDrives.stream()
                 .filter(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get())
                 .toList();
-        if (selected.isEmpty() || busy.get()) return;
+        if (selected.isEmpty() || defragBusy.get()) return;
 
         if (currentDefragThread != null && currentDefragThread.isAlive()) {
             new Alert(Alert.AlertType.WARNING, "A defrag operation is already running. Please wait or stop it first.").showAndWait();
@@ -544,7 +581,7 @@ public class DiskToolsTabView extends BorderPane {
         confirm.setHeaderText("Intelligent Defrag (" + mode + ")");
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
-        busy.set(true);
+        defragBusy.set(true);
         defragCancelled.set(false);
         defragProgress.setProgress(0);
         defragProgress.setVisible(true);
@@ -614,7 +651,7 @@ public class DiskToolsTabView extends BorderPane {
                 });
             } finally {
                 Platform.runLater(() -> {
-                    busy.set(false);
+                    defragBusy.set(false);
                     defragProgress.setVisible(false);
                 });
             }
@@ -655,8 +692,10 @@ public class DiskToolsTabView extends BorderPane {
         driveAnalysisLabel.setText(result.analysisText());
 
         fragCountLabel.setText(result.fragCountText());
+        fragCountLabel.getStyleClass().removeAll("label", "warning", "success", "danger");
         fragCountLabel.getStyleClass().addAll("label", "warning");
         fragPercentLabel.setText(result.fragPercentText());
+        fragPercentLabel.getStyleClass().removeAll("label", "warning", "success", "danger");
         fragPercentLabel.getStyleClass().addAll("label", result.fragIsHigh() ? "danger" : "success");
 
         legendBox.getChildren().setAll(
@@ -703,7 +742,47 @@ public class DiskToolsTabView extends BorderPane {
 
         overallHealthLabel.getStyleClass().addAll("label", "large");
 
-        VBox detailCard = new VBox(8, overallHealthLabel, smartGrid);
+        toggleSmartBtn.getStyleClass().add("button-outlined");
+        toggleSmartBtn.setTooltip(new Tooltip("Show or hide all raw SMART attributes"));
+        toggleSmartBtn.setOnAction(e -> {
+            rawSmartVisible = !rawSmartVisible;
+            rawSmartTable.setVisible(rawSmartVisible);
+            rawSmartTable.setManaged(rawSmartVisible);
+            toggleSmartBtn.setText(rawSmartVisible ? "Hide All SMART Attributes" : "Show All SMART Attributes");
+        });
+        rawSmartTable.setVisible(false);
+        rawSmartTable.setManaged(false);
+        rawSmartTable.setItems(rawSmartEntries);
+        rawSmartTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        rawSmartTable.setPrefHeight(250);
+
+        TableColumn<SmartAttribute, Number> attrIdCol = new TableColumn<>("ID");
+        attrIdCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getId()));
+        attrIdCol.setPrefWidth(50);
+
+        TableColumn<SmartAttribute, String> attrNameCol = new TableColumn<>("Attribute Name");
+        attrNameCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getName()));
+        attrNameCol.setPrefWidth(200);
+
+        TableColumn<SmartAttribute, String> attrValueCol = new TableColumn<>("Value");
+        attrValueCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getValue()));
+        attrValueCol.setPrefWidth(70);
+
+        TableColumn<SmartAttribute, String> attrWorstCol = new TableColumn<>("Worst");
+        attrWorstCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getWorst()));
+        attrWorstCol.setPrefWidth(70);
+
+        TableColumn<SmartAttribute, String> attrThreshCol = new TableColumn<>("Threshold");
+        attrThreshCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getThreshold()));
+        attrThreshCol.setPrefWidth(80);
+
+        TableColumn<SmartAttribute, String> attrRawCol = new TableColumn<>("Raw Value");
+        attrRawCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getRawValue()));
+        attrRawCol.setPrefWidth(120);
+
+        rawSmartTable.getColumns().addAll(attrIdCol, attrNameCol, attrValueCol, attrWorstCol, attrThreshCol, attrRawCol);
+
+        VBox detailCard = new VBox(8, overallHealthLabel, smartGrid, toggleSmartBtn, rawSmartTable);
         detailCard.setPadding(new Insets(12));
         detailCard.getStyleClass().add("sysinfo-card");
 
@@ -754,8 +833,13 @@ public class DiskToolsTabView extends BorderPane {
 
     private DiskHealthInfo findHealthInfo(String display) {
         for (DiskHealthInfo d : healthDrives) {
-            String letter = d.getDriveLetter().isEmpty() ? "" : d.getDriveLetter() + " - ";
-            if (display.startsWith(letter) && display.contains(d.getModel())) {
+            String letter = d.getDriveLetter();
+            if (!letter.isEmpty() && display.startsWith(letter + " - ") && display.contains(d.getModel())) {
+                return d;
+            }
+        }
+        for (DiskHealthInfo d : healthDrives) {
+            if (d.getDriveLetter().isEmpty() && display.contains(d.getModel())) {
                 return d;
             }
         }
@@ -872,6 +956,12 @@ public class DiskToolsTabView extends BorderPane {
             overallHealthLabel.getStyleClass().removeAll("success", "warning");
             overallHealthLabel.getStyleClass().add("danger");
         }
+
+        rawSmartEntries.setAll(info.getRawSmartAttributes());
+        rawSmartVisible = false;
+        rawSmartTable.setVisible(false);
+        rawSmartTable.setManaged(false);
+        toggleSmartBtn.setText("Show All SMART Attributes");
     }
 
     private void addSmartRow(int row, String label, String value) {
@@ -916,6 +1006,150 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     /* ===================================================================
+       BENCHMARK TAB
+       =================================================================== */
+
+    private VBox buildBenchmarkContent() {
+        Label desc = new Label("Test sequential read/write speed and random IOPS of a drive.");
+        desc.getStyleClass().add("text-muted");
+
+        benchDriveCombo.setPrefWidth(250);
+        benchDriveCombo.setTooltip(new Tooltip("Select a drive to benchmark"));
+        benchDriveCombo.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> updateBenchStartButton());
+
+        benchSizeCombo.getSelectionModel().select(1);
+        benchSizeCombo.setTooltip(new Tooltip("Test file size (larger = more accurate but slower)"));
+
+        benchStartBtn.getStyleClass().add("accent");
+        benchStartBtn.setDisable(true);
+        benchStartBtn.setOnAction(e -> startBenchmark());
+        benchStartBtn.setTooltip(new Tooltip("Run sequential read/write and random read benchmark"));
+
+        benchStopBtn.getStyleClass().add("danger");
+        benchStopBtn.setVisible(false);
+        benchStopBtn.setOnAction(e -> {
+            benchCancelled.set(true);
+            benchStopBtn.setDisable(true);
+            benchStatus.setText("Stopping...");
+        });
+        benchStopBtn.setTooltip(new Tooltip("Stop the benchmark"));
+
+        benchProgress.setVisible(false);
+        benchProgress.setPrefWidth(200);
+        benchStatus.getStyleClass().add("text-muted");
+
+        HBox toolbar = new HBox(8, benchDriveCombo, new Label("Size:"), benchSizeCombo,
+                benchStartBtn, benchStopBtn, benchProgress, benchStatus);
+        toolbar.setAlignment(Pos.CENTER_LEFT);
+        toolbar.setPadding(new Insets(12, 16, 12, 16));
+        toolbar.getStyleClass().add("toolbar");
+
+        benchSeqWriteLabel.getStyleClass().addAll("label", "large", "accent");
+        benchSeqReadLabel.getStyleClass().addAll("label", "large", "accent");
+        benchRandomReadLabel.getStyleClass().addAll("label", "large", "accent");
+
+        Label seqWriteTitle = new Label("Sequential Write:");
+        seqWriteTitle.getStyleClass().addAll("label", "text-muted");
+        Label seqReadTitle = new Label("Sequential Read:");
+        seqReadTitle.getStyleClass().addAll("label", "text-muted");
+        Label randomReadTitle = new Label("Random Read IOPS:");
+        randomReadTitle.getStyleClass().addAll("label", "text-muted");
+
+        GridPane resultsGrid = new GridPane();
+        resultsGrid.setHgap(32);
+        resultsGrid.setVgap(12);
+        resultsGrid.setPadding(new Insets(16, 16, 16, 16));
+        resultsGrid.add(seqWriteTitle, 0, 0);
+        resultsGrid.add(benchSeqWriteLabel, 1, 0);
+        resultsGrid.add(seqReadTitle, 0, 1);
+        resultsGrid.add(benchSeqReadLabel, 1, 1);
+        resultsGrid.add(randomReadTitle, 0, 2);
+        resultsGrid.add(benchRandomReadLabel, 1, 2);
+
+        VBox resultsCard = new VBox(resultsGrid);
+        resultsCard.setPadding(new Insets(12));
+        resultsCard.getStyleClass().add("sysinfo-card");
+        resultsCard.setPrefHeight(180);
+
+        VBox content = new VBox(4, toolbar, desc, resultsCard);
+        content.setPadding(new Insets(0));
+        return content;
+    }
+
+    private void updateBenchStartButton() {
+        benchStartBtn.setDisable(benchDriveCombo.getSelectionModel().getSelectedItem() == null);
+    }
+
+    private void startBenchmark() {
+        String selected = benchDriveCombo.getSelectionModel().getSelectedItem();
+        if (selected == null) return;
+
+        String rawSelection = selected.trim();
+        String extracted;
+        if (rawSelection.contains(" - ")) {
+            extracted = rawSelection.substring(0, rawSelection.indexOf(" - ")).trim();
+        } else {
+            extracted = rawSelection;
+        }
+        if (!extracted.endsWith(":")) {
+            extracted = extracted.split("\\s+")[0].trim();
+        }
+        final String driveLetter = extracted;
+
+        benchCancelled.set(false);
+        benchStartBtn.setDisable(true);
+        benchStopBtn.setVisible(true);
+        benchStopBtn.setDisable(false);
+        benchProgress.setProgress(0);
+        benchProgress.setVisible(true);
+        benchStatus.setText("Initializing benchmark...");
+
+        String sizeStr = benchSizeCombo.getSelectionModel().getSelectedItem();
+        int sizeMB = 64;
+        if (sizeStr != null && !sizeStr.isBlank()) {
+            try {
+                sizeMB = Integer.parseInt(sizeStr.replaceAll("[^0-9]", ""));
+            } catch (NumberFormatException ignored) {
+                sizeMB = 64;
+            }
+        }
+        final int testSizeMB = sizeMB;
+
+        currentBenchThread = new Thread(() -> {
+            try {
+                BenchmarkResult result = benchmarkService.benchmark(driveLetter, testSizeMB,
+                        msg -> Platform.runLater(() -> benchStatus.setText(msg)),
+                        benchCancelled);
+                Platform.runLater(() -> {
+                    benchProgress.setProgress(1);
+                    if (result.isSuccess()) {
+                        benchSeqWriteLabel.setText(String.format("%.1f MB/s", result.getSeqWriteMBps()));
+                        benchSeqReadLabel.setText(String.format("%.1f MB/s", result.getSeqReadMBps()));
+                        benchRandomReadLabel.setText(String.format("%.0f IOPS", result.getRandomReadIOPS()));
+                        benchStatus.setText("Benchmark completed for " + driveLetter + ".");
+                    } else {
+                        benchStatus.setText("Benchmark failed: " + result.getMessage());
+                    }
+                });
+            } catch (java.util.concurrent.CancellationException e) {
+                Platform.runLater(() -> benchStatus.setText("Benchmark cancelled."));
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    benchStatus.setText("Benchmark failed.");
+                    new Alert(Alert.AlertType.ERROR, "Benchmark failed:\n" + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> {
+                    benchStartBtn.setDisable(false);
+                    benchStopBtn.setVisible(false);
+                    benchProgress.setVisible(false);
+                });
+            }
+        }, "drive-benchmark");
+        currentBenchThread.start();
+    }
+
+    /* ===================================================================
        SECURE ERASE TAB
        =================================================================== */
 
@@ -951,12 +1185,19 @@ public class DiskToolsTabView extends BorderPane {
 
     @SuppressWarnings("unchecked")
     private VBox buildFileDeletionSection() {
-        Label header = new Label("Secure File Deletion");
+        Label header = new Label("Secure File / Folder Deletion");
         header.getStyleClass().addAll("label", "large", "accent");
 
-        filePathField.setPromptText("Select a file to securely delete...");
+        Label dropHint = new Label("Drag files or folders here, or use the buttons below to browse.");
+        dropHint.getStyleClass().addAll("label", "text-muted");
+        dropHint.setWrapText(true);
+
+        filePathField.setPromptText("Select a file or folder to securely delete...");
         filePathField.setPrefWidth(400);
         filePathField.setEditable(false);
+
+        Button browseFolderBtn = new Button("Browse Folder...");
+        browseFolderBtn.setTooltip(new Tooltip("Browse for a folder to securely delete recursively"));
 
         browseBtn.setOnAction(e -> {
             FileChooser fc = new FileChooser();
@@ -971,10 +1212,30 @@ public class DiskToolsTabView extends BorderPane {
             File f = fc.showOpenDialog(getScene() != null ? getScene().getWindow() : null);
             if (f != null) {
                 filePathField.setText(f.getAbsolutePath());
+                filePathField.setUserData(f.isDirectory());
                 secureDeleteBtn.setDisable(false);
             }
         });
         browseBtn.setTooltip(new Tooltip("Browse for a single file to securely delete"));
+
+        browseFolderBtn.setOnAction(e -> {
+            DirectoryChooser dc = new DirectoryChooser();
+            dc.setTitle("Select folder to securely delete");
+            dc.setInitialDirectory(new File("C:\\"));
+            File dir = dc.showDialog(getScene() != null ? getScene().getWindow() : null);
+            if (dir != null) {
+                filePathField.setText(dir.getAbsolutePath());
+                filePathField.setUserData(true);
+                secureDeleteBtn.setDisable(false);
+                secureDeleteBtn.setText("Secure Delete Folder");
+            }
+        });
+
+        filePathField.textProperty().addListener((obs, old, val) -> {
+            boolean isDir = Boolean.TRUE.equals(filePathField.getUserData());
+            secureDeleteBtn.setText(isDir ? "Secure Delete Folder" : "Secure Delete");
+            secureDeleteBtn.setDisable(val == null || val.isBlank());
+        });
 
         addFilesBtn.setOnAction(e -> {
             FileChooser fc = new FileChooser();
@@ -1004,8 +1265,15 @@ public class DiskToolsTabView extends BorderPane {
 
         secureDeleteBtn.setDisable(true);
         secureDeleteBtn.getStyleClass().add("danger");
-        secureDeleteBtn.setOnAction(e -> startSecureDelete());
-        secureDeleteBtn.setTooltip(new Tooltip("Securely delete the selected file with multiple overwrite passes"));
+        secureDeleteBtn.setOnAction(e -> {
+            Boolean isDir = Boolean.TRUE.equals(filePathField.getUserData());
+            if (Boolean.TRUE.equals(isDir)) {
+                startSecureDeleteFolder();
+            } else {
+                startSecureDelete();
+            }
+        });
+        secureDeleteBtn.setTooltip(new Tooltip("Securely delete the selected file or folder with multiple overwrite passes"));
 
         deleteAllBtn.setDisable(true);
         deleteAllBtn.getStyleClass().add("danger");
@@ -1019,8 +1287,11 @@ public class DiskToolsTabView extends BorderPane {
         overwritePresetCombo.getSelectionModel().select(1);
         overwritePresetCombo.setTooltip(new Tooltip("Select overwrite intensity: Quick (1 pass), Standard (3 passes DoD), or Deep (7 passes)"));
 
-        HBox row = new HBox(8, filePathField, browseBtn, addFilesBtn, secureDeleteBtn, deleteAllBtn);
+        HBox row = new HBox(8, filePathField, browseBtn, browseFolderBtn, addFilesBtn);
         row.setAlignment(Pos.CENTER_LEFT);
+
+        HBox actionRow = new HBox(8, secureDeleteBtn, deleteAllBtn);
+        actionRow.setAlignment(Pos.CENTER_LEFT);
 
         HBox presetRow = new HBox(8, new Label("Overwrite:"), overwritePresetCombo);
         presetRow.setAlignment(Pos.CENTER_LEFT);
@@ -1064,8 +1335,43 @@ public class DiskToolsTabView extends BorderPane {
 
         shredderTable.getColumns().addAll(pathCol, sizeCol, statusCol);
 
-        VBox section = new VBox(8, header, row, presetRow, progressRow, shredderTable);
+        VBox section = new VBox(8, header, dropHint, row, actionRow, presetRow, progressRow, shredderTable);
         section.setPadding(new Insets(8, 16, 8, 16));
+
+        section.setOnDragOver(e -> {
+            if (e.getGestureSource() != section && e.getDragboard().hasFiles()) {
+                e.acceptTransferModes(TransferMode.COPY);
+            }
+            e.consume();
+        });
+
+        section.setOnDragDropped(e -> {
+            Dragboard db = e.getDragboard();
+            boolean success = false;
+            if (db.hasFiles()) {
+                List<File> files = db.getFiles();
+                for (File file : files) {
+                    boolean exists = shredderEntries.stream()
+                            .anyMatch(entry -> entry.getFilePath().equals(file.getAbsolutePath()));
+                    if (!exists) {
+                        ShredderFileEntry entry = new ShredderFileEntry(file.getAbsolutePath(), file.length());
+                        entry.setStatusEnum(ShredderFileEntry.Status.PENDING);
+                        shredderEntries.add(entry);
+                    }
+                }
+                if (files.size() == 1) {
+                    File f = files.get(0);
+                    filePathField.setText(f.getAbsolutePath());
+                    filePathField.setUserData(f.isDirectory());
+                    secureDeleteBtn.setDisable(false);
+                }
+                updateDeleteButtons();
+                success = true;
+            }
+            e.setDropCompleted(success);
+            e.consume();
+        });
+
         return section;
     }
 
@@ -1096,7 +1402,7 @@ public class DiskToolsTabView extends BorderPane {
         confirm.setHeaderText("Confirm Secure Delete");
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
-        busy.set(true);
+        secureBusy.set(true);
         secureDeleteBtn.setDisable(true);
         secureDeleteProgress.setProgress(-1);
         secureDeleteProgress.setVisible(true);
@@ -1143,7 +1449,7 @@ public class DiskToolsTabView extends BorderPane {
                 }
             } finally {
                 Platform.runLater(() -> {
-                    busy.set(false);
+                    secureBusy.set(false);
                     secureDeleteBtn.setDisable(false);
                     secureDeleteProgress.setVisible(false);
                     filePathField.clear();
@@ -1151,6 +1457,87 @@ public class DiskToolsTabView extends BorderPane {
                 });
             }
         }, "secure-delete").start();
+    }
+
+    private void startSecureDeleteFolder() {
+        String folderPath = filePathField.getText();
+        if (folderPath == null || folderPath.isBlank()) return;
+
+        File f = new File(folderPath);
+        if (!f.exists() || !f.isDirectory()) {
+            new Alert(Alert.AlertType.ERROR, "Folder not found: " + folderPath).showAndWait();
+            return;
+        }
+
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING, "Secure folder deletion requires administrator rights.").showAndWait();
+            return;
+        }
+
+        File[] contents = f.listFiles();
+        int fileCount = 0;
+        if (contents != null) {
+            try {
+                fileCount = (int) java.nio.file.Files.walk(f.toPath())
+                        .filter(java.nio.file.Files::isRegularFile).count();
+            } catch (Exception ignored) {
+                fileCount = countFilesRecursive(f);
+            }
+        }
+
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Are you sure you want to securely delete this folder?\n\n"
+                        + folderPath + "\n\n"
+                        + "Contains approximately " + fileCount + " file(s).\n"
+                        + "All files will be overwritten multiple times and cannot be recovered.\n"
+                        + "This action is irreversible.");
+        confirm.setHeaderText("Confirm Secure Folder Delete");
+        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+
+        secureBusy.set(true);
+        secureDeleteBtn.setDisable(true);
+        secureDeleteProgress.setProgress(-1);
+        secureDeleteProgress.setVisible(true);
+        secureDeleteStatus.setText("Securely deleting folder contents...");
+
+        new Thread(() -> {
+            try {
+                int passCount = getSelectedPassCount();
+                FolderDeleteResult result = shredderService.secureDeleteFolder(folderPath, passCount);
+                Platform.runLater(() -> {
+                    if (result.isSuccess()) {
+                        String msg = "Folder securely deleted: " + result.getFilesDeleted() + " files, "
+                                + result.getFoldersDeleted() + " folders removed.";
+                        secureDeleteStatus.setText(msg);
+                        if (!result.getScheduledForReboot().isEmpty()) {
+                            msg += "\n\n" + result.getScheduledForReboot().size()
+                                    + " file(s) scheduled for deletion on next reboot.";
+                        }
+                        new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
+                    } else {
+                        secureDeleteStatus.setText("Folder deletion failed.");
+                        new Alert(Alert.AlertType.ERROR, "Failed to delete folder:\n" + result.getMessage()).showAndWait();
+                    }
+                    updateDeleteButtons();
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    secureDeleteStatus.setText("Folder deletion failed.");
+                    new Alert(Alert.AlertType.ERROR, "Secure folder delete failed:\n" + e.getMessage()).showAndWait();
+                    updateDeleteButtons();
+                });
+            } finally {
+                Platform.runLater(() -> {
+                    secureBusy.set(false);
+                    secureDeleteBtn.setDisable(false);
+                    secureDeleteProgress.setVisible(false);
+                    filePathField.clear();
+                    filePathField.setUserData(null);
+                    secureDeleteBtn.setText("Secure Delete");
+                    updateDeleteButtons();
+                });
+            }
+        }, "secure-delete-folder").start();
     }
 
     private void startBatchDelete() {
@@ -1179,7 +1566,7 @@ public class DiskToolsTabView extends BorderPane {
         confirm.setHeaderText("Confirm Batch Secure Delete");
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
-        busy.set(true);
+        secureBusy.set(true);
         secureDeleteBtn.setDisable(true);
         deleteAllBtn.setDisable(true);
         secureDeleteProgress.setProgress(-1);
@@ -1225,7 +1612,7 @@ public class DiskToolsTabView extends BorderPane {
             int finalDeleted = deleted;
             int finalFailed = failed;
             Platform.runLater(() -> {
-                busy.set(false);
+                secureBusy.set(false);
                 secureDeleteBtn.setDisable(false);
                 secureDeleteProgress.setVisible(false);
                 String msg = "Batch delete completed: " + finalDeleted + " deleted, " + finalFailed + " failed.";
@@ -1239,8 +1626,8 @@ public class DiskToolsTabView extends BorderPane {
     private void updateDeleteButtons() {
         boolean hasPending = shredderEntries.stream()
                 .anyMatch(e -> e.getStatusEnum() == ShredderFileEntry.Status.PENDING);
-        deleteAllBtn.setDisable(busy.get() || !hasPending);
-        secureDeleteBtn.setDisable(busy.get() || (filePathField.getText() == null || filePathField.getText().isBlank()));
+        deleteAllBtn.setDisable(secureBusy.get() || !hasPending);
+        secureDeleteBtn.setDisable(secureBusy.get() || (filePathField.getText() == null || filePathField.getText().isBlank()));
     }
 
     private static final Set<String> CRITICAL_SYSTEM_PATHS = Set.of(
@@ -1284,6 +1671,21 @@ public class DiskToolsTabView extends BorderPane {
         if (selected.startsWith("Quick")) return 1;
         if (selected.startsWith("Deep")) return 7;
         return 3;
+    }
+
+    private int countFilesRecursive(File dir) {
+        int count = 0;
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isDirectory()) {
+                    count += countFilesRecursive(f);
+                } else {
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     private void handleScheduleForReboot(ShredderFileEntry entry, String filePath, ShredderResult result) {
@@ -1431,7 +1833,7 @@ public class DiskToolsTabView extends BorderPane {
     private void updateWipeStartButton() {
         boolean anySelected = wipeDrives.stream()
                 .anyMatch(d -> wipeSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get());
-        startWipeBtn.setDisable(busy.get() || !anySelected);
+        startWipeBtn.setDisable(wipeBusy.get() || !anySelected);
     }
 
     private void startWipeFreeSpace() {
@@ -1445,7 +1847,7 @@ public class DiskToolsTabView extends BorderPane {
 
         List<String> driveLetters = selected.stream().map(DriveInfo::getDriveLetter).toList();
 
-        busy.set(true);
+        wipeBusy.set(true);
         wipeCancelled.set(false);
         startWipeBtn.setDisable(true);
         stopWipeBtn.setDisable(false);
@@ -1463,7 +1865,9 @@ public class DiskToolsTabView extends BorderPane {
                         int totalPasses = prog.getTotalPasses();
                         int pass = prog.getPass();
                         int percent = prog.getPercent();
-                        int driveProgress = (pass - 1) * 100 / totalPasses + percent / totalPasses;
+                        int driveProgress = totalPasses > 0
+                                ? (pass - 1) * 100 / totalPasses + percent / totalPasses
+                                : 0;
                         driveProgressMap.put(prog.getDrive(), driveProgress);
 
                         double overallProgress = driveProgressMap.values().stream()
@@ -1496,7 +1900,7 @@ public class DiskToolsTabView extends BorderPane {
                 });
             } finally {
                 Platform.runLater(() -> {
-                    busy.set(false);
+                    wipeBusy.set(false);
                     startWipeBtn.setDisable(false);
                     stopWipeBtn.setDisable(true);
                     wipeProgress.setVisible(false);

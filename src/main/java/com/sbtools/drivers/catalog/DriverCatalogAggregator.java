@@ -57,6 +57,12 @@ public class DriverCatalogAggregator {
         return providers.size();
     }
 
+    public void clearCache() {
+        if (cache != null) {
+            cache.clearAll();
+        }
+    }
+
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed) {
         return findUpdates(installed, CancellationToken.NONE);
     }

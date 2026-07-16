@@ -1,5 +1,6 @@
 package com.sbtools.ui;
 
+import com.sbtools.netoptimizer.NetworkAdapterRow;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
 import com.sbtools.netoptimizer.WiFiInfo;
 import javafx.application.Platform;
@@ -90,7 +91,13 @@ class WiFiPanel extends VBox {
         Button forgetBtn = UIButton.danger("Forget");
         forgetBtn.setOnAction(e -> forgetProfile());
 
-        HBox row = new HBox(8, profileCombo, refreshProfilesBtn, disconnectBtn, forgetBtn);
+        Button enableBtn = UIButton.success("Enable Wi-Fi");
+        enableBtn.setOnAction(e -> setWifiAdapterState(true));
+
+        Button disableBtn = UIButton.secondary("Disable Wi-Fi");
+        disableBtn.setOnAction(e -> setWifiAdapterState(false));
+
+        HBox row = new HBox(8, profileCombo, refreshProfilesBtn, disconnectBtn, forgetBtn, enableBtn, disableBtn);
         row.setAlignment(Pos.CENTER_LEFT);
         section.getChildren().add(row);
 
@@ -187,5 +194,47 @@ class WiFiPanel extends VBox {
                 busy.set(false);
             });
         }, "net-wifi-forget").start();
+    }
+
+    private void setWifiAdapterState(boolean enable) {
+        if (busy.get()) return;
+        busy.set(true);
+        String action = enable ? "Enabling" : "Disabling";
+        statusLabel.setText(action + " Wi-Fi adapter...");
+
+        new Thread(() -> {
+            try {
+                List<NetworkAdapterRow> adapters = service.listAdapters();
+                String wifiAdapterName = null;
+                for (NetworkAdapterRow a : adapters) {
+                    if (a.getDescription() != null && a.getDescription().matches("(?i).*(Wireless|Wi-Fi|802\\.11).*")) {
+                        wifiAdapterName = a.getName();
+                        break;
+                    }
+                }
+                if (wifiAdapterName == null) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("No Wi-Fi adapter found.");
+                        new Alert(Alert.AlertType.WARNING, "No Wi-Fi adapter found on this system.").showAndWait();
+                        busy.set(false);
+                    });
+                    return;
+                }
+                var result = service.setAdapterState(wifiAdapterName, enable);
+                Platform.runLater(() -> {
+                    statusLabel.setText(result.success()
+                            ? "Wi-Fi adapter " + (enable ? "enabled" : "disabled") + "."
+                            : "Failed to " + (enable ? "enable" : "disable") + " Wi-Fi adapter.");
+                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message()).showAndWait();
+                    busy.set(false);
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    statusLabel.setText("Failed to set Wi-Fi adapter state.");
+                    busy.set(false);
+                });
+            }
+        }, "net-wifi-set-state").start();
     }
 }

@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
 
     private static final String DSA_DATA_FEED_URL = "https://dsadata.intel.com/data/en";
+    private static final String DSA_DATA_FEED_FALLBACK_URL = "https://dsadata.intel.com/data/en/data.json";
     private static final String DSA_PRODUCT_URL = "https://www.intel.com/content/www/us/en/download/18231/intel-proset-wireless-software-and-drivers-for-it-admins.html";
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(30))
@@ -363,10 +364,22 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             return cachedDsaConfig;
         }
 
+        JsonNode result = fetchDsaFeed(DSA_DATA_FEED_URL, true);
+        if (result == null) {
+            AppLogger.warning("Intel: Primary DSA feed failed, trying fallback URL");
+            result = fetchDsaFeed(DSA_DATA_FEED_FALLBACK_URL, false);
+        }
+        if (result == null) {
+            AppLogger.warning("Intel: All DSA feed URLs failed. Legacy web scraping will be used as fallback.");
+        }
+        return result;
+    }
+
+    private JsonNode fetchDsaFeed(String url, boolean extractFromZip) {
         try {
-            AppLogger.info("Intel: Downloading DSA data feed");
+            AppLogger.info("Intel: Downloading DSA data feed from " + url);
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(DSA_DATA_FEED_URL))
+                    .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(60))
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                     .GET()
@@ -374,24 +387,28 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
 
             HttpResponse<byte[]> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofByteArray());
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-                AppLogger.warning("Intel: DSA data feed returned HTTP " + resp.statusCode());
+                AppLogger.warning("Intel: DSA data feed returned HTTP " + resp.statusCode() + " from " + url);
                 return null;
             }
 
-            byte[] zipBytes = resp.body();
-            String jsonContent = extractJsonFromZip(zipBytes);
+            String jsonContent;
+            if (extractFromZip) {
+                jsonContent = extractJsonFromZip(resp.body());
+            } else {
+                jsonContent = new String(resp.body(), java.nio.charset.StandardCharsets.UTF_8);
+            }
             if (jsonContent == null) {
-                AppLogger.warning("Intel: Could not find software-configurations.json in DSA ZIP");
+                AppLogger.warning("Intel: Could not parse DSA data from " + url);
                 return null;
             }
 
             JsonNode root = JsonMapper.parseTree(jsonContent);
             cachedDsaConfig = root;
-            cacheTimestamp = now;
-            AppLogger.info("Intel: Loaded DSA configurations (" + root.size() + " entries)");
+            cacheTimestamp = System.currentTimeMillis();
+            AppLogger.info("Intel: Loaded DSA configurations (" + root.size() + " entries) from " + url);
             return root;
         } catch (Exception e) {
-            AppLogger.warning("Intel: Error loading DSA data feed: " + e.getMessage());
+            AppLogger.warning("Intel: Error loading DSA data feed from " + url + ": " + e.getMessage());
             return null;
         }
     }

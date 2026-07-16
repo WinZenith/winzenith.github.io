@@ -18,7 +18,7 @@ public class DriveInfo {
     private final StringProperty fileSystem = new SimpleStringProperty("");
     private final LongProperty sizeBytes = new SimpleLongProperty(0);
     private final LongProperty freeBytes = new SimpleLongProperty(0);
-    private final LongProperty fragmentsFound = new SimpleLongProperty(0);
+    private final LongProperty fragmentedSpaceBytes = new SimpleLongProperty(0);
     private final LongProperty fragmentationPercent = new SimpleLongProperty(0);
 
     /* ── Extended analysis fields ── */
@@ -65,9 +65,10 @@ public class DriveInfo {
     public LongProperty freeBytesProperty() { return freeBytes; }
     public void setFreeBytes(long v) { freeBytes.set(v); }
 
-    public long getFragmentsFound() { return fragmentsFound.get(); }
-    public LongProperty fragmentsFoundProperty() { return fragmentsFound; }
-    public void setFragmentsFound(long v) { fragmentsFound.set(v); }
+    @JsonProperty("fragmentsFound")
+    public long getFragmentedSpaceBytes() { return fragmentedSpaceBytes.get(); }
+    public LongProperty fragmentedSpaceBytesProperty() { return fragmentedSpaceBytes; }
+    public void setFragmentedSpaceBytes(long v) { fragmentedSpaceBytes.set(v); }
 
     public long getFragmentationPercent() { return fragmentationPercent.get(); }
     public LongProperty fragmentationPercentProperty() { return fragmentationPercent; }
@@ -130,15 +131,7 @@ public class DriveInfo {
     }
 
     public String getFragmentsFormatted() {
-        long f = fragmentsFound.get();
-        return formatFragmentSize(f);
-    }
-
-    private static String formatFragmentSize(long f) {
-        if (f < 1024) return f + " B";
-        if (f < 1024 * 1024) return String.format("%.1f KB", f / 1024.0);
-        if (f < 1024L * 1024 * 1024) return String.format("%.1f MB", f / (1024.0 * 1024));
-        return String.format("%.1f GB", f / (1024.0 * 1024 * 1024));
+        return formatBytes(fragmentedSpaceBytes.get());
     }
 
     private static String formatBytes(long bytes) {

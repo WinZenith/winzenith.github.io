@@ -113,16 +113,15 @@ if ($fsutilOut) {
     }
 }
 
-# ── 5. Total directories (non-recursive, fast) ──
-$totalDirectories = @(Get-ChildItem -Path "$($drive):\" -Directory -ErrorAction SilentlyContinue).Count
+# ── 5. Total directories ──
+# Root-level enumeration is inaccurate; set to 0. Recursive enumeration is too slow.
+$totalDirectories = 0
 
-# ── 6. Estimate total file count from volume info (avoid slow recursive enumeration) ──
-if ($totalFileCount -eq 0) {
-    $totalFileCount = @(Get-ChildItem -Path "$($drive):\" -File -ErrorAction SilentlyContinue).Count
-}
+# ── 6. totalFileCount is only available from Optimize-Volume output ──
+# Root-level enumeration is inaccurate and intentionally omitted.
 if ($totalFileCount -eq 0) { $totalFileCount = 1 }
 
-if ($fragmentedFileCount -gt 0) {
+if ($fragmentedFileCount -gt 0 -and $averageFragmentsPerFile -eq 0) {
     $averageFragmentsPerFile = [Math]::Round($fragmentedFileCount / [Math]::Max(1, $totalFileCount), 2)
 }
 
@@ -138,6 +137,5 @@ $result = [ordered]@{
     hiberFileSizeBytes    = $hiberFileSizeBytes
     swapFileSizeBytes     = $swapFileSizeBytes
     totalDirectories      = $totalDirectories
-    rawOutput             = ($optOut | Out-String)
 }
 $result | ConvertTo-Json -Depth 2 -Compress

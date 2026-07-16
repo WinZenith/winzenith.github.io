@@ -18,7 +18,7 @@ public final class CancellationToken {
     }
 
     public boolean isCancelled() {
-        return cancelled.get() || Thread.currentThread().isInterrupted();
+        return cancelled.get() || (this != NONE && Thread.currentThread().isInterrupted());
     }
 
     public static final class CancellationException extends RuntimeException {

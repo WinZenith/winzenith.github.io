@@ -13,10 +13,17 @@ public class CancelableCompletableFuture<T> extends CompletableFuture<T> {
 
     private final List<CompletableFuture<?>> children;
     private final ExecutorService executor;
+    private final boolean ownExecutor;
 
     public CancelableCompletableFuture(List<CompletableFuture<?>> children, ExecutorService executor) {
+        this(children, executor, true);
+    }
+
+    public CancelableCompletableFuture(List<CompletableFuture<?>> children, ExecutorService executor,
+            boolean ownExecutor) {
         this.children = children;
         this.executor = executor;
+        this.ownExecutor = ownExecutor;
     }
 
     @Override
@@ -26,7 +33,7 @@ public class CancelableCompletableFuture<T> extends CompletableFuture<T> {
                 try { c.cancel(mayInterruptIfRunning); } catch (Exception ignored) {}
             }
         }
-        if (executor != null) {
+        if (executor != null && ownExecutor) {
             try { executor.shutdownNow(); } catch (Exception ignored) {}
         }
         return super.cancel(mayInterruptIfRunning);
