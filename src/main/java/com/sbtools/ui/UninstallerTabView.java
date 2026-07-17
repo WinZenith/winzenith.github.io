@@ -16,7 +16,6 @@ import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
 import javafx.collections.transformation.SortedList;
-import javafx.embed.swing.SwingFXUtils;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
@@ -190,10 +189,14 @@ public class UninstallerTabView extends BorderPane {
                             if (loc != null && !loc.isBlank()) {
                                 BufferedImage bimg = com.sbtools.util.IconExtractor.extractIconBuffered(loc);
                                 if (bimg != null) {
-                                    final BufferedImage fb = bimg;
+                                    final int w = bimg.getWidth();
+                                    final int h = bimg.getHeight();
+                                    final int[] argb = bimg.getRGB(0, 0, w, h, null, 0, w);
                                     Platform.runLater(() -> {
                                         try {
-                                            javafx.scene.image.Image fxImg = SwingFXUtils.toFXImage(fb, null);
+                                            javafx.scene.image.WritableImage fxImg = new javafx.scene.image.WritableImage(w, h);
+                                            fxImg.getPixelWriter().setPixels(0, 0, w, h,
+                                                    javafx.scene.image.PixelFormat.getIntArgbInstance(), argb, 0, w);
                                             if (getTableRow() != null && getTableRow().getItem() == app) {
                                                 imageView.setImage(fxImg);
                                             }

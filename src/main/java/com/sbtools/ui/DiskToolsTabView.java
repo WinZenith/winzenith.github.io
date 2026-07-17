@@ -318,28 +318,6 @@ public class DiskToolsTabView extends BorderPane {
         freeCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getFreeFormatted()));
         freeCol.setPrefWidth(100);
 
-        TableColumn<DriveInfo, String> fragCol = new TableColumn<>("Frag. Space");
-        fragCol.setCellValueFactory(c -> new SimpleObjectProperty<>(
-                c.getValue().getFragmentedSpaceBytes() == 0 ? "-" : c.getValue().getFragmentsFormatted()));
-        fragCol.setPrefWidth(90);
-
-        TableColumn<DriveInfo, Number> fragPctCol = new TableColumn<>("Frag. %");
-        fragPctCol.setCellValueFactory(c -> c.getValue().fragmentationPercentProperty());
-        fragPctCol.setPrefWidth(70);
-        fragPctCol.setCellFactory(col -> new TableCell<>() {
-            @Override
-            protected void updateItem(Number item, boolean empty) {
-                super.updateItem(item, empty);
-                if (empty) {
-                    setText(null);
-                } else if (item == null || item.longValue() == 0) {
-                    setText("-");
-                } else {
-                    setText(item.longValue() + "%");
-                }
-            }
-        });
-
         TableColumn<DriveInfo, String> lastAnalyzedCol = new TableColumn<>("Last Analyzed");
         lastAnalyzedCol.setCellValueFactory(c -> {
             Instant last = lastAnalyzed.get(c.getValue().getDriveLetter());
@@ -364,7 +342,7 @@ public class DiskToolsTabView extends BorderPane {
         });
         lastDefraggedCol.setPrefWidth(110);
 
-        driveTable.getColumns().addAll(checkCol, letterCol, labelCol, typeCol, fsCol, sizeCol, freeCol, fragCol, fragPctCol, lastAnalyzedCol, lastDefraggedCol);
+        driveTable.getColumns().addAll(checkCol, letterCol, labelCol, typeCol, fsCol, sizeCol, freeCol, lastAnalyzedCol, lastDefraggedCol);
 
         driveTable.setFixedCellSize(32);
 
@@ -381,11 +359,12 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void updateTableHeight() {
-        int rows = Math.max(filteredDrives.size(), 6);
-        double header = 28;
+        int rows = Math.max(filteredDrives.size(), 1);
+        double header = 30;
         double rowH = driveTable.getFixedCellSize();
-        driveTable.setPrefHeight(header + rows * rowH + 4);
-        driveTable.setMaxHeight(driveTable.getPrefHeight());
+        double height = header + rows * rowH + rowH + 4;
+        driveTable.setPrefHeight(height);
+        driveTable.setMinHeight(height);
     }
 
     private void applyFilter() {
@@ -412,6 +391,12 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void loadDrives() {
+        analyzeBtn.setDisable(true);
+        intelligentDefragBtn.setDisable(true);
+        defragProgress.setVisible(true);
+        defragProgress.setProgress(-1);
+        defragStatus.setText("Loading drives...");
+
         new Thread(() -> {
             try {
                 List<DriveInfo> drives = defragService.getDrives();
@@ -428,11 +413,14 @@ public class DiskToolsTabView extends BorderPane {
                                 + " (" + d.getMediaType() + ", " + d.getSizeFormatted() + ")";
                         benchDriveCombo.getItems().add(display);
                     }
+                    defragProgress.setVisible(false);
                     defragStatus.setText("Found " + drives.size() + " drive(s). Select drives and click Analyze Selected.");
+                    updateDefragButtons();
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to load drives", e);
                 Platform.runLater(() -> {
+                    defragProgress.setVisible(false);
                     defragStatus.setText("Failed to load drives.");
                     new Alert(Alert.AlertType.ERROR, "Failed to load drives:\n" + e.getMessage()).showAndWait();
                 });
@@ -1474,15 +1462,12 @@ public class DiskToolsTabView extends BorderPane {
             return;
         }
 
-        File[] contents = f.listFiles();
         int fileCount = 0;
-        if (contents != null) {
-            try {
-                fileCount = (int) java.nio.file.Files.walk(f.toPath())
-                        .filter(java.nio.file.Files::isRegularFile).count();
-            } catch (Exception ignored) {
-                fileCount = countFilesRecursive(f);
-            }
+        try {
+            fileCount = (int) java.nio.file.Files.walk(f.toPath())
+                    .filter(java.nio.file.Files::isRegularFile).count();
+        } catch (Exception ignored) {
+            fileCount = countFilesRecursive(f);
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,

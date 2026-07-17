@@ -1,5 +1,6 @@
 package com.sbtools.diskhealth;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import javafx.beans.property.IntegerProperty;
@@ -133,6 +134,7 @@ public class DiskHealthInfo {
     public StringProperty dataSourceProperty() { return dataSource; }
     public void setDataSource(String v) { dataSource.set(v); }
 
+    @JsonIgnore
     public List<SmartAttribute> getRawSmartAttributes() { return rawSmartAttributes; }
     public void setRawSmartAttributes(List<SmartAttribute> v) { rawSmartAttributes = v != null ? v : new ArrayList<>(); }
 

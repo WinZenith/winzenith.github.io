@@ -122,7 +122,7 @@ function Parse-SmartctlSas {
 
 $physicalDisks = Get-PhysicalDisk -ErrorAction SilentlyContinue
 if (-not $physicalDisks) {
-    @{ drives = @(); smartctlAvailable = ($null -ne $smartctlPath) } | ConvertTo-Json -Depth 3 -Compress
+    @{ drives = @(); smartctlAvailable = ($null -ne $smartctlPath) } | ConvertTo-Json -Depth 5 -Compress
     return
 }
 
@@ -394,4 +394,4 @@ foreach ($phys in $physicalDisks) {
 @{
     drives = $results
     smartctlAvailable = ($null -ne $smartctlPath)
-} | ConvertTo-Json -Depth 3 -Compress
+} | ConvertTo-Json -Depth 5 -Compress

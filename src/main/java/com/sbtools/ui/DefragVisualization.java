@@ -46,7 +46,7 @@ public class DefragVisualization {
         GraphicsContext gc = canvas.getGraphicsContext2D();
         gc.clearRect(0, 0, canvasW, canvasH);
 
-        long used = drive.getUsedBytes();
+        long used = Math.max(0, drive.getUsedBytes());
         long total = drive.getSizeBytes();
         double usedRatio = total > 0 ? (double) used / total : 0;
 
