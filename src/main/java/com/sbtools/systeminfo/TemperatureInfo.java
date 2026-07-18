@@ -9,7 +9,7 @@ public record TemperatureInfo(
         @JsonProperty("temperatureCelsius") double temperatureCelsius
 ) {
     public String formatTemperature() {
-        if (temperatureCelsius <= 0) return "";
+        if (temperatureCelsius < 0) return "";
         return String.format("%.1f\u00B0C / %.1f\u00B0F", temperatureCelsius, temperatureCelsius * 9.0 / 5.0 + 32);
     }
 

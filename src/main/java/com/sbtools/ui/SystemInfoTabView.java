@@ -879,7 +879,6 @@ public class SystemInfoTabView extends BorderPane {
             setVbarPolicy(ScrollBarPolicy.ALWAYS);
             setHbarPolicy(ScrollBarPolicy.NEVER);
             setStyle("-fx-background-color: transparent; -fx-background: transparent; -fx-border-color: transparent;");
-            setContent(content);
         }
     }
 
@@ -956,55 +955,58 @@ public class SystemInfoTabView extends BorderPane {
 
         if (data.os() != null) {
             sb.append("--- Operating System ---\n");
-            sb.append("OS: ").append(data.os().name()).append("\n");
-            sb.append("Version: ").append(data.os().version()).append("\n");
-            sb.append("Build: ").append(data.os().buildNumber()).append("\n");
-            sb.append("Architecture: ").append(data.os().architecture()).append("\n");
-            sb.append("Computer Name: ").append(data.os().computerName()).append("\n");
-            sb.append("Install Date: ").append(data.os().installDate()).append("\n");
-            sb.append("Last Boot: ").append(data.os().lastBoot()).append("\n");
-            sb.append("Serial Number: ").append(data.os().serialNumber()).append("\n\n");
+            appendField(sb, "OS", data.os().name());
+            appendField(sb, "Version", data.os().version());
+            appendField(sb, "Build", data.os().buildNumber());
+            appendField(sb, "Architecture", data.os().architecture());
+            appendField(sb, "Computer Name", data.os().computerName());
+            appendField(sb, "Install Date", data.os().installDate());
+            appendField(sb, "Last Boot", data.os().lastBoot());
+            appendField(sb, "Serial Number", data.os().serialNumber());
+            sb.append("\n");
         }
 
         if (data.cpu() != null) {
             sb.append("--- CPU ---\n");
-            sb.append("Name: ").append(data.cpu().name()).append("\n");
-            sb.append("Manufacturer: ").append(data.cpu().manufacturer()).append("\n");
-            sb.append("Architecture: ").append(data.cpu().architecture()).append("\n");
-            sb.append("Socket: ").append(data.cpu().socket()).append("\n");
+            appendField(sb, "Name", data.cpu().name());
+            appendField(sb, "Manufacturer", data.cpu().manufacturer());
+            appendField(sb, "Architecture", data.cpu().architecture());
+            appendField(sb, "Socket", data.cpu().socket());
             sb.append("Cores: ").append(data.cpu().cores()).append("\n");
             sb.append("Threads: ").append(data.cpu().logicalCpus()).append("\n");
-            sb.append("Base Clock: ").append(data.cpu().formatBaseClock()).append("\n");
-            sb.append("Current Clock: ").append(data.cpu().formatCurrentClock()).append("\n");
-            sb.append("L2 Cache: ").append(data.cpu().formatL2Cache()).append("\n");
-            sb.append("L3 Cache: ").append(data.cpu().formatL3Cache()).append("\n");
-            sb.append("Voltage: ").append(data.cpu().voltage()).append("\n\n");
+            appendField(sb, "Base Clock", data.cpu().formatBaseClock());
+            appendField(sb, "Current Clock", data.cpu().formatCurrentClock());
+            appendField(sb, "L2 Cache", data.cpu().formatL2Cache());
+            appendField(sb, "L3 Cache", data.cpu().formatL3Cache());
+            appendField(sb, "Voltage", data.cpu().voltage());
+            sb.append("\n");
         }
 
         if (data.gpu() != null) {
             for (int i = 0; i < data.gpu().size(); i++) {
                 GpuInfo gpu = data.gpu().get(i);
                 sb.append("--- GPU").append(data.gpu().size() > 1 ? " " + (i + 1) : "").append(" ---\n");
-                sb.append("Name: ").append(gpu.name()).append("\n");
-                sb.append("Manufacturer: ").append(gpu.manufacturer()).append("\n");
-                sb.append("VRAM: ").append(gpu.formatVram()).append("\n");
-                sb.append("Memory Type: ").append(gpu.memoryType()).append("\n");
-                sb.append("Driver Version: ").append(gpu.driverVersion()).append("\n");
-                sb.append("Driver Date: ").append(gpu.driverDate()).append("\n");
-                sb.append("Resolution: ").append(gpu.resolution()).append("\n\n");
+                appendField(sb, "Name", gpu.name());
+                appendField(sb, "Manufacturer", gpu.manufacturer());
+                appendField(sb, "VRAM", gpu.formatVram());
+                appendField(sb, "Memory Type", gpu.memoryType());
+                appendField(sb, "Driver Version", gpu.driverVersion());
+                appendField(sb, "Driver Date", gpu.driverDate());
+                appendField(sb, "Resolution", gpu.resolution());
+                sb.append("\n");
             }
         }
 
         if (data.ram() != null) {
             sb.append("--- RAM ---\n");
-            sb.append("Total: ").append(data.ram().formatTotal()).append("\n");
-            sb.append("Channel: ").append(data.ram().channel()).append("\n");
+            appendField(sb, "Total", data.ram().formatTotal());
+            appendField(sb, "Channel", data.ram().channel());
             if (data.ram().sticks() != null) {
                 for (int i = 0; i < data.ram().sticks().size(); i++) {
                     RamInfo.RamStick stick = data.ram().sticks().get(i);
                     sb.append("  Slot ").append(i + 1).append(": ").append(stick.formatCapacity())
-                            .append(" ").append(stick.memoryType()).append(" ").append(stick.formatSpeed())
-                            .append(" ").append(stick.manufacturer()).append("\n");
+                            .append(" ").append(nvl(stick.memoryType())).append(" ").append(stick.formatSpeed())
+                            .append(" ").append(nvl(stick.manufacturer())).append("\n");
                 }
             }
             sb.append("\n");
@@ -1015,15 +1017,15 @@ public class SystemInfoTabView extends BorderPane {
             if (data.storage().disks() != null) {
                 for (int i = 0; i < data.storage().disks().size(); i++) {
                     StorageInfo.Disk disk = data.storage().disks().get(i);
-                    sb.append("Disk ").append(i + 1).append(": ").append(disk.model())
-                            .append(" (").append(disk.formatSize()).append(") ").append(disk.interfaceType())
-                            .append(" [").append(disk.mediaType()).append("]\n");
+                    sb.append("Disk ").append(i + 1).append(": ").append(nvl(disk.model()))
+                            .append(" (").append(disk.formatSize()).append(") ").append(nvl(disk.interfaceType()))
+                            .append(" [").append(nvl(disk.mediaType())).append("]\n");
                     if (data.storage().partitions() != null) {
                         final int diskIdx = i;
                         data.storage().partitions().stream()
                                 .filter(p -> p.diskIndex() == diskIdx)
-                                .forEach(part -> sb.append("  ").append(part.deviceID()).append(": ").append(part.volumeName())
-                                        .append(" ").append(part.fsType())
+                                .forEach(part -> sb.append("  ").append(nvl(part.deviceID())).append(": ").append(nvl(part.volumeName()))
+                                        .append(" ").append(nvl(part.fsType()))
                                         .append(" ").append(part.formatSize())
                                         .append(" (").append(String.format("%.1f%% used", part.usagePercent())).append(")\n"));
                     }
@@ -1042,26 +1044,28 @@ public class SystemInfoTabView extends BorderPane {
 
         if (data.motherboard() != null) {
             sb.append("--- Motherboard ---\n");
-            sb.append("Manufacturer: ").append(data.motherboard().manufacturer()).append("\n");
-            sb.append("Model: ").append(data.motherboard().model()).append("\n");
-            sb.append("Version: ").append(data.motherboard().version()).append("\n");
-            sb.append("Chipset: ").append(data.motherboard().chipset()).append("\n\n");
+            appendField(sb, "Manufacturer", data.motherboard().manufacturer());
+            appendField(sb, "Model", data.motherboard().model());
+            appendField(sb, "Version", data.motherboard().version());
+            appendField(sb, "Chipset", data.motherboard().chipset());
+            sb.append("\n");
         }
 
         if (data.bios() != null) {
             sb.append("--- BIOS ---\n");
-            sb.append("Manufacturer: ").append(data.bios().manufacturer()).append("\n");
-            sb.append("Version: ").append(data.bios().version()).append("\n");
-            sb.append("Release Date: ").append(data.bios().releaseDate()).append("\n");
-            sb.append("SMBIOS: ").append(data.bios().formatSmbios()).append("\n\n");
+            appendField(sb, "Manufacturer", data.bios().manufacturer());
+            appendField(sb, "Version", data.bios().version());
+            appendField(sb, "Release Date", data.bios().releaseDate());
+            appendField(sb, "SMBIOS", data.bios().formatSmbios());
+            sb.append("\n");
         }
 
         if (data.networkAdapters() != null && !data.networkAdapters().isEmpty()) {
             sb.append("--- Network Adapters ---\n");
             for (NetworkAdapterInfo na : data.networkAdapters()) {
-                sb.append(na.name()).append(" (").append(na.status()).append(")\n");
-                sb.append("  Speed: ").append(na.speed()).append("\n");
-                sb.append("  MAC: ").append(na.macAddress()).append("\n");
+                sb.append(nvl(na.name())).append(" (").append(nvl(na.status())).append(")\n");
+                appendField(sb, "  Speed", na.speed());
+                appendField(sb, "  MAC", na.macAddress());
                 sb.append("  IP: ").append(na.formatIpAddresses()).append("\n");
                 sb.append("  DHCP: ").append(na.dhcpEnabled() ? "Yes" : "No").append("\n\n");
             }
@@ -1070,8 +1074,8 @@ public class SystemInfoTabView extends BorderPane {
         if (data.audioDevices() != null && !data.audioDevices().isEmpty()) {
             sb.append("--- Audio Devices ---\n");
             for (AudioDeviceInfo audio : data.audioDevices()) {
-                sb.append(audio.name()).append(" - ").append(audio.manufacturer())
-                        .append(" (").append(audio.status()).append(")\n");
+                sb.append(nvl(audio.name())).append(" - ").append(nvl(audio.manufacturer()))
+                        .append(" (").append(nvl(audio.status())).append(")\n");
             }
             sb.append("\n");
         }
@@ -1079,10 +1083,10 @@ public class SystemInfoTabView extends BorderPane {
         if (data.battery() != null) {
             BatteryInfo batt = data.battery();
             sb.append("--- Battery ---\n");
-            sb.append("Name: ").append(batt.name()).append("\n");
+            appendField(sb, "Name", batt.name());
             sb.append("Charge: ").append(batt.formatChargeLevel()).append("\n");
-            sb.append("Status: ").append(batt.status()).append("\n");
-            sb.append("Chemistry: ").append(batt.chemistry()).append("\n");
+            appendField(sb, "Status", batt.status());
+            appendField(sb, "Chemistry", batt.chemistry());
             sb.append("Remaining: ").append(batt.formatRemainingCapacity()).append("\n\n");
         }
 
@@ -1097,7 +1101,7 @@ public class SystemInfoTabView extends BorderPane {
         if (data.others() != null && !data.others().isEmpty()) {
             sb.append("--- Other Devices ---\n");
             for (OtherDevice dev : data.others()) {
-                sb.append(dev.name()).append(" [").append(dev.deviceClass()).append("]\n");
+                sb.append(nvl(dev.name())).append(" [").append(nvl(dev.deviceClass())).append("]\n");
             }
             sb.append("\n");
         }
@@ -1323,6 +1327,16 @@ public class SystemInfoTabView extends BorderPane {
 
         html.append("</body></html>");
         return html.toString();
+    }
+
+    private static String nvl(String s) {
+        return s != null ? s : "";
+    }
+
+    private static void appendField(StringBuilder sb, String label, String value) {
+        if (value != null && !value.isBlank()) {
+            sb.append(label).append(": ").append(value).append("\n");
+        }
     }
 
     private static String row(String label, String value) {

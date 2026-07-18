@@ -46,11 +46,17 @@ public final class VersionCompare {
         if (dashIdx > 0) {
             v = v.substring(0, dashIdx);
         }
+        String lower = v.toLowerCase();
         for (String suffix : new String[]{"alpha", "beta", "rc", "preview", "test", "dev"}) {
-            int idx = v.toLowerCase().indexOf(suffix);
+            int idx = lower.indexOf(suffix);
             if (idx > 0) {
-                v = v.substring(0, idx);
-                break;
+                char before = lower.charAt(idx - 1);
+                int endIdx = idx + suffix.length();
+                boolean afterIsWord = endIdx < lower.length() && Character.isLetterOrDigit(lower.charAt(endIdx));
+                if (!Character.isLetterOrDigit(before) && !afterIsWord) {
+                    v = v.substring(0, idx);
+                    break;
+                }
             }
         }
         return v;

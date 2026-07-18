@@ -15,6 +15,7 @@ import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.List;
 
 public class UpdateDialog extends Dialog<ButtonType> {
 
@@ -150,13 +151,27 @@ public class UpdateDialog extends Dialog<ButtonType> {
     private static void cleanupTempDir(Path tempDir) {
         Thread t = new Thread(() -> {
             try {
-                Thread.sleep(5000);
-                Files.walk(tempDir)
-                        .sorted((a, b) -> b.compareTo(a))
-                        .forEach(p -> {
-                            try { Files.deleteIfExists(p); } catch (Exception ignored) {}
-                        });
-            } catch (Exception ignored) {}
+                Thread.sleep(30000);
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    java.util.List<Path> remaining = new java.util.ArrayList<>();
+                    try (var walkStream = Files.walk(tempDir)) {
+                        List<Path> sorted = walkStream.sorted((a, b) -> b.compareTo(a))
+                                .collect(java.util.stream.Collectors.toList());
+                        for (Path p : sorted) {
+                            try {
+                                Files.deleteIfExists(p);
+                            } catch (Exception e) {
+                                remaining.add(p);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                    boolean allDeleted = remaining.isEmpty();
+                    if (allDeleted) break;
+                    Thread.sleep(10000L * (attempt + 1));
+                }
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
         }, "TempDirCleanup");
         t.setDaemon(true);
         t.start();

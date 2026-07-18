@@ -16,10 +16,14 @@ public final class PowerShellScripts {
     }
 
     public static Path resolve(String scriptFileName) throws IOException {
-        return CACHE.computeIfAbsent(scriptFileName, PowerShellScripts::extract);
+        Path cached = CACHE.get(scriptFileName);
+        if (cached != null) return cached;
+        Path extracted = extract(scriptFileName);
+        Path existing = CACHE.putIfAbsent(scriptFileName, extracted);
+        return existing != null ? existing : extracted;
     }
 
-    private static Path extract(String scriptFileName) {
+    private static Path extract(String scriptFileName) throws IOException {
         String resource = "/powershell/" + scriptFileName;
         try (InputStream in = PowerShellScripts.class.getResourceAsStream(resource)) {
             if (in == null) {
@@ -32,7 +36,7 @@ public final class PowerShellScripts {
             dir.toFile().deleteOnExit();
             return script;
         } catch (IOException e) {
-            throw new IllegalStateException("Failed to extract " + scriptFileName, e);
+            throw new IOException("Failed to extract " + scriptFileName, e);
         }
     }
 }

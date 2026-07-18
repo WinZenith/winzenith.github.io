@@ -14,7 +14,9 @@ public final class CancellationToken {
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
 
     public void cancel() {
-        cancelled.set(true);
+        if (this != NONE) {
+            cancelled.set(true);
+        }
     }
 
     public boolean isCancelled() {

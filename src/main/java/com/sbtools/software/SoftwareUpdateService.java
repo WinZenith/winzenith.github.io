@@ -28,6 +28,12 @@ public class SoftwareUpdateService {
 
     private final ProcessRunner runner = new ProcessRunner(600);
     private final WingetRunner winget = new WingetRunner(runner);
+    private final java.util.concurrent.ExecutorService scanExecutor =
+            java.util.concurrent.Executors.newFixedThreadPool(2, r -> {
+                Thread t = new Thread(r, "SoftwareUpdate-Scan");
+                t.setDaemon(true);
+                return t;
+            });
 
     public boolean isWingetAvailable() {
         return winget.isAvailable();
@@ -35,6 +41,10 @@ public class SoftwareUpdateService {
 
     public String getWingetDiagnostics() {
         return winget.getDiagnostics();
+    }
+
+    public void shutdown() {
+        scanExecutor.shutdownNow();
     }
 
     public List<SoftwareUpdateEntry> scanForUpdates() throws IOException, InterruptedException {
@@ -76,7 +86,8 @@ public class SoftwareUpdateService {
         List<SoftwareUpdateEntry> out = new ArrayList<>();
         String trimmed = stdout == null ? "" : stdout.trim();
         if (trimmed.isEmpty()) return out;
-        if (trimmed.toLowerCase().contains("no applicable upgrades") || trimmed.toLowerCase().contains("no installed package")) {
+        String lowerTrimmed = trimmed.toLowerCase();
+        if (lowerTrimmed.contains("no applicable upgrades") || lowerTrimmed.contains("no installed package")) {
             return out;
         }
         String[] lines = stdout.split("\\r?\\n");
@@ -95,34 +106,40 @@ public class SoftwareUpdateService {
             }
         }
         int start = headerIdx >= 0 ? headerIdx + 1 : 0;
-        String[] headerTokens = headerLine == null ? new String[0] : headerLine.trim().split("\\s{2,}");
-        int idxName = findHeaderIndex(headerTokens, "name");
-        int idxId = findHeaderIndex(headerTokens, "id", "identifier", "packageidentifier");
-        int idxVersion = findHeaderIndex(headerTokens, "version", "installedversion", "installed");
-        int idxAvailable = findHeaderIndex(headerTokens, "available", "availableversion", "new");
-        int idxSource = findHeaderIndex(headerTokens, "source");
+
+        int idxName = -1, idxId = -1, idxVersion = -1, idxAvailable = -1, idxSource = -1;
+        if (headerLine != null) {
+            String lowerHeader = headerLine.toLowerCase();
+            idxName = findColumnStart(lowerHeader, "name");
+            idxId = findColumnStart(lowerHeader, "id", "identifier", "packageidentifier", "package id");
+            idxVersion = findColumnStart(lowerHeader, "version", "installedversion", "installed", "current");
+            idxAvailable = findColumnStart(lowerHeader, "available", "availableversion", "new", "upgradable");
+            idxSource = findColumnStart(lowerHeader, "source");
+        }
 
         for (int i = start; i < lines.length; i++) {
-            String l = lines[i].trim();
+            String l = lines[i];
             if (l.isBlank()) continue;
-            if (l.startsWith("---")) continue;
-            String[] tokens = l.split("\\s{2,}");
-            if (tokens.length < 3) continue;
+            if (l.trim().startsWith("---")) continue;
 
             try {
                 String name = null, id = null, version = null, available = null, source = null;
-                if (headerLine != null && headerTokens.length > 0) {
-                    if (idxName >= 0 && idxName < tokens.length) name = tokens[idxName];
-                    if (idxId >= 0 && idxId < tokens.length) id = tokens[idxId];
-                    if (idxVersion >= 0 && idxVersion < tokens.length) version = tokens[idxVersion];
-                    if (idxAvailable >= 0 && idxAvailable < tokens.length) available = tokens[idxAvailable];
-                    if (idxSource >= 0 && idxSource < tokens.length) source = tokens[idxSource];
+                if (headerLine != null) {
+                    if (idxName >= 0) name = extractColumnAt(l, idxName, headerLine.length()).trim();
+                    if (idxId >= 0) id = extractColumnAt(l, idxId, headerLine.length()).trim();
+                    if (idxVersion >= 0) version = extractColumnAt(l, idxVersion, headerLine.length()).trim();
+                    if (idxAvailable >= 0) available = extractColumnAt(l, idxAvailable, headerLine.length()).trim();
+                    if (idxSource >= 0) source = extractColumnAt(l, idxSource, headerLine.length()).trim();
                 }
-                if (name == null) name = tokens[0];
-                if (id == null && tokens.length > 1) id = tokens[1];
-                if (version == null && tokens.length > 2) version = tokens[2];
-                if (available == null && tokens.length > 3) available = tokens[3];
-                if (source == null && tokens.length > 4) source = tokens[4];
+                if (name == null || name.isBlank()) {
+                    String[] tokens = l.trim().split("\\s{2,}");
+                    if (tokens.length < 3) continue;
+                    name = tokens[0];
+                    if (tokens.length > 1) id = tokens[1];
+                    if (tokens.length > 2) version = tokens[2];
+                    if (tokens.length > 3) available = tokens[3];
+                    if (tokens.length > 4) source = tokens[4];
+                }
 
                 if (source != null && !source.isBlank() && !source.equalsIgnoreCase("winget")) continue;
                 if (available == null || available.isBlank()) continue;
@@ -134,6 +151,21 @@ public class SoftwareUpdateService {
             }
         }
         return out;
+    }
+
+    private static int findColumnStart(String lowerHeader, String... keys) {
+        for (String key : keys) {
+            int idx = lowerHeader.indexOf(key.toLowerCase());
+            if (idx >= 0) return idx;
+        }
+        return -1;
+    }
+
+    private static String extractColumnAt(String line, int startCol, int headerLen) {
+        if (startCol >= line.length()) return "";
+        String sub = line.substring(startCol);
+        String[] tokens = sub.trim().split("\\s{2,}", 2);
+        return tokens.length > 0 ? tokens[0] : "";
     }
 
     List<SoftwareUpdateEntry> parseJsonOutput(String stdout) {
@@ -183,17 +215,6 @@ public class SoftwareUpdateService {
             AppLogger.warning("parseJsonOutput failed: " + ex.getMessage());
         }
         return results;
-    }
-
-    private int findHeaderIndex(String[] headers, String... keys) {
-        if (headers == null) return -1;
-        for (int i = 0; i < headers.length; i++) {
-            String h = headers[i].toLowerCase();
-            for (String k : keys) {
-                if (h.contains(k.toLowerCase())) return i;
-            }
-        }
-        return -1;
     }
 
     public List<Path> findCandidateInstallersForPackage(SoftwareUpdateEntry pkg, Instant since) {
@@ -298,8 +319,21 @@ public class SoftwareUpdateService {
     }
 
     public ProcessResult installWindowsUpdate(String updateId, long timeoutSeconds) throws IOException, InterruptedException {
+        return installWindowsUpdate(updateId, timeoutSeconds, null);
+    }
+
+    public ProcessResult installWindowsUpdate(String updateId, long timeoutSeconds, AtomicBoolean cancelled)
+            throws IOException, InterruptedException, CancellationException {
         Path script = PowerShellScripts.resolve("wu-install.ps1");
-        return runner.run(ProcessRunner.powershellScript(script.toString(), updateId), timeoutSeconds);
+        if (cancelled == null) {
+            return runner.run(ProcessRunner.powershellScript(script.toString(), updateId), timeoutSeconds);
+        }
+        return runner.runStreaming(
+                ProcessRunner.powershellScript(script.toString(), updateId),
+                line -> {},
+                pct -> {},
+                cancelled
+        );
     }
 
     /**
@@ -327,7 +361,7 @@ public class SoftwareUpdateService {
                 if (onWingetDone != null) onWingetDone.accept(0);
                 return List.of();
             }
-        });
+        }, scanExecutor);
 
         CompletableFuture<List<SoftwareUpdateEntry>> wuFuture = CompletableFuture.supplyAsync(() -> {
             if (cancelled.getAsBoolean()) return List.of();
@@ -340,7 +374,7 @@ public class SoftwareUpdateService {
                 if (onWuDone != null) onWuDone.accept(0);
                 return List.of();
             }
-        });
+        }, scanExecutor);
 
         try {
             CompletableFuture.allOf(wingetFuture, wuFuture).join();

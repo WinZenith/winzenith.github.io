@@ -10,6 +10,7 @@ import com.sbtools.software.SoftwareUpdateEntry;
 import com.sbtools.software.SoftwareUpdateService;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
+import com.sbtools.util.CancellationToken;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleStringProperty;
@@ -60,7 +61,8 @@ public class DashboardTabView extends BorderPane {
     private final Button stopButton = new Button("Stop");
     private TableView<IssueCategory> table;
     private volatile Future<?> scanFuture;
-    private volatile boolean scanCancelled;
+    private volatile int scanGeneration;
+    private volatile CancellationToken scanCancellationToken;
     private volatile boolean disposed;
     private volatile Instant lastScanTime;
 
@@ -80,15 +82,9 @@ public class DashboardTabView extends BorderPane {
 
     // Per-category progress
     private HBox progressRow;
-    private ProgressBar driverProgress;
-    private Label driverStatusLabel;
-    private ProgressBar softwareProgress;
-    private Label softwareStatusLabel;
-    private ProgressBar cleanupProgress;
-    private Label cleanupStatusLabel;
-    private HBox progressItemDrivers;
-    private HBox progressItemSoftware;
-    private HBox progressItemCleanup;
+    private ProgressItem driverItem;
+    private ProgressItem softwareItem;
+    private ProgressItem cleanupItem;
 
     // Status bar
     private Label timestampLabel;
@@ -135,7 +131,8 @@ public class DashboardTabView extends BorderPane {
 
     public void dispose() {
         disposed = true;
-        scanCancelled = true;
+        CancellationToken token = scanCancellationToken;
+        if (token != null) token.cancel();
         if (scanFuture != null) {
             scanFuture.cancel(true);
             scanFuture = null;
@@ -146,10 +143,19 @@ public class DashboardTabView extends BorderPane {
     // ── Welcome Screen ────────────────────────────────────────────────────
 
     private void buildWelcomeScreen() {
-        ImageView logoView = new ImageView(new Image(getClass().getResourceAsStream("/logo-ico.png")));
-        logoView.setFitHeight(64);
-        logoView.setFitWidth(64);
-        logoView.setPreserveRatio(true);
+        javafx.scene.Node logoNode;
+        java.io.InputStream logoStream = getClass().getResourceAsStream("/logo-ico.png");
+        if (logoStream != null) {
+            ImageView logoView = new ImageView(new Image(logoStream));
+            logoView.setFitHeight(64);
+            logoView.setFitWidth(64);
+            logoView.setPreserveRatio(true);
+            logoNode = logoView;
+        } else {
+            Label fallback = new Label("\u2699");
+            fallback.setStyle("-fx-font-size: 48px;");
+            logoNode = fallback;
+        }
 
         Label title = new Label("WinZenith Dashboard");
         title.getStyleClass().add("dashboard-welcome-title");
@@ -172,7 +178,7 @@ public class DashboardTabView extends BorderPane {
         Region spacer = new Region();
         VBox.setVgrow(spacer, Priority.ALWAYS);
 
-        welcomeBox = new VBox(12, logoView, title, desc, cards, spacer);
+        welcomeBox = new VBox(12, logoNode, title, desc, cards, spacer);
         welcomeBox.getStyleClass().add("dashboard-welcome");
     }
 
@@ -265,8 +271,8 @@ public class DashboardTabView extends BorderPane {
             categoriesDescLabel.setText("categories");
             return;
         }
-        int totalIssues = issues.stream().mapToInt(IssueCategory::getCount).sum();
-        long totalSize = issues.stream().mapToLong(IssueCategory::getSizeBytes).sum();
+        int totalIssues = issues.stream().filter(ic -> !ic.isError()).mapToInt(IssueCategory::getCount).sum();
+        long totalSize = issues.stream().filter(ic -> !ic.isError()).mapToLong(IssueCategory::getSizeBytes).sum();
 
         issuesValueLabel.setText(String.valueOf(totalIssues));
         issuesDescLabel.setText("issue" + (totalIssues == 1 ? "" : "s") + " found");
@@ -274,31 +280,27 @@ public class DashboardTabView extends BorderPane {
         spaceValueLabel.setText(formatBytes(totalSize));
         spaceDescLabel.setText("can be freed");
 
-        categoriesValueLabel.setText(String.valueOf(issues.size()));
+        long errorCount = issues.stream().filter(IssueCategory::isError).count();
+        int categoryCount = issues.size() - (int) errorCount;
+        categoriesValueLabel.setText(String.valueOf(categoryCount));
         categoriesDescLabel.setText("categories with issues");
     }
 
     // ── Per-Category Progress ─────────────────────────────────────────────
 
+    private record ProgressItem(HBox box, ProgressBar bar, Label statusLabel) {}
+
     private HBox buildProgressRow() {
-        progressItemDrivers = createProgressItem("Outdated Drivers", "#8be9fd");
-        driverProgress = (ProgressBar) progressItemDrivers.getChildren().get(1);
-        driverStatusLabel = (Label) progressItemDrivers.getChildren().get(2);
+        driverItem = createProgressItem("Outdated Drivers");
+        softwareItem = createProgressItem("Software Updates");
+        cleanupItem = createProgressItem("System Cleanup");
 
-        progressItemSoftware = createProgressItem("Software Updates", "#ffb86c");
-        softwareProgress = (ProgressBar) progressItemSoftware.getChildren().get(1);
-        softwareStatusLabel = (Label) progressItemSoftware.getChildren().get(2);
-
-        progressItemCleanup = createProgressItem("System Cleanup", "#ff79c6");
-        cleanupProgress = (ProgressBar) progressItemCleanup.getChildren().get(1);
-        cleanupStatusLabel = (Label) progressItemCleanup.getChildren().get(2);
-
-        HBox row = new HBox(12, progressItemDrivers, progressItemSoftware, progressItemCleanup);
+        HBox row = new HBox(12, driverItem.box(), softwareItem.box(), cleanupItem.box());
         row.getStyleClass().add("dashboard-progress-row");
         return row;
     }
 
-    private HBox createProgressItem(String label, String accentColor) {
+    private ProgressItem createProgressItem(String label) {
         Label nameLabel = new Label(label);
         nameLabel.getStyleClass().add("dashboard-progress-label");
 
@@ -312,57 +314,52 @@ public class DashboardTabView extends BorderPane {
         HBox item = new HBox(8, nameLabel, pbar, statusLbl);
         item.setAlignment(Pos.CENTER_LEFT);
         item.getStyleClass().add("dashboard-progress-item");
-        return item;
+        return new ProgressItem(item, pbar, statusLbl);
     }
 
     private void updateCategoryProgress(int categoryIndex, String state) {
-        ProgressBar pbar;
-        Label statusLbl;
-        HBox item;
-        switch (categoryIndex) {
-            case 0 -> { pbar = driverProgress; statusLbl = driverStatusLabel; item = progressItemDrivers; }
-            case 1 -> { pbar = softwareProgress; statusLbl = softwareStatusLabel; item = progressItemSoftware; }
-            default -> { pbar = cleanupProgress; statusLbl = cleanupStatusLabel; item = progressItemCleanup; }
-        }
+        ProgressItem pi = switch (categoryIndex) {
+            case 0 -> driverItem;
+            case 1 -> softwareItem;
+            default -> cleanupItem;
+        };
         Platform.runLater(() -> {
-            item.getStyleClass().removeAll("active", "done", "failed");
-            statusLbl.getStyleClass().removeAll("active", "done", "failed");
+            pi.box().getStyleClass().removeAll("active", "done", "failed");
+            pi.statusLabel().getStyleClass().removeAll("active", "done", "failed");
             switch (state) {
                 case "scanning" -> {
-                    pbar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
-                    statusLbl.setText("Scanning\u2026");
-                    item.getStyleClass().add("active");
-                    statusLbl.getStyleClass().add("active");
+                    pi.bar().setProgress(ProgressBar.INDETERMINATE_PROGRESS);
+                    pi.statusLabel().setText("Scanning\u2026");
+                    pi.box().getStyleClass().add("active");
+                    pi.statusLabel().getStyleClass().add("active");
                 }
                 case "done" -> {
-                    pbar.setProgress(1);
-                    statusLbl.setText("Done");
-                    item.getStyleClass().add("done");
-                    statusLbl.getStyleClass().add("done");
+                    pi.bar().setProgress(1);
+                    pi.statusLabel().setText("Done");
+                    pi.box().getStyleClass().add("done");
+                    pi.statusLabel().getStyleClass().add("done");
                 }
                 case "failed" -> {
-                    pbar.setProgress(0);
-                    statusLbl.setText("Failed");
-                    item.getStyleClass().add("failed");
-                    statusLbl.getStyleClass().add("failed");
+                    pi.bar().setProgress(0);
+                    pi.statusLabel().setText("Failed");
+                    pi.box().getStyleClass().add("failed");
+                    pi.statusLabel().getStyleClass().add("failed");
                 }
                 default -> {
-                    pbar.setProgress(0);
-                    statusLbl.setText("Pending");
+                    pi.bar().setProgress(0);
+                    pi.statusLabel().setText("Pending");
                 }
             }
         });
     }
 
     private void resetProgressItems() {
-        for (HBox item : new HBox[]{progressItemDrivers, progressItemSoftware, progressItemCleanup}) {
-            if (item == null) continue;
-            ProgressBar pb = (ProgressBar) item.getChildren().get(1);
-            Label sl = (Label) item.getChildren().get(2);
-            pb.setProgress(0);
-            sl.setText("Pending");
-            item.getStyleClass().removeAll("active", "done", "failed");
-            sl.getStyleClass().removeAll("active", "done", "failed");
+        for (ProgressItem pi : new ProgressItem[]{driverItem, softwareItem, cleanupItem}) {
+            if (pi == null) continue;
+            pi.bar().setProgress(0);
+            pi.statusLabel().setText("Pending");
+            pi.box().getStyleClass().removeAll("active", "done", "failed");
+            pi.statusLabel().getStyleClass().removeAll("active", "done", "failed");
         }
     }
 
@@ -447,7 +444,9 @@ public class DashboardTabView extends BorderPane {
             statusLabel.setText("Run as Administrator to scan for issues.");
             return;
         }
-        scanCancelled = false;
+        final int generation = ++scanGeneration;
+        final CancellationToken token = new CancellationToken();
+        scanCancellationToken = token;
         busy.set(true);
         issues.clear();
         progressBar.setProgress(0);
@@ -464,163 +463,195 @@ public class DashboardTabView extends BorderPane {
 
         summaryLabel.setVisible(false);
 
-        scanFuture = executor.submit(() -> {
-            lastScanTime = Instant.now();
-            AtomicInteger scansComplete = new AtomicInteger();
-            int totalScans = 3;
-            try {
-                CompletableFuture<Void> driverScan = CompletableFuture.runAsync(
-                        () -> scanDrivers(scansComplete, totalScans), executor);
-                CompletableFuture<Void> softwareScan = CompletableFuture.runAsync(
-                        () -> scanSoftware(scansComplete, totalScans), executor);
-                CompletableFuture<Void> cleanupScan = CompletableFuture.runAsync(
-                        () -> scanCleanup(scansComplete, totalScans), executor);
+        try {
+            scanFuture = executor.submit(() -> {
+                lastScanTime = Instant.now();
+                AtomicInteger scansComplete = new AtomicInteger();
+                int totalScans = 3;
+                try {
+                    CompletableFuture<Void> driverScan = CompletableFuture.runAsync(
+                            () -> scanDrivers(generation, token, scansComplete, totalScans), executor);
+                    CompletableFuture<Void> softwareScan = CompletableFuture.runAsync(
+                            () -> scanSoftware(generation, token, scansComplete, totalScans), executor);
+                    CompletableFuture<Void> cleanupScan = CompletableFuture.runAsync(
+                            () -> scanCleanup(generation, token, scansComplete, totalScans), executor);
 
-                CompletableFuture.allOf(driverScan, softwareScan, cleanupScan).join();
+                    CompletableFuture.allOf(driverScan, softwareScan, cleanupScan).join();
 
-                Platform.runLater(() -> {
-                    if (scanCancelled) return;
-
-                    IssueCategory driversEntry = null;
-                    IssueCategory softwareEntry = null;
-                    for (IssueCategory ic : issues) {
-                        if ("Outdated Drivers".equals(ic.categoryProperty().get())) {
-                            driversEntry = ic;
-                        } else if ("Outdated Software".equals(ic.categoryProperty().get())) {
-                            softwareEntry = ic;
-                        }
-                    }
-                    if (driversEntry != null) issues.remove(driversEntry);
-                    if (softwareEntry != null) issues.remove(softwareEntry);
-                    if (driversEntry != null) issues.add(0, driversEntry);
-                    if (softwareEntry != null) issues.add(driversEntry != null ? 1 : 0, softwareEntry);
-
-                    progressRow.setVisible(false);
-                    progressRow.setManaged(false);
-
-                    if (issues.isEmpty()) {
-                        showHealthyState();
-                        statusLabel.setText("Scan complete \u2014 no issues found.");
-                    } else {
-                        int totalIssues = issues.stream().mapToInt(IssueCategory::getCount).sum();
-                        long totalSize = issues.stream().mapToLong(IssueCategory::getSizeBytes).sum();
-                        statusLabel.setText("Scan complete \u2014 " + issues.size() + " category" + (issues.size() == 1 ? "" : "ies") + " with issues.");
-                        summaryLabel.setText("Total: " + totalIssues + " issue" + (totalIssues == 1 ? "" : "s") + " across " + issues.size()
-                                + " categor" + (issues.size() == 1 ? "y" : "ies") + ". " + formatBytes(totalSize) + " can be freed.");
-                        summaryLabel.setVisible(true);
-                    }
-                    updateSummaryCards();
-                    updateTimestamp();
-                });
-            } catch (Exception ex) {
-                if (!scanCancelled) {
-                    AppLogger.error("Dashboard scan failed", ex);
                     Platform.runLater(() -> {
+                        if (isScanStale(generation)) return;
+
+                        IssueCategory driversEntry = null;
+                        IssueCategory softwareEntry = null;
+                        for (IssueCategory ic : issues) {
+                            if ("Outdated Drivers".equals(ic.categoryProperty().get())) {
+                                driversEntry = ic;
+                            } else if ("Outdated Software".equals(ic.categoryProperty().get())) {
+                                softwareEntry = ic;
+                            }
+                        }
+                        if (driversEntry != null) issues.remove(driversEntry);
+                        if (softwareEntry != null) issues.remove(softwareEntry);
+                        if (driversEntry != null) issues.add(0, driversEntry);
+                        if (softwareEntry != null) issues.add(driversEntry != null ? 1 : 0, softwareEntry);
+
                         progressRow.setVisible(false);
                         progressRow.setManaged(false);
-                        statusLabel.setText("Scan failed: " + ex.getMessage());
-                        new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
+
+                        if (issues.isEmpty()) {
+                            showHealthyState();
+                            statusLabel.setText("Scan complete \u2014 no issues found.");
+                        } else {
+                            long errorCount = issues.stream().filter(IssueCategory::isError).count();
+                            int categoryCount = issues.size() - (int) errorCount;
+                            int totalIssues = issues.stream().filter(ic -> !ic.isError()).mapToInt(IssueCategory::getCount).sum();
+                            long totalSize = issues.stream().filter(ic -> !ic.isError()).mapToLong(IssueCategory::getSizeBytes).sum();
+                            String errorNote = errorCount > 0 ? " (" + errorCount + " scan error" + (errorCount == 1 ? "" : "s") + ")" : "";
+                            statusLabel.setText("Scan complete \u2014 " + categoryCount + " category" + (categoryCount == 1 ? "" : "ies") + " with issues." + errorNote);
+                            summaryLabel.setText("Total: " + totalIssues + " issue" + (totalIssues == 1 ? "" : "s") + " across " + categoryCount
+                                    + " categor" + (categoryCount == 1 ? "y" : "ies") + ". " + formatBytes(totalSize) + " can be freed." + errorNote);
+                            summaryLabel.setVisible(true);
+                        }
+                        updateSummaryCards();
+                        updateTimestamp();
+                    });
+                } catch (Exception ex) {
+                    if (!isScanStale(generation)) {
+                        AppLogger.error("Dashboard scan failed", ex);
+                        Platform.runLater(() -> {
+                            progressRow.setVisible(false);
+                            progressRow.setManaged(false);
+                            statusLabel.setText("Scan failed: " + ex.getMessage());
+                            new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
+                        });
+                    }
+                } finally {
+                    if (!isScanStale(generation)) {
+                        scanFuture = null;
+                    }
+                    Platform.runLater(() -> {
+                        if (isScanStale(generation)) return;
+                        busy.set(false);
+                        progressBar.setVisible(false);
+                        stopButton.setVisible(false);
+                        stopButton.setDisable(true);
                     });
                 }
-            } finally {
-                scanFuture = null;
-                Platform.runLater(() -> {
-                    busy.set(false);
-                    progressBar.setVisible(false);
-                    stopButton.setVisible(false);
-                    stopButton.setDisable(true);
-                    if (scanCancelled && issues.isEmpty()) {
-                        showWelcomeView();
-                    }
-                });
-            }
-        });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ex) {
+            AppLogger.error("Scan executor rejected task", ex);
+            busy.set(false);
+            progressBar.setVisible(false);
+            stopButton.setVisible(false);
+            stopButton.setDisable(true);
+            statusLabel.setText("Scan unavailable \u2014 try again later.");
+        }
     }
 
-    private void scanDrivers(AtomicInteger scansComplete, int totalScans) {
-        if (scanCancelled) return;
+    private boolean isScanStale(int generation) {
+        return generation != scanGeneration;
+    }
+
+    private void scanDrivers(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
+        if (isScanStale(generation)) return;
         updateCategoryProgress(0, "scanning");
         Platform.runLater(() -> statusLabel.setText("Scanning for outdated drivers\u2026"));
         try {
             List<InstalledDriver> installed = driverScanService.scanInstalled();
-            if (scanCancelled) return;
-            List<DriverUpdateCandidate> candidates = catalog.findUpdates(installed);
-            if (scanCancelled) return;
+            if (isScanStale(generation)) return;
+            List<DriverUpdateCandidate> candidates = catalog.findUpdates(installed, token);
+            if (isScanStale(generation)) return;
             if (!candidates.isEmpty()) {
-                Platform.runLater(() -> issues.add(new IssueCategory(
-                        "Outdated Drivers", candidates.size(), 0, "Drivers")));
+                Platform.runLater(() -> {
+                    if (isScanStale(generation)) return;
+                    issues.add(new IssueCategory("Outdated Drivers", candidates.size(), 0, "Drivers"));
+                });
             }
             updateCategoryProgress(0, "done");
         } catch (Exception ex) {
             AppLogger.warning("Dashboard driver scan failed: " + ex.getMessage());
             updateCategoryProgress(0, "failed");
-            Platform.runLater(() -> issues.add(new IssueCategory(
-                    "Outdated Drivers", "Error: " + ex.getMessage(), "", "Drivers", 0)));
+            Platform.runLater(() -> {
+                if (isScanStale(generation)) return;
+                issues.add(new IssueCategory("Outdated Drivers", "Error: " + ex.getMessage(), "", "Drivers", 0));
+            });
         }
         int done = scansComplete.incrementAndGet();
         Platform.runLater(() -> progressBar.setProgress((double) done / totalScans));
     }
 
-    private void scanSoftware(AtomicInteger scansComplete, int totalScans) {
-        if (scanCancelled) return;
+    private void scanSoftware(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
+        if (isScanStale(generation)) return;
         updateCategoryProgress(1, "scanning");
         Platform.runLater(() -> statusLabel.setText("Scanning for software updates\u2026"));
         try {
             List<SoftwareUpdateEntry> updates = softwareUpdateService.scanAllConcurrent(
-                    () -> scanCancelled, w -> {}, wu -> {});
-            if (scanCancelled) return;
+                    () -> isScanStale(generation), w -> {}, wu -> {});
+            if (isScanStale(generation)) return;
             if (!updates.isEmpty()) {
                 long totalSize = updates.stream().mapToLong(SoftwareUpdateEntry::sizeBytes).sum();
-                Platform.runLater(() -> issues.add(new IssueCategory(
-                        "Outdated Software", updates.size(), totalSize, "Software")));
+                Platform.runLater(() -> {
+                    if (isScanStale(generation)) return;
+                    issues.add(new IssueCategory("Outdated Software", updates.size(), totalSize, "Software"));
+                });
             }
             updateCategoryProgress(1, "done");
         } catch (Exception ex) {
             AppLogger.warning("Dashboard software scan failed: " + ex.getMessage());
             updateCategoryProgress(1, "failed");
-            Platform.runLater(() -> issues.add(new IssueCategory(
-                    "Outdated Software", "Error: " + ex.getMessage(), "", "Software", 0)));
+            Platform.runLater(() -> {
+                if (isScanStale(generation)) return;
+                issues.add(new IssueCategory("Outdated Software", "Error: " + ex.getMessage(), "", "Software", 0));
+            });
         }
         int done = scansComplete.incrementAndGet();
         Platform.runLater(() -> progressBar.setProgress((double) done / totalScans));
     }
 
-    private void scanCleanup(AtomicInteger scansComplete, int totalScans) {
-        if (scanCancelled) return;
+    private void scanCleanup(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
+        if (isScanStale(generation)) return;
         updateCategoryProgress(2, "scanning");
         Platform.runLater(() -> statusLabel.setText("Scanning for system cleanup opportunities\u2026"));
         try {
             List<CleanupRow> results = cleanupService.scan(() -> {});
-            if (scanCancelled) return;
+            if (isScanStale(generation)) return;
             for (CleanupRow row : results) {
-                if (scanCancelled) return;
+                if (isScanStale(generation)) return;
                 if (row.getTotalBytes() <= 0 && row.getScanStatus() != CleanupRow.ScanStatus.ERROR) {
                     continue;
                 }
                 String detailText = row.sizeOrCountTextProperty().get();
                 String sizeText = row.getTotalBytes() > 0 ? formatBytes(row.getTotalBytes()) : "";
-                Platform.runLater(() -> issues.add(new IssueCategory(
-                        row.getCategory().getDisplayName(),
-                        detailText,
-                        sizeText,
-                        "Cleanup",
-                        row.getTotalBytes())));
+                Platform.runLater(() -> {
+                    if (isScanStale(generation)) return;
+                    issues.add(new IssueCategory(
+                            row.getCategory().getDisplayName(),
+                            detailText,
+                            sizeText,
+                            "Cleanup",
+                            row.getTotalBytes()));
+                });
             }
             updateCategoryProgress(2, "done");
         } catch (Exception ex) {
             AppLogger.warning("Dashboard cleanup scan failed: " + ex.getMessage());
             updateCategoryProgress(2, "failed");
-            Platform.runLater(() -> issues.add(new IssueCategory(
-                    "System Cleanup", "Error: " + ex.getMessage(), "", "Cleanup", 0)));
+            Platform.runLater(() -> {
+                if (isScanStale(generation)) return;
+                issues.add(new IssueCategory("System Cleanup", "Error: " + ex.getMessage(), "", "Cleanup", 0));
+            });
         }
         int done = scansComplete.incrementAndGet();
         Platform.runLater(() -> progressBar.setProgress((double) done / totalScans));
     }
 
     private void stopScan() {
-        scanCancelled = true;
-        if (scanFuture != null) {
-            scanFuture.cancel(true);
+        scanGeneration++;
+        CancellationToken token = scanCancellationToken;
+        if (token != null) token.cancel();
+        Future<?> f = scanFuture;
+        if (f != null) {
+            f.cancel(true);
             scanFuture = null;
         }
         busy.set(false);
@@ -668,11 +699,13 @@ public class DashboardTabView extends BorderPane {
         private final SimpleStringProperty source;
         private final int count;
         private final long sizeBytes;
+        private final boolean error;
 
         public IssueCategory(String category, int count, long sizeBytes, String source) {
             this.category = new SimpleStringProperty(category);
             this.count = count;
             this.sizeBytes = sizeBytes;
+            this.error = false;
             this.countText = new SimpleStringProperty(count + " issue" + (count == 1 ? "" : "s"));
             this.sizeText = new SimpleStringProperty(sizeBytes > 0 ? formatBytes(sizeBytes) : "");
             this.source = new SimpleStringProperty(source);
@@ -682,6 +715,7 @@ public class DashboardTabView extends BorderPane {
             this.category = new SimpleStringProperty(category);
             this.count = 1;
             this.sizeBytes = sizeBytes;
+            this.error = true;
             this.countText = new SimpleStringProperty(detailText);
             this.sizeText = new SimpleStringProperty(sizeText);
             this.source = new SimpleStringProperty(source);
@@ -693,5 +727,6 @@ public class DashboardTabView extends BorderPane {
         public SimpleStringProperty sourceProperty() { return source; }
         public int getCount() { return count; }
         public long getSizeBytes() { return sizeBytes; }
+        public boolean isError() { return error; }
     }
 }

@@ -170,6 +170,9 @@ public class DriversTabView extends BorderPane {
             if (outdatedTable != null) {
                 outdatedTable.refresh();
             }
+            if (upToDateTable != null) {
+                upToDateTable.refresh();
+            }
         });
         if (!AppPaths.isWindows()) {
             statusLabel.setText("This application requires Windows.");
@@ -341,6 +344,7 @@ public class DriversTabView extends BorderPane {
         private final ProgressIndicator spinner = new ProgressIndicator();
         private final HBox container;
         private State state = State.IDLE;
+        private DriverRow trackedRow;
 
         DriverActionCell() {
             spinner.setPrefSize(24, 24);
@@ -359,7 +363,7 @@ public class DriversTabView extends BorderPane {
                 DriverRow row = currentRow();
                 if (row != null) {
                     excludeDriver(row);
-                    getTableView().getItems().remove(row);
+                    outdatedRows.remove(row);
                 }
             });
             stopBtn.setOnAction(e -> {
@@ -384,12 +388,21 @@ public class DriversTabView extends BorderPane {
             super.updateItem(item, empty);
             if (empty) {
                 setGraphic(null);
+                trackedRow = null;
                 return;
             }
             DriverRow row = currentRow();
             if (row == null) {
                 setGraphic(null);
+                trackedRow = null;
                 return;
+            }
+            if (row != trackedRow) {
+                state = State.IDLE;
+                sizeLabel.setText("");
+                downloadProgress.setProgress(0);
+                stopBtn.setDisable(true);
+                trackedRow = row;
             }
             updateBtn.setDisable(!row.hasUpdate() || busy.get());
             ignoreBtn.setDisable(busy.get());
@@ -400,6 +413,7 @@ public class DriversTabView extends BorderPane {
                 }
                 updateBtn.setTooltip(new Tooltip(tooltipText));
             }
+            applyVisibility();
             setGraphic(container);
         }
 
@@ -486,7 +500,7 @@ public class DriversTabView extends BorderPane {
                         DriverRow row = getTableView().getItems().get(idx);
                         if (row != null) {
                             excludeDriver(row);
-                            getTableView().getItems().remove(row);
+                            upToDateRows.remove(row);
                         }
                     }
                 });
@@ -504,7 +518,7 @@ public class DriversTabView extends BorderPane {
         });
 
         table.setPlaceholder(new Label("No up-to-date drivers detected yet \u2014 run a scan to populate this list."));
-        table.getColumns().addAll(deviceCol, currentCol, healthCol);
+        table.getColumns().addAll(deviceCol, currentCol, healthCol, actionCol);
         return table;
     }
 
@@ -653,14 +667,27 @@ public class DriversTabView extends BorderPane {
         statusLabel.setText(text);
     }
 
+    private static final Map<String, String> PROVIDER_STATUS_NAMES = Map.ofEntries(
+            Map.entry("WindowsUpdate", "Windows Update"),
+            Map.entry("Nvidia", "NVIDIA"),
+            Map.entry("AMD", "AMD"),
+            Map.entry("Intel", "Intel"),
+            Map.entry("Realtek", "Realtek"),
+            Map.entry("Broadcom", "Broadcom"),
+            Map.entry("Qualcomm", "Qualcomm"),
+            Map.entry("Synaptics", "Synaptics"),
+            Map.entry("Lenovo", "Lenovo"),
+            Map.entry("Dell", "Dell"),
+            Map.entry("HP", "HP"),
+            Map.entry("ASUS", "ASUS")
+    );
+
     private static String providerStatus(String providerId, int deviceCount) {
-        return switch (providerId) {
-            case "WindowsUpdate" -> "Checking Windows Update (" + deviceCount + " devices)…";
-            case "Nvidia" -> "Checking NVIDIA catalog…";
-            case "AMD" -> "Checking AMD catalog…";
-            case "Intel" -> "Checking Intel catalog…";
-            default -> "Checking " + providerId + "…";
-        };
+        String displayName = PROVIDER_STATUS_NAMES.getOrDefault(providerId, providerId);
+        if ("WindowsUpdate".equals(providerId)) {
+            return "Checking " + displayName + " (" + deviceCount + " devices)\u2026";
+        }
+        return "Checking " + displayName + " catalog\u2026";
     }
 
     private static void applyCandidates(Map<String, DriverRow> rowByDevice, List<DriverUpdateCandidate> candidates) {
@@ -1192,64 +1219,72 @@ public class DriversTabView extends BorderPane {
             int succeeded = 0;
             int failed = 0;
             int skipped = 0;
-            int total = rows.size();
-            AppSettings settings = settingsStore.load();
-            for (int i = 0; i < total; i++) {
-                DriverRow row = rows.get(i);
-                if (row.candidate() == null) {
-                    skipped++;
-                    continue;
-                }
-                DriverUpdateCandidate c = row.candidate();
-
-                boolean isWuInstall = "WindowsUpdate".equals(c.source())
-                        && c.packageId() != null && !c.packageId().isBlank();
-                if (!isWuInstall && (c.downloadUrl() == null || c.downloadUrl().isBlank())) {
-                    skipped++;
-                    continue;
-                }
-
-                final int idx = i;
-                Platform.runLater(() -> {
-                    statusLabel.setText("Installing " + (idx + 1) + "/" + total + ": "
-                            + row.installed().friendlyName() + "\u2026");
-                    double p = (double) idx / total;
-                    progressBar.setProgress(p);
-                    progressLabel.setText((int)(p * 100) + "%");
-                });
-
-                try {
-                    installService.resetCancellation();
-                    installService.setProgressCallback((bytesReceived, totalBytes, fraction) -> {
-                        String sizeText = totalBytes > 0
-                                ? formatBytes(bytesReceived) + " / " + formatBytes(totalBytes)
-                                : formatBytes(bytesReceived);
-                        Platform.runLater(() -> statusLabel.setText("Installing " + (idx + 1) + "/" + total
-                                + ": " + row.installed().friendlyName() + " \u2014 " + sizeText));
-                    });
-                    installService.setStatusCallback(status -> Platform.runLater(() ->
-                            statusLabel.setText("Installing " + (idx + 1) + "/" + total + ": "
-                                    + row.installed().friendlyName() + " \u2014 " + status)));
-                    DriverInstallService.InstallResult result = installService.install(c, settings);
-                    if (result.installed()) {
-                        succeeded++;
-                        Platform.runLater(() -> {
-                            row.setCandidate(null);
-                            row.setSelected(false);
-                            outdatedRows.remove(row);
-                            if (!upToDateRows.contains(row)) {
-                                upToDateRows.add(row);
-                            }
-                        });
-                        recordHistory(row, c, true);
-                    } else {
-                        failed++;
-                        recordHistory(row, c, false);
+            try {
+                int total = rows.size();
+                AppSettings settings = settingsStore.load();
+                for (int i = 0; i < total; i++) {
+                    DriverRow row = rows.get(i);
+                    if (row.candidate() == null) {
+                        skipped++;
+                        continue;
                     }
-                } catch (Exception ex) {
-                    failed++;
-                    AppLogger.warning("Batch install failed for " + row.installed().friendlyName() + ": " + ex.getMessage());
+                    DriverUpdateCandidate c = row.candidate();
+
+                    boolean isWuInstall = "WindowsUpdate".equals(c.source())
+                            && c.packageId() != null && !c.packageId().isBlank();
+                    if (!isWuInstall && (c.downloadUrl() == null || c.downloadUrl().isBlank())) {
+                        skipped++;
+                        continue;
+                    }
+
+                    final int idx = i;
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Installing " + (idx + 1) + "/" + total + ": "
+                                + row.installed().friendlyName() + "\u2026");
+                        double p = (double) idx / total;
+                        progressBar.setProgress(p);
+                        progressLabel.setText((int)(p * 100) + "%");
+                    });
+
+                    try {
+                        installService.resetCancellation();
+                        installService.setProgressCallback((bytesReceived, totalBytes, fraction) -> {
+                            String sizeText = totalBytes > 0
+                                    ? formatBytes(bytesReceived) + " / " + formatBytes(totalBytes)
+                                    : formatBytes(bytesReceived);
+                            Platform.runLater(() -> statusLabel.setText("Installing " + (idx + 1) + "/" + total
+                                    + ": " + row.installed().friendlyName() + " \u2014 " + sizeText));
+                        });
+                        installService.setStatusCallback(status -> Platform.runLater(() ->
+                                statusLabel.setText("Installing " + (idx + 1) + "/" + total + ": "
+                                        + row.installed().friendlyName() + " \u2014 " + status)));
+                        DriverInstallService.InstallResult result = installService.install(c, settings);
+                        if (result.installed()) {
+                            succeeded++;
+                            Platform.runLater(() -> {
+                                row.setCandidate(null);
+                                row.setSelected(false);
+                                outdatedRows.remove(row);
+                                if (!upToDateRows.contains(row)) {
+                                    upToDateRows.add(row);
+                                }
+                            });
+                            recordHistory(row, c, true);
+                        } else {
+                            failed++;
+                            recordHistory(row, c, false);
+                        }
+                    } catch (Exception ex) {
+                        failed++;
+                        AppLogger.warning("Batch install failed for " + row.installed().friendlyName() + ": " + ex.getMessage());
+                    }
                 }
+            } catch (Exception ex) {
+                AppLogger.warning("Batch install initialization failed: " + ex.getMessage());
+                failed += rows.size() - succeeded - skipped;
+            } finally {
+                installService.setProgressCallback(null);
+                installService.setStatusCallback(null);
             }
             final int s = succeeded;
             final int f = failed;
@@ -1259,6 +1294,8 @@ public class DriversTabView extends BorderPane {
                 scanButton.setDisable(false);
                 updateAllButton.setDisable(outdatedRows.isEmpty());
                 updateSelectedButton.setDisable(true);
+                progressBar.setProgress(1.0);
+                progressLabel.setText("100%");
                 progressBar.setVisible(false);
                 progressLabel.setVisible(false);
                 String summary = "Batch update complete: " + s + " succeeded, " + f + " failed";

@@ -19,7 +19,7 @@ try {
             updateId    = $u.Identity.UpdateID
             title       = $u.Title
             description = $u.Description
-            version     = if ($u.Title -match '\b\d+(?:\.\d+){2,}\b') { $Matches[0] } elseif ($u.DriverModel -match '\b\d+(?:\.\d+){2,}\b') { $Matches[0] } elseif ($u.DriverModel) { $u.DriverModel } else { $u.Title }
+            version     = if ($u.DriverModel -match '\b\d+(?:\.\d+){2,}\b') { $Matches[0] } elseif ($u.Title -match '\b\d+(?:\.\d+){3,}\b') { $Matches[0] } elseif ($u.Title -match '\b\d+(?:\.\d+){2,}\b') { $Matches[0] } elseif ($u.DriverModel) { $u.DriverModel } else { $u.Title }
             sizeBytes   = $u.MaxDownloadSize
             severity    = [string]$u.MsrcSeverity
             kbArticle   = [string]$kb

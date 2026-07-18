@@ -86,13 +86,28 @@ public class ProcessRunner {
                 }
                 outBuf.append(line).append(System.lineSeparator());
                 if (progressCallback != null) {
+                    boolean jsonProgressFired = false;
                     try {
                         var tree = JsonMapper.mapper().readTree(line);
                         if (tree.has("progress")) {
                             double pct = tree.get("progress").asDouble(0);
                             progressCallback.accept(Math.min(1.0, Math.max(0, pct / 100.0)));
+                            jsonProgressFired = true;
                         }
                     } catch (Exception ignored) {
+                    }
+                    if (!jsonProgressFired) {
+                        String trimmed = line.trim();
+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*%").matcher(trimmed);
+                        if (m.find()) {
+                            try {
+                                double pct = Double.parseDouble(m.group(1));
+                                progressCallback.accept(Math.min(1.0, Math.max(0, pct / 100.0)));
+                            } catch (NumberFormatException ignored) {
+                            }
+                        } else if (trimmed.toLowerCase().startsWith("downloading") || trimmed.toLowerCase().startsWith("installing")) {
+                            progressCallback.accept(-1.0);
+                        }
                     }
                 }
             }
@@ -149,5 +164,14 @@ public class ProcessRunner {
             cmd.add(arg);
         }
         return cmd;
+    }
+
+    /**
+     * Escapes a string for safe use inside a PowerShell single-quoted string literal.
+     * Single quotes within the value are doubled, which is PowerShell's escape mechanism.
+     */
+    public static String psQuote(String value) {
+        if (value == null) return "''";
+        return "'" + value.replace("'", "''") + "'";
     }
 }

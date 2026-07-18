@@ -36,7 +36,7 @@ public class DriverVerificationService {
             cmd.add("powershell");
             cmd.add("-NoProfile");
             cmd.add("-Command");
-            cmd.add("Get-AuthenticodeSignature -FilePath '" + file + "' | Select-Object -Property Status,SignerCertificate | ConvertTo-Json -Depth 4");
+            cmd.add("Get-AuthenticodeSignature -FilePath " + ProcessRunner.psQuote(file.toString()) + " | Select-Object -Property Status,SignerCertificate | ConvertTo-Json -Depth 4");
             ProcessResult result = POWERSHELL_RUNNER.run(cmd);
             if (!result.success()) {
                 AppLogger.warning("Authenticode thumbprint check failed: " + result.combinedOutput());
@@ -99,7 +99,7 @@ public class DriverVerificationService {
             cmd.add("powershell");
             cmd.add("-NoProfile");
             cmd.add("-Command");
-            cmd.add("Get-AuthenticodeSignature -FilePath '" + file + "' | ConvertTo-Json -Depth 3");
+            cmd.add("Get-AuthenticodeSignature -FilePath " + ProcessRunner.psQuote(file.toString()) + " | ConvertTo-Json -Depth 3");
             ProcessResult result = POWERSHELL_RUNNER.run(cmd);
             if (!result.success()) {
                 AppLogger.warning("Authenticode check failed: " + result.combinedOutput());

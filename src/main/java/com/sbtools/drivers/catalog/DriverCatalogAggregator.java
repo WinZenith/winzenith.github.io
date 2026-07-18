@@ -135,7 +135,12 @@ public class DriverCatalogAggregator {
                         if (token.isCancelled()) {
                             return null;
                         }
-                        rateLimit.acquire();
+                        try {
+                            rateLimit.acquire();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return null;
+                        }
                         try {
                             if (token.isCancelled()) {
                                 return null;
@@ -171,6 +176,14 @@ public class DriverCatalogAggregator {
             }
         } finally {
             pool.shutdown();
+            try {
+                if (!pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    pool.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                pool.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

@@ -57,6 +57,7 @@ public class SoftwareUpdateViewModel {
     private volatile Future<?> scanFuture;
     private final AtomicBoolean installCancelled = new AtomicBoolean(false);
     private final AtomicBoolean installRunning = new AtomicBoolean(false);
+    private final AtomicBoolean restorePointCreatedThisBatch = new AtomicBoolean(false);
     private final List<SoftwareUpdateEntry> failedEntries = new ArrayList<>();
     private volatile boolean disposed = false;
 
@@ -95,7 +96,7 @@ public class SoftwareUpdateViewModel {
     public void scan() {
         if (busy.get() || disposed) return;
         scanCancelled.set(false);
-        retryCount = 0;
+        restorePointCreatedThisBatch.set(false);
         Platform.runLater(() -> {
             if (disposed) return;
             busy.set(true);
@@ -180,15 +181,19 @@ public class SoftwareUpdateViewModel {
             }
             scanFuture = null;
         }
-        if (!installRunning.get()) {
-            Platform.runLater(() -> {
-                if (!disposed) busy.set(false);
-            });
-        }
-        statusText.set("Scan stopped.");
+        Platform.runLater(() -> {
+            if (!disposed && !installRunning.get()) {
+                busy.set(false);
+            }
+            statusText.set("Scan stopped.");
+        });
     }
 
     public void updateSelected(List<SoftwareUpdateEntry> selected) {
+        updateSelected(selected, false);
+    }
+
+    private void updateSelected(List<SoftwareUpdateEntry> selected, boolean isRetry) {
         if (!adminCheck.getAsBoolean()) {
             Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait());
             return;
@@ -200,6 +205,7 @@ public class SoftwareUpdateViewModel {
 
         maybeCreateRestorePointAsync().thenRunAsync(() -> {
             synchronized (failedEntries) { failedEntries.clear(); }
+            if (!isRetry) retryCount = 0;
             installRunning.set(true);
             int total = selected.size();
             Platform.runLater(() -> {
@@ -260,7 +266,8 @@ public class SoftwareUpdateViewModel {
                     fe.setStatus("Failed");
                     fe.setProgress(0.0);
                     fe.setSelected(false);
-                    if (!rows.contains(fe)) rows.add(fe);
+                    rows.remove(fe);
+                    rows.add(fe);
                 }
                 showRetryFailed.set(true);
                 showBatchResultDialog(failedNames, finalTechMismatch);
@@ -278,6 +285,7 @@ public class SoftwareUpdateViewModel {
             return;
         }
 
+        restorePointCreatedThisBatch.set(false);
         maybeCreateRestorePointAsync().thenRunAsync(() -> {
             synchronized (failedEntries) { failedEntries.clear(); }
             installRunning.set(true);
@@ -301,7 +309,11 @@ public class SoftwareUpdateViewModel {
             Instant start = Instant.now();
             ProcessResult res;
             if ("WindowsUpdate".equals(entry.source()) && entry.updateId() != null) {
-                res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS);
+                try {
+                    res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS, installCancelled);
+                } catch (CancellationException cex) {
+                    return;
+                }
             } else {
                 try {
                     res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_SECONDS, entry, installCancelled);
@@ -327,7 +339,7 @@ public class SoftwareUpdateViewModel {
                     });
                 }
             } else {
-                failedEntries.add(entry);
+                synchronized (failedEntries) { failedEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, res.combinedOutput());
                 Platform.runLater(() -> {
                     if (disposed) return;
@@ -339,7 +351,7 @@ public class SoftwareUpdateViewModel {
         } catch (Exception ex) {
             String msg = ex.getMessage();
             if (msg != null && msg.contains("INSTALL_TECHNOLOGY_MISMATCH")) {
-                failedEntries.add(entry);
+                synchronized (failedEntries) { failedEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, msg);
                 Platform.runLater(() -> {
                     if (disposed) return;
@@ -356,7 +368,7 @@ public class SoftwareUpdateViewModel {
                     }
                 });
             } else {
-                failedEntries.add(entry);
+                synchronized (failedEntries) { failedEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, msg);
                 Platform.runLater(() -> {
                     if (!disposed) {
@@ -372,7 +384,7 @@ public class SoftwareUpdateViewModel {
         }
     }
 
-    private int retryCount = 0;
+    private volatile int retryCount = 0;
 
     public void retryFailed() {
         synchronized (failedEntries) {
@@ -391,7 +403,7 @@ public class SoftwareUpdateViewModel {
                 e.setSelected(true);
             }
             showRetryFailed.set(false);
-            updateSelected(toRetry);
+            updateSelected(toRetry, true);
         }
     }
 
@@ -424,6 +436,8 @@ public class SoftwareUpdateViewModel {
             try { scanFuture.cancel(true); } catch (Exception ignored) {}
         }
         shutdownExecutor(installExecutor);
+        shutdownExecutor(executor);
+        service.shutdown();
     }
 
     // --- Executors ---
@@ -447,7 +461,8 @@ public class SoftwareUpdateViewModel {
                              List<SoftwareUpdateEntry> techMismatchEntries) {
         if (installCancelled.get()) return;
         try {
-            int current = completed.get();
+            Instant start = Instant.now();
+            int current = completed.incrementAndGet();
             Platform.runLater(() -> {
                 if (disposed) return;
                 statusText.set("Installing " + entry.getName() + "...");
@@ -459,7 +474,11 @@ public class SoftwareUpdateViewModel {
 
             ProcessResult res;
             if ("WindowsUpdate".equals(entry.source()) && entry.updateId() != null) {
-                res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS);
+                try {
+                    res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS, installCancelled);
+                } catch (CancellationException cex) {
+                    return;
+                }
             } else {
                 try {
                     res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_SECONDS, entry, installCancelled);
@@ -469,7 +488,7 @@ public class SoftwareUpdateViewModel {
             }
 
             if (res.success()) {
-                InstallerCleanupHelper.promptAndCleanup(service, entry, Instant.now());
+                InstallerCleanupHelper.promptAndCleanup(service, entry, start);
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), true, null);
                 Platform.runLater(() -> {
                     if (disposed) return;
@@ -495,6 +514,8 @@ public class SoftwareUpdateViewModel {
                     entry.setProgress(0.0);
                 });
             }
+        } catch (CancellationException cex) {
+            return;
         } catch (Exception ex) {
             AppLogger.warning("Exception during update: " + ex.getMessage());
             synchronized (failedPackages) { failedPackages.add(entry); }
@@ -508,13 +529,16 @@ public class SoftwareUpdateViewModel {
                 entry.setProgress(0.0);
             });
         } finally {
-            completed.incrementAndGet();
+            // completed already incremented at start of try block
         }
     }
 
     private CompletableFuture<Void> maybeCreateRestorePointAsync() {
         AppSettings settings = settingsStore.load();
         if (!settings.createSystemRestorePoint()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (restorePointCreatedThisBatch.get()) {
             return CompletableFuture.completedFuture(null);
         }
         CompletableFuture<Void> f = new CompletableFuture<>();
@@ -526,6 +550,7 @@ public class SoftwareUpdateViewModel {
                 if (result == ButtonType.OK) {
                     boolean created = restoreService.createRestorePoint("WinZenith software update").success();
                     if (!created) AppLogger.warning("Restore point creation failed or skipped.");
+                    restorePointCreatedThisBatch.set(true);
                 }
             });
             f.complete(null);

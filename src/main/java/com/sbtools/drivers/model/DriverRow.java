@@ -19,7 +19,7 @@ public class DriverRow {
     private final BooleanProperty selected = new SimpleBooleanProperty(false);
     private final ObjectProperty<DriverHealthService.DriverHealthScore> healthScore = new SimpleObjectProperty<>();
     private final ObjectProperty<UpdateSeverity> severity = new SimpleObjectProperty<>();
-    private DriverUpdateCandidate candidate;
+    private volatile DriverUpdateCandidate candidate;
 
     public DriverRow(InstalledDriver installed) {
         this.installed = installed;

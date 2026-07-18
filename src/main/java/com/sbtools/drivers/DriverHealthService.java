@@ -76,8 +76,11 @@ public class DriverHealthService {
         String[] parts = ver.split("\\.");
         if (parts.length >= 2) {
             try {
-                int major = Integer.parseInt(parts[0].replaceAll("[^0-9]", ""));
-                int minor = parts.length >= 2 ? Integer.parseInt(parts[1].replaceAll("[^0-9]", "")) : 0;
+                String majorStr = parts[0].replaceAll("[^0-9]", "");
+                String minorStr = parts[1].replaceAll("[^0-9]", "");
+                if (majorStr.isEmpty() || minorStr.isEmpty()) return 3;
+                int major = Integer.parseInt(majorStr);
+                int minor = Integer.parseInt(minorStr);
                 if (major == 0) return 10;
                 if (major < 5 && minor == 0) return 8;
                 if (major < 10) return 5;

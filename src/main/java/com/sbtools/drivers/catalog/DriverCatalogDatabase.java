@@ -169,7 +169,7 @@ public final class DriverCatalogDatabase {
         String normalized = normalizeHardwareId(hardwareId);
         List<CatalogEntry> result = new ArrayList<>();
         for (Map.Entry<String, List<CatalogEntry>> entry : byHardwareId.entrySet()) {
-            if (normalized.contains(entry.getKey()) || entry.getKey().contains(normalized)) {
+            if (matchesHardwareId(normalized, entry.getKey())) {
                 result.addAll(entry.getValue());
             }
         }
@@ -204,11 +204,11 @@ public final class DriverCatalogDatabase {
         String normalized = normalizeHardwareId(hwId);
         List<CatalogEntry> matches = new ArrayList<>();
         for (Map.Entry<String, List<CatalogEntry>> entry : byHardwareId.entrySet()) {
-            if (normalized.contains(entry.getKey())) {
+            if (matchesHardwareId(normalized, entry.getKey())) {
                 for (CatalogEntry ce : entry.getValue()) {
                     if (ce.hardwareIds() != null) {
                         for (String entryHwId : ce.hardwareIds()) {
-                            if (normalized.contains(normalizeHardwareId(entryHwId))) {
+                            if (matchesHardwareId(normalized, normalizeHardwareId(entryHwId))) {
                                 matches.add(ce);
                                 break;
                             }
@@ -256,6 +256,28 @@ public final class DriverCatalogDatabase {
 
     private static String normalizeHardwareId(String hwId) {
         return hwId.toUpperCase().replaceAll("[^A-Z0-9&\\\\_]", "");
+    }
+
+    /**
+     * Checks if two normalized hardware IDs match, allowing one to be a
+     * prefix of the other (e.g. PCI_VEN_8086&amp;DEV_2723 matches
+     * PCI_VEN_8086&amp;DEV_2723&amp;SUBSYS_12345678) but rejecting
+     * substring matches at non-segment boundaries (e.g. DEV_2723 must not
+     * match DEV_27231).
+     */
+    private static boolean matchesHardwareId(String a, String b) {
+        if (a.equals(b)) {
+            return true;
+        }
+        if (a.startsWith(b)) {
+            return b.isEmpty() || b.charAt(b.length() - 1) == '&' || b.charAt(b.length() - 1) == '\\'
+                    || a.charAt(b.length()) == '&' || a.charAt(b.length()) == '\\';
+        }
+        if (b.startsWith(a)) {
+            return a.isEmpty() || a.charAt(a.length() - 1) == '&' || a.charAt(a.length() - 1) == '\\'
+                    || b.charAt(a.length()) == '&' || b.charAt(a.length()) == '\\';
+        }
+        return false;
     }
 
     private static Map<String, List<CatalogEntry>> indexByProvider(List<CatalogEntry> entries) {

@@ -102,11 +102,16 @@ public class DriverInstallService {
         }
 
         if ("WindowsUpdate".equals(candidate.source()) && candidate.packageId() != null && !candidate.packageId().isBlank()) {
+            if (cancellationFlag.get()) {
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+            }
             try {
                 Path script = PowerShellScripts.resolve("wu-install.ps1");
                 ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
                         script.toString(), candidate.packageId()));
                 if (!result.success()) {
+                    removeBackupIfPresent(backupEntry);
+                    removeRestorePointIfPresent(restorePointSeq);
                     return new InstallResult(InstallStatus.INSTALL_FAILED, false,
                             "Windows Update install failed: " + result.combinedOutput());
                 }
@@ -130,6 +135,8 @@ public class DriverInstallService {
                 }
                 return new InstallResult(InstallStatus.SUCCESS, reboot, message);
             } catch (Exception e) {
+                removeBackupIfPresent(backupEntry);
+                removeRestorePointIfPresent(restorePointSeq);
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
         }
@@ -144,8 +151,14 @@ public class DriverInstallService {
             }
             try {
                 InstallResult result = downloadAndInstallDriver(candidate, settings);
+                if (!result.installed()) {
+                    removeBackupIfPresent(backupEntry);
+                    removeRestorePointIfPresent(restorePointSeq);
+                }
                 return result;
             } catch (Exception e) {
+                removeBackupIfPresent(backupEntry);
+                removeRestorePointIfPresent(restorePointSeq);
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
         }
@@ -527,7 +540,8 @@ public class DriverInstallService {
 
             ProcessResult extractResult = processRunner.run(java.util.List.of(new ProcessBuilder(
                     "powershell", "-NoProfile", "-Command",
-                    "Expand-Archive -Path '" + driverFile + "' -DestinationPath '" + extractDir + "' -Force"
+                    "Expand-Archive -Path " + ProcessRunner.psQuote(driverFile.toString())
+                            + " -DestinationPath " + ProcessRunner.psQuote(extractDir.toString()) + " -Force"
             ).command().toArray(new String[0])));
 
             if (!extractResult.success()) {
@@ -555,7 +569,8 @@ public class DriverInstallService {
 
             ProcessResult extractResult = processRunner.run(java.util.List.of(new ProcessBuilder(
                     "powershell", "-NoProfile", "-Command",
-                    "Expand-Archive -Path '" + driverFile + "' -DestinationPath '" + extractDir + "' -Force"
+                    "Expand-Archive -Path " + ProcessRunner.psQuote(driverFile.toString())
+                            + " -DestinationPath " + ProcessRunner.psQuote(extractDir.toString()) + " -Force"
             ).command().toArray(new String[0])));
 
             if (!extractResult.success()) {

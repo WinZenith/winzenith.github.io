@@ -41,10 +41,12 @@ public enum OemVendorHelper {
         AppLogger.debug("VendorDetect: Driver='" + driver.friendlyName() + "', HW='" + hw + "', Provider='" + prov + "'");
 
         for (OemVendorHelper v : values()) {
-            if (hw.contains(v.pciPattern)
-                    || (v.venId != null && (hw.contains(v.venId) || name.contains(v.venId) || prov.contains(v.venId)))
-                    || name.contains(v.label.toUpperCase())
-                    || prov.contains(v.label.toUpperCase())) {
+            boolean hwMatch = v.pciPattern.startsWith("VEN_") && hw.contains(v.pciPattern);
+            boolean venIdMatch = v.venId != null
+                    && (hw.contains(v.venId) || name.contains(v.venId) || prov.contains(v.venId));
+            boolean nameMatch = name.contains(v.label.toUpperCase());
+            boolean provMatch = prov.contains(v.label.toUpperCase());
+            if (hwMatch || venIdMatch || nameMatch || provMatch) {
                 AppLogger.debug("VendorDetect: Matched vendor " + v.label() + " for driver " + driver.friendlyName());
                 return v;
             }
