@@ -41,7 +41,6 @@ import javafx.scene.layout.VBox;
 
 import java.awt.Desktop;
 import java.io.File;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -453,9 +452,8 @@ public class BrowserExtensionsTabView extends BorderPane {
             }
         } catch (Exception ignored) {}
         try {
-            Process p = Runtime.getRuntime().exec(new String[]{"explorer", "/select,\"" + path + "\""});
-            p.getInputStream().transferTo(OutputStream.nullOutputStream());
-            p.getErrorStream().transferTo(OutputStream.nullOutputStream());
+            ProcessBuilder pb = new ProcessBuilder("explorer", "/select," + path);
+            pb.start();
         } catch (Exception ex) {
             AppLogger.warning("Failed to open folder for: " + path + " — " + ex.getMessage());
         }
@@ -504,13 +502,20 @@ public class BrowserExtensionsTabView extends BorderPane {
     private String buildStatusText(List<BrowserExtensionRow> results) {
         if (results.isEmpty()) return "No extensions found.";
 
+        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
+        for (String browser : BrowserExtensionService.ALL_BROWSERS) {
+            counts.put(browser, 0);
+        }
+        for (BrowserExtensionRow r : results) {
+            counts.merge(r.getBrowser(), 1, Integer::sum);
+        }
+
         StringBuilder sb = new StringBuilder("Found " + results.size() + " extensions (");
         boolean first = true;
-        for (String browser : BrowserExtensionService.ALL_BROWSERS) {
-            long count = results.stream().filter(r -> browser.equals(r.getBrowser())).count();
-            if (count > 0) {
+        for (var entry : counts.entrySet()) {
+            if (entry.getValue() > 0) {
                 if (!first) sb.append(", ");
-                sb.append(browser).append(": ").append(count);
+                sb.append(entry.getKey()).append(": ").append(entry.getValue());
                 first = false;
             }
         }

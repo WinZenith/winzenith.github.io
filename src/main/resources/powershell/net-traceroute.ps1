@@ -13,37 +13,42 @@ try {
 
     foreach ($line in $output) {
         $line = $line.Trim()
-        if ($line -match '^\s*(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)') {
-            $hops += [PSCustomObject]@{
-                hopNumber = [int]$Matches[1]
-                address   = $Matches[2]
-                latency1  = $Matches[3]
-                latency2  = $Matches[4]
-                latency3  = $Matches[5]
-            }
-        } elseif ($line -match '^\s*(\d+)\s+(\S+)\s+(\S+)\s+(\S+)') {
-            $hops += [PSCustomObject]@{
-                hopNumber = [int]$Matches[1]
-                address   = $Matches[2]
-                latency1  = $Matches[3]
-                latency2  = $Matches[4]
-                latency3  = ""
-            }
-        } elseif ($line -match '^\s*(\d+)\s+(\S+)\s+(\S+)') {
-            $hops += [PSCustomObject]@{
-                hopNumber = [int]$Matches[1]
-                address   = $Matches[2]
-                latency1  = $Matches[3]
-                latency2  = ""
-                latency3  = ""
-            }
-        } elseif ($line -match '^\s*(\d+)\s+Request timed out') {
+        if ($line -match '^\s*(\d+)\s+Request timed out') {
             $hops += [PSCustomObject]@{
                 hopNumber = [int]$Matches[1]
                 address   = "*"
                 latency1  = "*"
                 latency2  = "*"
                 latency3  = "*"
+            }
+            continue
+        }
+        $parts = $line -split '\s{2,}'
+        if ($parts.Count -ge 5) {
+            $hopStr = $parts[0].Trim()
+            if ($hopStr -match '^\d+$') {
+                $lat1 = $parts[1].Trim()
+                $lat2 = $parts[2].Trim()
+                $lat3 = $parts[3].Trim()
+                $addr = ($parts[4..($parts.Count - 1)] -join '  ').Trim()
+                $hops += [PSCustomObject]@{
+                    hopNumber = [int]$hopStr
+                    address   = $addr
+                    latency1  = $lat1
+                    latency2  = $lat2
+                    latency3  = $lat3
+                }
+            }
+        } elseif ($parts.Count -ge 3) {
+            $hopStr = $parts[0].Trim()
+            if ($hopStr -match '^\d+$') {
+                $hops += [PSCustomObject]@{
+                    hopNumber = [int]$hopStr
+                    address   = $parts[1].Trim()
+                    latency1  = $parts[2].Trim()
+                    latency2  = ""
+                    latency3  = ""
+                }
             }
         }
     }

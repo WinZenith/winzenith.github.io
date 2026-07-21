@@ -17,6 +17,7 @@ public class SystemInfoService {
     private static final long CACHE_TTL_MS = 5 * 60 * 1000;
 
     private final ProcessRunner processRunner = new ProcessRunner(TIMEOUT_SECONDS);
+    private final Object cacheLock = new Object();
 
     private volatile SystemInfoData cachedData;
     private volatile long cacheTimestamp;
@@ -34,11 +35,15 @@ public class SystemInfoService {
             throw new UnsupportedOperationException("System information is only available on Windows.");
         }
 
-        if (!forceRefresh && cachedData != null && (System.currentTimeMillis() - cacheTimestamp) < CACHE_TTL_MS) {
-            if (progressCallback != null) {
-                progressCallback.accept("cached", 1.0);
+        if (!forceRefresh) {
+            synchronized (cacheLock) {
+                if (cachedData != null && (System.currentTimeMillis() - cacheTimestamp) < CACHE_TTL_MS) {
+                    if (progressCallback != null) {
+                        progressCallback.accept("cached", 1.0);
+                    }
+                    return cachedData;
+                }
             }
-            return cachedData;
         }
 
         if (progressCallback != null) {
@@ -61,8 +66,10 @@ public class SystemInfoService {
         }
         try {
             SystemInfoData data = JsonMapper.mapper().readValue(json.trim(), SystemInfoData.class);
-            cachedData = data;
-            cacheTimestamp = System.currentTimeMillis();
+            synchronized (cacheLock) {
+                cachedData = data;
+                cacheTimestamp = System.currentTimeMillis();
+            }
             if (progressCallback != null) {
                 progressCallback.accept("done", 1.0);
             }
@@ -74,7 +81,9 @@ public class SystemInfoService {
     }
 
     public void invalidateCache() {
-        cachedData = null;
-        cacheTimestamp = 0;
+        synchronized (cacheLock) {
+            cachedData = null;
+            cacheTimestamp = 0;
+        }
     }
 }

@@ -161,7 +161,10 @@ class DnsCachePanel extends VBox {
     }
 
     private void flushDns() {
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         statusLabel.setText("Flushing DNS...");
         new Thread(() -> {
@@ -184,15 +187,18 @@ class DnsCachePanel extends VBox {
     }
 
     private void resetNetworkStack() {
-        if (busy.get()) return;
-        busy.set(true);
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         statusLabel.setText("Resetting network stack...");
         Alert warn = new Alert(Alert.AlertType.WARNING,
                 "Resetting the network stack requires a system reboot. Continue?");
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
-            busy.set(false);
+            statusLabel.setText("Ready.");
             return;
         }
+        busy.set(true);
         new Thread(() -> {
             try {
                 var result = service.resetNetworkStack();
@@ -213,15 +219,18 @@ class DnsCachePanel extends VBox {
     }
 
     private void resetWinsock() {
-        if (busy.get()) return;
-        busy.set(true);
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         statusLabel.setText("Resetting Winsock...");
         Alert warn = new Alert(Alert.AlertType.WARNING,
                 "Resetting Winsock may require a reboot. Continue?");
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
-            busy.set(false);
+            statusLabel.setText("Ready.");
             return;
         }
+        busy.set(true);
         new Thread(() -> {
             try {
                 var result = service.resetWinsock();
@@ -262,7 +271,10 @@ class DnsCachePanel extends VBox {
             new Alert(Alert.AlertType.WARNING, "Please select an adapter.").showAndWait();
             return;
         }
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
 
         String primary = primaryDnsField.getText().trim();
         String secondary = secondaryDnsField.getText().trim();
@@ -280,14 +292,22 @@ class DnsCachePanel extends VBox {
         statusLabel.setText("Setting DNS servers...");
 
         new Thread(() -> {
-            var result = service.setDnsServers(adapter, primary, secondary);
-            Platform.runLater(() -> {
-                statusLabel.setText(result.success() ? "DNS updated." : "DNS update failed.");
-                new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                        result.message()).showAndWait();
-                if (result.success()) loadCurrentDns();
-                busy.set(false);
-            });
+            try {
+                var result = service.setDnsServers(adapter, primary, secondary);
+                Platform.runLater(() -> {
+                    statusLabel.setText(result.success() ? "DNS updated." : "DNS update failed.");
+                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message()).showAndWait();
+                    if (result.success()) loadCurrentDns();
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    statusLabel.setText("DNS update failed.");
+                    new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-dns-set").start();
     }
 
@@ -297,23 +317,34 @@ class DnsCachePanel extends VBox {
             new Alert(Alert.AlertType.WARNING, "Please select an adapter.").showAndWait();
             return;
         }
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         statusLabel.setText("Resetting DNS to DHCP...");
 
         new Thread(() -> {
-            var result = service.setDnsServers(adapter, null, null);
-            Platform.runLater(() -> {
-                statusLabel.setText(result.success() ? "DNS reset to DHCP." : "DNS reset failed.");
-                new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                        result.message()).showAndWait();
-                if (result.success()) {
-                    primaryDnsField.clear();
-                    secondaryDnsField.clear();
-                    loadCurrentDns();
-                }
-                busy.set(false);
-            });
+            try {
+                var result = service.setDnsServers(adapter, null, null);
+                Platform.runLater(() -> {
+                    statusLabel.setText(result.success() ? "DNS reset to DHCP." : "DNS reset failed.");
+                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message()).showAndWait();
+                    if (result.success()) {
+                        primaryDnsField.clear();
+                        secondaryDnsField.clear();
+                        loadCurrentDns();
+                    }
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    statusLabel.setText("DNS reset failed.");
+                    new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-dns-reset").start();
     }
 
@@ -350,32 +381,43 @@ class DnsCachePanel extends VBox {
             return;
         }
 
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         statusLabel.setText("Pinging " + host + "...");
         diagnosticOutput.setText("Pinging " + host + " (" + count + " packets)...\n");
 
         new Thread(() -> {
-            PingResult result = service.ping(host, count);
-            Platform.runLater(() -> {
-                StringBuilder sb = new StringBuilder();
-                sb.append("Ping Results for ").append(host).append(":\n");
-                sb.append("  Packets Sent:     ").append(result.packetsSent()).append("\n");
-                sb.append("  Packets Received: ").append(result.packetsReceived()).append("\n");
-                sb.append("  Packet Loss:      ").append(result.packetLossPercent()).append("%\n");
-                if (result.packetsReceived() > 0) {
-                    sb.append("  Min Latency:      ").append(String.format("%.1f", result.minMs())).append(" ms\n");
-                    sb.append("  Max Latency:      ").append(String.format("%.1f", result.maxMs())).append(" ms\n");
-                    sb.append("  Avg Latency:      ").append(String.format("%.1f", result.avgMs())).append(" ms\n");
-                }
-                sb.append("\n--- Raw Output ---\n");
-                sb.append(result.rawOutput());
-                diagnosticOutput.setText(sb.toString());
-                statusLabel.setText(result.packetsReceived() > 0
-                        ? "Ping complete: " + result.avgMs() + "ms avg"
-                        : "Ping failed: no reply from " + host);
-                busy.set(false);
-            });
+            try {
+                PingResult result = service.ping(host, count);
+                Platform.runLater(() -> {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("Ping Results for ").append(host).append(":\n");
+                    sb.append("  Packets Sent:     ").append(result.packetsSent()).append("\n");
+                    sb.append("  Packets Received: ").append(result.packetsReceived()).append("\n");
+                    sb.append("  Packet Loss:      ").append(result.packetLossPercent()).append("%\n");
+                    if (result.packetsReceived() > 0) {
+                        sb.append("  Min Latency:      ").append(String.format("%.1f", result.minMs())).append(" ms\n");
+                        sb.append("  Max Latency:      ").append(String.format("%.1f", result.maxMs())).append(" ms\n");
+                        sb.append("  Avg Latency:      ").append(String.format("%.1f", result.avgMs())).append(" ms\n");
+                    }
+                    sb.append("\n--- Raw Output ---\n");
+                    sb.append(result.rawOutput());
+                    diagnosticOutput.setText(sb.toString());
+                    statusLabel.setText(result.packetsReceived() > 0
+                            ? "Ping complete: " + result.avgMs() + "ms avg"
+                            : "Ping failed: no reply from " + host);
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    diagnosticOutput.setText("Ping error: " + e.getMessage());
+                    statusLabel.setText("Ping failed.");
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-ping").start();
     }
 
@@ -386,30 +428,41 @@ class DnsCachePanel extends VBox {
             return;
         }
 
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         statusLabel.setText("Traceroute to " + host + "...");
         diagnosticOutput.setText("Traceroute to " + host + " (max 30 hops)...\n");
 
         new Thread(() -> {
-            List<TracerouteHop> hops = service.traceroute(host, 30);
-            Platform.runLater(() -> {
-                if (hops.isEmpty()) {
-                    diagnosticOutput.setText("Traceroute failed. No hops returned for " + host + ".");
-                    statusLabel.setText("Traceroute failed.");
-                } else {
-                    StringBuilder sb = new StringBuilder();
-                    sb.append(String.format("%-5s %-18s %-12s %-12s %-12s\n", "Hop", "Address", "Latency 1", "Latency 2", "Latency 3"));
-                    sb.append("-".repeat(60)).append("\n");
-                    for (TracerouteHop hop : hops) {
-                        sb.append(String.format("%-5d %-18s %-12s %-12s %-12s\n",
-                                hop.hopNumber(), hop.address(), hop.latency1(), hop.latency2(), hop.latency3()));
+            try {
+                List<TracerouteHop> hops = service.traceroute(host, 30);
+                Platform.runLater(() -> {
+                    if (hops.isEmpty()) {
+                        diagnosticOutput.setText("Traceroute failed. No hops returned for " + host + ".");
+                        statusLabel.setText("Traceroute failed.");
+                    } else {
+                        StringBuilder sb = new StringBuilder();
+                        sb.append(String.format("%-5s %-18s %-12s %-12s %-12s\n", "Hop", "Address", "Latency 1", "Latency 2", "Latency 3"));
+                        sb.append("-".repeat(60)).append("\n");
+                        for (TracerouteHop hop : hops) {
+                            sb.append(String.format("%-5d %-18s %-12s %-12s %-12s\n",
+                                    hop.hopNumber(), hop.address(), hop.latency1(), hop.latency2(), hop.latency3()));
+                        }
+                        diagnosticOutput.setText(sb.toString());
+                        statusLabel.setText("Traceroute complete: " + hops.size() + " hops.");
                     }
-                    diagnosticOutput.setText(sb.toString());
-                    statusLabel.setText("Traceroute complete: " + hops.size() + " hops.");
-                }
-                busy.set(false);
-            });
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    diagnosticOutput.setText("Traceroute error: " + e.getMessage());
+                    statusLabel.setText("Traceroute failed.");
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-traceroute").start();
     }
 }

@@ -365,7 +365,9 @@ public class DuplicateFilesTabView extends BorderPane {
             }
         } catch (Exception e) {
             try {
-                Runtime.getRuntime().exec(new String[]{"explorer", "/select,", path});
+                Process proc = Runtime.getRuntime().exec(new String[]{"explorer", "/select,", path});
+                proc.getInputStream().close();
+                proc.getErrorStream().close();
             } catch (Exception ex) {
                 AppLogger.warning("Failed to open folder for: " + path + " — " + ex.getMessage());
             }
@@ -460,6 +462,10 @@ public class DuplicateFilesTabView extends BorderPane {
         for (DuplicateFileRow row : rows) {
             row.setSelected(!allSelected);
         }
+    }
+
+    public void dispose() {
+        cancelled.set(true);
     }
 
     private void startClean() {

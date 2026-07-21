@@ -28,7 +28,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class CleanerTabView extends BorderPane {
+    public class CleanerTabView extends BorderPane {
 
     private final CleanupService service = new CleanupService();
     private final CleanerHistoryStore historyStore = new CleanerHistoryStore();
@@ -90,11 +90,16 @@ public class CleanerTabView extends BorderPane {
         scanButton.setOnAction(e -> startScan());
         selectAllButton.setOnAction(e -> {
             for (CleanupRow row : sessionRows) row.setSelected(true);
+            updateCleanButtonState();
         });
         deselectAllButton.setOnAction(e -> {
             for (CleanupRow row : sessionRows) row.setSelected(false);
+            updateCleanButtonState();
         });
-        presetButton.setOnAction(e -> showPresetMenu());
+        presetButton.setOnAction(e -> {
+            showPresetMenu();
+            updateCleanButtonState();
+        });
         cleanButton.setOnAction(e -> startClean());
         historyButton.setOnAction(e -> {
             CleanupHistoryDialog dialog = new CleanupHistoryDialog(historyStore);
@@ -259,6 +264,12 @@ public class CleanerTabView extends BorderPane {
         return (int) sessionRows.stream().filter(CleanupRow::isSelected).count();
     }
 
+    private void updateCleanButtonState() {
+        if (!busy.get()) {
+            cleanButton.setDisable(getSelectedCount() == 0);
+        }
+    }
+
     private void startScan() {
         if (busy.get()) return;
         busy.set(true);
@@ -299,6 +310,9 @@ public class CleanerTabView extends BorderPane {
                             .filter(r -> ignored == null || !ignored.contains(r.getCategory().name()))
                             .toList();
                     sessionRows.setAll(filtered);
+                    for (CleanupRow row : filtered) {
+                        row.setSelected(row.getCategory().getRiskLevel() != CleanupCategory.RiskLevel.HIGH);
+                    }
                     hasScanned = true;
                     long totalBytes = filtered.stream().mapToLong(CleanupRow::getTotalBytes).sum();
                     statusLabel.setText("Scan complete - " + CleanupService.formatBytes(totalBytes) + " identified.");
@@ -316,17 +330,57 @@ public class CleanerTabView extends BorderPane {
     private void startClean() {
         if (busy.get()) return;
         if (!hasScanned || sessionRows.isEmpty()) return;
-        java.util.List<CleanupRow> selected = sessionRows.stream().filter(CleanupRow::isSelected).toList();
-        if (selected.isEmpty()) return;
+        java.util.List<CleanupRow> initialSelection = sessionRows.stream().filter(CleanupRow::isSelected).toList();
+        if (initialSelection.isEmpty()) return;
 
         busy.set(true);
 
-        if (!adminCheck.getAsBoolean()) {
-            Alert a = new Alert(Alert.AlertType.WARNING,
-                    "Some cleanup operations (registry, system files) require administrator rights.");
-            a.showAndWait();
+        java.util.Set<CleanupCategory> adminRequired = java.util.Set.of(
+                CleanupCategory.REGISTRY,
+                CleanupCategory.REGISTRY_DEFRAG,
+                CleanupCategory.WINDOWS_UPDATE_CLEANUP,
+                CleanupCategory.OLD_WINDOWS_INSTALL,
+                CleanupCategory.WINDOWS_DEFENDER_CACHE,
+                CleanupCategory.WINDOWS_LOG_FILES
+        );
+
+        boolean isAdmin = adminCheck.getAsBoolean();
+        java.util.List<CleanupRow> adminBlocked;
+        final java.util.List<CleanupRow> selected;
+        if (!isAdmin) {
+            adminBlocked = initialSelection.stream()
+                    .filter(r -> adminRequired.contains(r.getCategory()))
+                    .toList();
+            selected = initialSelection.stream()
+                    .filter(r -> !adminRequired.contains(r.getCategory()))
+                    .toList();
+        } else {
+            adminBlocked = java.util.List.of();
+            selected = initialSelection;
+        }
+
+        if (selected.isEmpty()) {
+            if (!adminBlocked.isEmpty()) {
+                Alert a = new Alert(Alert.AlertType.WARNING,
+                        "The selected categories require administrator rights:\n\n"
+                                + adminBlocked.stream().map(r -> "  - " + r.getCategory().getDisplayName())
+                                .collect(java.util.stream.Collectors.joining("\n"))
+                                + "\n\nPlease run as administrator to clean these categories.");
+                a.setHeaderText("Administrator Rights Required");
+                a.showAndWait();
+            }
             busy.set(false);
             return;
+        }
+
+        if (!isAdmin && !adminBlocked.isEmpty()) {
+            Alert a = new Alert(Alert.AlertType.INFORMATION,
+                    "Proceeding with " + selected.size() + " non-admin categories.\n\n"
+                            + "The following categories require administrator rights and will be skipped:\n"
+                            + adminBlocked.stream().map(r -> "  - " + r.getCategory().getDisplayName())
+                            .collect(java.util.stream.Collectors.joining("\n")));
+            a.setHeaderText("Some Categories Skipped");
+            a.showAndWait();
         }
 
         boolean hasHighRisk = selected.stream()
@@ -364,7 +418,7 @@ public class CleanerTabView extends BorderPane {
             }
         }
 
-        boolean registryBackup = false;
+        boolean registryBackupRaw = false;
         if (registrySelected) {
             Alert backupPrompt = new Alert(Alert.AlertType.CONFIRMATION);
             backupPrompt.setTitle("Registry Backup");
@@ -379,119 +433,128 @@ public class CleanerTabView extends BorderPane {
                 busy.set(false);
                 return;
             }
-            registryBackup = result == yesBtn;
+            registryBackupRaw = result == yesBtn;
         }
+        final boolean registryBackup = registryBackupRaw;
 
         AppSettings settings = settingsStore.load();
-        if (settings.autoCreateRestoreBeforeCleanup()) {
+        final boolean createRestorePoint = settings.autoCreateRestoreBeforeCleanup();
+
+        Runnable doClean = () -> {
+            statusLabel.setText("Cleaning...");
+            cleanButton.setDisable(true);
+            progressBar.setProgress(0);
+            progressBar.setVisible(true);
+
+            int totalCategories = selected.size();
+            AtomicInteger cleaned = new AtomicInteger();
+
+            activeCleanFuture = service.cleanAsync(selected, registryBackup, () -> {
+                int done = cleaned.incrementAndGet();
+                Platform.runLater(() -> {
+                    progressBar.setProgress((double) done / totalCategories);
+                    statusLabel.setText("Cleaning: " + done + "/" + totalCategories + "...");
+                });
+            });
+            cancelButton.setDisable(false);
+
+            activeCleanFuture.whenComplete((summary, ex) -> {
+                if (ex != null) {
+                    Platform.runLater(() -> {
+                        if (cancelling.get() || activeCleanFuture.isCancelled()) {
+                            statusLabel.setText("Cleanup canceled.");
+                        } else {
+                            statusLabel.setText("Cleanup failed.");
+                            new Alert(Alert.AlertType.ERROR, "Cleanup failed:\n" + ex.getMessage()).showAndWait();
+                        }
+                        progressBar.setVisible(false);
+                        cancelButton.setDisable(true);
+                        busy.set(false);
+                    });
+                } else {
+                    historyStore.append(summary);
+
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Re-scanning cleaned categories...");
+                        progressBar.setProgress(-1);
+                    });
+
+                    java.util.List<CleanupCategory> cleanedCategories = selected.stream()
+                            .map(CleanupRow::getCategory).toList();
+
+                    CancelableCompletableFuture<java.util.List<CleanupRow>> rescanFuture =
+                            service.scanCategoriesAsync(cleanedCategories, () -> {});
+
+                    rescanFuture.whenComplete((rescanResults, rescanEx) -> {
+                        Platform.runLater(() -> {
+                            if (rescanEx == null) {
+                                java.util.Map<CleanupCategory, CleanupRow> rescanMap = new java.util.HashMap<>();
+                                for (CleanupRow rr : rescanResults) {
+                                    rescanMap.put(rr.getCategory(), rr);
+                                }
+                                for (int i = 0; i < sessionRows.size(); i++) {
+                                    CleanupRow existing = sessionRows.get(i);
+                                    CleanupRow refreshed = rescanMap.get(existing.getCategory());
+                                    if (refreshed != null) {
+                                        existing.setTotalBytes(refreshed.getTotalBytes());
+                                        existing.setItemCount(refreshed.getItemCount());
+                                        existing.setSizeOrCountText(refreshed.sizeOrCountTextProperty().get());
+                                        existing.setScanStatus(refreshed.getScanStatus());
+                                        existing.setErrorMessage(refreshed.getErrorMessage());
+                                        existing.setScanDurationMs(refreshed.getScanDurationMs());
+                                    }
+                                }
+                            }
+
+                            StringBuilder sb = new StringBuilder();
+                            sb.append("Cleanup completed.\n\n");
+                            sb.append("Total freed: ").append(CleanupService.formatBytes(summary.getTotalBytes()));
+                            sb.append(" (").append(summary.getTotalItems()).append(" items)\n");
+                            if (!summary.getPerCategory().isEmpty()) {
+                                sb.append("\nPer-category breakdown:\n");
+                                summary.getPerCategory().forEach((cat, bytes) ->
+                                        sb.append("  - ").append(cat.getDisplayName()).append(": ")
+                                                .append(CleanupService.formatBytes(bytes)).append("\n"));
+                            }
+                            statusLabel.setText("Cleanup completed - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
+                            progressBar.setVisible(false);
+                            cancelButton.setDisable(true);
+                            updateSummary();
+
+                            Alert resultAlert = new Alert(Alert.AlertType.INFORMATION, sb.toString());
+                            resultAlert.setHeaderText("Cleanup Results");
+                            resultAlert.showAndWait();
+
+                            cancelling.set(false);
+                            busy.set(false);
+                        });
+                    });
+                }
+            });
+        };
+
+        if (createRestorePoint) {
             statusLabel.setText("Creating System Restore point...");
             progressBar.setProgress(-1);
             progressBar.setVisible(true);
-            try {
-                ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
-                        "Checkpoint-Computer -Description 'WinZenith Cleanup Pre-Clean' -RestorePointType MODIFY_SETTINGS");
-                pb.redirectErrorStream(true);
-                Process p = pb.start();
-                boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
-                if (!finished) {
-                    p.destroyForcibly();
-                    AppLogger.warning("System Restore point creation timed out");
-                }
-            } catch (Exception e) {
-                AppLogger.warning("Failed to create System Restore point: " + e.getMessage());
-            }
-        }
 
-        statusLabel.setText("Cleaning...");
-        cleanButton.setDisable(true);
-        progressBar.setProgress(0);
-        progressBar.setVisible(true);
-
-        final boolean finalRegistryBackup = registryBackup;
-        int totalCategories = selected.size();
-        AtomicInteger cleaned = new AtomicInteger();
-
-        activeCleanFuture = service.cleanAsync(selected, finalRegistryBackup, () -> {
-            int done = cleaned.incrementAndGet();
-            Platform.runLater(() -> {
-                progressBar.setProgress((double) done / totalCategories);
-                statusLabel.setText("Cleaning: " + done + "/" + totalCategories + "...");
-            });
-        });
-        cancelButton.setDisable(false);
-
-        activeCleanFuture.whenComplete((summary, ex) -> {
-            if (ex != null) {
-                Platform.runLater(() -> {
-                    if (cancelling.get() || activeCleanFuture.isCancelled()) {
-                        statusLabel.setText("Cleanup canceled.");
-                    } else {
-                        statusLabel.setText("Cleanup failed.");
-                        new Alert(Alert.AlertType.ERROR, "Cleanup failed:\n" + ex.getMessage()).showAndWait();
+            CompletableFuture.runAsync(() -> {
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
+                            "Checkpoint-Computer -Description 'WinZenith Cleanup Pre-Clean' -RestorePointType MODIFY_SETTINGS");
+                    pb.redirectErrorStream(true);
+                    Process p = pb.start();
+                    boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!finished) {
+                        p.destroyForcibly();
+                        AppLogger.warning("System Restore point creation timed out");
                     }
-                    progressBar.setVisible(false);
-                    cancelButton.setDisable(true);
-                    busy.set(false);
-                });
-            } else {
-                historyStore.append(summary);
-
-                Platform.runLater(() -> {
-                    statusLabel.setText("Re-scanning cleaned categories...");
-                    progressBar.setProgress(-1);
-                });
-
-                java.util.List<CleanupCategory> cleanedCategories = selected.stream()
-                        .map(CleanupRow::getCategory).toList();
-
-                CancelableCompletableFuture<java.util.List<CleanupRow>> rescanFuture =
-                        service.scanCategoriesAsync(cleanedCategories, () -> {});
-
-                rescanFuture.whenComplete((rescanResults, rescanEx) -> {
-                    Platform.runLater(() -> {
-                        if (rescanEx == null) {
-                            java.util.Map<CleanupCategory, CleanupRow> rescanMap = new java.util.HashMap<>();
-                            for (CleanupRow rr : rescanResults) {
-                                rescanMap.put(rr.getCategory(), rr);
-                            }
-                            for (int i = 0; i < sessionRows.size(); i++) {
-                                CleanupRow existing = sessionRows.get(i);
-                                CleanupRow refreshed = rescanMap.get(existing.getCategory());
-                                if (refreshed != null) {
-                                    existing.setTotalBytes(refreshed.getTotalBytes());
-                                    existing.setItemCount(refreshed.getItemCount());
-                                    existing.setSizeOrCountText(refreshed.sizeOrCountTextProperty().get());
-                                    existing.setScanStatus(refreshed.getScanStatus());
-                                    existing.setErrorMessage(refreshed.getErrorMessage());
-                                    existing.setScanDurationMs(refreshed.getScanDurationMs());
-                                }
-                            }
-                        }
-
-                        StringBuilder sb = new StringBuilder();
-                        sb.append("Cleanup completed.\n\n");
-                        sb.append("Total freed: ").append(CleanupService.formatBytes(summary.getTotalBytes()));
-                        sb.append(" (").append(summary.getTotalItems()).append(" items)\n");
-                        if (!summary.getPerCategory().isEmpty()) {
-                            sb.append("\nPer-category breakdown:\n");
-                            summary.getPerCategory().forEach((cat, bytes) ->
-                                    sb.append("  - ").append(cat.getDisplayName()).append(": ")
-                                            .append(CleanupService.formatBytes(bytes)).append("\n"));
-                        }
-                        statusLabel.setText("Cleanup completed - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
-                        progressBar.setVisible(false);
-                        cancelButton.setDisable(true);
-                        updateSummary();
-
-                        Alert resultAlert = new Alert(Alert.AlertType.INFORMATION, sb.toString());
-                        resultAlert.setHeaderText("Cleanup Results");
-                        resultAlert.showAndWait();
-
-                        cancelling.set(false);
-                        busy.set(false);
-                    });
-                });
-            }
-        });
+                } catch (Exception e) {
+                    AppLogger.warning("Failed to create System Restore point: " + e.getMessage());
+                }
+            }).whenComplete((v, ex) -> Platform.runLater(doClean));
+        } else {
+            doClean.run();
+        }
     }
 }

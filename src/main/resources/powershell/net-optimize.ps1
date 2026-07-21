@@ -20,6 +20,11 @@ switch ($Preset) {
         netsh int tcp set global ecncapability=disabled
         Add-Result "Source Address Prefix" "disabled"
         netsh int ip set global sourceaddressprefixstore=disabled
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+        Remove-ItemProperty -Path $regPath -Name "TcpAckFrequency" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $regPath -Name "TCPNoDelay" -ErrorAction SilentlyContinue
+        Add-Result "TCP Ack Frequency" "removed (registry default)"
+        Add-Result "TCP No Delay" "removed (registry default)"
         break
     }
     "MaxStability" {
@@ -33,6 +38,11 @@ switch ($Preset) {
         netsh int tcp set global chimney=disabled
         Add-Result "Source Address Prefix" "disabled"
         netsh int ip set global sourceaddressprefixstore=disabled
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+        Remove-ItemProperty -Path $regPath -Name "TcpAckFrequency" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $regPath -Name "TCPNoDelay" -ErrorAction SilentlyContinue
+        Add-Result "TCP Ack Frequency" "removed (registry default)"
+        Add-Result "TCP No Delay" "removed (registry default)"
         break
     }
     "Gaming" {

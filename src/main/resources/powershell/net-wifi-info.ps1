@@ -16,7 +16,9 @@ if ($wifi) {
 
     $props = Get-NetAdapterAdvancedProperty -Name $wifi.Name -ErrorAction SilentlyContinue
     foreach ($p in $props) {
-        if ($p.DisplayName -eq "802.11n/ac Wireless Mode") { $info.radioType = $p.DisplayValue }
+        if ($p.DisplayName -match 'Wireless Mode|802\.11.*Wireless|Radio Type') {
+            $info.radioType = $p.DisplayValue
+        }
     }
 
     $connProfile = Get-NetConnectionProfile -ErrorAction SilentlyContinue |

@@ -105,7 +105,10 @@ class WiFiPanel extends VBox {
     }
 
     void loadCurrentInfo() {
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         new Thread(() -> {
             try {
@@ -157,16 +160,27 @@ class WiFiPanel extends VBox {
     }
 
     void disconnectWifi() {
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         new Thread(() -> {
-            var result = service.disconnectWifi();
-            Platform.runLater(() -> {
-                statusLabel.setText(result.success() ? "Disconnected." : "Disconnect failed.");
-                new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                        result.message()).showAndWait();
-                busy.set(false);
-            });
+            try {
+                var result = service.disconnectWifi();
+                Platform.runLater(() -> {
+                    statusLabel.setText(result.success() ? "Disconnected." : "Disconnect failed.");
+                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message()).showAndWait();
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    statusLabel.setText("Disconnect failed.");
+                    new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-wifi-disconnect").start();
     }
 
@@ -182,22 +196,36 @@ class WiFiPanel extends VBox {
         confirm.setHeaderText(null);
         if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
 
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         new Thread(() -> {
-            var result = service.forgetWifiProfile(profile);
-            Platform.runLater(() -> {
-                statusLabel.setText(result.success() ? result.message() : "Failed to forget profile.");
-                new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                        result.message()).showAndWait();
-                if (result.success()) loadProfiles();
-                busy.set(false);
-            });
+            try {
+                var result = service.forgetWifiProfile(profile);
+                Platform.runLater(() -> {
+                    statusLabel.setText(result.success() ? result.message() : "Failed to forget profile.");
+                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message()).showAndWait();
+                    if (result.success()) loadProfiles();
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    statusLabel.setText("Failed to forget profile.");
+                    new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-wifi-forget").start();
     }
 
     private void setWifiAdapterState(boolean enable) {
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         String action = enable ? "Enabling" : "Disabling";
         statusLabel.setText(action + " Wi-Fi adapter...");
@@ -216,7 +244,6 @@ class WiFiPanel extends VBox {
                     Platform.runLater(() -> {
                         statusLabel.setText("No Wi-Fi adapter found.");
                         new Alert(Alert.AlertType.WARNING, "No Wi-Fi adapter found on this system.").showAndWait();
-                        busy.set(false);
                     });
                     return;
                 }
@@ -227,13 +254,13 @@ class WiFiPanel extends VBox {
                             : "Failed to " + (enable ? "enable" : "disable") + " Wi-Fi adapter.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
                             result.message()).showAndWait();
-                    busy.set(false);
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
                     statusLabel.setText("Failed to set Wi-Fi adapter state.");
-                    busy.set(false);
                 });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
             }
         }, "net-wifi-set-state").start();
     }

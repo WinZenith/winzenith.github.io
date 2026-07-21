@@ -45,13 +45,20 @@ public class ProcessRunner {
         ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
         Thread stdoutReader = startStreamReader(process.getInputStream(), stdoutBuf);
         Thread stderrReader = startStreamReader(process.getErrorStream(), stderrBuf);
-        boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-        if (!finished) {
+        try {
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                joinReaders(stdoutReader, stderrReader);
+                throw new IOException("Process timed out after " + timeoutSeconds + "s");
+            }
+            joinReaders(stdoutReader, stderrReader);
+        } catch (InterruptedException e) {
             process.destroyForcibly();
             joinReaders(stdoutReader, stderrReader);
-            throw new IOException("Process timed out after " + timeoutSeconds + "s");
+            Thread.currentThread().interrupt();
+            throw e;
         }
-        joinReaders(stdoutReader, stderrReader);
         String stdout = stdoutBuf.toString(StandardCharsets.UTF_8);
         String stderr = stderrBuf.toString(StandardCharsets.UTF_8);
         return new ProcessResult(process.exitValue(), stdout, stderr);

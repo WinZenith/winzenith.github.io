@@ -26,6 +26,7 @@ public class SoftwareUpdateEntry {
     // Runtime UI state
     private final DoubleProperty progress = new SimpleDoubleProperty(0.0); // -1 = indeterminate
     private final StringProperty status = new SimpleStringProperty("");
+    private volatile String lastError;
 
     public SoftwareUpdateEntry(String id, String name, String currentVersion, String availableVersion) {
         this(id, name, currentVersion, availableVersion, "winget", null, 0);
@@ -124,5 +125,13 @@ public class SoftwareUpdateEntry {
 
     public void setSelected(boolean value) {
         selected.set(value);
+    }
+
+    public String getLastError() {
+        return lastError;
+    }
+
+    public void setLastError(String error) {
+        this.lastError = error;
     }
 }

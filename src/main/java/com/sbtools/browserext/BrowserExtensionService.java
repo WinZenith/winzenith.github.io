@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -64,10 +65,13 @@ public class BrowserExtensionService {
             if (!stderr.isEmpty()) {
                 AppLogger.warning("Script stderr for " + browser + ": " + stderr);
             }
-            if (exitCode != 0 || stderr.toLowerCase().contains("error")) {
+            if (exitCode != 0) {
                 AppLogger.warning("[BrowserExtensionService] Exit=" + exitCode + " stderr=" + stderr);
             }
             String trimmed = stdout.trim();
+            if (trimmed.startsWith("\uFEFF")) {
+                trimmed = trimmed.substring(1);
+            }
             if (trimmed.isEmpty() || "[]".equals(trimmed)) {
                 AppLogger.warning("[BrowserExtensionService] EMPTY stdout for " + browser + " (exit=" + exitCode + ") raw_hex=" + bytesToHex(stdout.getBytes(StandardCharsets.UTF_8)));
                 return results;
@@ -102,15 +106,25 @@ public class BrowserExtensionService {
 
     public boolean toggleExtension(BrowserExtensionRow ext, boolean enable) {
         try {
-            Path extPath = Paths.get(ext.getPath());
+            String pathStr = ext.getPath();
+            if (pathStr == null || pathStr.isBlank()) return false;
+            Path extPath = Paths.get(pathStr);
             if (!Files.exists(extPath)) return false;
             String browser = ext.getBrowser();
             if (CHROMIUM_BROWSERS.contains(browser)) {
                 Path extFolder = extPath.resolve(ext.getExtensionId());
+                if (!Files.exists(extFolder)) return false;
                 Path versionDir;
                 try (Stream<Path> stream = Files.list(extFolder)) {
                     versionDir = stream
                             .filter(Files::isDirectory)
+                            .filter(p -> {
+                                String name = p.getFileName().toString();
+                                return !name.equals("metadata") && !name.startsWith(".");
+                            })
+                            .sorted((a, b) -> compareVersions(
+                                    b.getFileName().toString(),
+                                    a.getFileName().toString()))
                             .findFirst().orElse(null);
                 }
                 if (versionDir == null) return false;
@@ -125,45 +139,66 @@ public class BrowserExtensionService {
                 Platform.runLater(() -> ext.setEnabled(enable));
                 return true;
             } else if ("Firefox".equals(browser)) {
-                if (enable) {
-                    Path disabledXpi = extPath.resolve(ext.getExtensionId() + ".xpi.disabled");
-                    if (Files.exists(disabledXpi)) {
-                        Files.move(disabledXpi, disabledXpi.resolveSibling(ext.getExtensionId() + ".xpi"));
-                        Platform.runLater(() -> ext.setEnabled(true));
-                        return true;
-                    }
-                    Path disabledJson = extPath.resolve(ext.getExtensionId() + ".json.disabled");
-                    if (Files.exists(disabledJson)) {
-                        Files.move(disabledJson, disabledJson.resolveSibling(ext.getExtensionId() + ".json"));
-                        Platform.runLater(() -> ext.setEnabled(true));
-                        return true;
-                    }
-                    return false;
-                } else {
-                    Path xpiPath = extPath.resolve(ext.getExtensionId() + ".xpi");
-                    if (Files.exists(xpiPath)) {
-                        Path disabledPath = extPath.resolve(ext.getExtensionId() + ".xpi.disabled");
-                        if (!Files.exists(disabledPath)) {
-                            Files.move(xpiPath, disabledPath);
-                        }
-                        Platform.runLater(() -> ext.setEnabled(false));
-                        return true;
-                    }
-                    Path jsonPath = extPath.resolve(ext.getExtensionId() + ".json");
-                    if (Files.exists(jsonPath)) {
-                        Path disabledPath = extPath.resolve(ext.getExtensionId() + ".json.disabled");
-                        if (!Files.exists(disabledPath)) {
-                            Files.move(jsonPath, disabledPath);
-                        }
-                        Platform.runLater(() -> ext.setEnabled(false));
-                        return true;
-                    }
-                    return false;
-                }
+                String extId = ext.getExtensionId();
+                return toggleFirefoxExtension(extPath, extId, enable, ext);
             }
             return false;
         } catch (Exception e) {
             AppLogger.warning("Failed to toggle extension: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean toggleFirefoxExtension(Path extPath, String extId, boolean enable,
+                                           BrowserExtensionRow ext) throws Exception {
+        if (enable) {
+            Path disabledXpi = extPath.resolve(extId + ".xpi.disabled");
+            if (Files.exists(disabledXpi)) {
+                Files.move(disabledXpi, disabledXpi.resolveSibling(extId + ".xpi"));
+                Platform.runLater(() -> ext.setEnabled(true));
+                return true;
+            }
+            Path disabledJson = extPath.resolve(extId + ".json.disabled");
+            if (Files.exists(disabledJson)) {
+                Files.move(disabledJson, disabledJson.resolveSibling(extId + ".json"));
+                Platform.runLater(() -> ext.setEnabled(true));
+                return true;
+            }
+            Path disabledDir = extPath.resolve(extId + ".dir.disabled");
+            if (Files.exists(disabledDir)) {
+                Files.move(disabledDir, disabledDir.resolveSibling(extId));
+                Platform.runLater(() -> ext.setEnabled(true));
+                return true;
+            }
+            return false;
+        } else {
+            Path xpiPath = extPath.resolve(extId + ".xpi");
+            if (Files.exists(xpiPath)) {
+                Path disabledPath = extPath.resolve(extId + ".xpi.disabled");
+                if (!Files.exists(disabledPath)) {
+                    Files.move(xpiPath, disabledPath);
+                }
+                Platform.runLater(() -> ext.setEnabled(false));
+                return true;
+            }
+            Path jsonPath = extPath.resolve(extId + ".json");
+            if (Files.exists(jsonPath)) {
+                Path disabledPath = extPath.resolve(extId + ".json.disabled");
+                if (!Files.exists(disabledPath)) {
+                    Files.move(jsonPath, disabledPath);
+                }
+                Platform.runLater(() -> ext.setEnabled(false));
+                return true;
+            }
+            Path dirPath = extPath.resolve(extId);
+            if (Files.isDirectory(dirPath)) {
+                Path disabledPath = extPath.resolve(extId + ".dir.disabled");
+                if (!Files.exists(disabledPath)) {
+                    Files.move(dirPath, disabledPath);
+                }
+                Platform.runLater(() -> ext.setEnabled(false));
+                return true;
+            }
             return false;
         }
     }
@@ -179,5 +214,25 @@ public class BrowserExtensionService {
             sb.append(String.format("%02x", b & 0xFF));
         }
         return sb.toString();
+    }
+
+    private static int compareVersions(String v1, String v2) {
+        String[] parts1 = v1.split("\\.");
+        String[] parts2 = v2.split("\\.");
+        int maxLen = Math.max(parts1.length, parts2.length);
+        for (int i = 0; i < maxLen; i++) {
+            int p1 = i < parts1.length ? parseIntOrDefault(parts1[i], 0) : 0;
+            int p2 = i < parts2.length ? parseIntOrDefault(parts2[i], 0) : 0;
+            if (p1 != p2) return Integer.compare(p1, p2);
+        }
+        return 0;
+    }
+
+    private static int parseIntOrDefault(String s, int defaultValue) {
+        try {
+            return Integer.parseInt(s.replaceAll("[^0-9]", ""));
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 }

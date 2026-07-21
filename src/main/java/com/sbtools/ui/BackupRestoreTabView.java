@@ -42,7 +42,6 @@ import javafx.stage.Modality;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -55,6 +54,7 @@ public class BackupRestoreTabView extends BorderPane {
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
     private final TabPane tabPane = new TabPane();
+    private final BooleanProperty registryBusy = new SimpleBooleanProperty(false);
 
     private DriverBackupService rollbackBackupService;
     private ObservableList<RestoreRow> rollbackRows;
@@ -197,7 +197,7 @@ public class BackupRestoreTabView extends BorderPane {
         AppExecutors.ioPool().execute(() -> {
             try {
                 var entries = rollbackBackupService.listAll();
-                long totalBytes = rollbackBackupService.getTotalSize();
+                long totalBytes = rollbackBackupService.getTotalSize(entries);
                 ObservableList<RestoreRow> newRows = FXCollections.observableArrayList();
                 for (var e : entries) {
                     RestoreRow row = new RestoreRow(e);
@@ -249,6 +249,11 @@ public class BackupRestoreTabView extends BorderPane {
     }
 
     private void deleteAllBackups() {
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING,
+                    "Deleting backups requires administrator rights.").showAndWait();
+            return;
+        }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Delete all driver backups?\n\nThis will permanently remove all backup data.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
@@ -312,22 +317,25 @@ public class BackupRestoreTabView extends BorderPane {
         Button scanButton = new Button("Scan");
         Button createButton = new Button("Create new restore point");
         Button launchButton = new Button("Launch restore point");
+        Button deleteButton = UIButton.danger("Delete Selected");
         TableView<SystemRestoreRow> table = new TableView<>(rows);
 
         Tooltip.install(scanButton, new Tooltip("Query Windows for available system restore points"));
         Tooltip.install(createButton, new Tooltip("Create a manual system restore point"));
         Tooltip.install(launchButton, new Tooltip("Open the Windows System Restore wizard"));
+        Tooltip.install(deleteButton, new Tooltip("Delete the selected restore points"));
 
         spinner.setVisible(false);
         spinner.setMaxSize(20, 20);
 
-        scanButton.setOnAction(e -> scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton));
-        createButton.setOnAction(e -> createSystemRestorePoint(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton));
+        scanButton.setOnAction(e -> scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton));
+        createButton.setOnAction(e -> createSystemRestorePoint(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton));
         launchButton.setOnAction(e -> launchSystemRestore(service, statusLabel));
+        deleteButton.setOnAction(e -> deleteSelectedRestorePoints(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton));
 
         createButton.getStyleClass().add("success");
 
-        HBox top = new HBox(12, scanButton, createButton, launchButton, spinner, statusLabel);
+        HBox top = new HBox(12, scanButton, createButton, launchButton, deleteButton, spinner, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -349,10 +357,11 @@ public class BackupRestoreTabView extends BorderPane {
             scanButton.setDisable(newVal);
             createButton.setDisable(newVal);
             launchButton.setDisable(newVal);
+            deleteButton.setDisable(newVal);
             spinner.setVisible(newVal);
         });
 
-        scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
+        scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton);
 
         Tab tab = new Tab("System restore");
         tab.setContent(pane);
@@ -420,7 +429,7 @@ public class BackupRestoreTabView extends BorderPane {
     private void scanSystemRestore(SystemRestoreService service, BooleanProperty localBusy,
                                     ObservableList<SystemRestoreRow> rows, Label statusLabel,
                                     ProgressIndicator spinner, Button scanButton, Button createButton,
-                                    Button launchButton) {
+                                    Button launchButton, Button deleteButton) {
         if (localBusy.get()) return;
         localBusy.set(true);
         statusLabel.setText("Scanning restore points...");
@@ -448,7 +457,7 @@ public class BackupRestoreTabView extends BorderPane {
     private void createSystemRestorePoint(SystemRestoreService service, BooleanProperty localBusy,
                                            ObservableList<SystemRestoreRow> rows, Label statusLabel,
                                            ProgressIndicator spinner, Button scanButton, Button createButton,
-                                           Button launchButton) {
+                                           Button launchButton, Button deleteButton) {
         if (localBusy.get()) return;
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING,
@@ -491,9 +500,58 @@ public class BackupRestoreTabView extends BorderPane {
             } finally {
                 Platform.runLater(() -> {
                     localBusy.set(false);
-                    scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
+                    scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton);
                 });
             }
+        });
+    }
+
+    private void deleteSelectedRestorePoints(SystemRestoreService service, BooleanProperty localBusy,
+                                              ObservableList<SystemRestoreRow> rows, Label statusLabel,
+                                              ProgressIndicator spinner, Button scanButton, Button createButton,
+                                              Button launchButton, Button deleteButton) {
+        List<SystemRestoreRow> selected = rows.stream()
+                .filter(SystemRestoreRow::isSelected)
+                .toList();
+        if (selected.isEmpty()) {
+            new Alert(Alert.AlertType.INFORMATION, "No restore points selected.").showAndWait();
+            return;
+        }
+
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING,
+                    "Deleting restore points requires administrator rights.").showAndWait();
+            return;
+        }
+
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Delete " + selected.size() + " selected restore point(s)?\n\nThis cannot be undone.");
+        if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
+
+        localBusy.set(true);
+        statusLabel.setText("Deleting restore points...");
+
+        AppExecutors.ioPool().execute(() -> {
+            int failedCount = 0;
+            for (SystemRestoreRow row : selected) {
+                try {
+                    boolean deleted = service.deleteRestorePoint(row.sequenceNumber());
+                    if (!deleted) failedCount++;
+                } catch (Exception e) {
+                    AppLogger.warning("Failed to delete restore point " + row.sequenceNumber() + ": " + e.getMessage());
+                    failedCount++;
+                }
+            }
+            final int deletedCount = selected.size() - failedCount;
+            final int failedFinal = failedCount;
+            Platform.runLater(() -> {
+                if (failedFinal == 0) {
+                    statusLabel.setText(deletedCount + " restore point(s) deleted.");
+                } else {
+                    statusLabel.setText(deletedCount + " deleted, " + failedFinal + " failed.");
+                }
+                scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton);
+            });
         });
     }
 
@@ -603,29 +661,37 @@ public class BackupRestoreTabView extends BorderPane {
                 }
                 List<RegistryBackupRow> results = new ArrayList<>();
                 SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-                try (var stream = Files.walk(backupsDir)) {
-                    stream.filter(p -> p.toString().toLowerCase().endsWith(".reg"))
-                            .sorted((a, b) -> {
+                try (var stream = Files.list(backupsDir)) {
+                    stream.filter(p -> Files.isDirectory(p) && p.getFileName().toString().startsWith("registry_backup_"))
+                            .sorted((a, b) -> b.getFileName().toString().compareTo(a.getFileName().toString()))
+                            .forEach(dir -> {
                                 try {
-                                    return Files.getLastModifiedTime(b).compareTo(Files.getLastModifiedTime(a));
-                                } catch (IOException e) {
-                                    return 0;
-                                }
-                            })
-                            .forEach(p -> {
-                                try {
-                                    BasicFileAttributes attrs = Files.readAttributes(p, BasicFileAttributes.class);
-                                    String filename = backupsDir.relativize(p).toString().replace('\\', '/');
-                                    String date = sdf.format(new Date(attrs.lastModifiedTime().to(TimeUnit.MILLISECONDS)));
-                                    String size = formatFileSize(attrs.size());
-                                    results.add(new RegistryBackupRow(filename, date, size));
+                                    long dirSize = 0;
+                                    long latestModified = 0;
+                                    int regCount = 0;
+                                    try (var files = Files.list(dir)) {
+                                        for (Path f : (Iterable<Path>) files::iterator) {
+                                            if (f.toString().toLowerCase().endsWith(".reg")) {
+                                                regCount++;
+                                                dirSize += Files.size(f);
+                                                long modTime = Files.getLastModifiedTime(f).toMillis();
+                                                if (modTime > latestModified) latestModified = modTime;
+                                            }
+                                        }
+                                    }
+                                    if (regCount > 0) {
+                                        String dirName = dir.getFileName().toString();
+                                        String date = sdf.format(new Date(latestModified));
+                                        String size = RestoreRow.formatFileSize(dirSize);
+                                        results.add(new RegistryBackupRow(dirName + "/", date, size));
+                                    }
                                 } catch (IOException ignored) {
                                 }
                             });
                 }
                 Platform.runLater(() -> {
                     rows.setAll(results);
-                    statusLabel.setText(results.size() + " registry backup(s) found.");
+                    statusLabel.setText(results.size() + " registry backup session(s) found.");
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to list registry backups", e);
@@ -681,7 +747,7 @@ public class BackupRestoreTabView extends BorderPane {
         List<String> selected = dialog.showAndWait().orElse(null);
         if (selected == null || selected.isEmpty()) return;
 
-        busy.set(true);
+        registryBusy.set(true);
         statusLabel.setText("Creating registry backup...");
 
         AppExecutors.ioPool().execute(() -> {
@@ -742,7 +808,7 @@ public class BackupRestoreTabView extends BorderPane {
                             "Failed to create registry backup:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                Platform.runLater(() -> registryBusy.set(false));
             }
         });
     }
@@ -760,36 +826,59 @@ public class BackupRestoreTabView extends BorderPane {
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Restore Registry Backup");
-        confirm.setHeaderText("Import registry file: " + selected.getFilename());
-        confirm.setContentText("This will merge the selected .reg file into the Windows registry.\n\n"
+        confirm.setHeaderText("Import registry session: " + selected.getFilename());
+        confirm.setContentText("This will merge all .reg files from this backup session into the Windows registry.\n\n"
                 + "Ensure all work is saved before proceeding.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
 
-        busy.set(true);
+        registryBusy.set(true);
         statusLabel.setText("Restoring registry backup...");
 
         AppExecutors.ioPool().execute(() -> {
             try {
-                Path filePath = resolveRegistryBackupPath(selected.getFilename());
-                ProcessBuilder pb = new ProcessBuilder("reg", "import", filePath.toString());
-                pb.redirectErrorStream(true);
-                Process process = ProcessManager.start(pb);
-                boolean finished = process.waitFor(120, TimeUnit.SECONDS);
-                if (!finished) {
-                    process.destroyForcibly();
-                    throw new IOException("Registry import timed out after 120 seconds");
+                Path dirPath = resolveRegistryBackupPath(selected.getFilename());
+                List<Path> regFiles;
+                try (var stream = Files.list(dirPath)) {
+                    regFiles = stream.filter(p -> p.toString().toLowerCase().endsWith(".reg"))
+                            .sorted()
+                            .toList();
                 }
-                int exitCode = process.exitValue();
-
+                if (regFiles.isEmpty()) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("No .reg files found in session.");
+                        new Alert(Alert.AlertType.WARNING,
+                                "No .reg files found in the backup session.").showAndWait();
+                    });
+                    return;
+                }
+                int regFailed = 0;
+                for (Path regFile : regFiles) {
+                    ProcessBuilder pb = new ProcessBuilder("reg", "import", regFile.toString());
+                    pb.redirectErrorStream(true);
+                    Process process = ProcessManager.start(pb);
+                    boolean finished = process.waitFor(120, TimeUnit.SECONDS);
+                    if (!finished) {
+                        process.destroyForcibly();
+                        regFailed++;
+                        AppLogger.warning("reg import timed out for " + regFile.getFileName());
+                    } else if (process.exitValue() != 0) {
+                        regFailed++;
+                        AppLogger.warning("reg import failed for " + regFile.getFileName() + " (exit=" + process.exitValue() + ")");
+                    }
+                }
+                final int imported = regFiles.size() - regFailed;
+                final int regFailedFinal = regFailed;
+                final int totalFiles = regFiles.size();
                 Platform.runLater(() -> {
-                    if (exitCode == 0) {
+                    if (regFailedFinal == 0) {
                         statusLabel.setText("Registry backup restored.");
                         new Alert(Alert.AlertType.INFORMATION,
-                                "Registry backup imported successfully.").showAndWait();
+                                "All " + imported + " registry file(s) imported successfully.").showAndWait();
                     } else {
-                        statusLabel.setText("Restore failed.");
-                        new Alert(Alert.AlertType.ERROR,
-                                "reg import exited with code " + exitCode).showAndWait();
+                        statusLabel.setText(imported + " restored, " + regFailedFinal + " failed.");
+                        new Alert(Alert.AlertType.WARNING,
+                                imported + " of " + totalFiles + " registry file(s) imported.\n"
+                                        + regFailedFinal + " file(s) failed.").showAndWait();
                     }
                 });
             } catch (Exception e) {
@@ -800,7 +889,7 @@ public class BackupRestoreTabView extends BorderPane {
                             "Failed to restore registry backup:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                Platform.runLater(() -> registryBusy.set(false));
             }
         });
     }
@@ -810,17 +899,25 @@ public class BackupRestoreTabView extends BorderPane {
         RegistryBackupRow selected = table.getSelectionModel().getSelectedItem();
         if (selected == null) return;
 
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING,
+                    "Deleting registry backups requires administrator rights.").showAndWait();
+            return;
+        }
+
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Delete Registry Backup");
-        confirm.setHeaderText("Delete backup file: " + selected.getFilename());
-        confirm.setContentText("This will permanently delete the selected registry backup file.");
+        confirm.setHeaderText("Delete backup session: " + selected.getFilename());
+        confirm.setContentText("This will permanently delete all registry backup files in this session.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
 
         try {
-            Path filePath = resolveRegistryBackupPath(selected.getFilename());
-            Files.deleteIfExists(filePath);
+            Path dirPath = resolveRegistryBackupPath(selected.getFilename());
+            if (Files.isDirectory(dirPath)) {
+                deleteDirectoryRecursive(dirPath);
+            }
             rows.remove(selected);
-            statusLabel.setText("Backup deleted.");
+            statusLabel.setText("Backup session deleted.");
         } catch (Exception e) {
             AppLogger.error("Failed to delete registry backup", e);
             new Alert(Alert.AlertType.ERROR,
@@ -828,18 +925,29 @@ public class BackupRestoreTabView extends BorderPane {
         }
     }
 
+    private static void deleteDirectoryRecursive(Path directory) throws IOException {
+        if (Files.exists(directory)) {
+            try (var stream = Files.walk(directory)) {
+                stream.sorted(java.util.Comparator.reverseOrder())
+                        .forEach(path -> {
+                            try {
+                                Files.deleteIfExists(path);
+                            } catch (IOException e) {
+                                AppLogger.warning("Could not delete: " + path, e);
+                            }
+                        });
+            }
+        }
+    }
+
     private static Path resolveRegistryBackupPath(String filename) throws IOException {
         Path base = AppPaths.backupsRoot().resolve("cleanup-backups");
-        Path filePath = base.resolve(filename).normalize();
+        String cleanName = filename.endsWith("/") ? filename.substring(0, filename.length() - 1) : filename;
+        Path filePath = base.resolve(cleanName).normalize();
         if (!filePath.startsWith(base)) {
             throw new IOException("Invalid backup path: " + filename);
         }
         return filePath;
     }
 
-    private static String formatFileSize(long bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
-    }
 }

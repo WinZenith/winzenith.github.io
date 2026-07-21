@@ -178,13 +178,13 @@ public class WingetRunner {
         for (List<String> candidate : candidates) {
             try {
                 ProcessResult r = runner.run(candidate, timeoutSeconds);
-                if (r.success() || (r.stdout() != null && !r.stdout().isBlank())) {
-                    if (!r.success()) {
-                        AppLogger.warning("winget returned non-zero: " + r.exitCode() + " output: " + r.combinedOutput());
-                    }
+                if (r.success()) {
                     return r;
                 }
                 lastResult = r;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted during winget fallback", e);
             } catch (Exception ex) {
                 lastEx = ex;
             }
@@ -198,19 +198,16 @@ public class WingetRunner {
      * Returns the first successful result, or the last failed result.
      */
     public ProcessResult runWithFallbackStreaming(Consumer<String> lineCallback,
-                                                  Consumer<Double> progressCallback,
-                                                  AtomicBoolean cancelled,
-                                                  String... args) throws java.io.IOException, java.util.concurrent.CancellationException {
+                                                   Consumer<Double> progressCallback,
+                                                   AtomicBoolean cancelled,
+                                                   String... args) throws java.io.IOException, java.util.concurrent.CancellationException {
         List<List<String>> candidates = buildCandidates(args);
         ProcessResult lastResult = null;
         Exception lastEx = null;
         for (List<String> candidate : candidates) {
             try {
                 ProcessResult r = runner.runStreaming(candidate, lineCallback, progressCallback, cancelled);
-                if (r.success() || (r.stdout() != null && !r.stdout().isBlank())) {
-                    if (!r.success()) {
-                        AppLogger.warning("winget returned non-zero: " + r.exitCode() + " output: " + r.combinedOutput());
-                    }
+                if (r.success()) {
                     return r;
                 }
                 lastResult = r;

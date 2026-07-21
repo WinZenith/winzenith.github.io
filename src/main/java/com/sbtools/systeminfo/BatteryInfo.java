@@ -13,18 +13,18 @@ public record BatteryInfo(
         @JsonProperty("chemistry") String chemistry
 ) {
     public String formatChargeLevel() {
-        if (chargeLevel <= 0) return "";
+        if (chargeLevel < 0) return "";
         return chargeLevel + "%";
     }
 
     public String formatRemainingCapacity() {
-        if (remainingCapacityMwh <= 0) return "";
+        if (remainingCapacityMwh < 0) return "";
         double wh = remainingCapacityMwh / 1000.0;
         return String.format("%.1f Wh", wh);
     }
 
     public String formatChargeRate() {
-        if (chargeRate <= 0) return "";
+        if (chargeRate < 0) return "";
         double watts = chargeRate / 1000.0;
         return String.format("%.1f W", watts);
     }

@@ -13,6 +13,7 @@ public class StartupItem {
     private final String taskPath;
     private final StartupItemType type;
     private String serviceStartType;
+    private final String originalServiceStartType;
     private double estimatedBootImpactMs;
     private List<String> dependencies;
 
@@ -29,6 +30,7 @@ public class StartupItem {
         this.taskPath = taskPath;
         this.type = type;
         this.serviceStartType = serviceStartType;
+        this.originalServiceStartType = serviceStartType;
     }
 
     public String getName() {
@@ -77,6 +79,10 @@ public class StartupItem {
 
     public void setServiceStartType(String serviceStartType) {
         this.serviceStartType = serviceStartType;
+    }
+
+    public String getOriginalServiceStartType() {
+        return originalServiceStartType;
     }
 
     public double getEstimatedBootImpactMs() {

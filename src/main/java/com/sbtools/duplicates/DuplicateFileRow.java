@@ -9,6 +9,7 @@ import javafx.beans.property.SimpleLongProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class DuplicateFileRow {
@@ -26,6 +27,7 @@ public class DuplicateFileRow {
         this.fullPath.set(fullPath);
         this.fileSize.set(fileSize);
         this.checksumSha256.set(checksumSha256);
+        this.deletablePaths = new ArrayList<>();
     }
 
     public DuplicateFileRow(String fileName, String fullPath, long fileSize, String checksumSha256,

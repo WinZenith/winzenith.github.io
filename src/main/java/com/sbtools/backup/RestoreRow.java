@@ -1,6 +1,5 @@
 package com.sbtools.backup;
 
-import com.sbtools.util.AppExecutors;
 import javafx.application.Platform;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;

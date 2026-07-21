@@ -42,7 +42,20 @@ class ChangeLogPanel extends VBox {
     }
 
     void loadEntries() {
-        entries.setAll(service.getChangeLog());
+        if (busy.get()) return;
+        busy.set(true);
+        new Thread(() -> {
+            try {
+                var result = service.getChangeLog();
+                javafx.application.Platform.runLater(() -> {
+                    entries.setAll(result);
+                });
+            } catch (Exception e) {
+                // logged silently
+            } finally {
+                javafx.application.Platform.runLater(() -> busy.set(false));
+            }
+        }, "net-load-changelog").start();
     }
 
     private VBox buildContent() {
@@ -68,8 +81,10 @@ class ChangeLogPanel extends VBox {
             confirm.setTitle("Clear History");
             confirm.setHeaderText(null);
             if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
-                service.clearChangeLog();
-                entries.clear();
+                new Thread(() -> {
+                    service.clearChangeLog();
+                    javafx.application.Platform.runLater(() -> entries.clear());
+                }, "net-clear-changelog").start();
             }
         });
 

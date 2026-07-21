@@ -155,8 +155,8 @@ public class NetworkOptimizerService {
     }
 
     public OperationResult renewIp(String adapterName) {
-        sanitizeName(adapterName);
         try {
+            sanitizeName(adapterName);
             ProcessResult release = new ProcessRunner(30).run(
                     powershellCommand("ipconfig /release \"" + adapterName + "\""));
             if (release.exitCode() != 0) {
@@ -177,8 +177,8 @@ public class NetworkOptimizerService {
     }
 
     public OperationResult setAdapterState(String adapterName, boolean enable) {
-        sanitizeName(adapterName);
         try {
+            sanitizeName(adapterName);
             String cmd = enable ? "Enable-NetAdapter" : "Disable-NetAdapter";
             ProcessResult pr = new ProcessRunner(30).run(
                     powershellCommand(cmd + " -Name '" + adapterName + "' -Confirm:$false"));
@@ -217,8 +217,8 @@ public class NetworkOptimizerService {
     }
 
     public List<String> getCurrentDnsServers(String adapterName) {
-        sanitizeName(adapterName);
         try {
+            sanitizeName(adapterName);
             Path script = PowerShellScripts.resolve("net-dns-get.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
                     ProcessRunner.powershellScript(script.toString(), "-AdapterName", adapterName));
@@ -238,8 +238,8 @@ public class NetworkOptimizerService {
     }
 
     public OperationResult setDnsServers(String adapterName, String primaryDns, String secondaryDns) {
-        sanitizeName(adapterName);
         try {
+            sanitizeName(adapterName);
             Path script = PowerShellScripts.resolve("net-dns-set.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
                     ProcessRunner.powershellScript(script.toString(),
@@ -290,40 +290,9 @@ public class NetworkOptimizerService {
         changeLog.clear();
     }
 
-    public List<ConnectionInfo> getActiveConnections(String stateFilter) {
-        List<ConnectionInfo> connections = new ArrayList<>();
-        try {
-            Path script = PowerShellScripts.resolve("net-connections.ps1");
-            String arg = (stateFilter != null && !stateFilter.isEmpty()) ? stateFilter : "ALL";
-            ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(), "-State", arg));
-            String stdout = pr.stdout().trim();
-            if (!stdout.isEmpty() && !"[]".equals(stdout)) {
-                List<Map<String, Object>> raw = mapper.readValue(stdout,
-                        new TypeReference<List<Map<String, Object>>>() {});
-                for (Map<String, Object> entry : raw) {
-                    try {
-                        connections.add(new ConnectionInfo(
-                                str(entry, "Protocol"),
-                                str(entry, "LocalAddress"),
-                                str(entry, "RemoteAddress"),
-                                str(entry, "State"),
-                                entry.get("PID") instanceof Number n ? n.intValue() : 0,
-                                str(entry, "ProcessName")));
-                    } catch (Exception e) {
-                        AppLogger.warning("Failed to parse connection entry: " + e.getMessage());
-                    }
-                }
-            }
-        } catch (Exception e) {
-            AppLogger.warning("Failed to get active connections: " + e.getMessage());
-        }
-        return connections;
-    }
-
     public AdapterProperties getAdapterProperties(String adapterName) {
-        sanitizeName(adapterName);
         try {
+            sanitizeName(adapterName);
             Path script = PowerShellScripts.resolve("net-adapter-properties.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
                     ProcessRunner.powershellScript(script.toString(), "-AdapterName", adapterName));
@@ -465,8 +434,8 @@ public class NetworkOptimizerService {
     }
 
     public PingResult ping(String host, int count) {
-        sanitizeHost(host);
         try {
+            sanitizeHost(host);
             Path script = PowerShellScripts.resolve("net-ping.ps1");
             ProcessResult pr = new ProcessRunner(30 + (long) count * 5).run(
                     ProcessRunner.powershellScript(script.toString(), "-Host", host, "-Count", String.valueOf(count)));
@@ -494,8 +463,8 @@ public class NetworkOptimizerService {
     }
 
     public List<TracerouteHop> traceroute(String host, int maxHops) {
-        sanitizeHost(host);
         try {
+            sanitizeHost(host);
             Path script = PowerShellScripts.resolve("net-traceroute.ps1");
             ProcessResult pr = new ProcessRunner(60 + (long) maxHops * 5).run(
                     ProcessRunner.powershellScript(script.toString(), "-Host", host, "-MaxHops", String.valueOf(maxHops)));
@@ -526,55 +495,4 @@ public class NetworkOptimizerService {
         return List.of();
     }
 
-    public PortScanResult scanPort(String host, int port) {
-        sanitizeHost(host);
-        if (port < 1 || port > 65535) {
-            return new PortScanResult(host, port, false, 0, "Invalid port number.");
-        }
-        try {
-            Path script = PowerShellScripts.resolve("net-portscan.ps1");
-            ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(), "-Host", host, "-Port", String.valueOf(port)));
-            String stdout = pr.stdout().trim();
-            if (!stdout.isEmpty() && !stdout.contains("\"error\"")) {
-                Map<String, Object> data = mapper.readValue(stdout,
-                        new TypeReference<Map<String, Object>>() {});
-                return new PortScanResult(
-                        host,
-                        port,
-                        data.get("open") instanceof Boolean b && b,
-                        data.get("latencyMs") instanceof Number n ? n.longValue() : 0,
-                        str(data, "rawOutput"));
-            }
-            return new PortScanResult(host, port, false, 0, stdout.isEmpty() ? "No output." : stdout);
-        } catch (IllegalArgumentException e) {
-            return new PortScanResult(host, port, false, 0, e.getMessage());
-        } catch (Exception e) {
-            AppLogger.warning("Failed to scan port: " + e.getMessage());
-            return new PortScanResult(host, port, false, 0, "Error: " + e.getMessage());
-        }
-    }
-
-    public SpeedTestResult runSpeedTest() {
-        try {
-            Path script = PowerShellScripts.resolve("net-speedtest.ps1");
-            ProcessResult pr = new ProcessRunner(120).run(
-                    ProcessRunner.powershellScript(script.toString()));
-            String stdout = pr.stdout().trim();
-            if (!stdout.isEmpty() && !stdout.contains("\"error\"")) {
-                Map<String, Object> data = mapper.readValue(stdout,
-                        new TypeReference<Map<String, Object>>() {});
-                return new SpeedTestResult(
-                        data.get("downloadMbps") instanceof Number n ? n.doubleValue() : 0,
-                        data.get("uploadMbps") instanceof Number n ? n.doubleValue() : 0,
-                        data.get("latencyMs") instanceof Number n ? n.longValue() : 0,
-                        str(data, "serverInfo"),
-                        str(data, "rawOutput"));
-            }
-            return SpeedTestResult.fail(stdout.isEmpty() ? "No output from speed test." : stdout);
-        } catch (Exception e) {
-            AppLogger.warning("Failed to run speed test: " + e.getMessage());
-            return SpeedTestResult.fail("Error: " + e.getMessage());
-        }
-    }
 }

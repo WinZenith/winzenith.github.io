@@ -31,6 +31,7 @@ import java.util.stream.Stream;
 public class CleanupService {
 
     private static final long PER_CATEGORY_SCAN_TIMEOUT_SECONDS = 30;
+    private static final long PER_CATEGORY_CLEAN_TIMEOUT_SECONDS = 120;
 
     public static final class CleanSummary {
         private final long totalBytes;
@@ -398,10 +399,15 @@ public class CleanupService {
             if (!row.isSelected())
                 continue;
             try {
+                long scannedBytes = row.getTotalBytes();
+                int scannedItems = row.getItemCount();
                 long cleaned = cleanCategory(row.getCategory(), registryBackup ? backupRoot : null);
-                int items = row.getItemCount();
                 totalBytes += cleaned;
-                totalItems += items;
+                if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
+                    totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
+                } else {
+                    totalItems += scannedItems;
+                }
                 perCategory.put(row.getCategory(), cleaned);
                 if (onProgress != null)
                     onProgress.run();
@@ -576,7 +582,13 @@ public class CleanupService {
                     if (onProgress != null)
                         onProgress.run();
                 }
-            }, executor);
+            }, executor).orTimeout(PER_CATEGORY_CLEAN_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+                    .exceptionally(ex -> {
+                        if (ex instanceof java.util.concurrent.TimeoutException) {
+                            AppLogger.warning("Clean timed out for " + taskRow.getCategory().getDisplayName());
+                        }
+                        return 0L;
+                    });
             futures.add(f);
         }
 
@@ -590,7 +602,13 @@ public class CleanupService {
                         long cleaned = futures.get(i).join();
                         CleanupRow row = tasks.get(i);
                         totalBytes += cleaned;
-                        totalItems += row.getItemCount();
+                        int scannedItems = row.getItemCount();
+                        long scannedBytes = row.getTotalBytes();
+                        if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
+                            totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
+                        } else {
+                            totalItems += scannedItems;
+                        }
                         perCategory.put(row.getCategory(), cleaned);
                     }
                     return new CleanSummary(totalBytes, totalItems, perCategory);
@@ -620,7 +638,7 @@ public class CleanupService {
         } else {
             row.setSizeOrCountText("Ready to compact");
         }
-        row.setItemCount(1);
+        row.setItemCount(RegistryDefragService.getHiveCount());
     }
 
     private long cleanRegistryDefrag() {
@@ -719,9 +737,12 @@ public class CleanupService {
                                 String serverPath = Advapi32Util.registryGetStringValue(
                                         WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\InprocServer32", "");
                                 if (serverPath != null && !serverPath.isEmpty()) {
-                                    Path p = Paths.get(serverPath);
-                                    if (!Files.exists(p)) {
-                                        count++;
+                                    String cleanPath = extractPathFromRegistryValue(serverPath);
+                                    if (cleanPath != null) {
+                                        Path p = Paths.get(cleanPath);
+                                        if (!Files.exists(p)) {
+                                            count++;
+                                        }
                                     }
                                 }
                             } else if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT,
@@ -805,16 +826,12 @@ public class CleanupService {
                                 pathToCheck = uninstallString;
                             }
                             if (pathToCheck != null) {
-                                String cleanPath = pathToCheck;
-                                if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
-                                    cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
-                                }
-                                int spaceIdx = cleanPath.indexOf(" -");
-                                if (spaceIdx > 0)
-                                    cleanPath = cleanPath.substring(0, spaceIdx);
-                                Path p = Paths.get(cleanPath);
-                                if (!Files.exists(p)) {
-                                    count++;
+                                String cleanPath = extractPathFromRegistryValue(pathToCheck);
+                                if (cleanPath != null) {
+                                    Path p = Paths.get(cleanPath);
+                                    if (!Files.exists(p)) {
+                                        count++;
+                                    }
                                 }
                             }
                         } catch (Exception ignored) {
@@ -928,9 +945,15 @@ public class CleanupService {
                         Path regBackup = backupRootOrNull.resolve("registry-" + keyPath.replace("\\", "_") + ".reg");
                         Files.createDirectories(regBackup.getParent());
                         try {
-                            ProcessManager.start(new ProcessBuilder("reg", "export",
+                            ProcessBuilder exportPb = new ProcessBuilder("reg", "export",
                                     (hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") + "\\" + keyPath,
-                                    regBackup.toString(), "/y").inheritIO()).waitFor();
+                                    regBackup.toString(), "/y");
+                            exportPb.redirectErrorStream(true);
+                            Process exportProcess = ProcessManager.start(exportPb);
+                            boolean exportFinished = exportProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+                            if (!exportFinished) {
+                                exportProcess.destroyForcibly();
+                            }
                         } catch (Exception ignored) {
                         }
                     }
@@ -955,10 +978,14 @@ public class CleanupService {
             try {
                 Path regBackup = backupRootOrNull.resolve("registry-" + description + ".reg");
                 Files.createDirectories(regBackup.getParent());
-                ProcessManager.start(
-                        new ProcessBuilder("reg", "export", hiveName + "\\" + keyPath, regBackup.toString(), "/y")
-                                .inheritIO())
-                        .waitFor();
+                ProcessBuilder pb = new ProcessBuilder("reg", "export", hiveName + "\\" + keyPath,
+                        regBackup.toString(), "/y");
+                pb.redirectErrorStream(true);
+                Process exportProcess = ProcessManager.start(pb);
+                boolean finished = exportProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+                if (!finished) {
+                    exportProcess.destroyForcibly();
+                }
             } catch (Exception ignored) {
             }
         }
@@ -1045,9 +1072,12 @@ public class CleanupService {
                                 String serverPath = Advapi32Util.registryGetStringValue(
                                         WinReg.HKEY_CLASSES_ROOT, "CLSID\\" + guid + "\\InprocServer32", "");
                                 if (serverPath != null && !serverPath.isEmpty()) {
-                                    Path p = Paths.get(serverPath);
-                                    if (!Files.exists(p))
-                                        invalid = true;
+                                    String cleanPath = extractPathFromRegistryValue(serverPath);
+                                    if (cleanPath != null) {
+                                        Path p = Paths.get(cleanPath);
+                                        if (!Files.exists(p))
+                                            invalid = true;
+                                    }
                                 }
                             } else if (Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT,
                                     "CLSID\\" + guid + "\\LocalServer32")) {
@@ -1096,13 +1126,12 @@ public class CleanupService {
                         String exePath = Advapi32Util.registryGetStringValue(
                                 WinReg.HKEY_LOCAL_MACHINE, keyPath + "\\" + appKey, "");
                         if (exePath != null && !exePath.isEmpty()) {
-                            String cleanPath = exePath;
-                            if (cleanPath.startsWith("\"") && cleanPath.endsWith("\"")) {
-                                cleanPath = cleanPath.substring(1, cleanPath.length() - 1);
-                            }
-                            Path p = Paths.get(cleanPath);
-                            if (!Files.exists(p)) {
-                                toDelete.add(appKey);
+                            String cleanPath = extractPathFromRegistryValue(exePath);
+                            if (cleanPath != null) {
+                                Path p = Paths.get(cleanPath);
+                                if (!Files.exists(p)) {
+                                    toDelete.add(appKey);
+                                }
                             }
                         }
                     } catch (Exception ignored) {
@@ -1223,7 +1252,7 @@ public class CleanupService {
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, basePath)) {
                 String[] sids = Advapi32Util.registryGetKeys(WinReg.HKEY_LOCAL_MACHINE, basePath);
                 List<String> allToDelete = new ArrayList<>();
-                Map<String, List<String>> deletionsBySid = new HashMap<>();
+                Map<String, List<String[]>> deletionsBySid = new HashMap<>();
                 for (String sid : sids) {
                     String compPath = basePath + "\\" + sid + "\\Components";
                     try {
@@ -1241,7 +1270,7 @@ public class CleanupService {
                                             if (!Files.exists(p)) {
                                                 allToDelete.add(valName);
                                                 deletionsBySid.computeIfAbsent(sid, k -> new ArrayList<>())
-                                                        .add(valPath + "\\" + valName);
+                                                        .add(new String[]{valPath, valName});
                                             }
                                         }
                                     }
@@ -1254,15 +1283,12 @@ public class CleanupService {
                 }
                 if (!allToDelete.isEmpty()) {
                     backupRegKey(backupRootOrNull, "installercomponents", "HKLM", basePath);
-                    for (Map.Entry<String, List<String>> entry : deletionsBySid.entrySet()) {
-                        for (String fullPath : entry.getValue()) {
+                    for (Map.Entry<String, List<String[]>> entry : deletionsBySid.entrySet()) {
+                        for (String[] keyVal : entry.getValue()) {
                             try {
-                                String[] parts = fullPath.replace(basePath + "\\", "").split("\\\\", 2);
-                                if (parts.length == 2) {
-                                    Advapi32Util.registryDeleteValue(
-                                            WinReg.HKEY_LOCAL_MACHINE, parts[0], parts[1]);
-                                    count++;
-                                }
+                                Advapi32Util.registryDeleteValue(
+                                        WinReg.HKEY_LOCAL_MACHINE, keyVal[0], keyVal[1]);
+                                count++;
                             } catch (Exception ignored) {
                             }
                         }
@@ -2047,11 +2073,25 @@ public class CleanupService {
                     if (line.contains("Size of superseded components")) {
                         String[] parts = line.split(":");
                         if (parts.length >= 2) {
-                            String sizeStr = parts[1].replaceAll("[^0-9]", "").trim();
+                            String sizePart = parts[1].trim();
+                            String sizeStr = sizePart.replaceAll("[^0-9.]", "").trim();
                             if (!sizeStr.isEmpty()) {
-                                long dismSize = Long.parseLong(sizeStr) * 1024L * 1024L;
-                                totalSize += dismSize;
-                                itemCount = Math.max(itemCount, 1);
+                                try {
+                                    double numericValue = Double.parseDouble(sizeStr);
+                                    long bytes;
+                                    if (sizePart.toUpperCase().contains("GB")) {
+                                        bytes = (long) (numericValue * 1024L * 1024L * 1024L);
+                                    } else if (sizePart.toUpperCase().contains("MB")) {
+                                        bytes = (long) (numericValue * 1024L * 1024L);
+                                    } else if (sizePart.toUpperCase().contains("KB")) {
+                                        bytes = (long) (numericValue * 1024L);
+                                    } else {
+                                        bytes = (long) (numericValue * 1024L * 1024L);
+                                    }
+                                    totalSize += bytes;
+                                    itemCount = Math.max(itemCount, 1);
+                                } catch (NumberFormatException ignored) {
+                                }
                             }
                         }
                     }
@@ -2998,38 +3038,46 @@ public class CleanupService {
         long totalSize = 0;
         int itemCount = 0;
 
-        CleanupRow temp = row;
-        scanDiscordCache(temp);
-        totalSize += temp.getTotalBytes();
-        itemCount += temp.getItemCount();
+        long[] subResult = new long[2];
 
-        scanVscodeCache(temp);
-        totalSize += temp.getTotalBytes();
-        itemCount += temp.getItemCount();
+        scanSubCache(subResult, this::scanDiscordCache);
+        totalSize += subResult[0];
+        itemCount += (int) subResult[1];
 
-        scanAdobeCache(temp);
-        totalSize += temp.getTotalBytes();
-        itemCount += temp.getItemCount();
+        scanSubCache(subResult, this::scanVscodeCache);
+        totalSize += subResult[0];
+        itemCount += (int) subResult[1];
 
-        scanSteamCache(temp);
-        totalSize += temp.getTotalBytes();
-        itemCount += temp.getItemCount();
+        scanSubCache(subResult, this::scanAdobeCache);
+        totalSize += subResult[0];
+        itemCount += (int) subResult[1];
 
-        scanSlackCache(temp);
-        totalSize += temp.getTotalBytes();
-        itemCount += temp.getItemCount();
+        scanSubCache(subResult, this::scanSteamCache);
+        totalSize += subResult[0];
+        itemCount += (int) subResult[1];
 
-        scanZoomCache(temp);
-        totalSize += temp.getTotalBytes();
-        itemCount += temp.getItemCount();
+        scanSubCache(subResult, this::scanSlackCache);
+        totalSize += subResult[0];
+        itemCount += (int) subResult[1];
 
-        scanTeamsCache(temp);
-        totalSize += temp.getTotalBytes();
-        itemCount += temp.getItemCount();
+        scanSubCache(subResult, this::scanZoomCache);
+        totalSize += subResult[0];
+        itemCount += (int) subResult[1];
+
+        scanSubCache(subResult, this::scanTeamsCache);
+        totalSize += subResult[0];
+        itemCount += (int) subResult[1];
 
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
         row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+    }
+
+    private void scanSubCache(long[] result, java.util.function.Consumer<CleanupRow> scanner) {
+        CleanupRow temp = new CleanupRow(CleanupCategory.OTHER_PROGRAMS_CACHE);
+        scanner.accept(temp);
+        result[0] = temp.getTotalBytes();
+        result[1] = temp.getItemCount();
     }
 
     private long cleanOtherProgramsCache() {
@@ -3394,6 +3442,20 @@ public class CleanupService {
         return result;
     }
 
+    private static String expandEnvironmentVariables(String path) {
+        if (path == null) return null;
+        String result = path;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("%([^%]+)%").matcher(result);
+        StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            String envName = m.group(1);
+            String envVal = System.getenv(envName);
+            m.appendReplacement(sb, envVal != null ? java.util.regex.Matcher.quoteReplacement(envVal) : m.group(0));
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
     private static String extractPathFromRegistryValue(String rawValue) {
         if (rawValue == null || rawValue.isEmpty()) return null;
         String path = rawValue;
@@ -3403,13 +3465,18 @@ public class CleanupService {
         if (path.startsWith("\\\\")) {
             return null;
         }
-        int spaceIdx = path.indexOf(" -");
-        if (spaceIdx > 0) {
-            path = path.substring(0, spaceIdx);
+        int exeIdx = path.lastIndexOf(".exe");
+        if (exeIdx > 0) {
+            String afterExe = path.substring(exeIdx + 4);
+            int spaceIdx = afterExe.indexOf(" -");
+            if (spaceIdx >= 0) {
+                path = path.substring(0, exeIdx + 4 + spaceIdx);
+            }
         }
         if (!path.contains("\\") && !path.contains("/")) {
             return null;
         }
+        path = expandEnvironmentVariables(path);
         return path;
     }
 

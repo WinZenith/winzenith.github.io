@@ -21,18 +21,22 @@ public class SystemRestoreService {
             Path script = PowerShellScripts.resolve("checkpoint-restore.ps1");
             ProcessResult r = runner.run(ProcessRunner.powershellScript(script.toString(), description));
             int seq = -1;
-            if (r.success() && r.stdout() != null && !r.stdout().isBlank()) {
+            boolean scriptSuccess = r.success();
+            if (r.stdout() != null && !r.stdout().isBlank()) {
                 try {
                     var tree = com.sbtools.util.JsonMapper.parseTree(r.stdout());
                     seq = tree.path("sequenceNumber").asInt(-1);
+                    if (tree.has("success")) {
+                        scriptSuccess = tree.path("success").asBoolean(r.success());
+                    }
                 } catch (Exception ignored) {}
             }
-            if (r.success()) {
+            if (scriptSuccess) {
                 AppLogger.info("System restore point created: " + description);
             } else {
                 AppLogger.warning("System restore point creation failed: " + r.combinedOutput());
             }
-            return new RestorePointResult(r.success(), seq);
+            return new RestorePointResult(scriptSuccess, seq);
         } catch (Exception e) {
             AppLogger.warning("Failed to create restore point: " + e.getMessage());
             return new RestorePointResult(false, -1);

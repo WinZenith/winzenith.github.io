@@ -199,10 +199,11 @@ public class SoftwareUpdateViewModel {
             return;
         }
         if (selected.isEmpty()) {
-            new Alert(Alert.AlertType.INFORMATION, "Select at least one program to update.").showAndWait();
+            Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Select at least one program to update.").showAndWait());
             return;
         }
 
+        restorePointCreatedThisBatch.set(false);
         maybeCreateRestorePointAsync().thenRunAsync(() -> {
             synchronized (failedEntries) { failedEntries.clear(); }
             if (!isRetry) retryCount = 0;
@@ -237,20 +238,16 @@ public class SoftwareUpdateViewModel {
             futures.add(future);
         }
 
-        try {
-            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
-        } catch (Exception ex) {
-            installCancelled.set(true);
-            for (CompletableFuture<Void> f : futures) {
-                f.cancel(true);
+        for (CompletableFuture<Void> f : futures) {
+            try {
+                f.join();
+            } catch (Exception ex) {
+                AppLogger.warning("Batch install future completed exceptionally: " + ex.getMessage());
             }
         }
 
         final int finalCompleted = completed.get();
-        List<String> failedNames = new ArrayList<>();
-        for (SoftwareUpdateEntry fe : failedPackages) {
-            failedNames.add(fe.getName() != null ? fe.getName() : fe.id());
-        }
+        List<SoftwareUpdateEntry> finalFailed = new ArrayList<>(failedPackages);
         List<SoftwareUpdateEntry> finalTechMismatch = new ArrayList<>(techMismatchEntries);
         Platform.runLater(() -> {
             if (disposed) return;
@@ -259,9 +256,9 @@ public class SoftwareUpdateViewModel {
             busy.set(false);
             if (installCancelled.get()) {
                 statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
-            } else if (!failedNames.isEmpty() || !finalTechMismatch.isEmpty()) {
-                statusText.set("Completed with " + failedNames.size() + " failure(s). Use \"Retry Failed\" or re-scan.");
-                for (SoftwareUpdateEntry fe : failedPackages) {
+            } else if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
+                statusText.set("Completed with " + finalFailed.size() + " failure(s). Use \"Retry Failed\" or re-scan.");
+                for (SoftwareUpdateEntry fe : finalFailed) {
                     synchronized (failedEntries) { failedEntries.add(fe); }
                     fe.setStatus("Failed");
                     fe.setProgress(0.0);
@@ -270,7 +267,7 @@ public class SoftwareUpdateViewModel {
                     rows.add(fe);
                 }
                 showRetryFailed.set(true);
-                showBatchResultDialog(failedNames, finalTechMismatch);
+                showBatchResultDialog(failedPackages, finalTechMismatch);
             } else {
                 statusText.set("All selected updates installed successfully.");
                 showRetryFailed.set(false);
@@ -281,7 +278,7 @@ public class SoftwareUpdateViewModel {
 
     public void updateSingle(SoftwareUpdateEntry entry) {
         if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait();
+            Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait());
             return;
         }
 
@@ -339,17 +336,31 @@ public class SoftwareUpdateViewModel {
                     });
                 }
             } else {
+                String errorMsg = res.combinedOutput();
+                entry.setLastError(errorMsg);
                 synchronized (failedEntries) { failedEntries.add(entry); }
-                recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, res.combinedOutput());
+                recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, errorMsg);
+                if (isMsiCorruptionError(errorMsg)) {
+                    errorMsg = "Windows Installer corruption detected.\n\n"
+                            + "The old version of this product cannot be removed because the installer cache is damaged.\n\n"
+                            + "To fix this:\n"
+                            + "1. Open Settings > Apps > Installed apps\n"
+                            + "2. Find and uninstall '" + (entry.getName() != null ? entry.getName() : entry.id()) + "'\n"
+                            + "3. Come back here and click 'Scan' to reinstall\n\n"
+                            + "Alternatively, download and run the Microsoft Program Install troubleshooter:\n"
+                            + "https://support.microsoft.com/en-us/topic/fix-problems-that-block-programs-from-being-installed-or-removed-cca7d1b6-65a9-3d98-426b-e9f927e1eb4d";
+                }
+                String finalMsg = errorMsg;
                 Platform.runLater(() -> {
                     if (disposed) return;
-                    new Alert(Alert.AlertType.ERROR, "Install failed:\n" + res.combinedOutput()).showAndWait();
+                    new Alert(Alert.AlertType.ERROR, "Install failed:\n" + finalMsg).showAndWait();
                     entry.setStatus("Failed");
                     entry.setProgress(0.0);
                 });
             }
         } catch (Exception ex) {
             String msg = ex.getMessage();
+            entry.setLastError(msg);
             if (msg != null && msg.contains("INSTALL_TECHNOLOGY_MISMATCH")) {
                 synchronized (failedEntries) { failedEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, msg);
@@ -418,7 +429,7 @@ public class SoftwareUpdateViewModel {
         } catch (Exception ex) {
             AppLogger.warning("Failed to skip software entry: " + ex.getMessage());
         }
-        rows.remove(entry);
+        Platform.runLater(() -> rows.remove(entry));
     }
 
     public List<SoftwareUpdateEntry> getFailedEntries() {
@@ -448,7 +459,7 @@ public class SoftwareUpdateViewModel {
         return t;
     });
 
-    private final ExecutorService installExecutor = Executors.newFixedThreadPool(2, r -> {
+    private final ExecutorService installExecutor = Executors.newFixedThreadPool(1, r -> {
         Thread t = new Thread(r, "SoftwareUpdate-Install");
         t.setDaemon(true);
         return t;
@@ -462,12 +473,9 @@ public class SoftwareUpdateViewModel {
         if (installCancelled.get()) return;
         try {
             Instant start = Instant.now();
-            int current = completed.incrementAndGet();
             Platform.runLater(() -> {
                 if (disposed) return;
                 statusText.set("Installing " + entry.getName() + "...");
-                batchProgressText.set(current + " / " + total);
-                batchProgress.set((double) current / total);
                 entry.setStatus("Installing...");
                 entry.setProgress(-1.0);
             });
@@ -505,9 +513,21 @@ public class SoftwareUpdateViewModel {
                     });
                 }
             } else {
-                AppLogger.warning("Update failed for " + entry.id() + ": " + res.combinedOutput());
+                String errorMsg = res.combinedOutput();
+                AppLogger.warning("Update failed for " + entry.id() + ": " + errorMsg);
+                if (isMsiCorruptionError(errorMsg)) {
+                    errorMsg = "Windows Installer corruption detected.\n\n"
+                            + "The old version of this product cannot be removed because the installer cache is damaged.\n\n"
+                            + "To fix this:\n"
+                            + "1. Open Settings > Apps > Installed apps\n"
+                            + "2. Find and uninstall '" + (entry.getName() != null ? entry.getName() : entry.id()) + "'\n"
+                            + "3. Come back here and click 'Scan' to reinstall\n\n"
+                            + "Alternatively, download and run the Microsoft Program Install troubleshooter:\n"
+                            + "https://support.microsoft.com/en-us/topic/fix-problems-that-block-programs-from-being-installed-or-removed-cca7d1b6-65a9-3d98-426b-e9f927e1eb4d";
+                }
+                entry.setLastError(errorMsg);
                 synchronized (failedPackages) { failedPackages.add(entry); }
-                recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, res.combinedOutput());
+                recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, errorMsg);
                 Platform.runLater(() -> {
                     if (disposed) return;
                     entry.setStatus("Failed");
@@ -517,10 +537,13 @@ public class SoftwareUpdateViewModel {
         } catch (CancellationException cex) {
             return;
         } catch (Exception ex) {
-            AppLogger.warning("Exception during update: " + ex.getMessage());
-            synchronized (failedPackages) { failedPackages.add(entry); }
+            String msg = ex.getMessage();
+            AppLogger.warning("Exception during update: " + msg);
+            entry.setLastError(msg);
             if (ex.getMessage() != null && ex.getMessage().contains("INSTALL_TECHNOLOGY_MISMATCH")) {
                 synchronized (techMismatchEntries) { techMismatchEntries.add(entry); }
+            } else {
+                synchronized (failedPackages) { failedPackages.add(entry); }
             }
             recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, ex.getMessage());
             Platform.runLater(() -> {
@@ -529,7 +552,35 @@ public class SoftwareUpdateViewModel {
                 entry.setProgress(0.0);
             });
         } finally {
-            // completed already incremented at start of try block
+            int current = completed.incrementAndGet();
+            Platform.runLater(() -> {
+                if (disposed) return;
+                batchProgressText.set(current + " / " + total);
+                batchProgress.set((double) current / total);
+            });
+        }
+    }
+
+    private static boolean isMsiCorruptionError(String output) {
+        if (output == null) return false;
+        String lower = output.toLowerCase();
+        if (lower.contains("cannot be removed") || lower.contains("error 1714")) return true;
+        if (!lower.contains("exit code: 1603")) return false;
+        int logIdx = lower.indexOf("installer log is available at:");
+        if (logIdx < 0) return false;
+        String afterLog = output.substring(logIdx + "installer log is available at:".length());
+        String[] logLines = afterLog.split("\\r?\\n");
+        String logPath = "";
+        for (String line : logLines) {
+            String trimmed = line.trim();
+            if (!trimmed.isEmpty()) { logPath = trimmed; break; }
+        }
+        if (logPath.isEmpty()) return false;
+        try {
+            String logContent = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(logPath))).toLowerCase();
+            return logContent.contains("error 1714") || logContent.contains("cannot be removed");
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -558,11 +609,21 @@ public class SoftwareUpdateViewModel {
         return f;
     }
 
-    private void showBatchResultDialog(List<String> failedNames, List<SoftwareUpdateEntry> techMismatchEntries) {
+    private void showBatchResultDialog(List<SoftwareUpdateEntry> failedEntries, List<SoftwareUpdateEntry> techMismatchEntries) {
         StringBuilder msg = new StringBuilder();
-        if (!failedNames.isEmpty()) {
+        if (!failedEntries.isEmpty()) {
             msg.append("The following updates failed:\n\n");
-            for (String f : failedNames) msg.append("  - ").append(f).append("\n");
+            for (SoftwareUpdateEntry fe : failedEntries) {
+                String displayName = fe.getName() != null ? fe.getName() : fe.id();
+                msg.append("  - ").append(displayName).append("\n");
+                String error = fe.getLastError();
+                if (error != null && !error.isBlank()) {
+                    String shortError = error.strip();
+                    if (shortError.length() > 200) shortError = shortError.substring(0, 200) + "...";
+                    msg.append("    Error: ").append(shortError).append("\n");
+                }
+                msg.append("\n");
+            }
         }
         if (!techMismatchEntries.isEmpty()) {
             if (!msg.isEmpty()) msg.append("\n");
@@ -578,7 +639,7 @@ public class SoftwareUpdateViewModel {
         a.setContentText(msg.toString());
 
         List<ButtonType> buttons = new ArrayList<>();
-        if (!failedNames.isEmpty()) buttons.add(new ButtonType("Retry Failed"));
+        if (!failedEntries.isEmpty()) buttons.add(new ButtonType("Retry Failed"));
         if (!techMismatchEntries.isEmpty()) buttons.add(new ButtonType("Add to Ignore List"));
         buttons.add(new ButtonType("OK", ButtonBar.ButtonData.OK_DONE));
         a.getButtonTypes().setAll(buttons);

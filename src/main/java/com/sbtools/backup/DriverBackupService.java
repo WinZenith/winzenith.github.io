@@ -25,16 +25,26 @@ public class DriverBackupService {
     private final ProcessRunner processRunner = new ProcessRunner(300);
 
     public List<DriverBackupEntry> listAll() throws IOException {
-        return loadIndex().getEntries().stream()
-                .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
-                .collect(Collectors.toList());
+        INDEX_LOCK.lock();
+        try {
+            return loadIndex().getEntries().stream()
+                    .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
+                    .collect(Collectors.toList());
+        } finally {
+            INDEX_LOCK.unlock();
+        }
     }
 
     public List<DriverBackupEntry> listBackups(String deviceId) throws IOException {
-        return loadIndex().getEntries().stream()
-                .filter(e -> e.deviceId().equals(deviceId))
-                .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
-                .collect(Collectors.toList());
+        INDEX_LOCK.lock();
+        try {
+            return loadIndex().getEntries().stream()
+                    .filter(e -> e.deviceId().equals(deviceId))
+                    .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
+                    .collect(Collectors.toList());
+        } finally {
+            INDEX_LOCK.unlock();
+        }
     }
 
     public DriverBackupEntry backupBeforeUpdate(InstalledDriver driver, AppSettings settings)
@@ -168,8 +178,12 @@ public class DriverBackupService {
     }
 
     public long getTotalSize() throws IOException {
+        return getTotalSize(listAll());
+    }
+
+    public long getTotalSize(List<DriverBackupEntry> entries) throws IOException {
         long total = 0;
-        for (DriverBackupEntry entry : listAll()) {
+        for (DriverBackupEntry entry : entries) {
             Path folder = Path.of(entry.backupFolder());
             if (Files.isDirectory(folder)) {
                 total += directorySize(folder);

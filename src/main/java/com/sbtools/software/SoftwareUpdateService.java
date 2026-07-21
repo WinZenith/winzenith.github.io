@@ -23,6 +23,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class SoftwareUpdateService {
 
@@ -47,8 +48,10 @@ public class SoftwareUpdateService {
         scanExecutor.shutdownNow();
     }
 
-    public List<SoftwareUpdateEntry> scanForUpdates() throws IOException, InterruptedException {
+    public List<SoftwareUpdateEntry> scanForUpdates(java.util.function.BooleanSupplier cancelled) throws IOException, InterruptedException {
         List<SoftwareUpdateEntry> results = new ArrayList<>();
+
+        if (cancelled != null && cancelled.getAsBoolean()) return results;
 
         // Try JSON mode first
         ProcessResult r = winget.runWithFallback(120,
@@ -60,6 +63,8 @@ public class SoftwareUpdateService {
                 results.addAll(parseJsonOutput(stdout));
             }
         }
+
+        if (cancelled != null && cancelled.getAsBoolean()) return results;
 
         // If JSON produced no results, try text-mode fallback for older winget
         if (results.isEmpty()) {
@@ -80,6 +85,10 @@ public class SoftwareUpdateService {
         }
 
         return results;
+    }
+
+    public List<SoftwareUpdateEntry> scanForUpdates() throws IOException, InterruptedException {
+        return scanForUpdates(null);
     }
 
     List<SoftwareUpdateEntry> parseTextOutput(String stdout) {
@@ -117,19 +126,24 @@ public class SoftwareUpdateService {
             idxSource = findColumnStart(lowerHeader, "source");
         }
 
+        int[] colStarts = {idxName, idxId, idxVersion, idxAvailable, idxSource};
+        int headerLen = headerLine != null ? headerLine.length() : 0;
+
         for (int i = start; i < lines.length; i++) {
             String l = lines[i];
             if (l.isBlank()) continue;
             if (l.trim().startsWith("---")) continue;
+            String lower = l.toLowerCase();
+            if (lower.contains("upgrades available") || lower.contains("package(s) have version")) continue;
 
             try {
                 String name = null, id = null, version = null, available = null, source = null;
                 if (headerLine != null) {
-                    if (idxName >= 0) name = extractColumnAt(l, idxName, headerLine.length()).trim();
-                    if (idxId >= 0) id = extractColumnAt(l, idxId, headerLine.length()).trim();
-                    if (idxVersion >= 0) version = extractColumnAt(l, idxVersion, headerLine.length()).trim();
-                    if (idxAvailable >= 0) available = extractColumnAt(l, idxAvailable, headerLine.length()).trim();
-                    if (idxSource >= 0) source = extractColumnAt(l, idxSource, headerLine.length()).trim();
+                    if (idxName >= 0) name = extractColumnAt(l, idxName, colStarts, 0, headerLen).trim();
+                    if (idxId >= 0) id = extractColumnAt(l, idxId, colStarts, 1, headerLen).trim();
+                    if (idxVersion >= 0) version = extractColumnAt(l, idxVersion, colStarts, 2, headerLen).trim();
+                    if (idxAvailable >= 0) available = extractColumnAt(l, idxAvailable, colStarts, 3, headerLen).trim();
+                    if (idxSource >= 0) source = extractColumnAt(l, idxSource, colStarts, 4, headerLen).trim();
                 }
                 if (name == null || name.isBlank()) {
                     String[] tokens = l.trim().split("\\s{2,}");
@@ -161,11 +175,18 @@ public class SoftwareUpdateService {
         return -1;
     }
 
-    private static String extractColumnAt(String line, int startCol, int headerLen) {
+    private static String extractColumnAt(String line, int startCol, int[] colStarts, int colIndex, int headerLen) {
         if (startCol >= line.length()) return "";
-        String sub = line.substring(startCol);
-        String[] tokens = sub.trim().split("\\s{2,}", 2);
-        return tokens.length > 0 ? tokens[0] : "";
+        int endCol = headerLen;
+        for (int j = colIndex + 1; j < colStarts.length; j++) {
+            if (colStarts[j] > startCol) {
+                endCol = colStarts[j];
+                break;
+            }
+        }
+        if (startCol >= line.length()) return "";
+        int end = Math.min(endCol, line.length());
+        return line.substring(startCol, end).trim();
     }
 
     List<SoftwareUpdateEntry> parseJsonOutput(String stdout) {
@@ -176,12 +197,22 @@ public class SoftwareUpdateService {
             if (root.isArray()) {
                 arrayNode = root;
             } else if (root.isObject()) {
-                Iterator<String> fields = root.fieldNames();
-                while (fields.hasNext()) {
-                    JsonNode child = root.get(fields.next());
-                    if (child.isArray()) {
+                String[] knownArrayNames = {"upgrades", "packages", "data", "updates", "results"};
+                for (String name : knownArrayNames) {
+                    JsonNode child = root.get(name);
+                    if (child != null && child.isArray()) {
                         arrayNode = child;
                         break;
+                    }
+                }
+                if (arrayNode == null) {
+                    Iterator<String> fields = root.fieldNames();
+                    while (fields.hasNext()) {
+                        JsonNode child = root.get(fields.next());
+                        if (child.isArray()) {
+                            arrayNode = child;
+                            break;
+                        }
                     }
                 }
             }
@@ -234,8 +265,24 @@ public class SoftwareUpdateService {
                     FileTime ft = Files.getLastModifiedTime(p);
                     Instant modified = ft.toInstant();
                     if (modified.isBefore(since)) continue;
-                    boolean containsToken = (!idToken.isBlank() && fileName.contains(idToken)) || (!name.isBlank() && Arrays.stream(name.split("\\s+"))
-                            .anyMatch(fileName::contains));
+                    boolean containsToken = false;
+                    if (!idToken.isBlank()) {
+                        String idBase = idToken.contains(".") ? idToken.substring(idToken.lastIndexOf('.') + 1) : idToken;
+                        if (idBase.length() >= 3 && fileName.contains(idBase)) {
+                            containsToken = true;
+                        } else if (fileName.contains(idToken)) {
+                            containsToken = true;
+                        }
+                    }
+                    if (!containsToken && !name.isBlank()) {
+                        String[] nameWords = name.split("\\s+");
+                        long matchedWords = java.util.Arrays.stream(nameWords)
+                                .filter(w -> w.length() >= 3 && fileName.contains(w))
+                                .count();
+                        if (matchedWords >= Math.min(2, nameWords.length)) {
+                            containsToken = true;
+                        }
+                    }
                     if (!containsToken) continue;
                     candidates.add(p);
                 } catch (Exception e) {
@@ -263,15 +310,17 @@ public class SoftwareUpdateService {
         return deleted;
     }
 
-    public List<SoftwareUpdateEntry> scanForWindowsUpdates() {
+    public List<SoftwareUpdateEntry> scanForWindowsUpdates(java.util.function.BooleanSupplier cancelled) {
         List<SoftwareUpdateEntry> results = new ArrayList<>();
         if (!com.sbtools.util.AppPaths.isWindows()) {
             return results;
         }
+        if (cancelled != null && cancelled.getAsBoolean()) return results;
         try {
             Path script = PowerShellScripts.resolve("wu-search-updates.ps1");
             ProcessResult result = runner.run(
                     ProcessRunner.powershellScript(script.toString()), 120);
+            if (cancelled != null && cancelled.getAsBoolean()) return results;
             if (!result.success()) {
                 AppLogger.warning("Windows Update search failed: " + result.combinedOutput());
                 return results;
@@ -289,10 +338,17 @@ public class SoftwareUpdateService {
                 results.add(parseWindowsUpdateEntry(root));
             }
             AppLogger.info("Found " + results.size() + " Windows Update(s)");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            AppLogger.info("Windows Update scan interrupted");
         } catch (Exception e) {
             AppLogger.warning("Windows Update scan failed: " + e.getMessage());
         }
         return results;
+    }
+
+    public List<SoftwareUpdateEntry> scanForWindowsUpdates() {
+        return scanForWindowsUpdates(null);
     }
 
     private SoftwareUpdateEntry parseWindowsUpdateEntry(JsonNode n) {
@@ -353,7 +409,7 @@ public class SoftwareUpdateService {
             if (!winget.isAvailable()) return List.of();
             if (cancelled.getAsBoolean()) return List.of();
             try {
-                List<SoftwareUpdateEntry> result = scanForUpdates();
+                List<SoftwareUpdateEntry> result = scanForUpdates(cancelled);
                 if (onWingetDone != null) onWingetDone.accept(result.size());
                 return result;
             } catch (Exception ex) {
@@ -366,7 +422,7 @@ public class SoftwareUpdateService {
         CompletableFuture<List<SoftwareUpdateEntry>> wuFuture = CompletableFuture.supplyAsync(() -> {
             if (cancelled.getAsBoolean()) return List.of();
             try {
-                List<SoftwareUpdateEntry> result = scanForWindowsUpdates();
+                List<SoftwareUpdateEntry> result = scanForWindowsUpdates(cancelled);
                 if (onWuDone != null) onWuDone.accept(result.size());
                 return result;
             } catch (Exception ex) {
@@ -413,19 +469,26 @@ public class SoftwareUpdateService {
      * This will update entry.status and entry.progress as lines/progress are received.
      */
     public ProcessResult updatePackageWithStreaming(String packageId, boolean silent, long timeoutSeconds,
-                                                    SoftwareUpdateEntry entry, AtomicBoolean cancelled)
+                                                     SoftwareUpdateEntry entry, AtomicBoolean cancelled)
             throws IOException, CancellationException {
         List<String> args = new ArrayList<>(List.of(
                 "upgrade", "--id", packageId, "--accept-source-agreements", "--accept-package-agreements"));
         if (silent) args.add("--silent");
 
         try {
+            AtomicLong lastStatusUpdate = new AtomicLong(0);
             ProcessResult r = winget.runWithFallbackStreaming(
-                    line -> Platform.runLater(() -> {
-                        try {
-                            if (entry != null) entry.setStatus(line == null ? "" : line);
-                        } catch (Exception ignored) {}
-                    }),
+                    line -> {
+                        long now = System.currentTimeMillis();
+                        if (now - lastStatusUpdate.get() >= 100 || line == null) {
+                            lastStatusUpdate.set(now);
+                            Platform.runLater(() -> {
+                                try {
+                                    if (entry != null) entry.setStatus(line == null ? "" : line);
+                                } catch (Exception ignored) {}
+                            });
+                        }
+                    },
                     pct -> Platform.runLater(() -> {
                         try {
                             if (entry != null) entry.setProgress(pct);

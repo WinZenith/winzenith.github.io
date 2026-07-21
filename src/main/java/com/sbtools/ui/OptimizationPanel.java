@@ -21,22 +21,27 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 
 import java.io.IOException;
+import java.util.function.Consumer;
 
 class OptimizationPanel extends VBox {
 
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
     private final SettingsStore settingsStore;
-    private final AppSettings currentSettings;
+    private AppSettings currentSettings;
     private final Label statusLabel;
+    private final Consumer<AppSettings> onSettingsSaved;
+    private ToggleGroup presetGroup;
 
     OptimizationPanel(NetworkOptimizerService service, BooleanProperty busy,
-                      SettingsStore settingsStore, AppSettings currentSettings, Label statusLabel) {
+                      SettingsStore settingsStore, AppSettings currentSettings,
+                      Label statusLabel, Consumer<AppSettings> onSettingsSaved) {
         this.service = service;
         this.busy = busy;
         this.settingsStore = settingsStore;
         this.currentSettings = currentSettings;
         this.statusLabel = statusLabel;
+        this.onSettingsSaved = onSettingsSaved;
         getChildren().addAll(buildContent());
     }
 
@@ -49,6 +54,7 @@ class OptimizationPanel extends VBox {
         box.getChildren().add(header);
 
         ToggleGroup group = new ToggleGroup();
+        this.presetGroup = group;
 
         Label descLabel = new Label("Choose a preset and click Apply.");
         descLabel.setWrapText(true);
@@ -119,32 +125,68 @@ class OptimizationPanel extends VBox {
         statusLabel.setText("Applying " + preset.getDisplayName() + "...");
 
         new Thread(() -> {
-            var result = service.applyOptimization(preset);
-            Platform.runLater(() -> {
-                progressBar.setVisible(false);
-                statusLabel.setText(result.success()
-                        ? "Optimization applied: " + preset.getDisplayName()
-                        : "Optimization failed.");
-                new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                        result.message()).showAndWait();
+            try {
+                var result = service.applyOptimization(preset);
+                boolean saved = false;
+                String saveError = null;
                 if (result.success()) {
-                    savePreset(preset);
-                    busy.set(false);
-                    showCurrentSettings();
-                } else {
-                    busy.set(false);
+                    try {
+                        AppSettings newSettings = currentSettings.toBuilder()
+                                .networkOptimizationPreset(preset.name())
+                                .build();
+                        settingsStore.save(newSettings);
+                        currentSettings = newSettings;
+                        if (onSettingsSaved != null) {
+                            onSettingsSaved.accept(newSettings);
+                        }
+                        saved = true;
+                    } catch (IOException e) {
+                        AppLogger.warning("Failed to save optimization preset: " + e.getMessage());
+                        saveError = e.getMessage();
+                    }
                 }
-            });
+                final boolean finalSaved = saved;
+                final String finalSaveError = saveError;
+                Platform.runLater(() -> {
+                    progressBar.setVisible(false);
+                    statusLabel.setText(result.success()
+                            ? "Optimization applied: " + preset.getDisplayName()
+                            : "Optimization failed.");
+                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message()).showAndWait();
+                    if (finalSaveError != null) {
+                        new Alert(Alert.AlertType.WARNING,
+                                "Preset applied successfully, but failed to save preference:\n" + finalSaveError
+                                        + "\n\nThe preset will revert on next launch.").showAndWait();
+                    }
+                    if (result.success()) {
+                        showCurrentSettings();
+                    }
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    progressBar.setVisible(false);
+                    statusLabel.setText("Optimization failed.");
+                    new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-optimize-apply").start();
     }
 
-    private void savePreset(OptimizationPreset preset) {
+    void refreshPresetSelection() {
+        if (presetGroup == null) return;
+        OptimizationPreset savedPreset = OptimizationPreset.DEFAULT;
         try {
-            settingsStore.save(currentSettings.toBuilder()
-                    .networkOptimizationPreset(preset.name())
-                    .build());
-        } catch (IOException e) {
-            AppLogger.warning("Failed to save optimization preset: " + e.getMessage());
+            savedPreset = OptimizationPreset.valueOf(currentSettings.networkOptimizationPreset());
+        } catch (IllegalArgumentException ignored) {
+        }
+        for (javafx.scene.control.Toggle toggle : presetGroup.getToggles()) {
+            if (toggle instanceof RadioButton rb && rb.getUserData() instanceof OptimizationPreset p && p == savedPreset) {
+                rb.setSelected(true);
+                break;
+            }
         }
     }
 
@@ -154,23 +196,30 @@ class OptimizationPanel extends VBox {
         statusLabel.setText("Loading TCP/IP settings...");
 
         new Thread(() -> {
-            TcpSettings settings = service.getCurrentTcpSettings();
-            Platform.runLater(() -> {
-                StringBuilder sb = new StringBuilder();
-                settings.settings().forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
-                Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                alert.setTitle("Current TCP/IP Settings");
-                alert.setHeaderText("Active TCP Global Settings");
-                javafx.scene.control.TextArea area = new javafx.scene.control.TextArea(sb.toString());
-                area.setEditable(false);
-                area.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 12px;");
-                area.setPrefRowCount(20);
-                area.setPrefColumnCount(60);
-                alert.getDialogPane().setContent(area);
-                alert.showAndWait();
-                statusLabel.setText("Ready.");
-                busy.set(false);
-            });
+            try {
+                TcpSettings settings = service.getCurrentTcpSettings();
+                Platform.runLater(() -> {
+                    StringBuilder sb = new StringBuilder();
+                    settings.settings().forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
+                    Alert alert = new Alert(Alert.AlertType.INFORMATION);
+                    alert.setTitle("Current TCP/IP Settings");
+                    alert.setHeaderText("Active TCP Global Settings");
+                    javafx.scene.control.TextArea area = new javafx.scene.control.TextArea(sb.toString());
+                    area.setEditable(false);
+                    area.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 12px;");
+                    area.setPrefRowCount(20);
+                    area.setPrefColumnCount(60);
+                    alert.getDialogPane().setContent(area);
+                    alert.showAndWait();
+                    statusLabel.setText("Ready.");
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    statusLabel.setText("Failed to load TCP/IP settings.");
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-tcp-settings").start();
     }
 }

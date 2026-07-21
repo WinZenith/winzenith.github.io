@@ -23,7 +23,7 @@ public class CleanupRow {
     }
 
     private final CleanupCategory category;
-    private final BooleanProperty selected = new SimpleBooleanProperty(true);
+    private final BooleanProperty selected = new SimpleBooleanProperty(false);
     private final StringProperty categoryName = new SimpleStringProperty();
     private final StringProperty description = new SimpleStringProperty();
     private final StringProperty sizeOrCountText = new SimpleStringProperty("Pending...");

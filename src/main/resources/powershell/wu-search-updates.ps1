@@ -18,7 +18,7 @@ try {
             updateId    = $u.Identity.UpdateID
             title       = $u.Title
             description = $u.Description
-            version     = $u.Identity.RevisionNumber
+            version     = if ($kb -and $kb.Length -gt 0) { $kb } else { $u.LastDeploymentChangeDate.ToString('yyyy-MM-dd') }
             sizeBytes   = [long]$u.MaxDownloadSize
             severity    = [string]$u.MsrcSeverity
             kbArticle   = [string]$kb

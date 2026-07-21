@@ -258,7 +258,8 @@ public class App extends Application {
             case 8 -> new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin);
             case 9 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
             case 10 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin, settingsStore);
-            case 11 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings);
+            case 11 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings,
+                    updatedSettings -> this.appSettings = updatedSettings);
             default -> throw new IllegalArgumentException("Unknown tab index: " + index);
         };
         return tabViews[index];
@@ -541,6 +542,10 @@ public class App extends Application {
                     sitv.dispose();
                 } else if (view instanceof BrowserExtensionsTabView betv) {
                     betv.dispose();
+                } else if (view instanceof NetworkOptimizerTabView notv) {
+                    notv.dispose();
+                } else if (view instanceof DuplicateFilesTabView dftv) {
+                    dftv.dispose();
                 }
             }
         }

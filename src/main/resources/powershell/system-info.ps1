@@ -23,7 +23,14 @@ try {
         }
         stepping      = if ($cpu.Stepping) { $cpu.Stepping } else { '' }
         revision      = if ($cpu.Revision) { $cpu.Revision } else { '' }
-        voltage       = if ($cpu.CurrentVoltage) { [math]::Round($cpu.CurrentVoltage / 10, 1).ToString() + ' V' } else { '' }
+        voltage       = if ($cpu.CurrentVoltage) {
+                            $vRaw = [int]$cpu.CurrentVoltage
+                            if (($vRaw -band 0x80) -ne 0) {
+                                [math]::Round(($vRaw -band 0x7F) / 10, 1).ToString() + ' V (user-set)'
+                            } elseif ($vRaw -gt 0) {
+                                [math]::Round($vRaw / 10, 1).ToString() + ' V'
+                            } else { '' }
+                        } else { '' }
     }
     $result['cpu'] = $cpuSection
 } catch {
@@ -52,13 +59,19 @@ try {
     } catch {}
     $nvidiaIdx = 0
     $gpuSearcher = New-Object System.Management.ManagementObjectSearcher('root\cimv2', 'SELECT * FROM Win32_VideoController')
+    try {
     foreach ($gpuObj in $gpuSearcher.Get()) {
         $vc = $gpuObj
 
         $vramBytes = [uint64]0
         try {
             $raw = $vc['AdapterRAM']
-            if ($null -ne $raw) { $vramBytes = [uint64]([uint32]$raw) }
+            if ($null -ne $raw) {
+                $asUint = [uint32]$raw
+                if ($asUint -ne [uint32]4294967295 -and $asUint -gt 0) {
+                    $vramBytes = [uint64]$asUint
+                }
+            }
         } catch {}
 
         $gpuName = ''
@@ -150,7 +163,7 @@ try {
         try { if ($vc['Status']) { $gpuEntry['status'] = [string]$vc['Status'] } } catch {}
         $gpus += $gpuEntry
     }
-    $gpuSearcher.Dispose()
+    } finally { $gpuSearcher.Dispose() }
     $result['gpu'] = $gpus
 } catch {
     $warnings += "GPU: $($_.Exception.Message)"
@@ -182,6 +195,7 @@ try {
 
     $sticks = @()
     $memSearcher = New-Object System.Management.ManagementObjectSearcher('root\cimv2', 'SELECT * FROM Win32_PhysicalMemory')
+    try {
     foreach ($memObj in $memSearcher.Get()) {
         $mem = $memObj
 
@@ -229,7 +243,7 @@ try {
         }
         $sticks += $stick
     }
-    $memSearcher.Dispose()
+    } finally { $memSearcher.Dispose() }
     $channel = if ($sticks.Count -ge 2) { 'Dual' } elseif ($sticks.Count -eq 1) { 'Single' } else { '' }
     $ramSection = [ordered]@{
         totalBytes = $totalRamBytes
@@ -354,14 +368,23 @@ try {
     }
 
     $nvmes = @()
-    Get-CimInstance Win32_PhysicalMedia -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.MediaType -match 'NVMe' -or $_.BusType -eq 'NVMe') {
-            $nvmes += [ordered]@{
-                serialNumber = if ($_.SerialNumber) { $_.SerialNumber.Trim() } else { '' }
-                mediaType    = if ($_.MediaType) { $_.MediaType } else { '' }
-                busType      = if ($_.BusType) { $_.BusType } else { '' }
+    $nvmeAccessFailed = $false
+    try {
+        $physMedia = @(Get-CimInstance Win32_PhysicalMedia -ErrorAction Stop)
+        foreach ($pm in $physMedia) {
+            if ($pm.MediaType -match 'NVMe' -or $pm.BusType -eq 'NVMe') {
+                $nvmes += [ordered]@{
+                    serialNumber = if ($pm.SerialNumber) { $pm.SerialNumber.Trim() } else { '' }
+                    mediaType    = if ($pm.MediaType) { $pm.MediaType } else { '' }
+                    busType      = if ($pm.BusType) { $pm.BusType } else { '' }
+                }
             }
         }
+    } catch {
+        $nvmeAccessFailed = $true
+    }
+    if ($nvmeAccessFailed -and $nvmes.Count -eq 0) {
+        $warnings += "NVMe: Could not query Win32_PhysicalMedia. This may require admin privileges."
     }
 
     $storageSection = [ordered]@{
@@ -390,6 +413,11 @@ try {
     $southbridge = ''
     Get-CimInstance Win32_PnPEntity | Where-Object { $_.DeviceID -match 'PCI\\CC_0601' } | ForEach-Object {
         if (-not $chipset -and $_.Name) { $chipset = $_.Name.Trim() }
+    }
+    Get-CimInstance Win32_PnPEntity | Where-Object {
+        $_.Name -match 'southbridge|PCH|FCH|fusion controller' -and $_.DeviceClass -eq 'System'
+    } | Select-Object -First 1 | ForEach-Object {
+        $southbridge = $_.Name.Trim()
     }
     if (-not $chipset) {
         Get-CimInstance Win32_PnPEntity | Where-Object {
@@ -627,12 +655,12 @@ try {
         $batt = Get-CimInstance Win32_PortableBattery -ErrorAction SilentlyContinue | Select-Object -First 1
     }
     if ($batt) {
-        $chargeLevel = 0
-        try { if ($batt.EstimatedChargeRemaining) { $chargeLevel = [int]$batt.EstimatedChargeRemaining } } catch {}
-        $remainingMwh = 0
-        try { if ($batt.RemainingCapacity) { $remainingMwh = [int]$batt.RemainingCapacity } } catch {}
-        $chargeRate = 0
-        try { if ($batt.ChargeRate) { $chargeRate = [int]$batt.ChargeRate } } catch {}
+        $chargeLevel = -1
+        try { if ($null -ne $batt.EstimatedChargeRemaining) { $chargeLevel = [int]$batt.EstimatedChargeRemaining } } catch {}
+        $remainingMwh = -1
+        try { if ($null -ne $batt.RemainingCapacity) { $remainingMwh = [int]$batt.RemainingCapacity } } catch {}
+        $chargeRate = -1
+        try { if ($null -ne $batt.ChargeRate) { $chargeRate = [int]$batt.ChargeRate } } catch {}
         $chemistry = ''
         try {
             if ($batt.Chemistry) {
@@ -699,6 +727,9 @@ try {
         }
     }
     $result['temperatures'] = $temps
+    if ($temps.Count -eq 0) {
+        $warnings += "Temperatures: No thermal zone data available. This may require admin privileges."
+    }
 } catch {
     $warnings += "Temperatures: $($_.Exception.Message)"
     $result['temperatures'] = @()

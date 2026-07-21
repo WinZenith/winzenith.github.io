@@ -142,6 +142,10 @@ public class RegistryDefragService {
         }
     }
 
+    public static int getHiveCount() {
+        return COMPACTABLE_HIVES.size();
+    }
+
     public static long estimateSize() {
         long totalBytes = 0;
         for (String hive : COMPACTABLE_HIVES) {

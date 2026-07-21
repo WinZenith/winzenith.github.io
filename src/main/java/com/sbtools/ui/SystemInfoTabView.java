@@ -69,6 +69,7 @@ public class SystemInfoTabView extends BorderPane {
     });
 
     private final Label statusLabel = new Label("Click Load to query system information.");
+    private final Label adminWarningLabel = new Label("Not running as admin. Some data (temperatures, NVMe) may be unavailable.");
     private final Button loadButton = new Button("Load System Info");
     private final Button refreshButton = new Button("Refresh");
     private final Button exportButton = new Button("Export...");
@@ -103,15 +104,28 @@ public class SystemInfoTabView extends BorderPane {
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
 
+        adminWarningLabel.getStyleClass().addAll("label", "text-muted");
+        adminWarningLabel.setStyle("-fx-padding: 6 16; -fx-background-color: #3d2e1a; -fx-text-fill: #ffb86c; -fx-font-size: 11px;");
+        adminWarningLabel.setWrapText(true);
+        adminWarningLabel.setMaxWidth(Double.MAX_VALUE);
+        adminWarningLabel.setVisible(false);
+        adminWarningLabel.setManaged(false);
+
+        VBox topContainer = new VBox(top, adminWarningLabel);
+        topContainer.setSpacing(0);
+
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
         tabPane.setPadding(new Insets(8, 0, 0, 0));
 
-        setTop(top);
+        setTop(topContainer);
         setCenter(tabPane);
 
         if (!AppPaths.isWindows()) {
             statusLabel.setText("System information is only available on Windows.");
             loadButton.setDisable(true);
+        } else if (!adminCheck.getAsBoolean()) {
+            adminWarningLabel.setVisible(true);
+            adminWarningLabel.setManaged(true);
         }
     }
 
@@ -491,7 +505,6 @@ public class SystemInfoTabView extends BorderPane {
 
         VBox deviceList = new VBox(8);
         deviceList.setPadding(new Insets(0));
-        ScrollableContainer deviceScroll = new ScrollableContainer(deviceList);
 
         categoryList.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, cat) -> {
             deviceList.getChildren().clear();
@@ -518,8 +531,8 @@ public class SystemInfoTabView extends BorderPane {
             deviceList.getChildren().add(wrapGrid(grid));
         });
 
-        HBox splitPane = new HBox(0, rightPanel, deviceScroll);
-        HBox.setHgrow(deviceScroll, Priority.ALWAYS);
+        HBox splitPane = new HBox(0, rightPanel, deviceList);
+        HBox.setHgrow(deviceList, Priority.ALWAYS);
         container.getChildren().addAll(searchField, splitPane);
 
         ScrollableContainer scroll = new ScrollableContainer(container);
@@ -697,6 +710,9 @@ public class SystemInfoTabView extends BorderPane {
     // ── Battery ─────────────────────────────────────────────────────────────
 
     private Tab buildBatteryTab(BatteryInfo battery) {
+        VBox container = new VBox(16);
+        container.setPadding(new Insets(12));
+
         GridPane grid = createInfoGrid();
         int row = 0;
         row = addRow(grid, row, "Name", battery.name());
@@ -706,16 +722,24 @@ public class SystemInfoTabView extends BorderPane {
         row = addRow(grid, row, "Remaining Capacity", battery.formatRemainingCapacity());
         row = addRow(grid, row, "Charge Rate", battery.formatChargeRate());
 
-        if (battery.chargeLevel() > 0) {
+        if (battery.chargeLevel() >= 0) {
             row = addUsageRow(grid, row, battery.chargeLevel());
         }
 
-        return new Tab("Battery", wrapGrid(grid));
+        container.getChildren().add(wrapGrid(grid));
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("Battery");
+        tab.setContent(scroll);
+        return tab;
     }
 
     // ── Temperatures ────────────────────────────────────────────────────────
 
     private Tab buildTemperaturesTab(List<TemperatureInfo> temperatures) {
+        VBox container = new VBox(16);
+        container.setPadding(new Insets(12));
+
         GridPane grid = createInfoGrid();
         int row = 0;
         for (TemperatureInfo temp : temperatures) {
@@ -727,7 +751,12 @@ public class SystemInfoTabView extends BorderPane {
             };
             row = addTemperatureRow(grid, row, temp.zoneName(), temp.formatTemperature(), cssClass);
         }
-        return new Tab("Temperatures", wrapGrid(grid));
+        container.getChildren().add(wrapGrid(grid));
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("Temperatures");
+        tab.setContent(scroll);
+        return tab;
     }
 
     private static int addTemperatureRow(GridPane grid, int row, String zoneName, String value, String cssClass) {
@@ -936,9 +965,12 @@ public class SystemInfoTabView extends BorderPane {
             }
 
             String fileName = file.getName();
-            if (!fileName.toLowerCase().endsWith(ext)) {
-                file = new File(file.getAbsolutePath() + ext);
+            String baseName = fileName;
+            String lowerName = fileName.toLowerCase();
+            if (lowerName.endsWith(".txt") || lowerName.endsWith(".json") || lowerName.endsWith(".html")) {
+                baseName = fileName.substring(0, fileName.length() - 4);
             }
+            file = new File(file.getParent(), baseName + ext);
 
             Files.writeString(file.toPath(), content, StandardCharsets.UTF_8);
             statusLabel.setText("Exported to: " + file.getName());
@@ -1247,13 +1279,18 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         if (data.storage() != null && data.storage().nvmes() != null && !data.storage().nvmes().isEmpty()) {
-            html.append("<h2>NVMe Drives</h2><table>");
-            for (StorageInfo.Nvme nvme : data.storage().nvmes()) {
+            html.append("<h2>NVMe Drives</h2>");
+            for (int i = 0; i < data.storage().nvmes().size(); i++) {
+                StorageInfo.Nvme nvme = data.storage().nvmes().get(i);
+                if (data.storage().nvmes().size() > 1) {
+                    html.append("<h3>NVMe ").append(i + 1).append("</h3>");
+                }
+                html.append("<table>");
                 html.append(row("Serial Number", nvme.serialNumber()));
                 html.append(row("Media Type", nvme.mediaType()));
                 html.append(row("Bus Type", nvme.busType()));
+                html.append("</table>");
             }
-            html.append("</table>");
         }
 
         if (data.motherboard() != null) {
@@ -1345,7 +1382,8 @@ public class SystemInfoTabView extends BorderPane {
 
     private static String escapeHtml(String text) {
         if (text == null) return "";
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\"", "&quot;").replace("'", "&#39;");
     }
 
     public void dispose() {

@@ -127,14 +127,6 @@ public class DuplicateFinderService {
             // Release Phase 1 data — no longer needed
             bySize.clear();
 
-            MessageDigest md;
-            try {
-                md = MessageDigest.getInstance("SHA-256");
-            } catch (Exception e) {
-                AppLogger.warning("SHA-256 not available: " + e.getMessage());
-                return result;
-            }
-
             HexFormat hex = HexFormat.of();
             int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 8);
             executor = Executors.newFixedThreadPool(threadCount, r -> {
@@ -168,10 +160,11 @@ public class DuplicateFinderService {
 
             Map<String, List<Path>> quickGroups = new HashMap<>();
             int quickProcessed = 0;
-            for (Future<Map.Entry<String, Path>> future : quickFutures) {
+            for (int i = 0; i < quickFutures.size(); i++) {
+                Future<Map.Entry<String, Path>> future = quickFutures.get(i);
                 if (cancelled.get()) {
-                    for (int i = quickFutures.indexOf(future); i < quickFutures.size(); i++) {
-                        quickFutures.get(i).cancel(true);
+                    for (int j = i; j < quickFutures.size(); j++) {
+                        quickFutures.get(j).cancel(true);
                     }
                     return result;
                 }
@@ -225,10 +218,11 @@ public class DuplicateFinderService {
 
             Map<String, List<Path>> hashGroups = new LinkedHashMap<>();
             int combinedProcessed = quickTotal;
-            for (Future<Map.Entry<String, Path>> future : fullFutures) {
+            for (int i = 0; i < fullFutures.size(); i++) {
+                Future<Map.Entry<String, Path>> future = fullFutures.get(i);
                 if (cancelled.get()) {
-                    for (int i = fullFutures.indexOf(future); i < fullFutures.size(); i++) {
-                        fullFutures.get(i).cancel(true);
+                    for (int j = i; j < fullFutures.size(); j++) {
+                        fullFutures.get(j).cancel(true);
                     }
                     return result;
                 }
@@ -316,22 +310,22 @@ public class DuplicateFinderService {
 
         for (DuplicateFileRow row : selectedRows) {
             if (!row.isSelected() || row.getDeletablePaths() == null) continue;
-            boolean rowFullyCleaned = true;
-            for (String path : row.getDeletablePaths()) {
-                if (useRecycleBin) {
-                    if (moveToRecycleBin(Collections.singletonList(path)) > 0) {
-                        deleted++;
-                    } else {
-                        failed++;
-                        rowFullyCleaned = false;
-                    }
-                } else {
+
+            if (useRecycleBin) {
+                int recycled = moveToRecycleBin(row.getDeletablePaths());
+                deleted += recycled;
+                failed += row.getDeletablePaths().size() - recycled;
+                if (recycled == row.getDeletablePaths().size()) {
+                    fullyCleanedRows.add(row);
+                }
+            } else {
+                boolean rowFullyCleaned = true;
+                for (String path : row.getDeletablePaths()) {
                     try {
                         if (Files.deleteIfExists(Paths.get(path))) {
                             deleted++;
                         } else {
                             AppLogger.info("File already absent during clean: " + path);
-                            deleted++;
                         }
                     } catch (Exception e) {
                         AppLogger.warning("Failed to delete duplicate: " + path + " — " + e.getMessage());
@@ -339,9 +333,9 @@ public class DuplicateFinderService {
                         rowFullyCleaned = false;
                     }
                 }
-            }
-            if (rowFullyCleaned) {
-                fullyCleanedRows.add(row);
+                if (rowFullyCleaned) {
+                    fullyCleanedRows.add(row);
+                }
             }
         }
         return new CleanResult(deleted, failed, fullyCleanedRows);
@@ -375,7 +369,13 @@ public class DuplicateFinderService {
         if (result == 0) {
             if (op.fAnyOperationsAborted) {
                 AppLogger.warning("SHFileOperationW: some operations were aborted");
-                return 0;
+                int successCount = 0;
+                for (String p : validPaths) {
+                    if (!Files.exists(Paths.get(p))) {
+                        successCount++;
+                    }
+                }
+                return successCount;
             }
             return validPaths.size();
         }

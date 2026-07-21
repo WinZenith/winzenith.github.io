@@ -38,7 +38,10 @@ class AdaptersPanel extends VBox {
     }
 
     void loadAdapters() {
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         statusLabel.setText("Loading network adapters...");
 
@@ -152,17 +155,25 @@ class AdaptersPanel extends VBox {
         statusLabel.setText(action + " " + selected.getName() + "...");
 
         new Thread(() -> {
-            var result = service.setAdapterState(selected.getName(), enable);
-            Platform.runLater(() -> {
-                busy.set(false);
-                if (result.success()) {
-                    statusLabel.setText(result.message());
-                    loadAdapters();
-                } else {
+            try {
+                var result = service.setAdapterState(selected.getName(), enable);
+                Platform.runLater(() -> {
+                    if (result.success()) {
+                        statusLabel.setText(result.message());
+                        loadAdapters();
+                    } else {
+                        statusLabel.setText("Failed to " + action.toLowerCase() + " adapter.");
+                        new Alert(Alert.AlertType.ERROR, result.message()).showAndWait();
+                    }
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
                     statusLabel.setText("Failed to " + action.toLowerCase() + " adapter.");
-                    new Alert(Alert.AlertType.ERROR, result.message()).showAndWait();
-                }
-            });
+                    new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-set-adapter-state").start();
     }
 
@@ -174,13 +185,21 @@ class AdaptersPanel extends VBox {
         statusLabel.setText("Renewing IP for " + selected.getName() + "...");
 
         new Thread(() -> {
-            var result = service.renewIp(selected.getName());
-            Platform.runLater(() -> {
-                busy.set(false);
-                statusLabel.setText(result.success() ? result.message() : "IP renewal failed.");
-                new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                        result.message()).showAndWait();
-            });
+            try {
+                var result = service.renewIp(selected.getName());
+                Platform.runLater(() -> {
+                    statusLabel.setText(result.success() ? result.message() : "IP renewal failed.");
+                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message()).showAndWait();
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    statusLabel.setText("IP renewal failed.");
+                    new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
         }, "net-renew-ip").start();
     }
 }

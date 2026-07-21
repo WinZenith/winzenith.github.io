@@ -254,6 +254,19 @@ public class StartupTabView extends BorderPane {
             return new SimpleStringProperty(label);
         });
         impactCol.setPrefWidth(100);
+        impactCol.setComparator((a, b) -> {
+            double order = switch (a) {
+                case "High" -> 3;
+                case "Medium" -> 2;
+                default -> 1;
+            };
+            double orderB = switch (b) {
+                case "High" -> 3;
+                case "Medium" -> 2;
+                default -> 1;
+            };
+            return Double.compare(order, orderB);
+        });
         impactCol.setCellFactory(col -> new TableCell<>() {
             @Override
             protected void updateItem(String item, boolean empty) {
@@ -425,6 +438,15 @@ public class StartupTabView extends BorderPane {
                     int total = allItems.size();
                     statusLabel.setText("Found " + total + " startup item(s).");
                     bootDelayLabel.setText("Total estimated boot delay: " + formattedTotal);
+
+                    List<String> errors = service.drainScanErrors();
+                    if (!errors.isEmpty()) {
+                        StringBuilder sb = new StringBuilder("Scan completed with warnings:\n");
+                        for (String err : errors) {
+                            sb.append("- ").append(err).append("\n");
+                        }
+                        new Alert(Alert.AlertType.WARNING, sb.toString()).showAndWait();
+                    }
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to scan startup items", e);
@@ -445,16 +467,31 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> selected = new ArrayList<>(getSelectedTable().getSelectionModel().getSelectedItems());
         if (selected.isEmpty() || busy.get()) return;
 
-        boolean hasServices = selected.stream().anyMatch(i -> i.getType() == StartupItemType.SERVICE);
-        if (hasServices && !adminCheck.getAsBoolean()) {
-            Alert alert = new Alert(Alert.AlertType.WARNING);
-            alert.setTitle("Administrator Required");
-            alert.setHeaderText("Service modification requires elevation");
-            alert.setContentText("Modifying Windows service start types requires administrator privileges.\n" +
-                    "Please run the application as administrator.");
-            alert.initModality(Modality.APPLICATION_MODAL);
-            alert.showAndWait();
-            return;
+        List<StartupItem> serviceItems = selected.stream()
+                .filter(i -> i.getType() == StartupItemType.SERVICE).toList();
+        List<StartupItem> nonServiceItems = selected.stream()
+                .filter(i -> i.getType() != StartupItemType.SERVICE).toList();
+
+        if (!serviceItems.isEmpty() && !adminCheck.getAsBoolean()) {
+            if (nonServiceItems.isEmpty()) {
+                Alert alert = new Alert(Alert.AlertType.WARNING);
+                alert.setTitle("Administrator Required");
+                alert.setHeaderText("Service modification requires elevation");
+                alert.setContentText("Modifying Windows service start types requires administrator privileges.\n" +
+                        "Please run the application as administrator.");
+                alert.initModality(Modality.APPLICATION_MODAL);
+                alert.showAndWait();
+                return;
+            } else {
+                Alert alert = new Alert(Alert.AlertType.WARNING);
+                alert.setTitle("Administrator Required");
+                alert.setHeaderText("Some items require elevation");
+                alert.setContentText(serviceItems.size() + " service item(s) require administrator privileges and will be skipped.\n" +
+                        nonServiceItems.size() + " non-service item(s) will be toggled.");
+                alert.initModality(Modality.APPLICATION_MODAL);
+                alert.showAndWait();
+                selected = new ArrayList<>(nonServiceItems);
+            }
         }
 
         if (selected.size() == 1) {
@@ -470,13 +507,15 @@ public class StartupTabView extends BorderPane {
             }
         }
 
+        final List<StartupItem> itemsToToggle = selected;
+
         busy.set(true);
         progress.setVisible(true);
-        statusLabel.setText("Toggling " + selected.size() + " item(s)...");
+        statusLabel.setText("Toggling " + itemsToToggle.size() + " item(s)...");
 
         executor.execute(() -> {
             List<String> errors = new ArrayList<>();
-            for (StartupItem item : selected) {
+            for (StartupItem item : itemsToToggle) {
                 try {
                     service.toggleStatus(item);
                 } catch (Exception e) {
@@ -486,12 +525,18 @@ public class StartupTabView extends BorderPane {
             }
 
             Platform.runLater(() -> {
+                for (StartupItem item : itemsToToggle) {
+                    item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
+                }
+                filteredRegistry.setPredicate(null);
+                filteredTasks.setPredicate(null);
+                filteredServices.setPredicate(null);
                 applyRegistryFilter();
                 applyTaskFilter();
                 applyServiceFilter();
                 getSelectedTable().refresh();
                 if (errors.isEmpty()) {
-                    statusLabel.setText("Toggled " + selected.size() + " item(s) successfully.");
+                    statusLabel.setText("Toggled " + itemsToToggle.size() + " item(s) successfully.");
                 } else {
                     statusLabel.setText("Completed with errors.");
                     new Alert(Alert.AlertType.ERROR, "Some items failed:\n" + String.join("\n", errors)).showAndWait();
@@ -563,7 +608,10 @@ public class StartupTabView extends BorderPane {
         dialog.setTitle("Startup item details");
         dialog.initModality(Modality.APPLICATION_MODAL);
         try {
-            dialog.getDialogPane().getStylesheets().add(getClass().getResource("/custom.css").toExternalForm());
+            var cssUrl = getClass().getResource("/custom.css");
+            if (cssUrl != null) {
+                dialog.getDialogPane().getStylesheets().add(cssUrl.toExternalForm());
+            }
         } catch (Exception ignored) {}
 
         VBox content = new VBox(8);
@@ -600,7 +648,10 @@ public class StartupTabView extends BorderPane {
         dialog.initModality(Modality.APPLICATION_MODAL);
 
         try {
-            dialog.getDialogPane().getStylesheets().add(getClass().getResource("/custom.css").toExternalForm());
+            var cssUrl = getClass().getResource("/custom.css");
+            if (cssUrl != null) {
+                dialog.getDialogPane().getStylesheets().add(cssUrl.toExternalForm());
+            }
         } catch (Exception ignored) {}
 
         ObservableList<StartupBackupEntry> backups = FXCollections.observableArrayList();
