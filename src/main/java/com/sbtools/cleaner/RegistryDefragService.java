@@ -184,17 +184,5 @@ public class RegistryDefragService {
         public boolean hasErrors() {
             return !errors.isEmpty();
         }
-
-        public String getSummary() {
-            StringBuilder sb = new StringBuilder();
-            sb.append("Defragged ").append(defraggedCount).append(" hive(s).");
-            if (hasErrors()) {
-                sb.append("\nErrors:\n");
-                for (String err : errors) {
-                    sb.append("- ").append(err).append("\n");
-                }
-            }
-            return sb.toString();
-        }
     }
 }

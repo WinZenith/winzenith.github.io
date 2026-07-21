@@ -15,10 +15,6 @@ public final class AppExecutors {
     private AppExecutors() {
     }
 
-    public static ExecutorService uiPool() {
-        return UI_POOL;
-    }
-
     public static ExecutorService ioPool() {
         return IO_POOL;
     }

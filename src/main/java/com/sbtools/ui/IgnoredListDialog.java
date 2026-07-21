@@ -1,7 +1,5 @@
 package com.sbtools.ui;
 
-import com.sbtools.settings.AppSettings;
-import com.sbtools.settings.SettingsStore;
 import com.sbtools.util.AppInfo;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -9,7 +7,6 @@ import javafx.geometry.Insets;
 import javafx.scene.control.*;
 import javafx.scene.layout.VBox;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BiConsumer;
@@ -71,22 +68,5 @@ public class IgnoredListDialog {
         dialog.getDialogPane().setContent(layout);
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.CLOSE);
         dialog.showAndWait();
-    }
-
-    /**
-     * Convenience overload: saves directly via SettingsStore.
-     */
-    public static void showAndSave(String title, List<String> currentItems, SettingsStore store) {
-        show(title, currentItems, (updated, ignored) -> {
-            try {
-                AppSettings current = store.load();
-                AppSettings updated_ = current.toBuilder()
-                        .skippedSoftwareIds(updated)
-                        .build();
-                store.save(updated_);
-            } catch (IOException ex) {
-                // ignore
-            }
-        });
     }
 }

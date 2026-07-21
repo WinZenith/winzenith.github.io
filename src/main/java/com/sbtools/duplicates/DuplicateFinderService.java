@@ -2,7 +2,6 @@ package com.sbtools.duplicates;
 
 import com.sbtools.util.AppLogger;
 import com.sun.jna.platform.win32.Shell32;
-import com.sun.jna.platform.win32.ShellAPI;
 import com.sun.jna.platform.win32.ShellAPI.SHFILEOPSTRUCT;
 
 import java.io.BufferedInputStream;
