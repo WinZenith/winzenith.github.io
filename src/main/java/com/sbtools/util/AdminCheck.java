@@ -100,6 +100,16 @@ public final class AdminCheck {
             }
         } catch (Exception e) {
         }
+        try {
+            String command = ProcessHandle.current().info().command().orElse(null);
+            if (command != null) {
+                java.io.File exeFile = new java.io.File(command);
+                if (exeFile.exists() && exeFile.getName().toLowerCase().endsWith(".exe")) {
+                    return exeFile.getAbsolutePath();
+                }
+            }
+        } catch (Exception e) {
+        }
         return null;
     }
 }
