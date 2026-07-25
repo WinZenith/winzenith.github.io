@@ -1,5 +1,6 @@
 package com.sbtools.cleaner;
 
+import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.LongProperty;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -70,7 +71,11 @@ public class CleanupRow {
     }
 
     public void setSizeOrCountText(String text) {
-        this.sizeOrCountText.set(text);
+        if (Platform.isFxApplicationThread()) {
+            this.sizeOrCountText.set(text);
+        } else {
+            Platform.runLater(() -> this.sizeOrCountText.set(text));
+        }
     }
 
     public StringProperty statusTextProperty() {
@@ -90,7 +95,11 @@ public class CleanupRow {
     }
 
     public void setScanDurationMs(long ms) {
-        this.scanDurationMs.set(ms);
+        if (Platform.isFxApplicationThread()) {
+            this.scanDurationMs.set(ms);
+        } else {
+            Platform.runLater(() -> this.scanDurationMs.set(ms));
+        }
     }
 
     public long getTotalBytes() {
@@ -115,7 +124,12 @@ public class CleanupRow {
 
     public void setScanStatus(ScanStatus status) {
         this.scanStatus = status;
-        this.statusText.set(status.getDisplayText());
+        Runnable update = () -> this.statusText.set(status.getDisplayText());
+        if (Platform.isFxApplicationThread()) {
+            update.run();
+        } else {
+            Platform.runLater(update);
+        }
     }
 
     public String getErrorMessage() {

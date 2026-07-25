@@ -57,9 +57,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 public class DiskToolsTabView extends BorderPane {
@@ -466,36 +471,59 @@ public class DiskToolsTabView extends BorderPane {
         defragStatus.setText("Analyzing " + selected.size() + " drive(s)...");
 
         Instant startTime = Instant.now();
+        int parallelism = Math.min(selected.size(), 3);
+        ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
+            Thread t = new Thread(r, "analyze-drive");
+            t.setDaemon(true);
+            return t;
+        });
+
+        ConcurrentLinkedQueue<String> statusMessages = new ConcurrentLinkedQueue<>();
+        AtomicInteger completedCount = new AtomicInteger(0);
+        int totalDrives = selected.size();
+
+        List<CompletableFuture<Void>> futures = selected.stream()
+                .map(driveCopy -> CompletableFuture.runAsync(() -> {
+                    if (defragCancelled.get()) return;
+
+                    String letter = driveCopy.getDriveLetter();
+                    Platform.runLater(() -> defragStatus.setText(
+                            "Analyzing " + letter + "... (" + (completedCount.get() + 1) + "/" + totalDrives + ")"));
+
+                    try {
+                        defragService.analyze(driveCopy, msg -> {
+                            statusMessages.add(letter + ": " + msg);
+                            Platform.runLater(() -> defragStatus.setText(msg));
+                        }, defragCancelled);
+
+                        analyzedDrives.add(letter);
+                        lastAnalyzed.put(letter, Instant.now());
+
+                        int done = completedCount.incrementAndGet();
+                        Platform.runLater(() -> {
+                            driveTable.refresh();
+                            String elapsed = formatElapsed(Duration.between(startTime, Instant.now()));
+                            defragStatus.setText("Analysis complete - "
+                                    + driveCopy.getFragmentsFormatted() + " fragmented space, "
+                                    + driveCopy.getFragmentationPercent() + "% fragmentation on " + letter
+                                    + " (" + elapsed + ", " + done + "/" + totalDrives + ")");
+                            updateRichBlockVisualization(driveCopy);
+                        });
+                    } catch (java.util.concurrent.CancellationException e) {
+                        // ignored, handled at top level
+                    } catch (Exception e) {
+                        String msg = e.getMessage() != null ? e.getMessage() : "Analysis failed for " + letter;
+                        Platform.runLater(() -> {
+                            defragStatus.setText("Analysis failed for " + letter);
+                            new Alert(Alert.AlertType.ERROR, msg).showAndWait();
+                        });
+                    }
+                }, executor))
+                .toList();
 
         currentAnalyzeThread = new Thread(() -> {
             try {
-                for (int i = 0; i < selected.size(); i++) {
-                    DriveInfo driveCopy = selected.get(i);
-                    String letter = driveCopy.getDriveLetter();
-                    int driveIndex = i;
-                    if (defragCancelled.get()) break;
-
-                    int current = driveIndex + 1;
-                    int total = selected.size();
-                    Platform.runLater(() -> defragStatus.setText("Analyzing " + letter + "... (" + current + "/" + total + ")"));
-
-                    defragService.analyze(driveCopy, msg -> Platform.runLater(() -> {
-                        defragStatus.setText(msg);
-                    }), defragCancelled);
-
-                    analyzedDrives.add(letter);
-                    lastAnalyzed.put(letter, Instant.now());
-
-                    Platform.runLater(() -> {
-                        driveTable.refresh();
-                        String elapsed = formatElapsed(Duration.between(startTime, Instant.now()));
-                        defragStatus.setText("Analysis complete - "
-                                + driveCopy.getFragmentsFormatted() + " fragmented space, "
-                                + driveCopy.getFragmentationPercent() + "% fragmentation on " + letter
-                                + " (" + elapsed + ")");
-                        updateRichBlockVisualization(driveCopy);
-                    });
-                }
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
             } catch (java.util.concurrent.CancellationException e) {
                 Platform.runLater(() -> defragStatus.setText("Analysis cancelled."));
             } catch (Exception e) {
@@ -505,12 +533,14 @@ public class DiskToolsTabView extends BorderPane {
                     new Alert(Alert.AlertType.ERROR, msg).showAndWait();
                 });
             } finally {
+                executor.shutdownNow();
                 Platform.runLater(() -> {
                     defragBusy.set(false);
                     defragProgress.setVisible(false);
                 });
             }
-        }, "analyze-drive");
+        }, "analyze-orchestrator");
+        currentAnalyzeThread.setDaemon(true);
         currentAnalyzeThread.start();
     }
 

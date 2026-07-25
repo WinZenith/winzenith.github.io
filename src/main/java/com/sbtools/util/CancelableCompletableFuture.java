@@ -16,7 +16,7 @@ public class CancelableCompletableFuture<T> extends CompletableFuture<T> {
     private final boolean ownExecutor;
 
     public CancelableCompletableFuture(List<CompletableFuture<?>> children, ExecutorService executor) {
-        this(children, executor, true);
+        this(children, executor, false);
     }
 
     public CancelableCompletableFuture(List<CompletableFuture<?>> children, ExecutorService executor,

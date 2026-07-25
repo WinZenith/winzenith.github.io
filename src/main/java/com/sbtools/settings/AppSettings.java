@@ -34,7 +34,7 @@ public record AppSettings(
                 "DEFAULT", System.getProperty("user.home") + "\\Downloads",
                 false, false, false, true,
                 "", "powershell", 960, 600, true, true,
-                Collections.emptyList(), Collections.emptyList(), false);
+                Collections.emptyList(), Collections.emptyList(), true);
     }
 
     /**

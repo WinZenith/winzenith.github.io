@@ -4,6 +4,7 @@ import com.sbtools.browserext.BrowserExtensionRow;
 import com.sbtools.browserext.BrowserExtensionService;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
+import com.sbtools.util.AppExecutors;
 import com.sbtools.util.AppInfo;
 import com.sbtools.util.AppLogger;
 import javafx.application.Platform;
@@ -117,10 +118,14 @@ public class BrowserExtensionsTabView extends BorderPane {
         browserFilter.getSelectionModel().select(0);
         browserFilter.setOnAction(e -> applyFilters());
 
-        HBox top = new HBox(12, scanButton, enableSelectedBtn, disableSelectedBtn, selectAllBtn,
-                new Label("Filter:"), browserFilter, searchField,
-                progressBar, statusLabel, selectionLabel, manageIgnoredBtn);
-        top.setAlignment(Pos.CENTER_LEFT);
+        HBox buttonRow = new HBox(12, scanButton, enableSelectedBtn, disableSelectedBtn, selectAllBtn, manageIgnoredBtn);
+        buttonRow.setAlignment(Pos.CENTER_LEFT);
+
+        HBox filterRow = new HBox(12, new Label("Filter:"), browserFilter, searchField,
+                progressBar, statusLabel, selectionLabel);
+        filterRow.setAlignment(Pos.CENTER_LEFT);
+
+        VBox top = new VBox(6, buttonRow, filterRow);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
 
@@ -473,8 +478,9 @@ public class BrowserExtensionsTabView extends BorderPane {
 
         Thread t = new Thread(() -> {
             try {
-                List<BrowserExtensionRow> results = service.scanAllBrowsers(progress ->
-                        Platform.runLater(() -> statusLabel.setText("Scanning " + progress + "..."))
+                List<BrowserExtensionRow> results = service.scanAllBrowsersParallel(
+                        AppExecutors.scanPool(),
+                        browser -> Platform.runLater(() -> statusLabel.setText("Scanning " + browser + "..."))
                 );
                 Platform.runLater(() -> {
                     allRows.setAll(results);
@@ -500,7 +506,18 @@ public class BrowserExtensionsTabView extends BorderPane {
     }
 
     private String buildStatusText(List<BrowserExtensionRow> results) {
-        if (results.isEmpty()) return "No extensions found.";
+        if (results.isEmpty()) {
+            java.util.List<String> notInstalled = new java.util.ArrayList<>();
+            for (String browser : BrowserExtensionService.ALL_BROWSERS) {
+                if (!service.checkBrowserInstalled(browser)) {
+                    notInstalled.add(browser);
+                }
+            }
+            if (notInstalled.isEmpty()) {
+                return "No extensions found.";
+            }
+            return "No extensions found. Not installed: " + String.join(", ", notInstalled);
+        }
 
         java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
         for (String browser : BrowserExtensionService.ALL_BROWSERS) {
@@ -510,6 +527,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             counts.merge(r.getBrowser(), 1, Integer::sum);
         }
 
+        java.util.List<String> notInstalled = new java.util.ArrayList<>();
         StringBuilder sb = new StringBuilder("Found " + results.size() + " extensions (");
         boolean first = true;
         for (var entry : counts.entrySet()) {
@@ -517,9 +535,14 @@ public class BrowserExtensionsTabView extends BorderPane {
                 if (!first) sb.append(", ");
                 sb.append(entry.getKey()).append(": ").append(entry.getValue());
                 first = false;
+            } else if (!service.checkBrowserInstalled(entry.getKey())) {
+                notInstalled.add(entry.getKey());
             }
         }
         sb.append(")");
+        if (!notInstalled.isEmpty()) {
+            sb.append(" Not installed: ").append(String.join(", ", notInstalled));
+        }
         return sb.toString();
     }
 

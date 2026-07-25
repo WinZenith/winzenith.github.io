@@ -13,6 +13,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Thread-safe utility for resolving the winget executable path and building
@@ -20,10 +22,17 @@ import java.util.function.Consumer;
  */
 public class WingetRunner {
 
+    private static final Pattern VERSION_PATTERN = Pattern.compile("v?([0-9]+\\.[0-9]+\\.[0-9]+)");
+
     private final ProcessRunner runner;
     private volatile String resolvedPath;
     private volatile boolean resolved;
     private volatile boolean available;
+
+    private volatile String cachedVersion;
+    private volatile Boolean cachedJsonSupported;
+
+    private volatile int workingCandidateIndex = -1;
 
     public WingetRunner(ProcessRunner runner) {
         this.runner = runner;
@@ -56,6 +65,59 @@ public class WingetRunner {
             resolved = true;
             return false;
         }
+    }
+
+    /**
+     * Returns the cached winget version string (e.g. "v1.9.2831").
+     * Runs {@code winget --version} only once; subsequent calls return the cached value.
+     */
+    public String getVersion() {
+        if (cachedVersion != null) return cachedVersion;
+        synchronized (this) {
+            if (cachedVersion != null) return cachedVersion;
+            try {
+                ProcessResult r = runner.run(buildCommand("winget", "--version"), 10);
+                if (r.success() && r.stdout() != null) {
+                    cachedVersion = r.stdout().trim();
+                } else {
+                    cachedVersion = "";
+                }
+            } catch (Exception e) {
+                AppLogger.info("Failed to get winget version: " + e.getMessage());
+                cachedVersion = "";
+            }
+            return cachedVersion;
+        }
+    }
+
+    /**
+     * Returns true if the installed winget version supports {@code --output json}.
+     * JSON output was introduced in winget v1.4.x. This is determined by parsing the
+     * version string cached by {@link #getVersion()}.
+     */
+    public boolean supportsJsonOutput() {
+        if (cachedJsonSupported != null) return cachedJsonSupported;
+        synchronized (this) {
+            if (cachedJsonSupported != null) return cachedJsonSupported;
+            String ver = getVersion();
+            cachedJsonSupported = parseMajorMinorVersion(ver) >= 1.4;
+            return cachedJsonSupported;
+        }
+    }
+
+    private static double parseMajorMinorVersion(String version) {
+        if (version == null || version.isEmpty()) return 0;
+        Matcher m = VERSION_PATTERN.matcher(version);
+        if (m.find()) {
+            try {
+                String[] parts = m.group(1).split("\\.");
+                int major = Integer.parseInt(parts[0]);
+                int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+                return major + minor / 10.0;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return 0;
     }
 
     /**
@@ -170,15 +232,21 @@ public class WingetRunner {
     /**
      * Runs a winget command with automatic fallback across all candidates.
      * Returns the first successful result, or the last failed result.
+     * Caches which candidate form succeeded so the next call tries it first.
      */
     public ProcessResult runWithFallback(long timeoutSeconds, String... args) {
         List<List<String>> candidates = buildCandidates(args);
         ProcessResult lastResult = null;
         Exception lastEx = null;
-        for (List<String> candidate : candidates) {
+        int startIdx = workingCandidateIndex >= 0 && workingCandidateIndex < candidates.size()
+                ? workingCandidateIndex : 0;
+        for (int attempt = 0; attempt < candidates.size(); attempt++) {
+            int idx = (startIdx + attempt) % candidates.size();
+            List<String> candidate = candidates.get(idx);
             try {
                 ProcessResult r = runner.run(candidate, timeoutSeconds);
                 if (r.success()) {
+                    workingCandidateIndex = idx;
                     return r;
                 }
                 lastResult = r;
@@ -196,6 +264,7 @@ public class WingetRunner {
      * Runs a winget command in streaming mode with automatic fallback across candidates.
      * Calls lineCallback for each output line and progressCallback for progress updates.
      * Returns the first successful result, or the last failed result.
+     * Caches which candidate form succeeded so the next call tries it first.
      */
     public ProcessResult runWithFallbackStreaming(Consumer<String> lineCallback,
                                                    Consumer<Double> progressCallback,
@@ -204,10 +273,15 @@ public class WingetRunner {
         List<List<String>> candidates = buildCandidates(args);
         ProcessResult lastResult = null;
         Exception lastEx = null;
-        for (List<String> candidate : candidates) {
+        int startIdx = workingCandidateIndex >= 0 && workingCandidateIndex < candidates.size()
+                ? workingCandidateIndex : 0;
+        for (int attempt = 0; attempt < candidates.size(); attempt++) {
+            int idx = (startIdx + attempt) % candidates.size();
+            List<String> candidate = candidates.get(idx);
             try {
                 ProcessResult r = runner.runStreaming(candidate, lineCallback, progressCallback, cancelled);
                 if (r.success()) {
+                    workingCandidateIndex = idx;
                     return r;
                 }
                 lastResult = r;

@@ -86,7 +86,6 @@ public class DriversTabView extends BorderPane {
     private final ProgressBar progressBar = new ProgressBar(0);
     private final Label progressLabel = new Label("0%");
     private final Button scanButton = new Button("Scan");
-    private final Button forceScanButton = new Button("Force Scan");
     private final Button stopScanButton = new Button("Stop");
     private final Button updateAllButton = new Button("Update All");
     private final Button updateSelectedButton = new Button("Update Selected");
@@ -117,8 +116,6 @@ public class DriversTabView extends BorderPane {
         scanButton.setOnAction(e -> startScan());
         stopScanButton.setOnAction(e -> stopScan());
         stopScanButton.setDisable(true);
-        forceScanButton.setOnAction(e -> startForceScan());
-        forceScanButton.setTooltip(new Tooltip("Clear cache and scan for outdated drivers"));
 
         updateAllButton.setDisable(true);
         updateAllButton.setOnAction(e -> startBatchUpdate());
@@ -150,7 +147,7 @@ public class DriversTabView extends BorderPane {
         historyButton.setTooltip(new Tooltip("View past driver update history"));
         detailsButton.setTooltip(new Tooltip("View details of the selected driver"));
 
-        HBox row1 = new HBox(8, scanButton, forceScanButton, stopScanButton, updateAllButton, updateSelectedButton,
+        HBox row1 = new HBox(8, scanButton, stopScanButton, updateAllButton, updateSelectedButton,
                 backupButton, stopBackupButton, ignoredListButton, historyButton, detailsButton);
         row1.setAlignment(Pos.CENTER_LEFT);
         row1.setPadding(new Insets(8, 16, 0, 16));
@@ -541,26 +538,22 @@ public class DriversTabView extends BorderPane {
     }
 
     private void startScan() {
-        startScanInternal(false);
+        startScanInternal();
     }
 
-    private void startForceScan() {
-        startScanInternal(true);
-    }
-
-    private void startScanInternal(boolean forceRefresh) {
+    private void startScanInternal() {
         if (busy.get()) {
             return;
         }
-        if (forceRefresh) {
-            catalog.clearCache();
+        CancellationToken previousToken = scanToken;
+        if (previousToken != null) {
+            previousToken.cancel();
         }
         final CancellationToken token = new CancellationToken();
         scanToken = token;
         busy.set(true);
         setStatus("Enumerating installed drivers…");
         scanButton.setDisable(true);
-        forceScanButton.setDisable(true);
         stopScanButton.setDisable(false);
         Set<String> previouslySelected = new HashSet<>();
         for (DriverRow row : outdatedRows) {
@@ -607,7 +600,7 @@ public class DriversTabView extends BorderPane {
 
                 if (token.isCancelled()) return;
                 AtomicInteger providersDone = new AtomicInteger();
-                int providerCount = catalog.providerCount();
+                int providerCount = catalog.relevantProviderCount(installed);
                 catalog.findUpdates(
                         installed,
                         token,
@@ -655,7 +648,6 @@ public class DriversTabView extends BorderPane {
                     progressBar.setVisible(false);
                     progressLabel.setVisible(false);
                     scanButton.setDisable(false);
-                    forceScanButton.setDisable(false);
                     stopScanButton.setDisable(true);
                     updateButtonStates();
                 });

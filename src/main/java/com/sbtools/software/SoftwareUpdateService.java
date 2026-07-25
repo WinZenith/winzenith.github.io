@@ -53,34 +53,27 @@ public class SoftwareUpdateService {
 
         if (cancelled != null && cancelled.getAsBoolean()) return results;
 
-        // Try JSON mode first
-        ProcessResult r = winget.runWithFallback(120,
-                "upgrade", "--source", "winget", "--accept-source-agreements",
-                "--accept-package-agreements", "--output", "json");
-        if (r != null) {
-            String stdout = r.stdout();
-            if (stdout != null && !stdout.isBlank()) {
-                results.addAll(parseJsonOutput(stdout));
+        if (winget.supportsJsonOutput()) {
+            ProcessResult r = winget.runWithFallback(120,
+                    "upgrade", "--source", "winget", "--accept-source-agreements",
+                    "--accept-package-agreements", "--output", "json");
+            if (r != null) {
+                String stdout = r.stdout();
+                if (stdout != null && !stdout.isBlank()) {
+                    results.addAll(parseJsonOutput(stdout));
+                }
             }
-        }
-
-        if (cancelled != null && cancelled.getAsBoolean()) return results;
-
-        // If JSON produced no results, try text-mode fallback for older winget
-        if (results.isEmpty()) {
+        } else {
             ProcessResult textResult = winget.runWithFallback(120,
                     "upgrade", "--source", "winget");
             if (textResult != null) {
                 String stdout = textResult.stdout();
                 if (stdout != null && !stdout.isBlank()) {
-                    List<SoftwareUpdateEntry> textResults = parseTextOutput(stdout);
-                    if (!textResults.isEmpty()) {
-                        results.addAll(textResults);
-                    }
+                    results.addAll(parseTextOutput(stdout));
                 }
             }
             if (results.isEmpty() && textResult == null) {
-                AppLogger.warning("Fallback winget text scan failed");
+                AppLogger.warning("winget text scan failed");
             }
         }
 

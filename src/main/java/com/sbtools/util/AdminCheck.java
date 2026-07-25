@@ -32,37 +32,63 @@ public final class AdminCheck {
         String exePath = getExePath();
         if (exePath != null && new java.io.File(exePath).exists()) {
             String cmd = String.format(
-                    "Start-Process -FilePath '%s' -Verb RunAs -WindowStyle Hidden",
+                    "Start-Process -FilePath '%s' -Verb RunAs",
                     exePath.replace("'", "''")
             );
             new ProcessBuilder("powershell.exe", "-NoProfile", "-Command", cmd).start();
         } else {
             String javaHome = System.getProperty("java.home");
             String javaBin = javaHome + "\\bin\\javaw.exe";
-            String classPath = System.getProperty("java.class.path");
             String modulePath = System.getProperty("jdk.module.path");
-            String mainClass = "com.sbtools.App";
+            String classPath = System.getProperty("java.class.path");
+
+            boolean hasModuleInfo = isModular();
 
             StringBuilder args = new StringBuilder();
             args.append("--enable-native-access=ALL-UNNAMED,javafx.graphics");
-            if (modulePath != null && !modulePath.isEmpty()) {
+
+            if (hasModuleInfo && modulePath != null && !modulePath.isEmpty()) {
                 args.append(" --module-path \"").append(modulePath).append("\"");
+                args.append(" --module com.winzenith/com.sbtools.App");
+            } else if (hasModuleInfo) {
+                args.append(" --module-path \"").append(classPath).append("\"");
+                args.append(" --module com.winzenith/com.sbtools.App");
+            } else {
+                if (modulePath != null && !modulePath.isEmpty()) {
+                    args.append(" --module-path \"").append(modulePath).append("\"");
+                }
+                args.append(" --add-modules javafx.controls");
+                args.append(" -cp \"").append(classPath).append("\"");
+                args.append(" com.sbtools.App");
             }
-            args.append(" --add-modules javafx.controls");
-            args.append(" -cp \"").append(classPath).append("\"");
-            args.append(" ").append(mainClass);
 
             String psArgs = args.toString().replace("'", "''");
             String psJavaBin = javaBin.replace("'", "''");
 
             String cmd = String.format(
-                    "Start-Process -FilePath '%s' -ArgumentList '%s' -Verb RunAs -WindowStyle Hidden",
+                    "Start-Process -FilePath '%s' -ArgumentList '%s' -Verb RunAs",
                     psJavaBin, psArgs
             );
             new ProcessBuilder("powershell.exe", "-NoProfile", "-Command", cmd).start();
         }
     }
-    
+
+    private static boolean isModular() {
+        String modulePath = System.getProperty("jdk.module.path");
+        if (modulePath != null && !modulePath.isEmpty()) {
+            return true;
+        }
+        return findModuleInfoClass() != null;
+    }
+
+    private static java.io.File findModuleInfoClass() {
+        java.security.CodeSource cs = AdminCheck.class.getProtectionDomain().getCodeSource();
+        if (cs == null || cs.getLocation() == null) return null;
+        java.io.File codeDir = new java.io.File(cs.getLocation().getPath());
+        java.io.File moduleInfo = new java.io.File(codeDir, "module-info.class");
+        return moduleInfo.exists() ? moduleInfo : null;
+    }
+
     private static String getExePath() {
         try {
             String classPath = AdminCheck.class.getProtectionDomain().getCodeSource().getLocation().getPath();

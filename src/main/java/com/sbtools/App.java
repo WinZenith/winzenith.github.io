@@ -42,6 +42,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import com.sbtools.util.ProcessManager;
@@ -127,8 +128,7 @@ public class App extends Application {
         stage.show();
 
         if (settings.autoCheckForUpdates() && com.sbtools.util.AppInfo.isPackaged()) {
-            updateChecker.checkForUpdateAsync(() -> {
-                UpdateChecker.UpdateResult result = updateChecker.getCachedResult();
+            updateChecker.checkForUpdateAsync(result -> {
                 if (result.isUpdateAvailable()) {
                     Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                             "A new version v" + result.latestVersion() + " is available.\nDo you want to download it?",
@@ -190,35 +190,35 @@ public class App extends Application {
             updateBtn.setDisable(true);
             updateBtn.setText("Checking...");
 
-            updateChecker.checkForUpdateAsync(() -> {
-                checkingForUpdate = false;
-                updateBtn.setDisable(false);
-                updateBtn.setText("\u2B50 Check for Updates");
+            updateChecker.checkForUpdateAsync(result -> {
+                try {
+                    if (result.isUpdateAvailable()) {
+                        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                                "A new version v" + result.latestVersion() + " is available.\nDo you want to download it?",
+                                ButtonType.YES, ButtonType.NO);
+                        confirm.setTitle("Update Available");
+                        confirm.setHeaderText("Update Available");
 
-                UpdateChecker.UpdateResult result = updateChecker.getCachedResult();
-
-                if (result.isUpdateAvailable()) {
-                    Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                            "A new version v" + result.latestVersion() + " is available.\nDo you want to download it?",
-                            ButtonType.YES, ButtonType.NO);
-                    confirm.setTitle("Update Available");
-                    confirm.setHeaderText("Update Available");
-
-                    if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
-                        downloadAndExtract(result);
+                        if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
+                            downloadAndExtract(result);
+                        }
+                    } else if (result.isUnknown()) {
+                        Alert warn = new Alert(Alert.AlertType.WARNING,
+                                "Could not check for updates.\nPlease check your internet connection and try again.");
+                        warn.setTitle("Update Check Failed");
+                        warn.setHeaderText(null);
+                        warn.showAndWait();
+                    } else {
+                        Alert info = new Alert(Alert.AlertType.INFORMATION,
+                                "Your version is up to date.");
+                        info.setTitle("No Updates");
+                        info.setHeaderText(null);
+                        info.showAndWait();
                     }
-                } else if (result.isUnknown()) {
-                    Alert warn = new Alert(Alert.AlertType.WARNING,
-                            "Could not check for updates.\nPlease check your internet connection and try again.");
-                    warn.setTitle("Update Check Failed");
-                    warn.setHeaderText(null);
-                    warn.showAndWait();
-                } else {
-                    Alert info = new Alert(Alert.AlertType.INFORMATION,
-                            "Your version is up to date.");
-                    info.setTitle("No Updates");
-                    info.setHeaderText(null);
-                    info.showAndWait();
+                } finally {
+                    checkingForUpdate = false;
+                    updateBtn.setDisable(false);
+                    updateBtn.setText("\u2B50 Check for Updates");
                 }
             });
         });
@@ -289,6 +289,7 @@ public class App extends Application {
         progressDialog.getDialogPane().setContent(box);
 
         AtomicBoolean cancelled = new AtomicBoolean(false);
+        AtomicReference<HttpURLConnection> activeConn = new AtomicReference<>();
 
         progressDialog.getDialogPane().getButtonTypes().stream()
                 .filter(bt -> bt.getButtonData() == ButtonBar.ButtonData.CANCEL_CLOSE)
@@ -297,12 +298,23 @@ public class App extends Application {
                     Button cancelBtn = (Button) progressDialog.getDialogPane().lookupButton(bt);
                     cancelBtn.setOnAction(e -> {
                         cancelled.set(true);
-                        progressDialog.close();
+                        HttpURLConnection conn = activeConn.getAndSet(null);
+                        if (conn != null) {
+                            try { conn.disconnect(); } catch (Exception ignored) {}
+                        }
+                        Platform.runLater(() -> {
+                            statusLabel.setText("Download cancelled.");
+                            progressDialog.close();
+                        });
                     });
                 });
 
         progressDialog.setOnCloseRequest(e -> {
             cancelled.set(true);
+            HttpURLConnection conn = activeConn.getAndSet(null);
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Exception ignored) {}
+            }
         });
 
         Thread t = new Thread(() -> {
@@ -323,14 +335,16 @@ public class App extends Application {
 
                 URL url = new URL(urlStr);
                 conn = (HttpURLConnection) url.openConnection();
+                activeConn.set(conn);
                 conn.setRequestProperty("User-Agent", AppInfo.DISPLAY_NAME + "/" + AppInfo.getVersion());
+                conn.setConnectTimeout(15_000);
+                conn.setReadTimeout(60_000);
                 conn.setInstanceFollowRedirects(true);
                 conn.connect();
 
                 int contentLength = conn.getContentLength();
-                String raw = conn.getURL().getFile();
-                String filename = raw.substring(raw.lastIndexOf('/') + 1);
-                if (filename == null || filename.isBlank()) filename = "update.zip";
+                String filename = extractFilename(conn.getURL());
+                if (filename.isBlank()) filename = "update.zip";
 
                 tempDir = Files.createTempDirectory("WinZenith-update-");
                 Path zipPath = tempDir.resolve(filename);
@@ -340,6 +354,7 @@ public class App extends Application {
                     byte[] buffer = new byte[8192];
                     int read;
                     long total = 0;
+                    long lastProgressUpdate = 0;
                     while ((read = in.read(buffer)) != -1) {
                         if (cancelled.get()) {
                             Platform.runLater(() -> {
@@ -350,12 +365,16 @@ public class App extends Application {
                         }
                         out.write(buffer, 0, read);
                         total += read;
-                        if (contentLength > 0) {
-                            double prog = Math.min(1.0, (double) total / contentLength);
-                            final double p = prog;
-                            Platform.runLater(() -> progressBar.setProgress(p));
-                        } else {
-                            Platform.runLater(() -> progressBar.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS));
+                        long now = System.currentTimeMillis();
+                        if (now - lastProgressUpdate >= 100) {
+                            lastProgressUpdate = now;
+                            if (contentLength > 0) {
+                                double prog = Math.min(1.0, (double) total / contentLength);
+                                final double p = prog;
+                                Platform.runLater(() -> progressBar.setProgress(p));
+                            } else {
+                                Platform.runLater(() -> progressBar.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS));
+                            }
                         }
                     }
                     if (contentLength > 0 && total != contentLength) {
@@ -409,15 +428,19 @@ public class App extends Application {
                     }
                 }
 
-                Path finalExe = extractDir.resolve("WinZenith.exe");
-                boolean hasExe = Files.exists(finalExe);
+                boolean hasExe = false;
+                try (var walk = Files.walk(extractDir)) {
+                    hasExe = walk.filter(Files::isRegularFile)
+                            .anyMatch(p -> p.getFileName().toString().equalsIgnoreCase("WinZenith.exe"));
+                }
+                final boolean foundExe = hasExe;
 
                 Platform.runLater(() -> {
                     progressDialog.close();
 
                     String message = "Update downloaded and extracted to:\n" + extractDir + "\n\n"
                             + "Please close WinZenith and run the new version."
-                            + (hasExe ? "\n\nWinZenith.exe is ready in that folder." : "");
+                            + (foundExe ? "\n\nWinZenith.exe is ready in that folder." : "");
 
                     Alert done = new Alert(Alert.AlertType.INFORMATION, message, ButtonType.OK);
                     done.setTitle("Update Ready");
@@ -437,22 +460,26 @@ public class App extends Application {
                     });
                 });
 
-                if (tempDir != null) {
-                    cleanupTempDir(tempDir);
-                }
-
             } catch (Exception ex) {
+                if (cancelled.get()) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Download cancelled.");
+                        progressDialog.close();
+                    });
+                } else {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Failed: " + ex.getMessage());
+                        progressDialog.getDialogPane().getButtonTypes().clear();
+                        progressDialog.getDialogPane().getButtonTypes().add(ButtonType.OK);
+                    });
+                }
+            } finally {
+                activeConn.set(null);
                 if (tempDir != null) {
                     cleanupTempDir(tempDir);
                 }
-                Platform.runLater(() -> {
-                    statusLabel.setText("Failed: " + ex.getMessage());
-                    progressDialog.getDialogPane().getButtonTypes().clear();
-                    progressDialog.getDialogPane().getButtonTypes().add(ButtonType.OK);
-                });
-            } finally {
                 if (conn != null) {
-                    conn.disconnect();
+                    try { conn.disconnect(); } catch (Exception ignored) {}
                 }
             }
         }, "UpdateDownloader");
@@ -460,6 +487,21 @@ public class App extends Application {
         t.start();
 
         progressDialog.showAndWait();
+    }
+
+    private static String extractFilename(URL url) {
+        try {
+            URI uri = url.toURI();
+            String path = uri.getPath();
+            if (path == null || path.isBlank()) return "";
+            int lastSlash = path.lastIndexOf('/');
+            if (lastSlash < 0) return path;
+            return path.substring(lastSlash + 1);
+        } catch (Exception e) {
+            String file = url.getFile();
+            int lastSlash = file.lastIndexOf('/');
+            return lastSlash >= 0 ? file.substring(lastSlash + 1) : file;
+        }
     }
 
     private Path getAppDirectory() {
@@ -491,12 +533,25 @@ public class App extends Application {
         Thread t = new Thread(() -> {
             try {
                 Thread.sleep(5000);
-                Files.walk(tempDir)
-                        .sorted((a, b) -> b.compareTo(a))
-                        .forEach(p -> {
-                            try { Files.deleteIfExists(p); } catch (Exception ignored) {}
-                        });
-            } catch (Exception ignored) {}
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    java.util.List<Path> remaining = new java.util.ArrayList<>();
+                    try (var walkStream = Files.walk(tempDir)) {
+                        java.util.List<Path> sorted = walkStream.sorted((a2, b) -> b.compareTo(a2))
+                                .collect(java.util.stream.Collectors.toList());
+                        for (Path p : sorted) {
+                            try {
+                                Files.deleteIfExists(p);
+                            } catch (Exception e) {
+                                remaining.add(p);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                    if (remaining.isEmpty()) break;
+                    Thread.sleep(10000L * (attempt + 1));
+                }
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
         }, "TempDirCleanup");
         t.setDaemon(true);
         t.start();

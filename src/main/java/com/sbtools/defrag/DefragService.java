@@ -9,8 +9,11 @@ import com.sbtools.util.ProcessRunner;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -23,7 +26,17 @@ public class DefragService {
     }
 
     private static final long TIMEOUT_SECONDS = 600;
+    private static final long METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
     private final ProcessRunner processRunner = new ProcessRunner(TIMEOUT_SECONDS);
+    private final Map<String, MetadataCacheEntry> metadataCache = new ConcurrentHashMap<>();
+
+    private record MetadataCacheEntry(long mftSizeBytes, long pageFileSizeBytes,
+                                       long hiberFileSizeBytes, long swapFileSizeBytes,
+                                       long timestamp) {
+        boolean isFresh() {
+            return System.currentTimeMillis() - timestamp < METADATA_CACHE_TTL_MS;
+        }
+    }
 
     @SuppressWarnings("unchecked")
     public List<DriveInfo> getDrives() throws IOException, InterruptedException {
@@ -46,19 +59,74 @@ public class DefragService {
         }
     }
 
+    /**
+     * Returns true if the drive is an SSD and should skip fragmentation analysis.
+     */
+    public static boolean isSsd(DriveInfo drive) {
+        return "SSD".equalsIgnoreCase(drive.getMediaType());
+    }
+
+    /**
+     * Analyzes fragmentation for a single drive.
+     * If the drive is an SSD, populates zero values and returns without running analysis.
+     * Metadata (MFT, system files) is cached for 5 minutes to avoid redundant queries.
+     */
     public void analyze(DriveInfo drive, Consumer<String> progressCallback, AtomicBoolean cancelled)
             throws IOException, InterruptedException, CancellationException {
         if (!AppPaths.isWindows()) return;
+
         String letter = drive.getDriveLetter().replace(":", "");
+
+        if (isSsd(drive)) {
+            drive.setFragmentedSpaceBytes(0);
+            drive.setFragmentationPercent(0);
+            drive.setFragmentedFileCount(0);
+            drive.setTotalFileCount(0);
+            drive.setAverageFragmentsPerFile(0);
+
+            MetadataCacheEntry cached = metadataCache.get(letter);
+            if (cached != null && cached.isFresh()) {
+                drive.setMftSizeBytes(cached.mftSizeBytes());
+                drive.setPageFileSizeBytes(cached.pageFileSizeBytes());
+                drive.setHiberFileSizeBytes(cached.hiberFileSizeBytes());
+                drive.setSwapFileSizeBytes(cached.swapFileSizeBytes());
+            }
+            if (progressCallback != null) {
+                progressCallback.accept("SSD detected — fragmentation analysis skipped. Use Trim instead.");
+            }
+            return;
+        }
+
+        MetadataCacheEntry cached = metadataCache.get(letter);
+        boolean skipMetadata = cached != null && cached.isFresh();
+
+        if (skipMetadata) {
+            drive.setMftSizeBytes(cached.mftSizeBytes());
+            drive.setPageFileSizeBytes(cached.pageFileSizeBytes());
+            drive.setHiberFileSizeBytes(cached.hiberFileSizeBytes());
+            drive.setSwapFileSizeBytes(cached.swapFileSizeBytes());
+        }
+
+        List<String> args = new ArrayList<>();
+        args.add(letter);
+        if (skipMetadata) {
+            args.add("-SkipMetadata");
+        }
+
         Path script = PowerShellScripts.resolve("analyze-fragmentation.ps1");
         ProcessResult result = processRunner.runStreaming(
-                ProcessRunner.powershellScript(script.toString(), letter),
-                null, null, cancelled);
+                ProcessRunner.powershellScript(script.toString(), args.toArray(new String[0])),
+                line -> {
+                    if (line.startsWith("stage:") && progressCallback != null) {
+                        progressCallback.accept(line.substring(6));
+                    }
+                }, null, cancelled);
 
         if (!result.success()) {
             throw new IOException("Analysis failed: " + result.combinedOutput());
         }
-        String json = result.stdout().trim();
+
+        String json = extractJson(result.stdout());
         if (json.isBlank()) return;
         try {
             var parsed = JsonMapper.mapper().readTree(json);
@@ -85,6 +153,10 @@ public class DefragService {
             drive.setSwapFileSizeBytes(swapSize);
             drive.setTotalDirectories(totalDirs);
 
+            if (!skipMetadata) {
+                metadataCache.put(letter, new MetadataCacheEntry(mftSize, pageSize, hiberSize, swapSize, System.currentTimeMillis()));
+            }
+
             if (progressCallback != null) {
                 progressCallback.accept("Analysis complete - " + fragments + " bytes fragmented space, " + percent + "% fragmented");
             }
@@ -92,6 +164,17 @@ public class DefragService {
             AppLogger.error("Failed to parse analysis result", e);
             throw new IOException("Failed to parse analysis: " + e.getMessage(), e);
         }
+    }
+
+    private static String extractJson(String output) {
+        String[] lines = output.split("\\R");
+        for (int i = lines.length - 1; i >= 0; i--) {
+            String line = lines[i].trim();
+            if (line.startsWith("{")) {
+                return line;
+            }
+        }
+        return output.trim();
     }
 
     public void defrag(DriveInfo drive, DefragOption option, Consumer<String> statusCallback,

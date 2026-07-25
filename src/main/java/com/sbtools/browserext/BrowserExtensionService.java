@@ -14,8 +14,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 public class BrowserExtensionService {
@@ -31,9 +35,66 @@ public class BrowserExtensionService {
             "Brave", "Opera", "Opera GX", "Vivaldi"
     );
 
+    private static final Map<String, String> BROWSER_PATHS = Map.ofEntries(
+            Map.entry("Chrome",       "%LOCALAPPDATA%\\Google\\Chrome\\User Data"),
+            Map.entry("Chrome Canary", "%LOCALAPPDATA%\\Google\\Chrome SxS\\User Data"),
+            Map.entry("Edge",         "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data"),
+            Map.entry("Edge Beta",    "%LOCALAPPDATA%\\Microsoft\\Edge Beta\\User Data"),
+            Map.entry("Edge Dev",     "%LOCALAPPDATA%\\Microsoft\\Edge Dev\\User Data"),
+            Map.entry("Edge Canary",  "%LOCALAPPDATA%\\Microsoft\\Edge SxS\\User Data"),
+            Map.entry("Firefox",      "%APPDATA%\\Mozilla\\Firefox\\Profiles"),
+            Map.entry("Brave",        "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data"),
+            Map.entry("Opera",        "%APPDATA%\\Opera Software\\Opera Stable\\Extensions"),
+            Map.entry("Opera GX",     "%APPDATA%\\Opera Software\\Opera GX Stable\\Extensions"),
+            Map.entry("Vivaldi",      "%LOCALAPPDATA%\\Vivaldi\\User Data")
+    );
+
     public record ToggleResult(int success, int failed) {}
 
     private final ObjectMapper mapper = new ObjectMapper();
+
+    /**
+     * Checks if a browser is installed by testing if its profile directory exists.
+     */
+    public boolean checkBrowserInstalled(String browser) {
+        String template = BROWSER_PATHS.get(browser);
+        if (template == null) return false;
+        String resolved = template.replace("%LOCALAPPDATA%", System.getenv("LOCALAPPDATA") != null ? System.getenv("LOCALAPPDATA") : "")
+                                  .replace("%APPDATA%", System.getenv("APPDATA") != null ? System.getenv("APPDATA") : "");
+        return Files.exists(Paths.get(resolved));
+    }
+
+    /**
+     * Scan all browsers in parallel using the provided thread pool.
+     * Returns a map of browser name -> installed status, plus extension rows.
+     */
+    public List<BrowserExtensionRow> scanAllBrowsersParallel(
+            ExecutorService pool,
+            Consumer<String> onProgress) {
+        int total = ALL_BROWSERS.size();
+        Map<String, CompletableFuture<List<BrowserExtensionRow>>> futures = new LinkedHashMap<>();
+
+        for (int i = 0; i < total; i++) {
+            String browser = ALL_BROWSERS.get(i);
+            futures.put(browser, CompletableFuture.supplyAsync(() -> {
+                List<BrowserExtensionRow> rows = scanBrowser(browser);
+                if (onProgress != null) {
+                    onProgress.accept(browser);
+                }
+                return rows;
+            }, pool));
+        }
+
+        List<BrowserExtensionRow> all = new ArrayList<>();
+        for (Map.Entry<String, CompletableFuture<List<BrowserExtensionRow>>> entry : futures.entrySet()) {
+            try {
+                all.addAll(entry.getValue().join());
+            } catch (Exception e) {
+                AppLogger.warning("Failed to scan " + entry.getKey() + ": " + e.getMessage());
+            }
+        }
+        return all;
+    }
 
     /**
      * Scan all browsers individually, calling onProgress(browserName, completedCount, totalCount)

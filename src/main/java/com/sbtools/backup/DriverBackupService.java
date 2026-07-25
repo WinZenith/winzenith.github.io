@@ -16,34 +16,34 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 
 public class DriverBackupService {
 
-    private static final ReentrantLock INDEX_LOCK = new ReentrantLock();
+    private static final ReentrantReadWriteLock INDEX_LOCK = new ReentrantReadWriteLock();
     private final ProcessRunner processRunner = new ProcessRunner(300);
 
     public List<DriverBackupEntry> listAll() throws IOException {
-        INDEX_LOCK.lock();
+        INDEX_LOCK.readLock().lock();
         try {
             return loadIndex().getEntries().stream()
                     .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
                     .collect(Collectors.toList());
         } finally {
-            INDEX_LOCK.unlock();
+            INDEX_LOCK.readLock().unlock();
         }
     }
 
     public List<DriverBackupEntry> listBackups(String deviceId) throws IOException {
-        INDEX_LOCK.lock();
+        INDEX_LOCK.readLock().lock();
         try {
             return loadIndex().getEntries().stream()
                     .filter(e -> e.deviceId().equals(deviceId))
                     .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
                     .collect(Collectors.toList());
         } finally {
-            INDEX_LOCK.unlock();
+            INDEX_LOCK.readLock().unlock();
         }
     }
 
@@ -79,13 +79,13 @@ public class DriverBackupService {
                 inf
         );
 
-        INDEX_LOCK.lock();
+        INDEX_LOCK.writeLock().lock();
         try {
             BackupIndex index = loadIndex();
             index.getEntries().add(entry);
             saveIndex(index);
         } finally {
-            INDEX_LOCK.unlock();
+            INDEX_LOCK.writeLock().unlock();
         }
 
         AppLogger.info("Driver backup created: " + entry.friendlyName()
@@ -118,13 +118,13 @@ public class DriverBackupService {
     }
 
     public void removeBackupEntry(DriverBackupEntry entry) throws IOException {
-        INDEX_LOCK.lock();
+        INDEX_LOCK.writeLock().lock();
         try {
             BackupIndex index = loadIndex();
             index.getEntries().removeIf(e -> e.id().equals(entry.id()));
             saveIndex(index);
         } finally {
-            INDEX_LOCK.unlock();
+            INDEX_LOCK.writeLock().unlock();
         }
 
         try {
@@ -147,16 +147,16 @@ public class DriverBackupService {
 
     public void removeAll() throws IOException {
         List<DriverBackupEntry> entriesToDelete;
-        INDEX_LOCK.lock();
+        INDEX_LOCK.writeLock().lock();
         try {
             BackupIndex index = loadIndex();
             entriesToDelete = new java.util.ArrayList<>(index.getEntries());
             index.getEntries().clear();
             saveIndex(index);
         } finally {
-            INDEX_LOCK.unlock();
+            INDEX_LOCK.writeLock().unlock();
         }
-        for (DriverBackupEntry entry : entriesToDelete) {
+        entriesToDelete.parallelStream().forEach(entry -> {
             try {
                 Path folder = Path.of(entry.backupFolder());
                 if (Files.isDirectory(folder)) {
@@ -173,7 +173,7 @@ public class DriverBackupService {
             } catch (IOException e) {
                 AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
             }
-        }
+        });
         AppLogger.info("All driver backups removed");
     }
 
@@ -204,11 +204,7 @@ public class DriverBackupService {
         try (var stream = Files.walk(directory)) {
             return stream.filter(Files::isRegularFile)
                     .mapToLong(p -> {
-                        try {
-                            return Files.size(p);
-                        } catch (IOException e) {
-                            return 0;
-                        }
+                        try { return Files.size(p); } catch (IOException e) { return 0; }
                     })
                     .sum();
         }
@@ -219,11 +215,7 @@ public class DriverBackupService {
             try (var stream = Files.walk(directory)) {
                 stream.sorted(Comparator.reverseOrder())
                         .forEach(path -> {
-                            try {
-                                Files.deleteIfExists(path);
-                            } catch (IOException e) {
-                                AppLogger.warning("Could not delete: " + path, e);
-                            }
+                            try { Files.deleteIfExists(path); } catch (IOException e) { AppLogger.warning("Could not delete: " + path, e); }
                         });
             }
         }

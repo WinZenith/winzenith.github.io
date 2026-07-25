@@ -12,7 +12,9 @@ import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class DriverScanService {
 
@@ -34,21 +36,21 @@ public class DriverScanService {
 
     public static List<InstalledDriver> parseDrivers(String json) throws com.fasterxml.jackson.core.JsonProcessingException {
         JsonNode root = JsonMapper.parseTree(json);
-        List<InstalledDriver> list = new ArrayList<>();
+        Map<String, InstalledDriver> byDeviceId = new LinkedHashMap<>();
         if (root.isArray()) {
             for (JsonNode n : root) {
                 InstalledDriver d = nodeToDriver(n);
                 if (d != null) {
-                    list.add(d);
+                    byDeviceId.put(d.deviceId(), d);
                 }
             }
         } else if (root.isObject()) {
             InstalledDriver d = nodeToDriver(root);
             if (d != null) {
-                list.add(d);
+                byDeviceId.put(d.deviceId(), d);
             }
         }
-        return list;
+        return new ArrayList<>(byDeviceId.values());
     }
 
     private static InstalledDriver nodeToDriver(JsonNode n) {

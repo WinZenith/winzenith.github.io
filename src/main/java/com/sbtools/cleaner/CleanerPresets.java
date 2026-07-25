@@ -3,20 +3,19 @@ package com.sbtools.cleaner;
 import java.util.EnumSet;
 import java.util.Set;
 
-/**
- * Predefined selection presets for cleanup categories.
- */
 public enum CleanerPresets {
     SAFE_ONLY("Safe Only", "Low-risk categories only", EnumSet.of(
             CleanupCategory.EMPTY_RECYCLE_BIN,
             CleanupCategory.JUNK_FILES,
             CleanupCategory.CACHE,
             CleanupCategory.THUMBNAIL_CACHE,
-            CleanupCategory.FONT_CACHE,
             CleanupCategory.NOTIFICATION_HISTORY,
             CleanupCategory.TASKBAR_JUMP_LISTS,
             CleanupCategory.WINDOWS_LOG_FILES,
-            CleanupCategory.NVIDIA_SHADER_CACHE
+            CleanupCategory.NVIDIA_SHADER_CACHE,
+            CleanupCategory.NPM_CACHE,
+            CleanupCategory.YARN_CACHE,
+            CleanupCategory.PIP_CACHE
     )),
     HIGH_IMPACT("High Impact", "Categories that free the most space", EnumSet.of(
             CleanupCategory.REGISTRY,
@@ -24,21 +23,32 @@ public enum CleanerPresets {
             CleanupCategory.WINDOWS_UPDATE_CLEANUP,
             CleanupCategory.OTHER_PROGRAMS_CACHE,
             CleanupCategory.OLD_WINDOWS_INSTALL,
-            CleanupCategory.SOFTWARE_DISTRIBUTION_CACHE
+            CleanupCategory.SOFTWARE_DISTRIBUTION_CACHE,
+            CleanupCategory.DOCKER_CACHE,
+            CleanupCategory.GRADLE_CACHE,
+            CleanupCategory.JETBRAINS_CACHE
     )),
     PRIVACY("Privacy", "Remove browsing and usage traces", EnumSet.of(
             CleanupCategory.PRIVACY_TRACES,
             CleanupCategory.WEB_BROWSING_TRACES,
             CleanupCategory.TASKBAR_JUMP_LISTS,
-            CleanupCategory.OFFICE_DOCUMENT_CACHE
+            CleanupCategory.OFFICE_DOCUMENT_CACHE,
+            CleanupCategory.WINDOWS_SEARCH_CACHE
     )),
     MAINTENANCE("Maintenance", "System health and optimization", EnumSet.of(
             CleanupCategory.REGISTRY,
-            CleanupCategory.REGISTRY_DEFRAG,
             CleanupCategory.WINDOWS_ERROR_REPORTING,
             CleanupCategory.WINDOWS_DEFENDER_CACHE,
             CleanupCategory.WINDOWS_DIAGNOSTICS_CACHE,
             CleanupCategory.MEMORY_DUMPS
+    )),
+    DEV_TOOLS("Dev Tools", "Clear caches from development tools", EnumSet.of(
+            CleanupCategory.NPM_CACHE,
+            CleanupCategory.YARN_CACHE,
+            CleanupCategory.MAVEN_CACHE,
+            CleanupCategory.GRADLE_CACHE,
+            CleanupCategory.PIP_CACHE,
+            CleanupCategory.JETBRAINS_CACHE
     ));
 
     private final String displayName;
@@ -51,20 +61,10 @@ public enum CleanerPresets {
         this.categories = categories;
     }
 
-    public String getDisplayName() {
-        return displayName;
-    }
-
-    public String getDescription() {
-        return description;
-    }
-
-    public Set<CleanupCategory> getCategories() {
-        return categories;
-    }
+    public String getDisplayName() { return displayName; }
+    public String getDescription() { return description; }
+    public Set<CleanupCategory> getCategories() { return categories; }
 
     @Override
-    public String toString() {
-        return displayName;
-    }
+    public String toString() { return displayName; }
 }

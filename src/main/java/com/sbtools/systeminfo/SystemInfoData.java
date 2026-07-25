@@ -19,6 +19,9 @@ public record SystemInfoData(
         @JsonProperty("audioDevices") List<AudioDeviceInfo> audioDevices,
         @JsonProperty("battery") BatteryInfo battery,
         @JsonProperty("temperatures") List<TemperatureInfo> temperatures,
+        @JsonProperty("usbDevices") List<UsbDeviceInfo> usbDevices,
+        @JsonProperty("monitors") List<MonitorInfo> monitors,
+        @JsonProperty("printers") List<PrinterInfo> printers,
         @JsonProperty("version") String version,
         @JsonProperty("warnings") List<String> warnings
 ) {

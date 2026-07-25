@@ -384,7 +384,21 @@ try {
         $nvmeAccessFailed = $true
     }
     if ($nvmeAccessFailed -and $nvmes.Count -eq 0) {
-        $warnings += "NVMe: Could not query Win32_PhysicalMedia. This may require admin privileges."
+        # Fallback: use Get-PhysicalDisk (available without admin on PS 5.1+)
+        try {
+            $physDisks = @(Get-PhysicalDisk -ErrorAction Stop)
+            foreach ($pd in $physDisks) {
+                if ($pd.BusType -eq 'NVMe') {
+                    $nvmes += [ordered]@{
+                        serialNumber = if ($pd.SerialNumber) { $pd.SerialNumber.Trim() } else { '' }
+                        mediaType    = if ($pd.MediaType) { $pd.MediaType } else { '' }
+                        busType      = 'NVMe'
+                    }
+                }
+            }
+        } catch {
+            $warnings += "NVMe: Could not query Win32_PhysicalMedia or Get-PhysicalDisk."
+        }
     }
 
     $storageSection = [ordered]@{
@@ -728,11 +742,131 @@ try {
     }
     $result['temperatures'] = $temps
     if ($temps.Count -eq 0) {
-        $warnings += "Temperatures: No thermal zone data available. This may require admin privileges."
+        # Fallback: try wmic thermal zone
+        try {
+            $wmicOutput = & wmic /namespace:\\root\wmi PATH MSAcpi_ThermalZoneTemperature get CurrentTemperature /format:csv 2>$null
+            if ($wmicOutput) {
+                foreach ($line in $wmicOutput) {
+                    $line = $line.Trim()
+                    if ($line -match '^\d+$' -or $line -match '^Node,CurrentTemperature$' -or $line -eq '') { continue }
+                    $parts = $line -split ','
+                    if ($parts.Count -ge 2) {
+                        $val = 0
+                        try { $val = [double]$parts[1].Trim() } catch { continue }
+                        if ($val -le 0) { continue }
+                        $tempCelsius = [math]::Round($val / 10.0 - 273.15, 1)
+                        $temps += [ordered]@{
+                            zoneName          = "Thermal Zone " + ($temps.Count + 1)
+                            temperatureCelsius = $tempCelsius
+                        }
+                    }
+                }
+            }
+        } catch {}
+        if ($temps.Count -eq 0) {
+            $warnings += "Temperatures: No thermal zone data available. This may require admin privileges."
+        }
+        $result['temperatures'] = $temps
     }
 } catch {
     $warnings += "Temperatures: $($_.Exception.Message)"
     $result['temperatures'] = @()
+}
+
+# ── USB DEVICES ──────────────────────────────────────────────────────────────
+try {
+    $ErrorActionPreference = 'Stop'
+    $usbDevices = @()
+    $usbSearcher = New-Object System.Management.ManagementObjectSearcher('root\cimv2',
+        'SELECT * FROM Win32_USBControllerDevice')
+    try {
+        foreach ($assoc in $usbSearcher.Get()) {
+            $dep = [wmi]$assoc.Dependent
+            $devid = if ($dep.DeviceID) { [string]$dep.DeviceID } else { '' }
+            if (-not $devid) { continue }
+            $usbDevices += [ordered]@{
+                name         = if ($dep.Name) { [string]$dep.Name } else { '' }
+                manufacturer = if ($dep.Manufacturer) { [string]$dep.Manufacturer } else { '' }
+                deviceId     = $devid
+                status       = if ($dep.Status) { [string]$dep.Status } else { '' }
+            }
+        }
+    } finally { $usbSearcher.Dispose() }
+    $result['usbDevices'] = $usbDevices
+} catch {
+    $warnings += "USB Devices: $($_.Exception.Message)"
+    $result['usbDevices'] = @()
+}
+
+# ── MONITORS ─────────────────────────────────────────────────────────────────
+try {
+    $ErrorActionPreference = 'Stop'
+    $monitors = @()
+    Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue | ForEach-Object {
+        $mon = [ordered]@{
+            name         = if ($_.Name) { $_.Name.Trim() } else { '' }
+            manufacturer = if ($_.MonitorManufacturer) { $_.MonitorManufacturer.Trim() } else { '' }
+            screenSize   = ''
+            resolution   = ''
+            status       = if ($_.Status) { [string]$_.Status } else { '' }
+        }
+        $w = 0; $h = 0
+        try { if ($_.ScreenWidth) { $w = [int]$_.ScreenWidth } } catch {}
+        try { if ($_.ScreenHeight) { $h = [int]$_.ScreenHeight } } catch {}
+        if ($w -gt 0 -and $h -gt 0) { $mon['resolution'] = "${w}x${h}" }
+        try {
+            $raw = $_.PNPDeviceID
+            if ($null -ne $raw -and [string]$raw -ne '') {
+                $mon['pnpDeviceId'] = [string]$raw
+            }
+        } catch {}
+        $monitors += $mon
+    }
+    # Also try Win32_DisplayConfiguration for more details
+    try {
+        $dispCfg = Get-CimInstance Win32_DisplayConfiguration -ErrorAction Stop | Select-Object -First 1
+        if ($dispCfg -and $monitors.Count -gt 0) {
+            $first = $monitors[0]
+            if (-not $first['resolution'] -and $dispCfg.PelsWidth -and $dispCfg.PelsHeight) {
+                $first['resolution'] = "$($dispCfg.PelsWidth)x$($dispCfg.PelsHeight)"
+            }
+        }
+    } catch {}
+    $result['monitors'] = $monitors
+} catch {
+    $warnings += "Monitors: $($_.Exception.Message)"
+    $result['monitors'] = @()
+}
+
+# ── PRINTERS ─────────────────────────────────────────────────────────────────
+try {
+    $ErrorActionPreference = 'Stop'
+    $printers = @()
+    Get-CimInstance Win32_Printer | ForEach-Object {
+        $printerStatus = ''
+        try {
+            if ($_.PrinterStatus) {
+                $ps = [int]$_.PrinterStatus
+                $printerStatus = switch ($ps) {
+                    1 { 'Other' } 2 { 'Unknown' } 3 { 'Ready' } 4 { 'Printing' }
+                    5 { 'Warmup' } 6 { 'Stopped' } 7 { 'Offline' }
+                    default { 'Unknown' }
+                }
+            }
+        } catch {}
+        $printers += [ordered]@{
+            name      = if ($_.Name) { $_.Name.Trim() } else { '' }
+            driver    = if ($_.DriverName) { $_.DriverName.Trim() } else { '' }
+            port      = if ($_.PortName) { $_.PortName.Trim() } else { '' }
+            status    = $printerStatus
+            shared    = if ($null -ne $_.Shared) { [bool]$_.Shared } else { $false }
+            isDefault = if ($null -ne $_.Default) { [bool]$_.Default } else { $false }
+        }
+    }
+    $result['printers'] = $printers
+} catch {
+    $warnings += "Printers: $($_.Exception.Message)"
+    $result['printers'] = @()
 }
 
 # ── OUTPUT ───────────────────────────────────────────────────────────────────

@@ -61,26 +61,37 @@ Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
         $drivers += $entry
     }
 
-Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
-    Where-Object { $_.InstanceId -and -not $seen.ContainsKey($_.InstanceId) } |
-    ForEach-Object {
-        $dev = $_
+# Batch-fetch device properties for Display class devices (single pipeline call instead of N calls)
+$displayDevices = Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
+    Where-Object { $_.InstanceId -and -not $seen.ContainsKey($_.InstanceId) }
+
+if ($displayDevices) {
+    $propMap = @{}
+    $displayDevices | Get-PnpDeviceProperty -KeyName 'DEVPKEY_Device_DriverVersion','DEVPKEY_Device_DriverDate' -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $id = $_.InstanceId
+            if (-not $propMap.ContainsKey($id)) { $propMap[$id] = @{} }
+            $key = $_.KeyName
+            if ($key -eq 'DEVPKEY_Device_DriverVersion') { $propMap[$id]['version'] = $_.Data }
+            if ($key -eq 'DEVPKEY_Device_DriverDate') { $propMap[$id]['date'] = $_.Data }
+        }
+
+    foreach ($dev in $displayDevices) {
+        $id = $dev.InstanceId
         $ver = ''
         $driverDate = ''
-        try {
-            $ver = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName 'DEVPKEY_Device_DriverVersion' -ErrorAction SilentlyContinue).Data
-            if ($null -eq $ver) { $ver = '' }
-            $dateObj = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName 'DEVPKEY_Device_DriverDate' -ErrorAction SilentlyContinue).Data
-            if ($null -ne $dateObj) {
-                $driverDate = $dateObj.ToString('yyyy-MM-dd')
+        if ($propMap.ContainsKey($id)) {
+            $v = $propMap[$id]['version']
+            if ($null -ne $v) { $ver = [string]$v }
+            $d = $propMap[$id]['date']
+            if ($null -ne $d) {
+                try { $driverDate = $d.ToString('yyyy-MM-dd') } catch { $driverDate = '' }
             }
-        } catch {
-            $ver = ''
         }
         $entry = [ordered]@{
-            deviceId       = $dev.InstanceId
-            friendlyName   = if ($dev.FriendlyName) { $dev.FriendlyName } else { $dev.InstanceId }
-            hardwareIds    = $dev.InstanceId
+            deviceId       = $id
+            friendlyName   = if ($dev.FriendlyName) { $dev.FriendlyName } else { $id }
+            hardwareIds    = $id
             provider       = ''
             driverVersion  = $ver
             infName        = ''
@@ -88,8 +99,9 @@ Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
             status         = 'OK'
             releaseDate    = $driverDate
         }
-        $seen[$dev.InstanceId] = $true
+        $seen[$id] = $true
         $drivers += $entry
     }
+}
 
 $drivers | ConvertTo-Json -Depth 4 -Compress

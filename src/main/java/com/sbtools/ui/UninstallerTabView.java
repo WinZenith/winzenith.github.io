@@ -464,22 +464,12 @@ public class UninstallerTabView extends BorderPane {
         new Thread(() -> {
             try {
                 AppLogger.info("Starting uninstaller for: " + app.getName());
-                ProcessResult result = service.runUninstaller(app);
+                ProcessResult result = service.runUninstallerAndWait(app, 600);
                 AppLogger.info("Uninstaller completed with exit code: " + result.exitCode());
                 boolean uninstallSucceeded = result.success();
 
-                // Wait briefly for the uninstaller to release file locks.
-                // Poll the install location: if it's removed, proceed immediately.
-                // Otherwise wait up to 5 seconds total.
-                String installLoc = app.getInstallLocation();
-                long deadline = System.currentTimeMillis() + 5000;
-                while (System.currentTimeMillis() < deadline) {
-                    if (installLoc != null && !installLoc.isBlank()) {
-                        File installDir = new File(installLoc);
-                        if (!installDir.exists()) break;
-                    }
-                    Thread.sleep(250);
-                }
+                // Brief pause for file system to settle after process exits
+                Thread.sleep(1000);
 
                 if (!uninstallSucceeded) {
                     AtomicReference<ButtonType> userChoice = new AtomicReference<>();

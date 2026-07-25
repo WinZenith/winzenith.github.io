@@ -7,9 +7,11 @@ import com.sbtools.util.CancellationToken;
 import com.sbtools.util.VersionCompare;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -17,22 +19,30 @@ import java.util.function.Consumer;
 
 public class DriverCatalogAggregator {
 
+    private static final long PROVIDER_TIMEOUT_SECONDS = 60;
+
     private final List<DriverCatalogProvider> providers;
     private final ProviderCache cache;
     private final DriverCatalogDatabase catalogDatabase;
+    private final ExecutorService pool;
 
     public DriverCatalogAggregator(List<DriverCatalogProvider> providers) {
-        this(providers, new ProviderCache(), null);
+        this(providers, new ProviderCache(), null, null);
     }
 
     public DriverCatalogAggregator(List<DriverCatalogProvider> providers, ProviderCache cache) {
-        this(providers, cache, null);
+        this(providers, cache, null, null);
     }
 
     public DriverCatalogAggregator(List<DriverCatalogProvider> providers, ProviderCache cache, DriverCatalogDatabase catalogDatabase) {
+        this(providers, cache, catalogDatabase, null);
+    }
+
+    public DriverCatalogAggregator(List<DriverCatalogProvider> providers, ProviderCache cache, DriverCatalogDatabase catalogDatabase, ExecutorService pool) {
         this.providers = List.copyOf(providers);
         this.cache = cache;
         this.catalogDatabase = catalogDatabase;
+        this.pool = pool;
     }
 
     public static DriverCatalogAggregator createDefault() {
@@ -50,17 +60,53 @@ public class DriverCatalogAggregator {
                 new OemHpCatalogProvider(catalog),
                 new OemAsusCatalogProvider(catalog),
                 new WindowsUpdateCatalogProvider()
-        ), new ProviderCache(), catalog);
+        ), new ProviderCache(), catalog, com.sbtools.util.AppExecutors.ioPool());
     }
 
     public int providerCount() {
         return providers.size();
     }
 
+    /**
+     * Returns the number of providers that would actually run for the given installed drivers.
+     * Used for accurate progress calculation.
+     */
+    public int relevantProviderCount(List<InstalledDriver> installed) {
+        return relevantProviders(installed).size();
+    }
+
     public void clearCache() {
         if (cache != null) {
             cache.clearAll();
         }
+    }
+
+    /**
+     * Filters providers to only those relevant to the installed drivers.
+     * OEM providers are skipped if no installed driver matches their vendor.
+     * Windows Update provider is always included.
+     */
+    private List<DriverCatalogProvider> relevantProviders(List<InstalledDriver> installed) {
+        Set<OemVendorHelper> presentVendors = EnumSet.noneOf(OemVendorHelper.class);
+        for (InstalledDriver d : installed) {
+            OemVendorHelper v = OemVendorHelper.detect(d);
+            if (v != null) {
+                presentVendors.add(v);
+            }
+        }
+        AppLogger.debug("CatalogAggregator: Detected vendors: " + presentVendors);
+        List<DriverCatalogProvider> filtered = new ArrayList<>();
+        for (DriverCatalogProvider p : providers) {
+            if (p instanceof AbstractOemCatalogProvider oem) {
+                if (oem.isVendorPresent(presentVendors)) {
+                    filtered.add(p);
+                }
+            } else {
+                filtered.add(p);
+            }
+        }
+        AppLogger.debug("CatalogAggregator: " + filtered.size() + "/" + providers.size() + " providers relevant");
+        return filtered;
     }
 
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed) {
@@ -120,18 +166,23 @@ public class DriverCatalogAggregator {
             CancellationToken token,
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderResult) {
-        // Rate-limit concurrent vendor requests to avoid HTTP 429 throttling.
-        // 4 concurrent providers is a good balance between speed and politeness.
-        int maxConcurrent = Math.min(4, providers.size());
+        List<DriverCatalogProvider> activeProviders = relevantProviders(installed);
+        if (activeProviders.isEmpty()) {
+            return;
+        }
+        int maxConcurrent = Math.min(8, activeProviders.size());
         java.util.concurrent.Semaphore rateLimit = new java.util.concurrent.Semaphore(maxConcurrent);
-        ExecutorService pool = Executors.newFixedThreadPool(maxConcurrent, r -> {
-            Thread t = new Thread(r, "catalog-provider");
-            t.setDaemon(true);
-            return t;
-        });
+        boolean ownsPool = pool == null;
+        ExecutorService effectivePool = ownsPool
+                ? Executors.newFixedThreadPool(maxConcurrent, r -> {
+                    Thread t = new Thread(r, "catalog-provider");
+                    t.setDaemon(true);
+                    return t;
+                })
+                : pool;
         try {
-            var futures = providers.stream()
-                    .map(provider -> pool.submit(() -> {
+            var futures = activeProviders.stream()
+                    .map(provider -> effectivePool.submit(() -> {
                         if (token.isCancelled()) {
                             return null;
                         }
@@ -167,7 +218,10 @@ public class DriverCatalogAggregator {
                     continue;
                 }
                 try {
-                    future.get();
+                    future.get(PROVIDER_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (java.util.concurrent.TimeoutException e) {
+                    future.cancel(true);
+                    AppLogger.warning("CatalogAggregator: Provider timed out after " + PROVIDER_TIMEOUT_SECONDS + "s");
                 } catch (Exception e) {
                     if (e.getCause() instanceof InterruptedException) {
                         Thread.currentThread().interrupt();
@@ -175,14 +229,16 @@ public class DriverCatalogAggregator {
                 }
             }
         } finally {
-            pool.shutdown();
-            try {
-                if (!pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                    pool.shutdownNow();
+            if (ownsPool) {
+                effectivePool.shutdown();
+                try {
+                    if (!effectivePool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        effectivePool.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    effectivePool.shutdownNow();
+                    Thread.currentThread().interrupt();
                 }
-            } catch (InterruptedException e) {
-                pool.shutdownNow();
-                Thread.currentThread().interrupt();
             }
         }
     }

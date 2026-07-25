@@ -8,6 +8,7 @@ import com.sbtools.drivers.model.DriverUpdateCandidate;
 import com.sbtools.drivers.model.InstalledDriver;
 import com.sbtools.software.SoftwareUpdateEntry;
 import com.sbtools.software.SoftwareUpdateService;
+import com.sbtools.util.AppExecutors;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 import com.sbtools.util.CancellationToken;
@@ -38,7 +39,6 @@ import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
@@ -51,8 +51,7 @@ public class DashboardTabView extends BorderPane {
     private final DriverScanService driverScanService = new DriverScanService();
     private final DriverCatalogAggregator catalog = DriverCatalogAggregator.createDefault();
     private final SoftwareUpdateService softwareUpdateService = new SoftwareUpdateService();
-    private final ExecutorService executor = Executors.newFixedThreadPool(5,
-            r -> { Thread t = new Thread(r, "dashboard-scan"); t.setDaemon(true); return t; });
+    private final ExecutorService executor = AppExecutors.scanPool();
 
     private final ObservableList<IssueCategory> issues = FXCollections.observableArrayList();
     private final Label statusLabel = new Label("Check your PC health by pressing the Scan for issues button.");
@@ -137,7 +136,6 @@ public class DashboardTabView extends BorderPane {
             scanFuture.cancel(true);
             scanFuture = null;
         }
-        executor.shutdownNow();
     }
 
     // ── Welcome Screen ────────────────────────────────────────────────────

@@ -5,15 +5,18 @@ import com.sbtools.systeminfo.BatteryInfo;
 import com.sbtools.systeminfo.BiosInfo;
 import com.sbtools.systeminfo.CpuInfo;
 import com.sbtools.systeminfo.GpuInfo;
+import com.sbtools.systeminfo.MonitorInfo;
 import com.sbtools.systeminfo.MotherboardInfo;
 import com.sbtools.systeminfo.NetworkAdapterInfo;
 import com.sbtools.systeminfo.OtherDevice;
 import com.sbtools.systeminfo.OsInfo;
+import com.sbtools.systeminfo.PrinterInfo;
 import com.sbtools.systeminfo.RamInfo;
 import com.sbtools.systeminfo.StorageInfo;
 import com.sbtools.systeminfo.SystemInfoData;
 import com.sbtools.systeminfo.SystemInfoService;
 import com.sbtools.systeminfo.TemperatureInfo;
+import com.sbtools.systeminfo.UsbDeviceInfo;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 import com.sbtools.util.DataSizeFormatter;
@@ -213,6 +216,15 @@ public class SystemInfoTabView extends BorderPane {
         }
         if (data.others() != null && !data.others().isEmpty()) {
             tabPane.getTabs().add(buildOthersTab(data.others()));
+        }
+        if (data.usbDevices() != null && !data.usbDevices().isEmpty()) {
+            tabPane.getTabs().add(buildUsbTab(data.usbDevices()));
+        }
+        if (data.monitors() != null && !data.monitors().isEmpty()) {
+            tabPane.getTabs().add(buildMonitorTab(data.monitors()));
+        }
+        if (data.printers() != null && !data.printers().isEmpty()) {
+            tabPane.getTabs().add(buildPrinterTab(data.printers()));
         }
 
         if (data.warnings() != null && !data.warnings().isEmpty()) {
@@ -707,6 +719,81 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
+    // ── USB Devices ────────────────────────────────────────────────────────
+
+    private Tab buildUsbTab(List<UsbDeviceInfo> devices) {
+        VBox container = new VBox(16);
+        container.setPadding(new Insets(12));
+
+        for (int i = 0; i < devices.size(); i++) {
+            UsbDeviceInfo dev = devices.get(i);
+            container.getChildren().add(UILabel.sectionTitle("Device " + (i + 1)));
+            GridPane grid = createInfoGrid();
+            int row = 0;
+            row = addRow(grid, row, "Name", dev.name());
+            row = addRow(grid, row, "Manufacturer", dev.manufacturer());
+            row = addRow(grid, row, "Device ID", dev.deviceId());
+            row = addRow(grid, row, "Status", dev.status());
+            container.getChildren().add(wrapGrid(grid));
+        }
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("USB Devices");
+        tab.setContent(scroll);
+        return tab;
+    }
+
+    // ── Monitors ───────────────────────────────────────────────────────────
+
+    private Tab buildMonitorTab(List<MonitorInfo> monitors) {
+        VBox container = new VBox(16);
+        container.setPadding(new Insets(12));
+
+        for (int i = 0; i < monitors.size(); i++) {
+            MonitorInfo mon = monitors.get(i);
+            container.getChildren().add(UILabel.sectionTitle("Monitor " + (i + 1)));
+            GridPane grid = createInfoGrid();
+            int row = 0;
+            row = addRow(grid, row, "Name", mon.name());
+            row = addRow(grid, row, "Manufacturer", mon.manufacturer());
+            row = addRow(grid, row, "Screen Size", mon.screenSize());
+            row = addRow(grid, row, "Resolution", mon.resolution());
+            row = addRow(grid, row, "Status", mon.status());
+            container.getChildren().add(wrapGrid(grid));
+        }
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("Monitors");
+        tab.setContent(scroll);
+        return tab;
+    }
+
+    // ── Printers ───────────────────────────────────────────────────────────
+
+    private Tab buildPrinterTab(List<PrinterInfo> printers) {
+        VBox container = new VBox(16);
+        container.setPadding(new Insets(12));
+
+        for (int i = 0; i < printers.size(); i++) {
+            PrinterInfo printer = printers.get(i);
+            container.getChildren().add(UILabel.sectionTitle(printer.name()));
+            GridPane grid = createInfoGrid();
+            int row = 0;
+            row = addRow(grid, row, "Name", printer.name());
+            row = addRow(grid, row, "Driver", printer.driver());
+            row = addRow(grid, row, "Port", printer.port());
+            row = addRow(grid, row, "Status", printer.status());
+            row = addRow(grid, row, "Shared", printer.shared() ? "Yes" : "No");
+            row = addRow(grid, row, "Default", printer.isDefault() ? "Yes" : "No");
+            container.getChildren().add(wrapGrid(grid));
+        }
+
+        ScrollableContainer scroll = new ScrollableContainer(container);
+        Tab tab = new Tab("Printers");
+        tab.setContent(scroll);
+        return tab;
+    }
+
     // ── Battery ─────────────────────────────────────────────────────────────
 
     private Tab buildBatteryTab(BatteryInfo battery) {
@@ -1138,6 +1225,34 @@ public class SystemInfoTabView extends BorderPane {
             sb.append("\n");
         }
 
+        if (data.usbDevices() != null && !data.usbDevices().isEmpty()) {
+            sb.append("--- USB Devices ---\n");
+            for (UsbDeviceInfo usb : data.usbDevices()) {
+                sb.append(nvl(usb.name())).append(" (").append(nvl(usb.status())).append(")\n");
+                appendField(sb, "  Manufacturer", usb.manufacturer());
+            }
+            sb.append("\n");
+        }
+
+        if (data.monitors() != null && !data.monitors().isEmpty()) {
+            sb.append("--- Monitors ---\n");
+            for (MonitorInfo mon : data.monitors()) {
+                sb.append(nvl(mon.name())).append(" - ").append(nvl(mon.resolution())).append("\n");
+                appendField(sb, "  Manufacturer", mon.manufacturer());
+            }
+            sb.append("\n");
+        }
+
+        if (data.printers() != null && !data.printers().isEmpty()) {
+            sb.append("--- Printers ---\n");
+            for (PrinterInfo printer : data.printers()) {
+                sb.append(nvl(printer.name())).append(" (").append(nvl(printer.status())).append(")\n");
+                appendField(sb, "  Driver", printer.driver());
+                appendField(sb, "  Port", printer.port());
+            }
+            sb.append("\n");
+        }
+
         if (data.warnings() != null && !data.warnings().isEmpty()) {
             sb.append("--- Warnings ---\n");
             for (String w : data.warnings()) {
@@ -1353,6 +1468,44 @@ public class SystemInfoTabView extends BorderPane {
                 html.append(row(temp.zoneName(), temp.formatTemperature()));
             }
             html.append("</table>");
+        }
+
+        if (data.usbDevices() != null && !data.usbDevices().isEmpty()) {
+            html.append("<h2>USB Devices</h2>");
+            for (UsbDeviceInfo usb : data.usbDevices()) {
+                html.append("<h3>").append(escapeHtml(usb.name())).append("</h3><table>");
+                html.append(row("Name", usb.name()));
+                html.append(row("Manufacturer", usb.manufacturer()));
+                html.append(row("Device ID", usb.deviceId()));
+                html.append(row("Status", usb.status()));
+                html.append("</table>");
+            }
+        }
+
+        if (data.monitors() != null && !data.monitors().isEmpty()) {
+            html.append("<h2>Monitors</h2>");
+            for (MonitorInfo mon : data.monitors()) {
+                html.append("<h3>").append(escapeHtml(mon.name())).append("</h3><table>");
+                html.append(row("Name", mon.name()));
+                html.append(row("Manufacturer", mon.manufacturer()));
+                html.append(row("Resolution", mon.resolution()));
+                html.append(row("Status", mon.status()));
+                html.append("</table>");
+            }
+        }
+
+        if (data.printers() != null && !data.printers().isEmpty()) {
+            html.append("<h2>Printers</h2>");
+            for (PrinterInfo printer : data.printers()) {
+                html.append("<h3>").append(escapeHtml(printer.name())).append("</h3><table>");
+                html.append(row("Name", printer.name()));
+                html.append(row("Driver", printer.driver()));
+                html.append(row("Port", printer.port()));
+                html.append(row("Status", printer.status()));
+                html.append(row("Shared", printer.shared() ? "Yes" : "No"));
+                html.append(row("Default", printer.isDefault() ? "Yes" : "No"));
+                html.append("</table>");
+            }
         }
 
         if (data.warnings() != null && !data.warnings().isEmpty()) {

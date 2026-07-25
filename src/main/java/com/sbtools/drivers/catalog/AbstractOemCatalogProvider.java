@@ -14,6 +14,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -34,6 +35,14 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
     protected AbstractOemCatalogProvider(OemVendorHelper vendor, DriverCatalogDatabase catalogDatabase) {
         this.vendor = vendor;
         this.catalogDatabase = catalogDatabase;
+    }
+
+    /**
+     * Returns true if this provider's vendor is present in the detected vendor set.
+     * Used to skip irrelevant providers during scanning.
+     */
+    public boolean isVendorPresent(Set<OemVendorHelper> presentVendors) {
+        return presentVendors.contains(vendor);
     }
 
     @Override
@@ -123,8 +132,8 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
 
     protected abstract String fetchLatestVersion(InstalledDriver driver);
 
-    private static final int HTTP_MAX_RETRIES = 3;
-    private static final long HTTP_INITIAL_BACKOFF_MS = 1000;
+    private static final int HTTP_MAX_RETRIES = 2;
+    private static final long HTTP_INITIAL_BACKOFF_MS = 500;
 
     protected String httpGet(String url) {
         long backoffMs = HTTP_INITIAL_BACKOFF_MS;
@@ -132,7 +141,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             try {
                 HttpRequest req = HttpRequest.newBuilder()
                         .uri(URI.create(url))
-                        .timeout(Duration.ofSeconds(30))
+                        .timeout(Duration.ofSeconds(15))
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
                         .GET()
                         .build();

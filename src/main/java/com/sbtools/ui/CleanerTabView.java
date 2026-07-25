@@ -161,6 +161,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         checkCol.setCellFactory(col -> new TableCell<>() {
             private final CheckBox checkBox = new CheckBox();
             private CleanupRow previousItem;
+            private javafx.beans.value.ChangeListener<Boolean> selectionListener;
             {
                 checkBox.setStyle("-fx-text-fill: #f8f8f2;");
             }
@@ -170,18 +171,27 @@ import java.util.concurrent.atomic.AtomicInteger;
                 if (empty || item == null) {
                     if (previousItem != null) {
                         checkBox.selectedProperty().unbindBidirectional(previousItem.selectedProperty());
+                        if (selectionListener != null) {
+                            previousItem.selectedProperty().removeListener(selectionListener);
+                        }
                         previousItem = null;
+                        selectionListener = null;
                     }
                     setGraphic(null);
                     setText(null);
                 } else {
                     if (previousItem != null && previousItem != item) {
                         checkBox.selectedProperty().unbindBidirectional(previousItem.selectedProperty());
+                        if (selectionListener != null) {
+                            previousItem.selectedProperty().removeListener(selectionListener);
+                        }
                     }
                     if (checkBox.selectedProperty().isBound()) {
                         checkBox.selectedProperty().unbind();
                     }
                     checkBox.selectedProperty().bindBidirectional(item.selectedProperty());
+                    selectionListener = (obs, oldVal, newVal) -> updateCleanButtonState();
+                    item.selectedProperty().addListener(selectionListener);
                     previousItem = item;
                     setGraphic(checkBox);
                 }
@@ -274,6 +284,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         if (busy.get()) return;
         busy.set(true);
         hasScanned = false;
+        cancelling.set(false);
         statusLabel.setText("Scanning system...");
         cleanButton.setDisable(true);
         sessionRows.clear();
@@ -334,14 +345,16 @@ import java.util.concurrent.atomic.AtomicInteger;
         if (initialSelection.isEmpty()) return;
 
         busy.set(true);
+        cancelling.set(false);
 
         java.util.Set<CleanupCategory> adminRequired = java.util.Set.of(
                 CleanupCategory.REGISTRY,
-                CleanupCategory.REGISTRY_DEFRAG,
                 CleanupCategory.WINDOWS_UPDATE_CLEANUP,
                 CleanupCategory.OLD_WINDOWS_INSTALL,
                 CleanupCategory.WINDOWS_DEFENDER_CACHE,
-                CleanupCategory.WINDOWS_LOG_FILES
+                CleanupCategory.WINDOWS_LOG_FILES,
+                CleanupCategory.FONT_CACHE,
+                CleanupCategory.WINDOWS_SEARCH_CACHE
         );
 
         boolean isAdmin = adminCheck.getAsBoolean();
@@ -383,39 +396,26 @@ import java.util.concurrent.atomic.AtomicInteger;
             a.showAndWait();
         }
 
-        boolean hasHighRisk = selected.stream()
-                .anyMatch(r -> r.getCategory().getRiskLevel() == CleanupCategory.RiskLevel.HIGH);
         boolean registrySelected = selected.stream()
                 .anyMatch(r -> r.getCategory() == CleanupCategory.REGISTRY);
 
-        if (hasHighRisk) {
-            Alert highRiskAlert = new Alert(Alert.AlertType.WARNING,
-                    "One or more HIGH-risk categories are selected.\n\n"
-                            + "These operations may be irreversible. Please review your selections carefully.",
-                    ButtonType.OK, ButtonType.CANCEL);
-            highRiskAlert.setHeaderText("High-Risk Cleanup Warning");
-            if (highRiskAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
-                busy.set(false);
-                return;
-            }
-        }
+        boolean hasHighRisk = selected.stream()
+                .anyMatch(r -> r.getCategory().getRiskLevel() == CleanupCategory.RiskLevel.HIGH);
 
-        boolean browserTracesSelected = selected.stream()
-                .anyMatch(r -> r.getCategory() == CleanupCategory.WEB_BROWSING_TRACES);
-        if (browserTracesSelected) {
-            Alert browserAlert = new Alert(Alert.AlertType.WARNING,
-                    "Web Browsing Traces cleanup will delete:\n\n"
-                            + "  - Browser cache files\n"
-                            + "  - Cookies (you will be logged out of websites)\n"
-                            + "  - Browsing history\n"
-                            + "  - Saved login data and form data\n\n"
-                            + "This may affect your browsing experience. Continue?",
-                    ButtonType.OK, ButtonType.CANCEL);
-            browserAlert.setHeaderText("Browser Data Warning");
-            if (browserAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
-                busy.set(false);
-                return;
-            }
+        String riskLabel = hasHighRisk ? " (includes HIGH-risk categories)" : "";
+        String dialogMessage = "Do you confirm the cleanup of " + selected.size() + " categories"
+                + riskLabel + "?\n\n"
+                + selected.stream().map(r -> "  - " + r.getCategory().getDisplayName())
+                .collect(java.util.stream.Collectors.joining("\n"))
+                + "\n\nThis action cannot be undone.";
+
+        Alert confirmAlert = new Alert(Alert.AlertType.CONFIRMATION, dialogMessage,
+                ButtonType.OK, ButtonType.CANCEL);
+        confirmAlert.setHeaderText("Confirm Cleanup");
+        confirmAlert.getDialogPane().setMinWidth(400);
+        if (confirmAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
+            busy.set(false);
+            return;
         }
 
         boolean registryBackupRaw = false;
@@ -516,6 +516,11 @@ import java.util.concurrent.atomic.AtomicInteger;
                                         sb.append("  - ").append(cat.getDisplayName()).append(": ")
                                                 .append(CleanupService.formatBytes(bytes)).append("\n"));
                             }
+                            if (summary.hasErrors()) {
+                                sb.append("\nErrors encountered:\n");
+                                summary.getErrors().forEach(err ->
+                                        sb.append("  - ").append(err).append("\n"));
+                            }
                             statusLabel.setText("Cleanup completed - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
                             progressBar.setVisible(false);
                             cancelButton.setDisable(true);
@@ -548,6 +553,18 @@ import java.util.concurrent.atomic.AtomicInteger;
                     if (!finished) {
                         p.destroyForcibly();
                         AppLogger.warning("System Restore point creation timed out");
+                    } else if (p.exitValue() != 0) {
+                        String err = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                        AppLogger.warning("System Restore point creation failed: " + err.trim());
+                        Platform.runLater(() -> {
+                            Alert alert = new Alert(Alert.AlertType.INFORMATION,
+                                    "Could not create a System Restore point.\n\n"
+                                            + "System Protection may be disabled on this drive.\n"
+                                            + "Cleanup will continue without a restore point.\n\n"
+                                            + "You can enable System Protection in System Properties > System Protection.");
+                            alert.setHeaderText("Restore Point Unavailable");
+                            alert.showAndWait();
+                        });
                     }
                 } catch (Exception e) {
                     AppLogger.warning("Failed to create System Restore point: " + e.getMessage());

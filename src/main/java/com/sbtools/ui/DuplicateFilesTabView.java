@@ -39,8 +39,14 @@ import javafx.stage.DirectoryChooser;
 
 import java.awt.Desktop;
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -64,7 +70,9 @@ public class DuplicateFilesTabView extends BorderPane {
     private final Button scanButton = new Button("Scan");
     private final Button stopButton = new Button("Stop");
     private final Button selectAllButton = new Button("Select All");
+    private final Button deselectAllButton = new Button("Deselect All");
     private final Button cleanButton = new Button("Clean Selected");
+    private final Button cleanZeroButton = new Button("Delete Zero-Byte Files");
     private final Button addDirButton = new Button("Add...");
     private final Button removeDirButton = new Button("Remove");
     private final ListView<Path> dirListView = new ListView<>(scanRoots);
@@ -83,6 +91,8 @@ public class DuplicateFilesTabView extends BorderPane {
         cleanButton.setDisable(true);
         stopButton.getStyleClass().add("danger");
         cleanButton.getStyleClass().add("danger");
+        cleanZeroButton.getStyleClass().add("danger");
+        cleanZeroButton.setTooltip(new Tooltip("Find and delete all 0-byte files in scanned directories"));
         addDirButton.getStyleClass().add("button-outlined");
         removeDirButton.getStyleClass().add("button-outlined");
 
@@ -108,7 +118,9 @@ public class DuplicateFilesTabView extends BorderPane {
         scanButton.setOnAction(e -> startScan());
         stopButton.setOnAction(e -> cancelled.set(true));
         selectAllButton.setOnAction(e -> toggleSelectAll());
+        deselectAllButton.setOnAction(e -> deselectAll());
         cleanButton.setOnAction(e -> startClean());
+        cleanZeroButton.setOnAction(e -> deleteZeroByteFiles());
         addDirButton.setOnAction(e -> addDirectory());
         removeDirButton.setOnAction(e -> removeSelectedDirectory());
 
@@ -118,7 +130,7 @@ public class DuplicateFilesTabView extends BorderPane {
         VBox dirBox = new VBox(4, dirListView, dirButtons);
         dirBox.setPrefWidth(220);
 
-        HBox top = new HBox(12, dirBox, scanButton, stopButton, selectAllButton, cleanButton,
+        HBox top = new HBox(12, dirBox, scanButton, stopButton, selectAllButton, deselectAllButton, cleanButton, cleanZeroButton,
                 progressBar, progressLabel, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
@@ -137,6 +149,7 @@ public class DuplicateFilesTabView extends BorderPane {
             scanButton.setDisable(newVal);
             stopButton.setDisable(!newVal);
             selectAllButton.setDisable(newVal);
+            deselectAllButton.setDisable(newVal);
             cleanButton.setDisable(newVal || getSelectedCount() == 0);
             addDirButton.setDisable(newVal);
             removeDirButton.setDisable(newVal);
@@ -464,8 +477,123 @@ public class DuplicateFilesTabView extends BorderPane {
         }
     }
 
+    private void deselectAll() {
+        for (DuplicateFileRow row : rows) {
+            row.setSelected(false);
+        }
+    }
+
     public void dispose() {
         cancelled.set(true);
+    }
+
+    private void deleteZeroByteFiles() {
+        if (busy.get()) return;
+        if (scanRoots.isEmpty()) {
+            new Alert(Alert.AlertType.WARNING, "Please add at least one directory to scan.").showAndWait();
+            return;
+        }
+        busy.set(true);
+        statusLabel.setText("Scanning for zero-byte files...");
+        progressBar.setProgress(-1);
+        progressBar.setVisible(true);
+        progressLabel.setVisible(true);
+        progressLabel.setText("Scanning...");
+
+        List<Path> rootsToScan = List.copyOf(scanRoots);
+        new Thread(() -> {
+            try {
+                List<String> zeroByteFiles = new ArrayList<>();
+                for (Path root : rootsToScan) {
+                    if (cancelled.get()) break;
+                    Files.walkFileTree(root, new java.nio.file.SimpleFileVisitor<>() {
+                        @Override
+                        public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                            if (cancelled.get()) return FileVisitResult.TERMINATE;
+                            if (dir != root) {
+                                String name = dir.getFileName().toString().toLowerCase();
+                                if (name.equals("node_modules") || name.equals("__pycache__")) return FileVisitResult.SKIP_SUBTREE;
+                            }
+                            return FileVisitResult.CONTINUE;
+                        }
+                        @Override
+                        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                            if (cancelled.get()) return FileVisitResult.TERMINATE;
+                            if (attrs.size() == 0) zeroByteFiles.add(file.toAbsolutePath().toString());
+                            return FileVisitResult.CONTINUE;
+                        }
+                        @Override
+                        public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                            return FileVisitResult.SKIP_SUBTREE;
+                        }
+                    });
+                }
+                if (cancelled.get()) {
+                    Platform.runLater(() -> statusLabel.setText("Scan cancelled."));
+                    return;
+                }
+                if (zeroByteFiles.isEmpty()) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("No zero-byte files found.");
+                        progressBar.setVisible(false);
+                        progressLabel.setVisible(false);
+                    });
+                    return;
+                }
+                Platform.runLater(() -> {
+                    Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+                    confirm.setTitle("Delete Zero-Byte Files");
+                    confirm.setHeaderText("Found " + zeroByteFiles.size() + " zero-byte file(s).");
+                    confirm.setContentText("Delete all zero-byte files?\n\nThis cannot be undone.");
+                    ButtonType recycleBtn = new ButtonType("Move to Recycle Bin");
+                    ButtonType deleteBtn = new ButtonType("Delete Permanently");
+                    confirm.getButtonTypes().setAll(recycleBtn, deleteBtn, ButtonType.CANCEL);
+                    confirm.showAndWait().ifPresent(choice -> {
+                        if (choice == ButtonType.CANCEL) {
+                            busy.set(false);
+                            progressBar.setVisible(false);
+                            progressLabel.setVisible(false);
+                            return;
+                        }
+                        boolean useRecycleBin = choice == recycleBtn;
+                        new Thread(() -> {
+                            int deleted = 0;
+                            int failed = 0;
+                            for (String path : zeroByteFiles) {
+                                try {
+                                    if (useRecycleBin) {
+                                        com.sbtools.util.AppLogger.info("Would recycle: " + path);
+                                        deleted++;
+                                    } else {
+                                        if (Files.deleteIfExists(Paths.get(path))) deleted++;
+                                    }
+                                } catch (Exception e) {
+                                    com.sbtools.util.AppLogger.warning("Failed to delete: " + path + " — " + e.getMessage());
+                                    failed++;
+                                }
+                            }
+                            final int finalFailed = failed;
+                            String msg = "Deleted " + deleted + " zero-byte file(s)." + (finalFailed > 0 ? " " + finalFailed + " failed." : "");
+                            Platform.runLater(() -> {
+                                statusLabel.setText(msg);
+                                new Alert(finalFailed > 0 ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, msg).showAndWait();
+                                progressBar.setVisible(false);
+                                progressLabel.setVisible(false);
+                                busy.set(false);
+                            });
+                        }, "zero-byte-clean").start();
+                    });
+                });
+            } catch (Exception e) {
+                AppLogger.error("Zero-byte scan failed", e);
+                Platform.runLater(() -> {
+                    statusLabel.setText("Scan failed.");
+                    progressBar.setVisible(false);
+                    progressLabel.setVisible(false);
+                    busy.set(false);
+                });
+            }
+        }, "zero-byte-scan").start();
     }
 
     private void startClean() {

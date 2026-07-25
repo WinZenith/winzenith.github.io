@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.JsonMapper;
 import com.sbtools.util.PowerShellScripts;
+import com.sbtools.util.ProcessManager;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
 import com.sun.jna.platform.win32.Advapi32Util;
@@ -16,6 +17,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class UninstallerService {
 
@@ -98,6 +100,134 @@ public class UninstallerService {
         }
     }
 
+    /**
+     * Runs the uninstaller and waits for all related child processes to exit.
+     * This ensures file locks are released before scanning for leftovers.
+     */
+    public ProcessResult runUninstallerAndWait(InstalledApp app, long timeoutSeconds) throws IOException, InterruptedException {
+        if (!app.isWin32()) {
+            Path script = PowerShellScripts.resolve("appx-uninstall.ps1");
+            return processRunner.run(ProcessRunner.powershellScript(script.toString(), "-PackageFullName", app.getAppxPackageFullName()), timeoutSeconds);
+        } else {
+            String uninstallCmd = app.getUninstallString();
+            if (uninstallCmd == null || uninstallCmd.isBlank()) {
+                throw new IOException("No uninstall command available for " + app.getName());
+            }
+            List<String> command = parseUninstallCommand(uninstallCmd);
+
+            // Start the process
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.redirectErrorStream(false);
+            AppLogger.info("Running uninstaller: " + String.join(" ", command));
+            Process process = pb.start();
+            try {
+                ProcessManager.register(process);
+            } catch (Throwable ignored) {}
+
+            // Wait for the main process to complete
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                throw new IOException("Uninstaller timed out after " + timeoutSeconds + "s");
+            }
+
+            int exitCode = process.exitValue();
+
+            // Collect stdout/stderr (drain streams in background)
+            Thread drainStdout = new Thread(() -> {
+                try { process.getInputStream().readAllBytes(); } catch (Exception ignored) {}
+            }, "uninstaller-stdout-drain");
+            drainStdout.setDaemon(true);
+            drainStdout.start();
+            Thread drainStderr = new Thread(() -> {
+                try { process.getErrorStream().readAllBytes(); } catch (Exception ignored) {}
+            }, "uninstaller-stderr-drain");
+            drainStderr.setDaemon(true);
+            drainStderr.start();
+
+            // Wait for child processes to exit
+            waitForChildProcesses(app, 30);
+
+            // Additionally wait for the install directory to be removed,
+            // as some uninstallers perform cleanup after child processes exit.
+            waitForInstallDirRemoval(app, 30);
+
+            return new ProcessResult(exitCode, "", "");
+        }
+    }
+
+    /**
+     * Waits for any child processes related to the app to exit.
+     * Checks periodically for processes whose command line matches the app's install location.
+     */
+    private void waitForChildProcesses(InstalledApp app, int maxWaitSeconds) {
+        String installLoc = app.getInstallLocation();
+        String appName = app.getName().toLowerCase();
+        long deadline = System.currentTimeMillis() + (maxWaitSeconds * 1000L);
+
+        while (System.currentTimeMillis() < deadline) {
+            AtomicBoolean found = new AtomicBoolean(false);
+            try {
+                ProcessHandle.allProcesses().forEach(ph -> {
+                    if (found.get()) return;
+                    if (!ph.isAlive()) return;
+                    ProcessHandle.Info info = ph.info();
+                    String cmdLine = info.commandLine().orElse("").toLowerCase();
+                    String execPath = info.command().map(String::toLowerCase).orElse("");
+
+                    boolean matchByPath = installLoc != null && !installLoc.isBlank()
+                            && (cmdLine.contains(installLoc.toLowerCase()) || execPath.contains(installLoc.toLowerCase()));
+                    boolean matchByName = appName.length() >= 4 && (cmdLine.contains(appName) || execPath.contains(appName));
+
+                    if (matchByPath || matchByName) {
+                        found.set(true);
+                    }
+                });
+            } catch (Exception ignored) {}
+
+            if (!found.get()) break;
+
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+    }
+
+    /**
+     * Waits until the install directory is removed from disk.
+     * This handles uninstallers that spawn a final cleanup process
+     * which deletes the install directory and its contents after
+     * the main uninstaller process has exited.
+     */
+    private void waitForInstallDirRemoval(InstalledApp app, int maxWaitSeconds) {
+        String installLoc = app.getInstallLocation();
+        if (installLoc == null || installLoc.isBlank()) return;
+
+        File installDir = new File(installLoc);
+        if (!installDir.exists()) return;
+
+        AppLogger.info("Waiting for install directory to be removed: " + installLoc);
+        long deadline = System.currentTimeMillis() + (maxWaitSeconds * 1000L);
+
+        while (System.currentTimeMillis() < deadline && installDir.exists()) {
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+
+        if (installDir.exists()) {
+            AppLogger.warning("Install directory still exists after waiting: " + installLoc);
+        } else {
+            AppLogger.info("Install directory successfully removed: " + installLoc);
+        }
+    }
+
     private List<String> parseUninstallCommand(String uninstallCmd) {
         String trimmed = uninstallCmd.trim();
         String lower = trimmed.toLowerCase();
@@ -106,47 +236,47 @@ public class UninstallerService {
             return List.of("cmd.exe", "/c", trimmed);
         }
 
-        if (trimmed.startsWith("\"")) {
-            int endQuote = trimmed.indexOf('"', 1);
-            if (endQuote > 1) {
-                String exe = trimmed.substring(1, endQuote);
-                String args = trimmed.substring(endQuote + 1).trim();
-                if (args.isEmpty()) {
-                    return List.of(exe);
-                }
-                return List.of("cmd.exe", "/c", exe, args);
-            }
+        List<String> tokens = splitCommandLine(trimmed);
+        if (tokens.isEmpty()) {
+            throw new IllegalArgumentException("Empty uninstall command: " + uninstallCmd);
         }
-
-        int spaceIdx = findFirstUnquotedSpace(trimmed);
-        if (spaceIdx > 0) {
-            String exe = trimmed.substring(0, spaceIdx);
-            String args = trimmed.substring(spaceIdx + 1).trim();
-            if (args.isEmpty()) {
-                return List.of(exe);
-            }
-            return List.of("cmd.exe", "/c", exe, args);
-        }
-
-        return List.of("cmd.exe", "/c", trimmed);
+        return tokens;
     }
 
-    private static int findFirstUnquotedSpace(String s) {
+    /**
+     * Splits a command line string into tokens, respecting quoted segments.
+     * For example: a quoted path with args gets properly separated.
+     */
+    private static List<String> splitCommandLine(String commandLine) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
         boolean inQuote = false;
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
+
+        for (int i = 0; i < commandLine.length(); i++) {
+            char c = commandLine.charAt(i);
             if (c == '"') {
                 inQuote = !inQuote;
             } else if (c == ' ' && !inQuote) {
-                return i;
+                if (!current.isEmpty()) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                current.append(c);
             }
         }
-        return -1;
+        if (!current.isEmpty()) {
+            tokens.add(current.toString());
+        }
+
+        return tokens;
     }
 
     /**
      * Scans filesystem (%ProgramFiles%, %ProgramFiles(x86)%, %AppData%, %LocalAppData%, %ProgramData%)
      * for remnants matching the application name, publisher or install location.
+     * Also scans additional locations: LocalAppData\Programs, AppData\LocalLow,
+     * Public\Documents, Desktop, Quick Launch, and environment PATH entries.
      */
     public List<String> scanFilesystemLeftovers(InstalledApp app) {
         List<String> leftovers = new ArrayList<>();
@@ -168,6 +298,18 @@ public class UninstallerService {
         addIfNotNull(roots, System.getenv("LocalAppData"));
         addIfNotNull(roots, System.getenv("ProgramData"));
 
+        // Additional scan locations
+        String localAppData = System.getenv("LocalAppData");
+        String appData = System.getenv("AppData");
+        String userProfile = System.getenv("USERPROFILE");
+        String publicDir = System.getenv("PUBLIC");
+        if (localAppData != null) addIfNotNull(roots, localAppData + "\\Programs");
+        if (appData != null) addIfNotNull(roots, appData + "\\LocalLow");
+        if (publicDir != null) addIfNotNull(roots, publicDir + "\\Documents");
+        if (userProfile != null) addIfNotNull(roots, userProfile + "\\Desktop");
+        if (appData != null) addIfNotNull(roots, appData + "\\Microsoft\\Internet Explorer\\Quick Launch");
+
+        // Scan depth: 1 for standard roots, 2 for vendor directories
         for (String root : roots) {
             File rootDir = new File(root);
             if (!rootDir.exists() || !rootDir.isDirectory()) {
@@ -186,16 +328,55 @@ public class UninstallerService {
                         if (!leftovers.contains(absPath)) {
                             leftovers.add(absPath);
                         }
+                    } else if (isPublisherMatch(child.getName(), app.getPublisher())) {
+                        // Deeper scan: if this is a vendor folder, scan inside it
+                        File[] vendorChildren = child.listFiles(File::isDirectory);
+                        if (vendorChildren != null) {
+                            for (File vendorChild : vendorChildren) {
+                                if (isFolderMatch(vendorChild.getName(), app.getName(), null)) {
+                                    String absPath = vendorChild.getAbsolutePath();
+                                    if (!leftovers.contains(absPath)) {
+                                        leftovers.add(absPath);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        // Check PATH entries for app install location
+        if (app.getInstallLocation() != null && !app.getInstallLocation().isBlank()) {
+            checkPathEntriesForLeftover(app.getInstallLocation(), leftovers);
         }
 
         return leftovers;
     }
 
     /**
-     * Scans Registry SOFTWARE keys (HKLM, HKLM-Wow6432, HKCU) for remnants.
+     * Checks if the app's install location is referenced in system or user PATH.
+     */
+    private void checkPathEntriesForLeftover(String installLocation, List<String> leftovers) {
+        try {
+            String lowerLoc = installLocation.toLowerCase().trim();
+            String pathEnv = System.getenv("PATH");
+            if (pathEnv != null) {
+                for (String entry : pathEnv.split(";")) {
+                    String trimmed = entry.trim();
+                    if (!trimmed.isEmpty() && trimmed.toLowerCase().startsWith(lowerLoc)) {
+                        String warning = "PATH entry references app: " + trimmed;
+                        if (!leftovers.contains(warning)) {
+                            leftovers.add(warning);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Scans Registry SOFTWARE keys (HKLM, HKLM-Wow6432, HKCU) and HKCR for remnants.
      */
     public List<String> scanRegistryLeftovers(InstalledApp app) {
         List<String> leftovers = new ArrayList<>();
@@ -216,7 +397,45 @@ public class UninstallerService {
         scanRegistryForLeftovers(WinReg.HKEY_CURRENT_USER, "HKCU", "SOFTWARE", app.getName(), app.getPublisher(), leftovers);
         scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SYSTEM\\CurrentControlSet\\Services", app.getName(), app.getPublisher(), leftovers);
 
+        // Scan HKCR for file association entries
+        scanHkcrForLeftovers(app.getName(), app.getPublisher(), leftovers);
+
         return leftovers;
+    }
+
+    /**
+     * Scans HKEY_CLASSES_ROOT for file association entries matching the app name or publisher.
+     */
+    private void scanHkcrForLeftovers(String appName, String publisher, List<String> leftovers) {
+        try {
+            if (!Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "")) {
+                return;
+            }
+            String[] subkeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CLASSES_ROOT, "");
+            if (subkeys == null) return;
+
+            String lowerName = appName != null ? appName.toLowerCase().trim() : "";
+            String lowerPub = publisher != null ? publisher.toLowerCase().trim() : "";
+            if (lowerName.length() < 4 && lowerPub.length() < 4) return;
+
+            for (String subkey : subkeys) {
+                // Skip very long keys (COM CLSIDs, etc.) and generic entries
+                if (subkey.length() > 80 || subkey.startsWith("CLSID\\") || subkey.startsWith("Wow6432Node\\")) {
+                    continue;
+                }
+                String lowerKey = subkey.toLowerCase();
+                boolean nameMatch = lowerName.length() >= 4 && (lowerKey.equals(lowerName) || lowerKey.contains(lowerName));
+                boolean pubMatch = lowerPub.length() >= 4 && (lowerKey.equals(lowerPub) || lowerKey.contains(lowerPub));
+                if (nameMatch || pubMatch) {
+                    String path = "HKCR\\" + subkey;
+                    if (!leftovers.contains(path)) {
+                        leftovers.add(path);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            AppLogger.debug("HKCR scan failed: " + e.getMessage());
+        }
     }
 
     private void scanRegistryForLeftovers(HKEY hive, String hiveLabel, String rootPath, String appName, String publisher, List<String> leftovers) {

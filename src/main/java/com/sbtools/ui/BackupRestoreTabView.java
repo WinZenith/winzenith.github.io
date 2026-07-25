@@ -317,25 +317,22 @@ public class BackupRestoreTabView extends BorderPane {
         Button scanButton = new Button("Scan");
         Button createButton = new Button("Create new restore point");
         Button launchButton = new Button("Launch restore point");
-        Button deleteButton = UIButton.danger("Delete Selected");
         TableView<SystemRestoreRow> table = new TableView<>(rows);
 
         Tooltip.install(scanButton, new Tooltip("Query Windows for available system restore points"));
         Tooltip.install(createButton, new Tooltip("Create a manual system restore point"));
         Tooltip.install(launchButton, new Tooltip("Open the Windows System Restore wizard"));
-        Tooltip.install(deleteButton, new Tooltip("Delete the selected restore points"));
 
         spinner.setVisible(false);
         spinner.setMaxSize(20, 20);
 
-        scanButton.setOnAction(e -> scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton));
-        createButton.setOnAction(e -> createSystemRestorePoint(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton));
+        scanButton.setOnAction(e -> scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton));
+        createButton.setOnAction(e -> createSystemRestorePoint(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton));
         launchButton.setOnAction(e -> launchSystemRestore(service, statusLabel));
-        deleteButton.setOnAction(e -> deleteSelectedRestorePoints(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton));
 
         createButton.getStyleClass().add("success");
 
-        HBox top = new HBox(12, scanButton, createButton, launchButton, deleteButton, spinner, statusLabel);
+        HBox top = new HBox(12, scanButton, createButton, launchButton, spinner, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -357,11 +354,10 @@ public class BackupRestoreTabView extends BorderPane {
             scanButton.setDisable(newVal);
             createButton.setDisable(newVal);
             launchButton.setDisable(newVal);
-            deleteButton.setDisable(newVal);
             spinner.setVisible(newVal);
         });
 
-        scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton);
+        scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
 
         Tab tab = new Tab("System restore");
         tab.setContent(pane);
@@ -429,7 +425,7 @@ public class BackupRestoreTabView extends BorderPane {
     private void scanSystemRestore(SystemRestoreService service, BooleanProperty localBusy,
                                     ObservableList<SystemRestoreRow> rows, Label statusLabel,
                                     ProgressIndicator spinner, Button scanButton, Button createButton,
-                                    Button launchButton, Button deleteButton) {
+                                    Button launchButton) {
         if (localBusy.get()) return;
         localBusy.set(true);
         statusLabel.setText("Scanning restore points...");
@@ -457,7 +453,7 @@ public class BackupRestoreTabView extends BorderPane {
     private void createSystemRestorePoint(SystemRestoreService service, BooleanProperty localBusy,
                                            ObservableList<SystemRestoreRow> rows, Label statusLabel,
                                            ProgressIndicator spinner, Button scanButton, Button createButton,
-                                           Button launchButton, Button deleteButton) {
+                                           Button launchButton) {
         if (localBusy.get()) return;
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING,
@@ -500,58 +496,9 @@ public class BackupRestoreTabView extends BorderPane {
             } finally {
                 Platform.runLater(() -> {
                     localBusy.set(false);
-                    scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton);
+                    scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
                 });
             }
-        });
-    }
-
-    private void deleteSelectedRestorePoints(SystemRestoreService service, BooleanProperty localBusy,
-                                              ObservableList<SystemRestoreRow> rows, Label statusLabel,
-                                              ProgressIndicator spinner, Button scanButton, Button createButton,
-                                              Button launchButton, Button deleteButton) {
-        List<SystemRestoreRow> selected = rows.stream()
-                .filter(SystemRestoreRow::isSelected)
-                .toList();
-        if (selected.isEmpty()) {
-            new Alert(Alert.AlertType.INFORMATION, "No restore points selected.").showAndWait();
-            return;
-        }
-
-        if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING,
-                    "Deleting restore points requires administrator rights.").showAndWait();
-            return;
-        }
-
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                "Delete " + selected.size() + " selected restore point(s)?\n\nThis cannot be undone.");
-        if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
-
-        localBusy.set(true);
-        statusLabel.setText("Deleting restore points...");
-
-        AppExecutors.ioPool().execute(() -> {
-            int failedCount = 0;
-            for (SystemRestoreRow row : selected) {
-                try {
-                    boolean deleted = service.deleteRestorePoint(row.sequenceNumber());
-                    if (!deleted) failedCount++;
-                } catch (Exception e) {
-                    AppLogger.warning("Failed to delete restore point " + row.sequenceNumber() + ": " + e.getMessage());
-                    failedCount++;
-                }
-            }
-            final int deletedCount = selected.size() - failedCount;
-            final int failedFinal = failedCount;
-            Platform.runLater(() -> {
-                if (failedFinal == 0) {
-                    statusLabel.setText(deletedCount + " restore point(s) deleted.");
-                } else {
-                    statusLabel.setText(deletedCount + " deleted, " + failedFinal + " failed.");
-                }
-                scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, deleteButton);
-            });
         });
     }
 
