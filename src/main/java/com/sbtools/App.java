@@ -88,12 +88,14 @@ public class App extends Application {
         if (!admin && AppPaths.isWindows()) {
             AppLogger.info("Requesting administrator privileges...");
             try {
-                AdminCheck.requestElevation();
+                if (AdminCheck.requestElevation()) {
+                    Platform.exit();
+                    return;
+                }
             } catch (IOException ex) {
                 AppLogger.warning("Failed to request elevation: " + ex.getMessage());
             }
-            Platform.exit();
-            return;
+            AppLogger.info("Elevation not available. Continuing without administrator privileges.");
         }
 
         logoImage = new Image(getClass().getResourceAsStream("/logo-ico.png"));

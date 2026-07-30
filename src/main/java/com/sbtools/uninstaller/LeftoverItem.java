@@ -4,7 +4,7 @@ import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 
 public class LeftoverItem {
-    private final BooleanProperty selected = new SimpleBooleanProperty(false);
+    private final BooleanProperty selected = new SimpleBooleanProperty(true);
     private final String path;
     private final boolean registry;
 

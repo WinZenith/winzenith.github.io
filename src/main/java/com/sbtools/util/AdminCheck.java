@@ -1,5 +1,7 @@
 package com.sbtools.util;
 
+import com.sun.jna.platform.win32.Shell32;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
@@ -28,49 +30,90 @@ public final class AdminCheck {
         }
     }
 
-    public static void requestElevation() throws IOException {
+    public static boolean requestElevation() throws IOException {
+        // 1) Packaged .exe — just re-launch it elevated
         String exePath = getExePath();
         if (exePath != null && new java.io.File(exePath).exists()) {
-            String cmd = String.format(
-                    "Start-Process -FilePath '%s' -Verb RunAs",
-                    exePath.replace("'", "''")
-            );
-            new ProcessBuilder("powershell.exe", "-NoProfile", "-Command", cmd).start();
-        } else {
-            String javaHome = System.getProperty("java.home");
-            String javaBin = javaHome + "\\bin\\javaw.exe";
-            String modulePath = System.getProperty("jdk.module.path");
-            String classPath = System.getProperty("java.class.path");
-
-            boolean hasModuleInfo = isModular();
-
-            StringBuilder args = new StringBuilder();
-            args.append("--enable-native-access=ALL-UNNAMED,javafx.graphics");
-
-            if (hasModuleInfo && modulePath != null && !modulePath.isEmpty()) {
-                args.append(" --module-path \"").append(modulePath).append("\"");
-                args.append(" --module com.winzenith/com.sbtools.App");
-            } else if (hasModuleInfo) {
-                args.append(" --module-path \"").append(classPath).append("\"");
-                args.append(" --module com.winzenith/com.sbtools.App");
-            } else {
-                if (modulePath != null && !modulePath.isEmpty()) {
-                    args.append(" --module-path \"").append(modulePath).append("\"");
-                }
-                args.append(" --add-modules javafx.controls");
-                args.append(" -cp \"").append(classPath).append("\"");
-                args.append(" com.sbtools.App");
+            String lower = exePath.toLowerCase();
+            boolean isJavaBinary = lower.endsWith("java.exe") || lower.endsWith("javaw.exe");
+            if (!isJavaBinary) {
+                String cmd = String.format(
+                        "Start-Process -FilePath '%s' -Verb RunAs",
+                        exePath.replace("'", "''")
+                );
+                new ProcessBuilder("powershell.exe", "-NoProfile", "-Command", cmd).start();
+                return true;
             }
-
-            String psArgs = args.toString().replace("'", "''");
-            String psJavaBin = javaBin.replace("'", "''");
-
-            String cmd = String.format(
-                    "Start-Process -FilePath '%s' -ArgumentList '%s' -Verb RunAs",
-                    psJavaBin, psArgs
-            );
-            new ProcessBuilder("powershell.exe", "-NoProfile", "-Command", cmd).start();
         }
+
+        // 2) IntelliJ / IDE — use JNA ShellExecute "runas" with the current command line
+        String currentCmd = ProcessHandle.current().info().commandLine().orElse(null);
+        if (currentCmd != null && !currentCmd.isBlank()) {
+            String[] parsed = parseExeAndArgs(currentCmd);
+            if (parsed != null) {
+                String file = parsed[0];
+                String args = parsed[1];
+                long rc = Shell32.INSTANCE.ShellExecute(
+                        null, "runas", file,
+                        args != null ? args : "",
+                        null, 1 /*SW_SHOWNORMAL*/).longValue();
+                if (rc > 32) return true;
+            }
+        }
+
+        // 3) Last resort: reconstruct from system properties
+        String javaHome = System.getProperty("java.home");
+        String javaBin = javaHome + "\\bin\\javaw.exe";
+        String modulePath = System.getProperty("jdk.module.path");
+        String classPath = System.getProperty("java.class.path");
+
+        StringBuilder argsBuilder = new StringBuilder();
+        argsBuilder.append("--enable-native-access=ALL-UNNAMED,javafx.graphics");
+
+        if (isModular()) {
+            String mp = modulePath != null && !modulePath.isEmpty() ? modulePath : classPath;
+            argsBuilder.append(" --module-path \"").append(mp).append("\"");
+            argsBuilder.append(" --module com.winzenith/com.sbtools.App");
+        } else {
+            if (modulePath != null && !modulePath.isEmpty()) {
+                argsBuilder.append(" --module-path \"").append(modulePath).append("\"");
+            }
+            argsBuilder.append(" --add-modules javafx.controls");
+            argsBuilder.append(" -cp \"").append(classPath).append("\"");
+            argsBuilder.append(" com.sbtools.App");
+        }
+
+        long rc = Shell32.INSTANCE.ShellExecute(
+                null, "runas", javaBin,
+                argsBuilder.toString(),
+                null, 1).longValue();
+        return rc > 32;
+    }
+
+    private static String[] parseExeAndArgs(String commandLine) {
+        String trimmed = commandLine.trim();
+        String exe;
+        String args = null;
+
+        if (trimmed.startsWith("\"")) {
+            int endQuote = trimmed.indexOf('"', 1);
+            if (endQuote < 0) return null;
+            exe = trimmed.substring(1, endQuote);
+            if (endQuote + 1 < trimmed.length()) {
+                args = trimmed.substring(endQuote + 1).trim();
+            }
+        } else {
+            int space = trimmed.indexOf(' ');
+            if (space < 0) {
+                exe = trimmed;
+            } else {
+                exe = trimmed.substring(0, space);
+                args = trimmed.substring(space + 1).trim();
+            }
+        }
+
+        if (!new java.io.File(exe).exists()) return null;
+        return new String[]{exe, args};
     }
 
     private static boolean isModular() {

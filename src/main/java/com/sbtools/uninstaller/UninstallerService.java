@@ -145,7 +145,23 @@ public class UninstallerService {
             drainStderr.setDaemon(true);
             drainStderr.start();
 
-            // Wait for child processes to exit
+            // Wait for all descendant processes to exit (catches msiexec and other spawned uninstaller processes)
+            try {
+                List<ProcessHandle> descendants = process.descendants().toList();
+                AppLogger.info("Waiting for " + descendants.size() + " descendant process(es) to exit");
+                long descendantDeadline = System.currentTimeMillis() + (30_000);
+                for (ProcessHandle child : descendants) {
+                    long remaining = descendantDeadline - System.currentTimeMillis();
+                    if (remaining <= 0) break;
+                    try {
+                        child.onExit().get(remaining, TimeUnit.MILLISECONDS);
+                    } catch (Exception ignored) {}
+                }
+            } catch (Exception e) {
+                AppLogger.debug("Failed to wait for descendants: " + e.getMessage());
+            }
+
+            // Additionally wait for child processes matching app name/path (fallback)
             waitForChildProcesses(app, 30);
 
             // Additionally wait for the install directory to be removed,
