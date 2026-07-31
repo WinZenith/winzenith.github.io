@@ -235,7 +235,7 @@ public class DashboardTabView extends BorderPane {
     private HBox buildSummaryCards() {
         issuesValueLabel = new Label("\u2014");
         issuesValueLabel.getStyleClass().add("dashboard-summary-value");
-        issuesDescLabel = new Label("Issues Found");
+        issuesDescLabel = new Label("Outdated Drivers/Software");
         issuesDescLabel.getStyleClass().add("dashboard-summary-label");
         VBox issuesCard = new VBox(4, issuesValueLabel, issuesDescLabel);
         issuesCard.getStyleClass().add("dashboard-summary-card");
@@ -249,7 +249,7 @@ public class DashboardTabView extends BorderPane {
 
         categoriesValueLabel = new Label("\u2014");
         categoriesValueLabel.getStyleClass().add("dashboard-summary-value");
-        categoriesDescLabel = new Label("Categories");
+        categoriesDescLabel = new Label("Cleanup Categories");
         categoriesDescLabel.getStyleClass().add("dashboard-summary-label");
         VBox categoriesCard = new VBox(4, categoriesValueLabel, categoriesDescLabel);
         categoriesCard.getStyleClass().add("dashboard-summary-card");
@@ -262,26 +262,41 @@ public class DashboardTabView extends BorderPane {
     private void updateSummaryCards() {
         if (issues.isEmpty()) {
             issuesValueLabel.setText("0");
-            issuesDescLabel.setText("issues found");
+            issuesDescLabel.setText("Outdated Drivers/Software");
             spaceValueLabel.setText("0 B");
             spaceDescLabel.setText("can be freed");
             categoriesValueLabel.setText("0");
-            categoriesDescLabel.setText("categories");
+            categoriesDescLabel.setText("cleanup categories");
             return;
         }
-        int totalIssues = issues.stream().filter(ic -> !ic.isError()).mapToInt(IssueCategory::getCount).sum();
-        long totalSize = issues.stream().filter(ic -> !ic.isError()).mapToLong(IssueCategory::getSizeBytes).sum();
 
-        issuesValueLabel.setText(String.valueOf(totalIssues));
-        issuesDescLabel.setText("issue" + (totalIssues == 1 ? "" : "s") + " found");
+        int driverCount = 0;
+        int softwareCount = 0;
+        long totalSize = 0;
+        int cleanupCategoryCount = 0;
+
+        for (IssueCategory ic : issues) {
+            if (ic.isError()) continue;
+            String name = ic.categoryProperty().get();
+            if ("Outdated Drivers".equals(name)) {
+                driverCount = ic.getCount();
+            } else if ("Outdated Software".equals(name)) {
+                softwareCount = ic.getCount();
+            } else if ("Cleanup".equals(ic.sourceProperty().get())) {
+                cleanupCategoryCount++;
+                totalSize += ic.getSizeBytes();
+            }
+        }
+
+        int totalDriverSoftware = driverCount + softwareCount;
+        issuesValueLabel.setText(String.valueOf(totalDriverSoftware));
+        issuesDescLabel.setText("Outdated Drivers/Software");
 
         spaceValueLabel.setText(formatBytes(totalSize));
         spaceDescLabel.setText("can be freed");
 
-        long errorCount = issues.stream().filter(IssueCategory::isError).count();
-        int categoryCount = issues.size() - (int) errorCount;
-        categoriesValueLabel.setText(String.valueOf(categoryCount));
-        categoriesDescLabel.setText("categories with issues");
+        categoriesValueLabel.setText(String.valueOf(cleanupCategoryCount));
+        categoriesDescLabel.setText("cleanup categories");
     }
 
     // ── Per-Category Progress ─────────────────────────────────────────────
@@ -500,14 +515,34 @@ public class DashboardTabView extends BorderPane {
                             showHealthyState();
                             statusLabel.setText("Scan complete \u2014 no issues found.");
                         } else {
-                            long errorCount = issues.stream().filter(IssueCategory::isError).count();
-                            int categoryCount = issues.size() - (int) errorCount;
-                            int totalIssues = issues.stream().filter(ic -> !ic.isError()).mapToInt(IssueCategory::getCount).sum();
-                            long totalSize = issues.stream().filter(ic -> !ic.isError()).mapToLong(IssueCategory::getSizeBytes).sum();
-                            String errorNote = errorCount > 0 ? " (" + errorCount + " scan error" + (errorCount == 1 ? "" : "s") + ")" : "";
-                            statusLabel.setText("Scan complete \u2014 " + categoryCount + " category" + (categoryCount == 1 ? "" : "ies") + " with issues." + errorNote);
-                            summaryLabel.setText("Total: " + totalIssues + " issue" + (totalIssues == 1 ? "" : "s") + " across " + categoryCount
-                                    + " categor" + (categoryCount == 1 ? "y" : "ies") + ". " + formatBytes(totalSize) + " can be freed." + errorNote);
+                        long errorCount = issues.stream().filter(IssueCategory::isError).count();
+                        int cleanupCategoryCount = (int) issues.stream()
+                                .filter(ic -> !ic.isError() && "Cleanup".equals(ic.sourceProperty().get()))
+                                .count();
+                        int totalDriverSoftware = 0;
+                        for (IssueCategory ic : issues) {
+                            if (ic.isError()) continue;
+                            String name = ic.categoryProperty().get();
+                            if ("Outdated Drivers".equals(name) || "Outdated Software".equals(name)) {
+                                totalDriverSoftware += ic.getCount();
+                            }
+                        }
+                        long totalSize = issues.stream()
+                                .filter(ic -> !ic.isError() && "Cleanup".equals(ic.sourceProperty().get()))
+                                .mapToLong(IssueCategory::getSizeBytes).sum();
+                        String errorNote = errorCount > 0
+                                ? " (" + errorCount + " cleanup scan error" + (errorCount == 1 ? "" : "s") + ")"
+                                : "";
+                        statusLabel.setText("Scan complete \u2014 "
+                                + totalDriverSoftware + " outdated driver" + (totalDriverSoftware == 1 ? "" : "s")
+                                + "/software, " + cleanupCategoryCount
+                                + " cleanup categor" + (cleanupCategoryCount == 1 ? "y" : "ies")
+                                + " with reclaimable space." + errorNote);
+                        summaryLabel.setText("Total: " + totalDriverSoftware + " outdated driver"
+                                + (totalDriverSoftware == 1 ? "" : "s") + "/software, "
+                                + cleanupCategoryCount + " cleanup categor"
+                                + (cleanupCategoryCount == 1 ? "y" : "ies") + ". "
+                                + formatBytes(totalSize) + " can be freed." + errorNote);
                             summaryLabel.setVisible(true);
                         }
                         updateSummaryCards();
@@ -571,7 +606,7 @@ public class DashboardTabView extends BorderPane {
             updateCategoryProgress(0, "failed");
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
-                issues.add(new IssueCategory("Outdated Drivers", "Error: " + ex.getMessage(), "", "Drivers", 0));
+                issues.add(IssueCategory.error("Outdated Drivers", "Error: " + ex.getMessage(), "", "Drivers", 0));
             });
         }
         int done = scansComplete.incrementAndGet();
@@ -599,7 +634,7 @@ public class DashboardTabView extends BorderPane {
             updateCategoryProgress(1, "failed");
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
-                issues.add(new IssueCategory("Outdated Software", "Error: " + ex.getMessage(), "", "Software", 0));
+                issues.add(IssueCategory.error("Outdated Software", "Error: " + ex.getMessage(), "", "Software", 0));
             });
         }
         int done = scansComplete.incrementAndGet();
@@ -615,11 +650,25 @@ public class DashboardTabView extends BorderPane {
             if (isScanStale(generation)) return;
             for (CleanupRow row : results) {
                 if (isScanStale(generation)) return;
-                if (row.getTotalBytes() <= 0 && row.getScanStatus() != CleanupRow.ScanStatus.ERROR) {
+                if (row.getScanStatus() == CleanupRow.ScanStatus.ERROR) {
+                    String detailText = row.getErrorMessage() != null ? row.getErrorMessage() : "Scan error";
+                    Platform.runLater(() -> {
+                        if (isScanStale(generation)) return;
+                        issues.add(IssueCategory.error(
+                                row.getCategory().getDisplayName(),
+                                detailText,
+                                "",
+                                "Cleanup",
+                                0));
+                    });
+                    continue;
+                }
+                if (row.getTotalBytes() <= 0 && (row.getItemCount() <= 0)) {
                     continue;
                 }
                 String detailText = row.sizeOrCountTextProperty().get();
                 String sizeText = row.getTotalBytes() > 0 ? formatBytes(row.getTotalBytes()) : "";
+                final long sizeBytes = row.getTotalBytes();
                 Platform.runLater(() -> {
                     if (isScanStale(generation)) return;
                     issues.add(new IssueCategory(
@@ -627,7 +676,7 @@ public class DashboardTabView extends BorderPane {
                             detailText,
                             sizeText,
                             "Cleanup",
-                            row.getTotalBytes()));
+                            sizeBytes));
                 });
             }
             updateCategoryProgress(2, "done");
@@ -636,7 +685,7 @@ public class DashboardTabView extends BorderPane {
             updateCategoryProgress(2, "failed");
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
-                issues.add(new IssueCategory("System Cleanup", "Error: " + ex.getMessage(), "", "Cleanup", 0));
+                issues.add(IssueCategory.error("System Cleanup", "Error: " + ex.getMessage(), "", "Cleanup", 0));
             });
         }
         int done = scansComplete.incrementAndGet();
@@ -713,7 +762,21 @@ public class DashboardTabView extends BorderPane {
             this.category = new SimpleStringProperty(category);
             this.count = 1;
             this.sizeBytes = sizeBytes;
-            this.error = true;
+            this.error = false;
+            this.countText = new SimpleStringProperty(detailText);
+            this.sizeText = new SimpleStringProperty(sizeText);
+            this.source = new SimpleStringProperty(source);
+        }
+
+        public static IssueCategory error(String category, String detailText, String sizeText, String source, long sizeBytes) {
+            return new IssueCategory(category, detailText, sizeText, source, sizeBytes, true);
+        }
+
+        private IssueCategory(String category, String detailText, String sizeText, String source, long sizeBytes, boolean error) {
+            this.category = new SimpleStringProperty(category);
+            this.count = 1;
+            this.sizeBytes = sizeBytes;
+            this.error = error;
             this.countText = new SimpleStringProperty(detailText);
             this.sizeText = new SimpleStringProperty(sizeText);
             this.source = new SimpleStringProperty(source);

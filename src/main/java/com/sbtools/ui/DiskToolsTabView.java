@@ -6,7 +6,6 @@ import com.sbtools.defrag.DefragService;
 import com.sbtools.defrag.DriveInfo;
 import com.sbtools.diskhealth.DiskHealthInfo;
 import com.sbtools.diskhealth.DiskHealthService;
-import com.sbtools.diskhealth.SmartAttribute;
 import com.sbtools.shredder.FolderDeleteResult;
 import com.sbtools.shredder.ShredderFileEntry;
 import com.sbtools.shredder.ShredderResult;
@@ -139,10 +138,6 @@ public class DiskToolsTabView extends BorderPane {
     private final GridPane smartGrid = new GridPane();
     private final Label overallHealthLabel = new Label();
     private boolean smartctlAvailable = false;
-    private final TableView<SmartAttribute> rawSmartTable = new TableView<>();
-    private final ObservableList<SmartAttribute> rawSmartEntries = FXCollections.observableArrayList();
-    private final Button toggleSmartBtn = new Button("Show All SMART Attributes");
-    private boolean rawSmartVisible = false;
 
     /* ───── Benchmark tab components ───── */
     private final ComboBox<String> benchDriveCombo = new ComboBox<>();
@@ -760,47 +755,7 @@ public class DiskToolsTabView extends BorderPane {
 
         overallHealthLabel.getStyleClass().addAll("label", "large");
 
-        toggleSmartBtn.getStyleClass().add("button-outlined");
-        toggleSmartBtn.setTooltip(new Tooltip("Show or hide all raw SMART attributes"));
-        toggleSmartBtn.setOnAction(e -> {
-            rawSmartVisible = !rawSmartVisible;
-            rawSmartTable.setVisible(rawSmartVisible);
-            rawSmartTable.setManaged(rawSmartVisible);
-            toggleSmartBtn.setText(rawSmartVisible ? "Hide All SMART Attributes" : "Show All SMART Attributes");
-        });
-        rawSmartTable.setVisible(false);
-        rawSmartTable.setManaged(false);
-        rawSmartTable.setItems(rawSmartEntries);
-        rawSmartTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-        rawSmartTable.setPrefHeight(250);
-
-        TableColumn<SmartAttribute, Number> attrIdCol = new TableColumn<>("ID");
-        attrIdCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getId()));
-        attrIdCol.setPrefWidth(50);
-
-        TableColumn<SmartAttribute, String> attrNameCol = new TableColumn<>("Attribute Name");
-        attrNameCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getName()));
-        attrNameCol.setPrefWidth(200);
-
-        TableColumn<SmartAttribute, String> attrValueCol = new TableColumn<>("Value");
-        attrValueCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getValue()));
-        attrValueCol.setPrefWidth(70);
-
-        TableColumn<SmartAttribute, String> attrWorstCol = new TableColumn<>("Worst");
-        attrWorstCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getWorst()));
-        attrWorstCol.setPrefWidth(70);
-
-        TableColumn<SmartAttribute, String> attrThreshCol = new TableColumn<>("Threshold");
-        attrThreshCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getThreshold()));
-        attrThreshCol.setPrefWidth(80);
-
-        TableColumn<SmartAttribute, String> attrRawCol = new TableColumn<>("Raw Value");
-        attrRawCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getRawValue()));
-        attrRawCol.setPrefWidth(120);
-
-        rawSmartTable.getColumns().addAll(attrIdCol, attrNameCol, attrValueCol, attrWorstCol, attrThreshCol, attrRawCol);
-
-        VBox detailCard = new VBox(8, overallHealthLabel, smartGrid, toggleSmartBtn, rawSmartTable);
+        VBox detailCard = new VBox(8, overallHealthLabel, smartGrid);
         detailCard.setPadding(new Insets(12));
         detailCard.getStyleClass().add("sysinfo-card");
 
@@ -974,12 +929,6 @@ public class DiskToolsTabView extends BorderPane {
             overallHealthLabel.getStyleClass().removeAll("success", "warning");
             overallHealthLabel.getStyleClass().add("danger");
         }
-
-        rawSmartEntries.setAll(info.getRawSmartAttributes());
-        rawSmartVisible = false;
-        rawSmartTable.setVisible(false);
-        rawSmartTable.setManaged(false);
-        toggleSmartBtn.setText("Show All SMART Attributes");
     }
 
     private void addSmartRow(int row, String label, String value) {

@@ -76,6 +76,7 @@ public class BrowserExtensionsTabView extends BorderPane {
     private final Button enableSelectedBtn = UIButton.primary("Enable");
     private final Button disableSelectedBtn = UIButton.secondary("Disable");
     private final Button selectAllBtn = UIButton.secondary("Select All");
+    private final Button deselectAllBtn = UIButton.secondary("Deselect All");
     private final Button manageIgnoredBtn = UIButton.secondary("Manage Ignored");
     private final ComboBox<String> browserFilter = new ComboBox<>(
             FXCollections.observableArrayList(FILTER_BROWSERS));
@@ -98,10 +99,12 @@ public class BrowserExtensionsTabView extends BorderPane {
         enableSelectedBtn.setDisable(true);
         disableSelectedBtn.setDisable(true);
         selectAllBtn.setDisable(true);
+        deselectAllBtn.setDisable(true);
 
         enableSelectedBtn.getStyleClass().add("success");
         disableSelectedBtn.getStyleClass().add("button-outlined");
         selectAllBtn.getStyleClass().add("button-outlined");
+        deselectAllBtn.getStyleClass().add("button-outlined");
         manageIgnoredBtn.getStyleClass().add("button-outlined");
 
         searchField.setPromptText("Search extensions...");
@@ -113,12 +116,13 @@ public class BrowserExtensionsTabView extends BorderPane {
         enableSelectedBtn.setOnAction(e -> toggleSelected(true));
         disableSelectedBtn.setOnAction(e -> toggleSelected(false));
         selectAllBtn.setOnAction(e -> toggleSelectAll());
+        deselectAllBtn.setOnAction(e -> deselectAll());
         manageIgnoredBtn.setOnAction(e -> showIgnoredListDialog());
 
         browserFilter.getSelectionModel().select(0);
         browserFilter.setOnAction(e -> applyFilters());
 
-        HBox buttonRow = new HBox(12, scanButton, enableSelectedBtn, disableSelectedBtn, selectAllBtn, manageIgnoredBtn);
+        HBox buttonRow = new HBox(12, scanButton, enableSelectedBtn, disableSelectedBtn, selectAllBtn, deselectAllBtn, manageIgnoredBtn);
         buttonRow.setAlignment(Pos.CENTER_LEFT);
 
         HBox filterRow = new HBox(12, new Label("Filter:"), browserFilter, searchField,
@@ -144,6 +148,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             browserFilter.setDisable(newVal);
             searchField.setDisable(newVal);
             selectAllBtn.setDisable(newVal || allRows.isEmpty());
+            deselectAllBtn.setDisable(newVal || allRows.isEmpty());
             progressBar.setVisible(newVal);
             progressBar.setProgress(newVal ? -1 : 0);
         });
@@ -602,6 +607,12 @@ public class BrowserExtensionsTabView extends BorderPane {
             if (!row.isIgnored()) {
                 row.setSelected(!allSelected);
             }
+        }
+    }
+
+    private void deselectAll() {
+        for (BrowserExtensionRow row : allRows) {
+            row.setSelected(false);
         }
     }
 
