@@ -106,6 +106,91 @@ img {
     line-height: 1.7;
 }
 
+.hero-description-blue {
+    color: #8be9fd;
+    max-width: 720px;
+    font-size: 17px;
+}
+
+.hero-download-block {
+    margin: 32px auto 0;
+    max-width: 600px;
+}
+
+.hero-download-block .section-title {
+    font-size: 24px;
+    margin-bottom: 8px;
+}
+
+.hero-download-meta {
+    margin-top: 16px;
+}
+
+.hero-download-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.virustotal-link {
+    color: var(--text-muted);
+    font-size: 14px;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    transition: color 0.2s ease;
+}
+
+.virustotal-link:hover {
+    color: var(--accent);
+}
+
+/* --- Trust Bar --- */
+.trust-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 32px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+}
+
+.trust-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    background-color: var(--bg-surface);
+    text-decoration: none;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.trust-badge:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    box-shadow: 0 0 12px rgba(80, 250, 123, 0.1);
+}
+
+.trust-badge-static {
+    cursor: default;
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.trust-badge-static:hover {
+    color: var(--accent);
+    box-shadow: 0 0 12px rgba(80, 250, 123, 0.1);
+}
+
 .hero-download-row {
     display: flex;
     align-items: center;

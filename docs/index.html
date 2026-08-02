@@ -27,28 +27,43 @@
     <!-- Schema.org Structured Data -->
     <script type="application/ld+json">
     {
-        "@context": "https://schema.org",
-        "@type": "SoftwareApplication",
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "WinZenith",
+      "operatingSystem": "Windows 10, Windows 11",
+      "applicationCategory": "UtilitiesApplication",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "aggregateRating": {
+        "@type": "AggregateRating",
+        "ratingValue": "3.5",
+        "bestRating": "5",
+        "worstRating": "1",
+        "ratingCount": "1",
+        "reviewCount": "1"
+      },
+      "description": "Free, open-source, and portable Windows system optimizer, driver updater, software updater, and system cleaner.",
+      "url": "https://winzenith.github.io/",
+      "downloadUrl": "https://winzenith.github.io/",
+      "softwareVersion": "1.0.0",
+      "featureList": [
+        "Driver & Software Updater",
+        "System Junk Cleaner",
+        "Windows App Uninstaller",
+        "Startup Manager & Services Configurator",
+        "Duplicate File Detection",
+        "Disk Defragmentation & Secure File Shredder",
+        "Browser Extensions Manager",
+        "Network Adapter Optimizer"
+      ],
+      "author": {
+        "@type": "Organization",
         "name": "WinZenith",
-        "description": "WinZenith is a free, portable, open-source Windows utility to clean junk, update drivers & software, uninstall apps, manage startup items, and optimize your PC. No ads, no telemetry.",
-        "operatingSystem": "Windows 10, Windows 11",
-        "applicationCategory": "UtilitiesApplication",
-        "softwareVersion": "1.2.0",
-        "fileSize": "62MB",
-        "offers": {
-            "@type": "Offer",
-            "price": "0",
-            "priceCurrency": "USD"
-        },
-        "downloadUrl": "https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.0/WinZenith-1.2.0-portable.zip",
-        "screenshot": "https://winzenith.github.io/images/screenshot-dashboard.png",
-        "softwareRequirements": "Java 17 or later",
-        "permissions": "Administrator privileges recommended",
-        "author": {
-            "@type": "Organization",
-            "name": "WinZenith",
-            "url": "https://winzenith.github.io"
-        }
+        "url": "https://winzenith.github.io/"
+      }
     }
     </script>
 </head>
@@ -65,17 +80,54 @@
     <!-- Hero Section -->
     <section class="hero">
         <div class="container">
-            <p class="hero-description">
-                Application with useful tools to maintain your windows / apps updates, driver updates and more.
-                Completely free, portable and without ads.
+            <p class="hero-description hero-description-blue">
+                WinZenith is a free, open-source Windows optimization suite that puts many of the maintenance and cleanup tools you normally need into a single, modern interface. From removing junk files and completely uninstalling stubborn applications to optimizing system settings, updating drivers, and even defragmenting traditional hard drives, WinZenith makes routine PC maintenance quick and straightforward.
             </p>
-            <p style="text-align: center; margin-top: 12px;">
-                <a href="https://www.softpedia.com/get/Windows-Widgets/System-Utilities/WinZenith.shtml"
-                   target="_blank" rel="noopener noreferrer"
-                   style="color: var(--accent); font-size: 28px; font-weight: bold;">
-                    Rated 3.5/5 on Softpedia. Read the review of WinZenith. &#10132;
+
+            <div class="hero-download-block">
+                <h2 class="section-title">Download <span>WinZenith</span></h2>
+                <p class="download-cta-text">Free. Portable. No installation required. Designed for Windows 10 and 11.</p>
+                <a href="https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.0/WinZenith-1.2.0-portable.zip"
+                   class="btn btn-primary" id="download-btn-hero">
+                    &#11015; Download WinZenith from GitHub
                 </a>
-            </p>
+                <div class="hero-download-meta">
+                    <div class="hero-download-meta-row">
+                        <a href="https://www.softpedia.com/get/Windows-Widgets/System-Utilities/WinZenith.shtml"
+                           target="_blank" rel="noopener noreferrer" style="display: inline-block;">
+                            <img src="https://www.softpedia.com/_img/softpedia_100_clean.webp"
+                                 alt="Softpedia 100% Clean Award - WinZenith is virus free"
+                                 style="height: 62px; width: auto;">
+                        </a>
+                        <a href="https://www.virustotal.com/gui/file/1fb68bb65deef942521fc96a08ad6077a1aacbd0f38e8abd1dd8314327fff314/detection"
+                           target="_blank" rel="noopener noreferrer"
+                           class="virustotal-link">
+                            VirusTotal Report Link
+                        </a>
+                    </div>
+                    <div class="download-count" style="justify-content: center; margin-top: 12px;">
+                        &#10003; <span class="download-count-number">...</span> downloads
+                    </div>
+                </div>
+            </div>
+
+            <div class="trust-bar">
+                <a href="https://www.softpedia.com/get/Windows-Widgets/System-Utilities/WinZenith.shtml"
+                   target="_blank" rel="noopener noreferrer" class="trust-badge">
+                    &#9733; Softpedia 3.5/5 &#9733;
+                </a>
+                <a href="https://www.majorgeeks.com/files/details/winzenith.html"
+                   target="_blank" rel="noopener noreferrer" class="trust-badge">
+                    Featured on MajorGeeks
+                </a>
+                <a href="https://alternativeto.net/software/winzenith/about/"
+                   target="_blank" rel="noopener noreferrer" class="trust-badge">
+                    Listed on AlternativeTo
+                </a>
+                <span class="trust-badge trust-badge-static">
+                    &#10003; 100% Clean Award
+                </span>
+            </div>
         </div>
     </section>
 
@@ -207,7 +259,8 @@
                 This is normal for new, unsigned applications. To run WinZenith:<br><br>
                 1. Click <strong>"More info"</strong><br>
                 2. Click <strong>"Run anyway"</strong><br><br>
-                WinZenith is completely free and contains no ads or malware.
+                WinZenith is completely free and contains no ads or malware.<br><br>
+                SmartScreen appears because WinZenith is a free, open-source app without a costly corporate digital certificate. The source code is 100% public.
             </div>
         </div>
     </section>
