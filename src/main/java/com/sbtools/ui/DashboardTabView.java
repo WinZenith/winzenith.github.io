@@ -24,6 +24,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.TableColumn;
+import javafx.scene.control.TableRow;
 import javafx.scene.control.TableView;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
@@ -42,11 +43,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 public class DashboardTabView extends BorderPane {
 
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
+    private final Consumer<Integer> tabSwitchRequest;
     private final CleanupService cleanupService = new CleanupService();
     private final DriverScanService driverScanService = new DriverScanService();
     private final DriverCatalogAggregator catalog = DriverCatalogAggregator.createDefault();
@@ -89,9 +92,10 @@ public class DashboardTabView extends BorderPane {
     private Label timestampLabel;
     private Label summaryLabel;
 
-    public DashboardTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
+    public DashboardTabView(BooleanProperty busy, BooleanSupplier adminCheck, Consumer<Integer> tabSwitchRequest) {
         this.busy = busy;
         this.adminCheck = adminCheck;
+        this.tabSwitchRequest = tabSwitchRequest;
 
         progressBar.setVisible(false);
         progressBar.setPrefWidth(200);
@@ -164,11 +168,11 @@ public class DashboardTabView extends BorderPane {
 
         HBox cards = new HBox(16,
                 createInfoCard("\uD83D\uDD0C", "Outdated Drivers",
-                        "Detect drivers that have newer versions available from OEM catalogs"),
+                        "Detect drivers that have newer versions available from OEM catalogs", 1),
                 createInfoCard("\uD83D\uDD14", "Software Updates",
-                        "Find installed applications with pending updates via winget"),
+                        "Find installed applications with pending updates via winget", 3),
                 createInfoCard("\uD83E\uDDF9", "System Cleanup",
-                        "Identify temporary files, caches, and junk that waste disk space")
+                        "Identify temporary files, caches, and junk that waste disk space", 7)
         );
         cards.getStyleClass().add("dashboard-welcome-cards");
         cards.setAlignment(Pos.CENTER);
@@ -180,7 +184,7 @@ public class DashboardTabView extends BorderPane {
         welcomeBox.getStyleClass().add("dashboard-welcome");
     }
 
-    private VBox createInfoCard(String icon, String title, String description) {
+    private VBox createInfoCard(String icon, String title, String description, int tabIndex) {
         Label iconLabel = new Label(icon);
         iconLabel.getStyleClass().add("dashboard-info-card-icon");
 
@@ -194,6 +198,12 @@ public class DashboardTabView extends BorderPane {
         VBox card = new VBox(8, iconLabel, titleLabel, descLabel);
         card.getStyleClass().add("dashboard-info-card");
         card.setAlignment(Pos.CENTER);
+
+        if (tabSwitchRequest != null) {
+            card.getStyleClass().add("dashboard-clickable");
+            card.setOnMouseClicked(e -> tabSwitchRequest.accept(tabIndex));
+        }
+
         return card;
     }
 
@@ -446,6 +456,30 @@ public class DashboardTabView extends BorderPane {
         sourceCol.setPrefWidth(120);
 
         t.getColumns().addAll(categoryCol, countCol, sizeCol, sourceCol);
+
+        t.setRowFactory(tv -> {
+            TableRow<IssueCategory> row = new TableRow<>();
+            row.setOnMouseClicked(event -> {
+                if (row.isEmpty() || row.getItem() == null || row.getItem().isError()) return;
+                if (tabSwitchRequest == null) return;
+                String source = row.getItem().sourceProperty().get();
+                int tabIndex = switch (source) {
+                    case "Drivers" -> 1;
+                    case "Software" -> 3;
+                    case "Cleanup" -> 7;
+                    default -> -1;
+                };
+                if (tabIndex >= 0) tabSwitchRequest.accept(tabIndex);
+            });
+            row.setOnMouseEntered(e -> {
+                if (!row.isEmpty() && row.getItem() != null && !row.getItem().isError()) {
+                    row.getStyleClass().add("dashboard-clickable");
+                }
+            });
+            row.setOnMouseExited(e -> row.getStyleClass().remove("dashboard-clickable"));
+            return row;
+        });
+
         return t;
     }
 

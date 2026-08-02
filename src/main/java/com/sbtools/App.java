@@ -43,6 +43,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import com.sbtools.util.ProcessManager;
@@ -249,7 +250,12 @@ public class App extends Application {
             return tabViews[index];
         }
         tabViews[index] = switch (index) {
-            case 0 -> new DashboardTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 0 -> new DashboardTabView(busy, AdminCheck::isRunningAsAdmin,
+                    idx -> {
+                        selectedTab = idx;
+                        selectTab(tabButtons[idx]);
+                        root.setCenter(createTab(idx));
+                    });
             case 1 -> new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
             case 2 -> new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdmin);
             case 3 -> new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);

@@ -722,3 +722,13 @@
     -fx-font-size: 13px;
     -fx-text-fill: #6272a4;
 }
+
+/* Clickable Elements (table rows, info cards) */
+.dashboard-clickable {
+    -fx-cursor: hand;
+}
+
+.dashboard-clickable:hover {
+    -fx-border-color: #50fa7b;
+    -fx-effect: dropshadow(gaussian, #50fa7b, 8, 0.12, 0, 0);
+}
