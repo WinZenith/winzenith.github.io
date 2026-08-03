@@ -110,7 +110,13 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
     private void wireButtons() {
         scanButton.setOnAction(e -> viewModel.scan());
-        stopScanButton.setOnAction(e -> viewModel.stopScan());
+        stopScanButton.setOnAction(e -> {
+            if (viewModel.isInstallRunning()) {
+                viewModel.cancelInstall();
+            } else {
+                viewModel.stopScan();
+            }
+        });
         stopScanButton.setDisable(true);
 
         updateSelectedButton.setOnAction(e -> updateSelected());
@@ -172,6 +178,30 @@ public class SoftwareUpdatesTabView extends BorderPane {
             protected void updateItem(SoftwareUpdateEntry item, boolean empty) {
                 super.updateItem(item, empty);
                 setText(empty || item == null ? null : formatBytes(item.sizeBytes()));
+            }
+        });
+
+        TableColumn<SoftwareUpdateEntry, String> statusCol = new TableColumn<>("Status");
+        statusCol.setCellValueFactory(c -> c.getValue().statusProperty());
+        statusCol.setPrefWidth(100);
+        statusCol.setSortable(false);
+        statusCol.setCellFactory(col -> new TableCell<>() {
+            @Override
+            protected void updateItem(String value, boolean empty) {
+                super.updateItem(value, empty);
+                if (empty || value == null || value.isBlank()) {
+                    setText(null);
+                    setStyle(null);
+                } else if ("Failed".equals(value)) {
+                    setText(value);
+                    setStyle("-fx-text-fill: #ff5555;");
+                } else if (value.startsWith("Installing")) {
+                    setText(value);
+                    setStyle("-fx-text-fill: #ffb86c;");
+                } else {
+                    setText(value);
+                    setStyle("-fx-text-fill: #50fa7b;");
+                }
             }
         });
 
@@ -255,6 +285,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
             private void unbindEntry() {
                 if (boundEntry != null) {
                     try { downloadProgress.progressProperty().unbind(); } catch (Exception ignored) {}
+                    try { installingLabel.textProperty().unbind(); } catch (Exception ignored) {}
                     if (statusListener != null) {
                         try { boundEntry.statusProperty().removeListener(statusListener); } catch (Exception ignored) {}
                         statusListener = null;
@@ -264,7 +295,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
             }
         });
 
-        table.getColumns().addAll(selCol, nameCol, currentCol, availCol, sourceCol, sizeCol, actionCol);
+        table.getColumns().addAll(selCol, nameCol, currentCol, availCol, sourceCol, statusCol, sizeCol, actionCol);
 
         table.setRowFactory(tv -> {
             TableRow<SoftwareUpdateEntry> row = new TableRow<>();

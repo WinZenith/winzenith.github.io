@@ -34,6 +34,20 @@ public class DriverScanService {
         return parseDrivers(result.stdout());
     }
 
+    /**
+     * Re-scans the system and returns the updated driver entry for the given device ID,
+     * or {@code null} if the device is no longer found.
+     */
+    public InstalledDriver scanSingleDriver(String deviceId) throws IOException, InterruptedException {
+        List<InstalledDriver> all = scanInstalled();
+        for (InstalledDriver d : all) {
+            if (d.deviceId().equals(deviceId)) {
+                return d;
+            }
+        }
+        return null;
+    }
+
     public static List<InstalledDriver> parseDrivers(String json) throws com.fasterxml.jackson.core.JsonProcessingException {
         JsonNode root = JsonMapper.parseTree(json);
         Map<String, InstalledDriver> byDeviceId = new LinkedHashMap<>();

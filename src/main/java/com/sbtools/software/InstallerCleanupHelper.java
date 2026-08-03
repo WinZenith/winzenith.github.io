@@ -7,6 +7,7 @@ import javafx.scene.control.ButtonType;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -95,5 +96,51 @@ public final class InstallerCleanupHelper {
             service.deleteInstallerFiles(candidates);
         }
         return userConfirmed.get();
+    }
+
+    /**
+     * Asynchronously prompts the user to delete installer files for all successfully
+     * updated packages in a batch. Shows a single consolidated dialog.
+     *
+     * @param service   the update service (for finding/deleting files)
+     * @param packages  the list of successfully installed packages
+     * @param since     timestamp to search for candidate files (typically batch start time)
+     * @return CompletableFuture that completes with true if files were deleted
+     */
+    public static CompletableFuture<Boolean> promptAndCleanupBatchAsync(SoftwareUpdateService service,
+                                                                        List<SoftwareUpdateEntry> packages,
+                                                                        Instant since) {
+        Map<SoftwareUpdateEntry, List<Path>> allCandidates =
+                service.findCandidateInstallersForPackages(packages, since);
+        if (allCandidates.isEmpty()) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        CompletableFuture<Boolean> result = new CompletableFuture<>();
+        Platform.runLater(() -> {
+            StringBuilder sb = new StringBuilder();
+            int totalFiles = 0;
+            for (Map.Entry<SoftwareUpdateEntry, List<Path>> entry : allCandidates.entrySet()) {
+                String name = entry.getKey().getName() != null ? entry.getKey().getName() : entry.getKey().id();
+                sb.append(name).append(":\n");
+                for (Path p : entry.getValue()) {
+                    sb.append("  ").append(p.getFileName().toString()).append("\n");
+                    totalFiles++;
+                }
+                sb.append("\n");
+            }
+            Alert del = new Alert(Alert.AlertType.CONFIRMATION,
+                    "The following installer files (" + totalFiles + " file(s)) were detected in your Downloads folder:\n\n"
+                            + sb + "Delete these files?");
+            del.setHeaderText("Clean up installer files");
+            boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
+            if (confirmed) {
+                for (List<Path> files : allCandidates.values()) {
+                    service.deleteInstallerFiles(files);
+                }
+            }
+            result.complete(confirmed);
+        });
+        return result;
     }
 }

@@ -8,6 +8,8 @@ import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
 import com.sbtools.util.ProcessManager;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
@@ -68,6 +70,83 @@ public class ShredderService {
         ProcessResult result = processRunner.run(
                 ProcessRunner.powershellScript(script.toString(), filePath));
         return parseResult(result, filePath);
+    }
+
+    public record RecycleBinResult(List<RecycleBinEntry> entries, long totalSizeBytes, int fileCount) {}
+
+    public RecycleBinResult getRecycleBinContents() throws IOException, InterruptedException {
+        if (!AppPaths.isWindows()) {
+            throw new UnsupportedOperationException("Recycle Bin is only available on Windows.");
+        }
+        Path script = PowerShellScripts.resolve("list-recyclebin.ps1");
+        ProcessResult result = processRunner.run(
+                ProcessRunner.powershellScript(script.toString()));
+        if (!result.success()) {
+            throw new IOException("Failed to list Recycle Bin: " + result.combinedOutput());
+        }
+        String json = result.stdout().trim();
+        if (json.isBlank()) return new RecycleBinResult(List.of(), 0, 0);
+        try {
+            JsonNode root = JsonMapper.mapper().readTree(json);
+            long totalSize = root.has("totalSizeBytes") ? root.get("totalSizeBytes").asLong(0) : 0;
+            int fileCount = root.has("fileCount") ? root.get("fileCount").asInt(0) : 0;
+            List<RecycleBinEntry> entries = new ArrayList<>();
+            JsonNode filesNode = root.has("files") ? root.get("files") : null;
+            if (filesNode != null && filesNode.isArray()) {
+                for (JsonNode node : filesNode) {
+                    entries.add(JsonMapper.mapper().treeToValue(node, RecycleBinEntry.class));
+                }
+            }
+            return new RecycleBinResult(entries, totalSize, fileCount);
+        } catch (Exception e) {
+            AppLogger.error("Failed to parse Recycle Bin JSON", e);
+            throw new IOException("Failed to parse Recycle Bin: " + e.getMessage(), e);
+        }
+    }
+
+    public FolderDeleteResult secureWipeRecycleBin(List<String> recyclePaths, int passCount,
+                                                    Consumer<String> progressCallback,
+                                                    AtomicBoolean cancelled) throws IOException, InterruptedException {
+        if (!AppPaths.isWindows()) {
+            throw new UnsupportedOperationException("Recycle Bin wipe is only available on Windows.");
+        }
+        int filesDeleted = 0;
+        int foldersDeleted = 0;
+        List<String> scheduledForReboot = new ArrayList<>();
+
+        for (int i = 0; i < recyclePaths.size(); i++) {
+            if (cancelled != null && cancelled.get()) break;
+            String path = recyclePaths.get(i);
+            int current = i + 1;
+            int total = recyclePaths.size();
+
+            if (progressCallback != null) {
+                progressCallback.accept("Securely deleting (" + current + "/" + total + "): " + new File(path).getName());
+            }
+
+            File file = new File(path);
+            if (!file.exists()) continue;
+
+            try {
+                ShredderResult result = secureDelete(path, passCount);
+                if (result.isDeleted()) {
+                    filesDeleted++;
+                } else if (result.isScheduledForReboot()) {
+                    scheduledForReboot.add(path);
+                }
+            } catch (Exception e) {
+                String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                if (msg.contains("in use") || msg.contains("access denied") || msg.contains("unauthorized")) {
+                    scheduledForReboot.add(path);
+                } else {
+                    AppLogger.error("Failed to securely delete recycle bin entry: " + path, e);
+                }
+            }
+        }
+
+        return new FolderDeleteResult(true,
+                "Recycle Bin wipe: " + filesDeleted + " files securely deleted.",
+                filesDeleted, foldersDeleted, scheduledForReboot);
     }
 
     public void wipeFreeSpace(List<String> driveLetters, Consumer<WipeProgress> progressCallback,

@@ -7,6 +7,7 @@ import com.sbtools.defrag.DriveInfo;
 import com.sbtools.diskhealth.DiskHealthInfo;
 import com.sbtools.diskhealth.DiskHealthService;
 import com.sbtools.shredder.FolderDeleteResult;
+import com.sbtools.shredder.RecycleBinEntry;
 import com.sbtools.shredder.ShredderFileEntry;
 import com.sbtools.shredder.ShredderResult;
 import com.sbtools.shredder.ShredderService;
@@ -128,6 +129,24 @@ public class DiskToolsTabView extends BorderPane {
     private final Label wipeStatus = new Label("Select drives and click Start.");
     private final CheckBox selectAllWipeCheck = new CheckBox("Select All");
     private final Map<String, BooleanProperty> wipeSelected = new HashMap<>();
+
+    /* ───── Recycle Bin tab components ───── */
+    private final TableView<RecycleBinEntry> recycleBinTable = new TableView<>();
+    private final ObservableList<RecycleBinEntry> recycleBinEntries = FXCollections.observableArrayList();
+    private final Button refreshRecycleBinBtn = new Button("Refresh");
+    private final Button secureWipeRecycleBinBtn = new Button("Secure Wipe Recycle Bin");
+    private final ProgressBar recycleBinProgress = new ProgressBar(0);
+    private final Label recycleBinStatus = new Label("Click Refresh to list Recycle Bin contents.");
+    private final Label recycleBinSummary = new Label();
+    private final AtomicBoolean recycleBinBusy = new AtomicBoolean(false);
+    private final AtomicBoolean recycleBinCancelled = new AtomicBoolean(false);
+
+    /* ───── Shared thread pool ───── */
+    private final ExecutorService sharedExecutor = Executors.newFixedThreadPool(3, r -> {
+        Thread t = new Thread(r, "disk-tools-worker");
+        t.setDaemon(true);
+        return t;
+    });
 
     /* ───── Disk Health tab components ───── */
     private final ComboBox<String> healthDriveCombo = new ComboBox<>();
@@ -466,16 +485,10 @@ public class DiskToolsTabView extends BorderPane {
         defragStatus.setText("Analyzing " + selected.size() + " drive(s)...");
 
         Instant startTime = Instant.now();
-        int parallelism = Math.min(selected.size(), 3);
-        ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
-            Thread t = new Thread(r, "analyze-drive");
-            t.setDaemon(true);
-            return t;
-        });
+        int totalDrives = selected.size();
 
         ConcurrentLinkedQueue<String> statusMessages = new ConcurrentLinkedQueue<>();
         AtomicInteger completedCount = new AtomicInteger(0);
-        int totalDrives = selected.size();
 
         List<CompletableFuture<Void>> futures = selected.stream()
                 .map(driveCopy -> CompletableFuture.runAsync(() -> {
@@ -513,7 +526,7 @@ public class DiskToolsTabView extends BorderPane {
                             new Alert(Alert.AlertType.ERROR, msg).showAndWait();
                         });
                     }
-                }, executor))
+                }, sharedExecutor))
                 .toList();
 
         currentAnalyzeThread = new Thread(() -> {
@@ -528,7 +541,6 @@ public class DiskToolsTabView extends BorderPane {
                     new Alert(Alert.AlertType.ERROR, msg).showAndWait();
                 });
             } finally {
-                executor.shutdownNow();
                 Platform.runLater(() -> {
                     defragBusy.set(false);
                     defragProgress.setVisible(false);
@@ -1140,9 +1152,13 @@ public class DiskToolsTabView extends BorderPane {
         }
 
         VBox fileSection = buildFileDeletionSection();
+        VBox recycleBinSection = buildRecycleBinSection();
         VBox wipeSection = buildFreeSpaceWipeSection();
 
-        VBox content = new VBox(12, warning, fileSection, wipeSection);
+        VBox.setVgrow(recycleBinSection, Priority.SOMETIMES);
+        VBox.setVgrow(wipeSection, Priority.ALWAYS);
+
+        VBox content = new VBox(12, warning, fileSection, recycleBinSection, wipeSection);
         content.setPadding(new Insets(0));
         VBox.setVgrow(wipeSection, Priority.ALWAYS);
         return content;
@@ -1340,6 +1356,178 @@ public class DiskToolsTabView extends BorderPane {
         });
 
         return section;
+    }
+
+    /* ── Recycle Bin Section ── */
+
+    @SuppressWarnings("unchecked")
+    private VBox buildRecycleBinSection() {
+        Label header = new Label("Recycle Bin Cleanup");
+        header.getStyleClass().addAll("label", "large", "accent");
+
+        Label desc = new Label("Securely wipe all files currently in the Recycle Bin to prevent recovery.");
+        desc.getStyleClass().add("text-muted");
+        desc.setWrapText(true);
+
+        recycleBinProgress.setVisible(false);
+        recycleBinProgress.setPrefWidth(150);
+        recycleBinStatus.getStyleClass().add("text-muted");
+        recycleBinSummary.getStyleClass().addAll("label", "text-muted");
+
+        refreshRecycleBinBtn.getStyleClass().add("accent");
+        refreshRecycleBinBtn.setOnAction(e -> loadRecycleBin());
+        refreshRecycleBinBtn.setTooltip(new Tooltip("List all files in the Recycle Bin"));
+
+        secureWipeRecycleBinBtn.getStyleClass().add("danger");
+        secureWipeRecycleBinBtn.setDisable(true);
+        secureWipeRecycleBinBtn.setOnAction(e -> startSecureWipeRecycleBin());
+        secureWipeRecycleBinBtn.setTooltip(new Tooltip("Securely overwrite all Recycle Bin contents (requires admin)"));
+
+        HBox toolbar = new HBox(8, refreshRecycleBinBtn, secureWipeRecycleBinBtn,
+                recycleBinProgress, recycleBinStatus, recycleBinSummary);
+        toolbar.setAlignment(Pos.CENTER_LEFT);
+        toolbar.setPadding(new Insets(8, 16, 8, 16));
+        toolbar.getStyleClass().add("toolbar");
+
+        recycleBinTable.setItems(recycleBinEntries);
+        recycleBinTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        recycleBinTable.setPrefHeight(150);
+
+        TableColumn<RecycleBinEntry, String> rbNameCol = new TableColumn<>("File Name");
+        rbNameCol.setCellValueFactory(c -> c.getValue().nameProperty());
+        rbNameCol.setPrefWidth(200);
+
+        TableColumn<RecycleBinEntry, String> rbOrigCol = new TableColumn<>("Original Location");
+        rbOrigCol.setCellValueFactory(c -> c.getValue().originalPathProperty());
+        rbOrigCol.setPrefWidth(300);
+
+        TableColumn<RecycleBinEntry, String> rbSizeCol = new TableColumn<>("Size");
+        rbSizeCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getSizeFormatted()));
+        rbSizeCol.setPrefWidth(90);
+
+        TableColumn<RecycleBinEntry, String> rbDateCol = new TableColumn<>("Deleted");
+        rbDateCol.setCellValueFactory(c -> {
+            String date = c.getValue().getDeleteDate();
+            return new SimpleObjectProperty<>(date != null && !date.isBlank() ? date : "-");
+        });
+        rbDateCol.setPrefWidth(150);
+
+        recycleBinTable.getColumns().addAll(rbNameCol, rbOrigCol, rbSizeCol, rbDateCol);
+
+        VBox section = new VBox(8, header, desc, toolbar, recycleBinTable);
+        section.setPadding(new Insets(8, 16, 8, 16));
+        VBox.setVgrow(recycleBinTable, Priority.ALWAYS);
+        return section;
+    }
+
+    private void loadRecycleBin() {
+        if (!AppPaths.isWindows()) return;
+        refreshRecycleBinBtn.setDisable(true);
+        secureWipeRecycleBinBtn.setDisable(true);
+        recycleBinProgress.setProgress(-1);
+        recycleBinProgress.setVisible(true);
+        recycleBinStatus.setText("Loading Recycle Bin contents...");
+
+        new Thread(() -> {
+            try {
+                ShredderService.RecycleBinResult result = shredderService.getRecycleBinContents();
+                Platform.runLater(() -> {
+                    recycleBinEntries.setAll(result.entries());
+                    if (result.fileCount() == 0) {
+                        recycleBinStatus.setText("Recycle Bin is empty.");
+                        recycleBinSummary.setText("");
+                        secureWipeRecycleBinBtn.setDisable(true);
+                    } else {
+                        String sizeText = result.totalSizeBytes() < 1024 * 1024
+                                ? (result.totalSizeBytes() / 1024) + " KB"
+                                : String.format("%.1f MB", result.totalSizeBytes() / (1024.0 * 1024));
+                        recycleBinStatus.setText(result.fileCount() + " item(s) in Recycle Bin.");
+                        recycleBinSummary.setText("Total size: " + sizeText);
+                        secureWipeRecycleBinBtn.setDisable(false);
+                    }
+                });
+            } catch (Exception e) {
+                AppLogger.error("Failed to load Recycle Bin", e);
+                Platform.runLater(() -> {
+                    recycleBinStatus.setText("Failed to load Recycle Bin.");
+                    new Alert(Alert.AlertType.ERROR, "Failed to load Recycle Bin:\n" + e.getMessage()).showAndWait();
+                });
+            } finally {
+                Platform.runLater(() -> {
+                    refreshRecycleBinBtn.setDisable(false);
+                    recycleBinProgress.setVisible(false);
+                });
+            }
+        }, "load-recyclebin").start();
+    }
+
+    private void startSecureWipeRecycleBin() {
+        List<RecycleBinEntry> entries = List.copyOf(recycleBinEntries);
+        if (entries.isEmpty()) return;
+
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING, "Secure Recycle Bin wipe requires administrator rights.").showAndWait();
+            return;
+        }
+
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Are you sure you want to securely wipe all " + entries.size() + " item(s) from the Recycle Bin?\n\n"
+                        + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
+        confirm.setHeaderText("Confirm Recycle Bin Wipe");
+        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+
+        recycleBinBusy.set(true);
+        recycleBinCancelled.set(false);
+        secureWipeRecycleBinBtn.setDisable(true);
+        refreshRecycleBinBtn.setDisable(true);
+        recycleBinProgress.setProgress(0);
+        recycleBinProgress.setVisible(true);
+        recycleBinStatus.setText("Securely wiping Recycle Bin...");
+
+        List<String> recyclePaths = entries.stream()
+                .map(RecycleBinEntry::getRecyclePath)
+                .filter(p -> p != null && !p.isBlank())
+                .toList();
+
+        new Thread(() -> {
+            try {
+                int passCount = getSelectedPassCount();
+                FolderDeleteResult result = shredderService.secureWipeRecycleBin(recyclePaths, passCount,
+                        msg -> Platform.runLater(() -> recycleBinStatus.setText(msg)),
+                        recycleBinCancelled);
+                Platform.runLater(() -> {
+                    if (result.isSuccess()) {
+                        recycleBinEntries.clear();
+                        recycleBinStatus.setText("Recycle Bin securely wiped: " + result.getFilesDeleted() + " item(s) removed.");
+                        recycleBinSummary.setText("");
+                        secureWipeRecycleBinBtn.setDisable(true);
+                        String msg = "Recycle Bin securely wiped.\n" + result.getFilesDeleted() + " file(s) overwritten.";
+                        if (!result.getScheduledForReboot().isEmpty()) {
+                            msg += "\n" + result.getScheduledForReboot().size() + " file(s) scheduled for deletion on next reboot.";
+                        }
+                        new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
+                    } else {
+                        recycleBinStatus.setText("Recycle Bin wipe failed.");
+                        new Alert(Alert.AlertType.ERROR, "Recycle Bin wipe failed:\n" + result.getMessage()).showAndWait();
+                    }
+                });
+            } catch (Exception e) {
+                AppLogger.error("Recycle Bin wipe failed", e);
+                Platform.runLater(() -> {
+                    recycleBinStatus.setText("Recycle Bin wipe failed.");
+                    if (!recycleBinCancelled.get()) {
+                        new Alert(Alert.AlertType.ERROR, "Recycle Bin wipe failed:\n" + e.getMessage()).showAndWait();
+                    }
+                });
+            } finally {
+                Platform.runLater(() -> {
+                    recycleBinBusy.set(false);
+                    secureWipeRecycleBinBtn.setDisable(recycleBinEntries.isEmpty());
+                    refreshRecycleBinBtn.setDisable(false);
+                    recycleBinProgress.setVisible(false);
+                });
+            }
+        }, "wipe-recyclebin").start();
     }
 
     private void startSecureDelete() {

@@ -334,6 +334,7 @@ public class DriversTabView extends BorderPane {
 
         private final UIButton updateBtn = UIButton.small("Update");
         private final UIButton ignoreBtn = UIButton.small("Ignore");
+        private final UIButton compareBtn = UIButton.small("Compare");
         private final UIButton stopBtn = UIButton.small("Stop");
         private final ProgressBar downloadProgress = new ProgressBar(0);
         private final UILabel sizeLabel = new UILabel("");
@@ -347,7 +348,7 @@ public class DriversTabView extends BorderPane {
             spinner.setPrefSize(24, 24);
             spinner.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
             downloadProgress.setPrefWidth(80);
-            container = new HBox(6, updateBtn, ignoreBtn, sizeLabel, downloadProgress, stopBtn, installingLabel, spinner);
+            container = new HBox(6, updateBtn, ignoreBtn, compareBtn, sizeLabel, downloadProgress, stopBtn, installingLabel, spinner);
             container.setAlignment(Pos.CENTER_LEFT);
 
             updateBtn.setOnAction(e -> {
@@ -361,6 +362,12 @@ public class DriversTabView extends BorderPane {
                 if (row != null) {
                     excludeDriver(row);
                     outdatedRows.remove(row);
+                }
+            });
+            compareBtn.setOnAction(e -> {
+                DriverRow row = currentRow();
+                if (row != null && row.hasUpdate()) {
+                    showComparisonDialog(row);
                 }
             });
             stopBtn.setOnAction(e -> {
@@ -403,6 +410,9 @@ public class DriversTabView extends BorderPane {
             }
             updateBtn.setDisable(!row.hasUpdate() || busy.get());
             ignoreBtn.setDisable(busy.get());
+            compareBtn.setDisable(!row.hasUpdate() || busy.get());
+            compareBtn.setVisible(row.hasUpdate());
+            compareBtn.setManaged(row.hasUpdate());
             if (row.candidate() != null) {
                 String tooltipText = row.installed().friendlyName();
                 if (row.candidate().availableVersion() != null) {
@@ -871,6 +881,9 @@ public class DriversTabView extends BorderPane {
                         live.setIdle();
                     }
                 });
+                if (result.installed()) {
+                    verifyInstalledVersion(row, c);
+                }
             } catch (Exception ex) {
                 Platform.runLater(() -> {
                     showErrorWithFallback("Install failed:\n" + ex.getMessage(), c.vendorPageUrl());
@@ -966,6 +979,42 @@ public class DriversTabView extends BorderPane {
         if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
         if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
         return String.format("%.2f GB", bytes / (1024.0 * 1024 * 1024));
+    }
+
+    /**
+     * Looks up the {@link DriverActionCell} for a given row by walking the table's visible cells.
+     * Returns {@code null} if the row is not currently visible in the viewport.
+     */
+    private DriverActionCell lookupActionCell(DriverRow row) {
+        if (outdatedTable == null) return null;
+        for (var node : outdatedTable.lookupAll(".table-cell")) {
+            if (node instanceof DriverActionCell cell) {
+                DriverRow cellRow = cell.getTableRow() != null ? cell.getTableRow().getItem() : null;
+                if (cellRow == row) {
+                    return cell;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Re-scans a single driver after update to verify the new version was actually installed.
+     * Updates the row's current version if the installed version changed.
+     */
+    private void verifyInstalledVersion(DriverRow row, DriverUpdateCandidate oldCandidate) {
+        try {
+            InstalledDriver updated = scanService.scanSingleDriver(row.installed().deviceId());
+            if (updated != null) {
+                String newVersion = updated.driverVersion() != null ? updated.driverVersion() : "\u2014";
+                if (!newVersion.equals(row.currentVersionProperty().get())) {
+                    AppLogger.info("Version verified: " + row.installed().friendlyName()
+                            + " updated to " + newVersion);
+                }
+            }
+        } catch (Exception e) {
+            AppLogger.debug("Post-update re-scan failed: " + e.getMessage());
+        }
     }
     
     private void excludeDriver(DriverRow row) {
@@ -1158,6 +1207,108 @@ public class DriversTabView extends BorderPane {
         grid.add(val, 1, row);
     }
 
+    private void showComparisonDialog(DriverRow row) {
+        DriverUpdateCandidate c = row.candidate();
+        if (c == null) return;
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Driver Comparison");
+        dialog.setHeaderText(row.installed().friendlyName());
+
+        GridPane grid = new GridPane();
+        grid.setHgap(16);
+        grid.setVgap(8);
+        grid.setPadding(new Insets(16));
+
+        Label currentHeader = new Label("Current");
+        currentHeader.setStyle("-fx-font-weight: bold; -fx-font-size: 14;");
+        Label availableHeader = new Label("Available");
+        availableHeader.setStyle("-fx-font-weight: bold; -fx-font-size: 14; -fx-text-fill: #50fa7b;");
+        grid.add(currentHeader, 0, 0);
+        grid.add(availableHeader, 1, 0);
+
+        addComparisonRow(grid, 1, "Version:", row.installed().driverVersion(), c.availableVersion());
+        addComparisonRow(grid, 2, "Provider:", row.installed().provider(), c.source());
+        addComparisonRow(grid, 3, "Release Date:",
+                row.installed().releaseDate() != null
+                        ? row.installed().releaseDate().format(DateTimeFormatter.ISO_LOCAL_DATE) : "\u2014",
+                c.title() != null && !c.title().isBlank() ? c.title() : "\u2014");
+
+        int r = 4;
+        if (c.severity() != null) {
+            Label sevLabel = new Label(c.severity().name());
+            sevLabel.setStyle(switch (c.severity()) {
+                case CRITICAL -> "-fx-text-fill: #ff5555; -fx-font-weight: bold;";
+                case IMPORTANT -> "-fx-text-fill: #ffb86c; -fx-font-weight: bold;";
+                case RECOMMENDED -> "-fx-text-fill: #f1fa8c;";
+                case OPTIONAL -> "-fx-text-fill: #6272a4;";
+                default -> "";
+            });
+            grid.add(new Label("Severity:"), 0, r);
+            grid.add(sevLabel, 1, r);
+            r++;
+        }
+
+        if (c.description() != null && !c.description().isBlank()) {
+            Label descLabel = new Label(c.description());
+            descLabel.setWrapText(true);
+            descLabel.setMaxWidth(400);
+            grid.add(new Label("Description:"), 0, r);
+            grid.add(descLabel, 1, r);
+            r++;
+        }
+
+        DriverHealthService.DriverHealthScore hs = row.getHealthScore();
+        if (hs != null) {
+            Label scoreLabel = new Label(hs.score() + "/100 \u2014 " + hs.getLabel());
+            scoreLabel.setStyle(hs.getColorStyle());
+            grid.add(new Label("Health Score:"), 0, r);
+            grid.add(scoreLabel, 1, r);
+            r++;
+        }
+
+        if (c.downloadUrl() != null && !c.downloadUrl().isBlank()) {
+            grid.add(new Label("Download:"), 0, r);
+            Hyperlink dlLink = new Hyperlink(c.downloadUrl());
+            dlLink.setOnAction(e -> {
+                try { java.awt.Desktop.getDesktop().browse(new java.net.URI(c.downloadUrl())); }
+                catch (Exception ex) { AppLogger.warning("Failed to open browser: " + ex.getMessage()); }
+            });
+            grid.add(dlLink, 1, r);
+            r++;
+        }
+
+        if (c.vendorPageUrl() != null && !c.vendorPageUrl().isBlank()) {
+            grid.add(new Label("Vendor Page:"), 0, r);
+            Hyperlink vpLink = new Hyperlink(c.vendorPageUrl());
+            vpLink.setOnAction(e -> {
+                try { java.awt.Desktop.getDesktop().browse(new java.net.URI(c.vendorPageUrl())); }
+                catch (Exception ex) { AppLogger.warning("Failed to open browser: " + ex.getMessage()); }
+            });
+            grid.add(vpLink, 1, r);
+        }
+
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.CLOSE);
+        dialog.setResizable(true);
+        dialog.showAndWait();
+    }
+
+    private static void addComparisonRow(GridPane grid, int row, String label, String current, String available) {
+        Label curLabel = new Label(current != null ? current : "\u2014");
+        curLabel.setWrapText(true);
+        curLabel.setMaxWidth(200);
+        Label arrowLabel = new Label("\u2192");
+        Label availLabel = new Label(available != null ? available : "\u2014");
+        availLabel.setWrapText(true);
+        availLabel.setMaxWidth(200);
+        availLabel.setStyle("-fx-text-fill: #50fa7b;");
+        HBox rowBox = new HBox(12, curLabel, arrowLabel, availLabel);
+        rowBox.setAlignment(Pos.CENTER_LEFT);
+        grid.add(new Label(label), 0, row);
+        grid.add(rowBox, 1, row);
+    }
+
     private void startBatchUpdate() {
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING, "Installing drivers requires administrator rights.").showAndWait();
@@ -1244,12 +1395,31 @@ public class DriversTabView extends BorderPane {
                             String sizeText = totalBytes > 0
                                     ? formatBytes(bytesReceived) + " / " + formatBytes(totalBytes)
                                     : formatBytes(bytesReceived);
-                            Platform.runLater(() -> statusLabel.setText("Installing " + (idx + 1) + "/" + total
-                                    + ": " + row.installed().friendlyName() + " \u2014 " + sizeText));
+                            Platform.runLater(() -> {
+                                statusLabel.setText("Installing " + (idx + 1) + "/" + total
+                                        + ": " + row.installed().friendlyName() + " \u2014 " + sizeText);
+                                DriverActionCell cell = installCells.get(row);
+                                if (cell != null) {
+                                    cell.setDownloading(sizeText, fraction > 0 ? fraction : 0);
+                                }
+                            });
                         });
-                        installService.setStatusCallback(status -> Platform.runLater(() ->
-                                statusLabel.setText("Installing " + (idx + 1) + "/" + total + ": "
-                                        + row.installed().friendlyName() + " \u2014 " + status)));
+                        installService.setStatusCallback(status -> Platform.runLater(() -> {
+                            statusLabel.setText("Installing " + (idx + 1) + "/" + total + ": "
+                                    + row.installed().friendlyName() + " \u2014 " + status);
+                            DriverActionCell cell = installCells.get(row);
+                            if (cell != null) {
+                                cell.setInstalling();
+                            }
+                        }));
+                        Platform.runLater(() -> {
+                            DriverActionCell cell = lookupActionCell(row);
+                            if (cell != null) {
+                                installCells.put(row, cell);
+                                cell.setDownloading("Starting\u2026", 0);
+                            }
+                        });
+                        Thread.sleep(50);
                         DriverInstallService.InstallResult result = installService.install(c, settings);
                         if (result.installed()) {
                             succeeded++;
@@ -1260,15 +1430,31 @@ public class DriversTabView extends BorderPane {
                                 if (!upToDateRows.contains(row)) {
                                     upToDateRows.add(row);
                                 }
+                                DriverActionCell cell = installCells.remove(row);
+                                if (cell != null) {
+                                    cell.setIdle();
+                                }
                             });
                             recordHistory(row, c, true);
                         } else {
                             failed++;
                             recordHistory(row, c, false);
+                            Platform.runLater(() -> {
+                                DriverActionCell cell = installCells.remove(row);
+                                if (cell != null) {
+                                    cell.setIdle();
+                                }
+                            });
                         }
                     } catch (Exception ex) {
                         failed++;
                         AppLogger.warning("Batch install failed for " + row.installed().friendlyName() + ": " + ex.getMessage());
+                        Platform.runLater(() -> {
+                            DriverActionCell cell = installCells.remove(row);
+                            if (cell != null) {
+                                cell.setIdle();
+                            }
+                        });
                     }
                 }
             } catch (Exception ex) {
@@ -1277,6 +1463,25 @@ public class DriversTabView extends BorderPane {
             } finally {
                 installService.setProgressCallback(null);
                 installService.setStatusCallback(null);
+            }
+            if (succeeded > 0) {
+                Platform.runLater(() -> statusLabel.setText("Verifying installed versions\u2026"));
+                try {
+                    List<InstalledDriver> freshScan = scanService.scanInstalled();
+                    Map<String, InstalledDriver> freshByDevice = new java.util.HashMap<>();
+                    for (InstalledDriver d : freshScan) {
+                        freshByDevice.put(d.deviceId(), d);
+                    }
+                    for (DriverRow row : rows) {
+                        InstalledDriver fresh = freshByDevice.get(row.installed().deviceId());
+                        if (fresh != null) {
+                            String newVersion = fresh.driverVersion() != null ? fresh.driverVersion() : "\u2014";
+                            row.currentVersionProperty().set(newVersion);
+                        }
+                    }
+                } catch (Exception e) {
+                    AppLogger.debug("Post-batch re-scan failed: " + e.getMessage());
+                }
             }
             final int s = succeeded;
             final int f = failed;

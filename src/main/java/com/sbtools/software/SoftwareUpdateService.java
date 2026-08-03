@@ -288,6 +288,18 @@ public class SoftwareUpdateService {
         return candidates;
     }
 
+    public java.util.Map<SoftwareUpdateEntry, List<Path>> findCandidateInstallersForPackages(
+            List<SoftwareUpdateEntry> packages, Instant since) {
+        java.util.Map<SoftwareUpdateEntry, List<Path>> result = new java.util.LinkedHashMap<>();
+        for (SoftwareUpdateEntry pkg : packages) {
+            List<Path> candidates = findCandidateInstallersForPackage(pkg, since);
+            if (!candidates.isEmpty()) {
+                result.put(pkg, candidates);
+            }
+        }
+        return result;
+    }
+
     public List<Path> deleteInstallerFiles(List<Path> files) {
         List<Path> deleted = new ArrayList<>();
         for (Path p : files) {
@@ -465,7 +477,9 @@ public class SoftwareUpdateService {
                                                      SoftwareUpdateEntry entry, AtomicBoolean cancelled)
             throws IOException, CancellationException {
         List<String> args = new ArrayList<>(List.of(
-                "upgrade", "--id", packageId, "--accept-source-agreements", "--accept-package-agreements"));
+                "upgrade", "--id", packageId, "--source", "winget",
+                "--accept-source-agreements", "--accept-package-agreements",
+                "--force"));
         if (silent) args.add("--silent");
 
         try {
@@ -490,6 +504,8 @@ public class SoftwareUpdateService {
                     cancelled,
                     args.toArray(new String[0])
             );
+            AppLogger.info("winget upgrade result for " + packageId + ": exitCode=" + r.exitCode()
+                    + " output=" + (r.stdout() != null ? r.stdout().substring(0, Math.min(500, r.stdout().length())) : "null"));
             if (r.success()) return r;
             if (isInstallTechnologyMismatch(r)) {
                 throw new IOException("INSTALL_TECHNOLOGY_MISMATCH");

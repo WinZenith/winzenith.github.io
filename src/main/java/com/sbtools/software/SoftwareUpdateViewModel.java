@@ -81,6 +81,10 @@ public class SoftwareUpdateViewModel {
     public BooleanProperty showBatchProgressProperty() { return showBatchProgress; }
     public BooleanProperty busyProperty() { return busy; }
 
+    public boolean isInstallRunning() {
+        return installRunning.get();
+    }
+
     public void setOnWingetNotAvailable(Consumer<String> handler) {
         this.onWingetNotAvailable = handler;
     }
@@ -189,6 +193,21 @@ public class SoftwareUpdateViewModel {
         });
     }
 
+    public void cancelInstall() {
+        Platform.runLater(() -> {
+            if (disposed) return;
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                    "Cancel remaining updates?");
+            confirm.setHeaderText("Cancel Install");
+            confirm.showAndWait().ifPresent(result -> {
+                if (result == ButtonType.OK) {
+                    installCancelled.set(true);
+                    statusText.set("Cancelling updates...");
+                }
+            });
+        });
+    }
+
     public void updateSelected(List<SoftwareUpdateEntry> selected) {
         updateSelected(selected, false);
     }
@@ -228,12 +247,15 @@ public class SoftwareUpdateViewModel {
         AtomicInteger completed = new AtomicInteger(0);
         List<SoftwareUpdateEntry> failedPackages = new ArrayList<>();
         List<SoftwareUpdateEntry> techMismatchEntries = new ArrayList<>();
+        List<SoftwareUpdateEntry> successfulEntries = new ArrayList<>();
+        Instant batchStartTime = Instant.now();
 
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (SoftwareUpdateEntry e : selected) {
             if (installCancelled.get()) break;
             CompletableFuture<Void> future = CompletableFuture.runAsync(
-                    () -> installOne(e, total, completed, failedPackages, techMismatchEntries),
+                    () -> installOne(e, total, completed, failedPackages, techMismatchEntries,
+                            successfulEntries, batchStartTime),
                     installExecutor);
             futures.add(future);
         }
@@ -246,34 +268,37 @@ public class SoftwareUpdateViewModel {
             }
         }
 
+        final List<SoftwareUpdateEntry> finalSuccessful = new ArrayList<>(successfulEntries);
         final int finalCompleted = completed.get();
         List<SoftwareUpdateEntry> finalFailed = new ArrayList<>(failedPackages);
         List<SoftwareUpdateEntry> finalTechMismatch = new ArrayList<>(techMismatchEntries);
-        Platform.runLater(() -> {
-            if (disposed) return;
-            showBatchProgress.set(false);
-            installRunning.set(false);
-            busy.set(false);
-            if (installCancelled.get()) {
-                statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
-            } else if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
-                statusText.set("Completed with " + finalFailed.size() + " failure(s). Use \"Retry Failed\" or re-scan.");
-                for (SoftwareUpdateEntry fe : finalFailed) {
-                    synchronized (failedEntries) { failedEntries.add(fe); }
-                    fe.setStatus("Failed");
-                    fe.setProgress(0.0);
-                    fe.setSelected(false);
-                    rows.remove(fe);
-                    rows.add(fe);
-                }
-                showRetryFailed.set(true);
-                showBatchResultDialog(failedPackages, finalTechMismatch);
-            } else {
-                statusText.set("All selected updates installed successfully.");
-                showRetryFailed.set(false);
-                scan();
-            }
-        });
+
+        InstallerCleanupHelper.promptAndCleanupBatchAsync(service, finalSuccessful, batchStartTime)
+                .thenRunAsync(() -> Platform.runLater(() -> {
+                    if (disposed) return;
+                    showBatchProgress.set(false);
+                    installRunning.set(false);
+                    busy.set(false);
+                    if (installCancelled.get()) {
+                        statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
+                    } else if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
+                        statusText.set("Completed with " + finalFailed.size() + " failure(s). Use \"Retry Failed\" or re-scan.");
+                        for (SoftwareUpdateEntry fe : finalFailed) {
+                            synchronized (failedEntries) { failedEntries.add(fe); }
+                            fe.setStatus("Failed");
+                            fe.setProgress(0.0);
+                            fe.setSelected(false);
+                            rows.remove(fe);
+                            rows.add(fe);
+                        }
+                        showRetryFailed.set(true);
+                        showBatchResultDialog(failedPackages, finalTechMismatch);
+                    } else {
+                        statusText.set("All selected updates installed successfully.");
+                        showRetryFailed.set(false);
+                        scan();
+                    }
+                }), executor);
     }
 
     public void updateSingle(SoftwareUpdateEntry entry) {
@@ -414,7 +439,13 @@ public class SoftwareUpdateViewModel {
                 e.setSelected(true);
             }
             showRetryFailed.set(false);
-            updateSelected(toRetry, true);
+            executor.submit(() -> {
+                try { Thread.sleep(2000); } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                Platform.runLater(() -> updateSelected(toRetry, true));
+            }, "SoftwareUpdate-RetryDelay");
         }
     }
 
@@ -469,7 +500,8 @@ public class SoftwareUpdateViewModel {
 
     private void installOne(SoftwareUpdateEntry entry, int total,
                              AtomicInteger completed, List<SoftwareUpdateEntry> failedPackages,
-                             List<SoftwareUpdateEntry> techMismatchEntries) {
+                             List<SoftwareUpdateEntry> techMismatchEntries,
+                             List<SoftwareUpdateEntry> successfulEntries, Instant batchStartTime) {
         if (installCancelled.get()) return;
         try {
             Instant start = Instant.now();
@@ -496,7 +528,7 @@ public class SoftwareUpdateViewModel {
             }
 
             if (res.success()) {
-                InstallerCleanupHelper.promptAndCleanup(service, entry, start);
+                synchronized (successfulEntries) { successfulEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), true, null);
                 Platform.runLater(() -> {
                     if (disposed) return;
@@ -555,7 +587,7 @@ public class SoftwareUpdateViewModel {
             int current = completed.incrementAndGet();
             Platform.runLater(() -> {
                 if (disposed) return;
-                batchProgressText.set(current + " / " + total);
+                batchProgressText.set(entry.getName() + " (" + current + " / " + total + ")");
                 batchProgress.set((double) current / total);
             });
         }
