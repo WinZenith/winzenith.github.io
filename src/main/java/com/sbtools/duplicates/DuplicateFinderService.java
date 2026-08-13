@@ -7,7 +7,6 @@ import com.sun.jna.platform.win32.ShellAPI.SHFILEOPSTRUCT;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.FileVisitResult;

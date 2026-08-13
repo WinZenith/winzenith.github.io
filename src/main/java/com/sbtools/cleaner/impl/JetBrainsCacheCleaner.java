@@ -5,7 +5,6 @@ import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 
-import java.io.IOException;
 import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.List;

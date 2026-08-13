@@ -11,7 +11,6 @@ import com.sbtools.shredder.RecycleBinEntry;
 import com.sbtools.shredder.ShredderFileEntry;
 import com.sbtools.shredder.ShredderResult;
 import com.sbtools.shredder.ShredderService;
-import com.sbtools.shredder.WipeProgress;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 

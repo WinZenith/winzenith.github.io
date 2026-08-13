@@ -7,7 +7,6 @@ import com.sbtools.cleaner.CleanerUtils;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.ProcessManager;
 
-import java.io.IOException;
 import java.nio.file.*;
 import java.util.Comparator;
 import java.util.stream.Stream;
