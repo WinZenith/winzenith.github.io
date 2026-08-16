@@ -392,8 +392,30 @@ public class SoftwareUpdateService {
                 ProcessRunner.powershellScript(script.toString(), updateId),
                 line -> {},
                 pct -> {},
-                cancelled
+                cancelled,
+                timeoutSeconds
         );
+    }
+
+    /**
+     * Returns true if the given process result indicates a restart is required to finish
+     * the installation. Handles the JSON output of wu-install.ps1 (field "rebootRequired")
+     * and falls back to a case-insensitive text search for robustness.
+     */
+    public static boolean isRebootRequired(ProcessResult result) {
+        if (result == null) return false;
+        String output = result.combinedOutput();
+        if (output == null || output.isBlank()) return false;
+        try {
+            JsonNode root = JsonMapper.parseTree(output);
+            JsonNode reboot = root.has("rebootRequired") ? root.get("rebootRequired") : null;
+            if (reboot != null) {
+                if (reboot.isBoolean()) return reboot.asBoolean(false);
+                if (reboot.isTextual()) return Boolean.parseBoolean(reboot.asText());
+            }
+        } catch (Exception ignored) {
+        }
+        return output.toLowerCase().contains("rebootrequired");
     }
 
     /**
@@ -501,6 +523,7 @@ public class SoftwareUpdateService {
                         } catch (Exception ignored) {}
                     }),
                     cancelled,
+                    timeoutSeconds,
                     args.toArray(new String[0])
             );
             AppLogger.info("winget upgrade result for " + packageId + ": exitCode=" + r.exitCode()

@@ -269,6 +269,7 @@ public class WingetRunner {
     public ProcessResult runWithFallbackStreaming(Consumer<String> lineCallback,
                                                    Consumer<Double> progressCallback,
                                                    AtomicBoolean cancelled,
+                                                   long timeoutSeconds,
                                                    String... args) throws java.io.IOException, java.util.concurrent.CancellationException {
         List<List<String>> candidates = buildCandidates(args);
         ProcessResult lastResult = null;
@@ -279,7 +280,7 @@ public class WingetRunner {
             int idx = (startIdx + attempt) % candidates.size();
             List<String> candidate = candidates.get(idx);
             try {
-                ProcessResult r = runner.runStreaming(candidate, lineCallback, progressCallback, cancelled);
+                ProcessResult r = runner.runStreaming(candidate, lineCallback, progressCallback, cancelled, timeoutSeconds);
                 if (r.success()) {
                     workingCandidateIndex = idx;
                     return r;

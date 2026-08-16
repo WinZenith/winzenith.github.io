@@ -115,7 +115,6 @@ public class UninstallerService {
             }
             List<String> command = parseUninstallCommand(uninstallCmd);
 
-            // Start the process
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(false);
             AppLogger.info("Running uninstaller: " + String.join(" ", command));
@@ -124,16 +123,7 @@ public class UninstallerService {
                 ProcessManager.register(process);
             } catch (Throwable ignored) {}
 
-            // Wait for the main process to complete
-            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                throw new IOException("Uninstaller timed out after " + timeoutSeconds + "s");
-            }
-
-            int exitCode = process.exitValue();
-
-            // Collect stdout/stderr (drain streams in background)
+            // Drain streams BEFORE waitFor to prevent pipe deadlock (~4 KB buffer fills up)
             Thread drainStdout = new Thread(() -> {
                 try { process.getInputStream().readAllBytes(); } catch (Exception ignored) {}
             }, "uninstaller-stdout-drain");
@@ -145,28 +135,45 @@ public class UninstallerService {
             drainStderr.setDaemon(true);
             drainStderr.start();
 
-            // Wait for all descendant processes to exit (catches msiexec and other spawned uninstaller processes)
+            // Capture descendant handles while the parent is still alive
+            List<ProcessHandle> descendantHandles;
             try {
-                List<ProcessHandle> descendants = process.descendants().toList();
-                AppLogger.info("Waiting for " + descendants.size() + " descendant process(es) to exit");
-                long descendantDeadline = System.currentTimeMillis() + (30_000);
-                for (ProcessHandle child : descendants) {
-                    long remaining = descendantDeadline - System.currentTimeMillis();
-                    if (remaining <= 0) break;
-                    try {
-                        child.onExit().get(remaining, TimeUnit.MILLISECONDS);
-                    } catch (Exception ignored) {}
-                }
+                descendantHandles = process.descendants().toList();
+                AppLogger.info("Captured " + descendantHandles.size() + " descendant process(es) to wait for");
             } catch (Exception e) {
-                AppLogger.debug("Failed to wait for descendants: " + e.getMessage());
+                descendantHandles = List.of();
+                AppLogger.debug("Failed to capture descendants: " + e.getMessage());
             }
 
-            // Additionally wait for child processes matching app name/path (fallback)
-            waitForChildProcesses(app, 30);
+            // Wait for the main process to complete
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                throw new IOException("Uninstaller timed out after " + timeoutSeconds + "s");
+            }
 
-            // Additionally wait for the install directory to be removed,
-            // as some uninstallers perform cleanup after child processes exit.
-            waitForInstallDirRemoval(app, 30);
+            int exitCode = process.exitValue();
+
+            // Join drain threads so streams are fully consumed
+            try { drainStdout.join(10_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            try { drainStderr.join(10_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+            // Wait for descendant processes captured before the parent exited
+            if (!descendantHandles.isEmpty()) {
+                for (ProcessHandle child : descendantHandles) {
+                    if (!child.isAlive()) continue;
+                    try {
+                        AppLogger.info("Waiting for descendant process to exit: PID " + child.pid());
+                        child.onExit().get(timeoutSeconds, TimeUnit.SECONDS);
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            // Fallback: wait for child processes matching app name/path
+            waitForChildProcesses(app, 60);
+
+            // Wait for the install directory to be removed
+            waitForInstallDirRemoval(app, 60);
 
             return new ProcessResult(exitCode, "", "");
         }
@@ -407,11 +414,11 @@ public class UninstallerService {
             } catch (Exception ignored) {}
         }
 
-        // Search in Software paths
+        // Search in Software paths only — do NOT scan SYSTEM\CurrentControlSet\Services
+        // because substring matching on service names can flag legitimate Windows services
         scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SOFTWARE", app.getName(), app.getPublisher(), leftovers);
         scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SOFTWARE\\Wow6432Node", app.getName(), app.getPublisher(), leftovers);
         scanRegistryForLeftovers(WinReg.HKEY_CURRENT_USER, "HKCU", "SOFTWARE", app.getName(), app.getPublisher(), leftovers);
-        scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SYSTEM\\CurrentControlSet\\Services", app.getName(), app.getPublisher(), leftovers);
 
         // Scan HKCR for file association entries
         scanHkcrForLeftovers(app.getName(), app.getPublisher(), leftovers);
@@ -803,8 +810,16 @@ public class UninstallerService {
         try {
             String psScript;
             if (installLoc != null && !installLoc.isBlank()) {
-                String escapedPath = installLoc.replace("'", "''");
-                psScript = "Get-Process | Where-Object { $_.Path -like '" + escapedPath + "*' } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
+                // Use exact directory boundary comparison to avoid killing processes
+                // in sibling directories that share a prefix (e.g. C:\...\Google\ vs C:\...\Google Update\)
+                String normalizedPath = installLoc.replace('\\', '/').replaceAll("/+$", "");
+                String escapedPath = normalizedPath.replace("'", "''").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?");
+                psScript = "$target = '" + escapedPath + "'; " +
+                        "Get-Process | Where-Object { " +
+                        "  if (-not $_.Path) { return $false }; " +
+                        "  $p = $_.Path.Replace('\\','/'); " +
+                        "  $p -eq $target -or $p.StartsWith($target + '/', [System.StringComparison]::OrdinalIgnoreCase) " +
+                        "} | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                         "Write-Output 'done'";
             } else {
                 String escapedName = appName.replace("'", "''").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?");
@@ -814,7 +829,6 @@ public class UninstallerService {
             ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-Command", psScript);
             pb.redirectErrorStream(true);
             Process proc = pb.start();
-            // Drain the output stream to prevent deadlock if the buffer fills up
             Thread drainThread = new Thread(() -> {
                 try { proc.getInputStream().readAllBytes(); } catch (Exception ignored) {}
             }, "ps-drain");

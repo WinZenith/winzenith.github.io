@@ -19,7 +19,7 @@ import java.util.function.Consumer;
 
 public class DriverCatalogAggregator {
 
-    private static final long PROVIDER_TIMEOUT_SECONDS = 60;
+    private static final long PROVIDER_TIMEOUT_SECONDS = 180;
 
     private final List<DriverCatalogProvider> providers;
     private final ProviderCache cache;

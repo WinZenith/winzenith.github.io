@@ -86,7 +86,11 @@ public class DriverInstallService {
 
         com.sbtools.backup.DriverBackupEntry backupEntry = null;
         if (settings.autoBackupDrivers()) {
-            backupEntry = backupService.backupBeforeUpdate(candidate.installed(), settings);
+            try {
+                backupEntry = backupService.backupBeforeUpdate(candidate.installed(), settings);
+            } catch (Exception e) {
+                AppLogger.warning("Pre-install driver backup failed (non-fatal): " + e.getMessage());
+            }
         }
 
         String availVer = candidate.availableVersion();
@@ -288,7 +292,18 @@ public class DriverInstallService {
             }
 
             String lowerName = driverFile.getFileName().toString().toLowerCase();
-            if (lowerName.endsWith(".exe")) {
+            if (lowerName.endsWith(".zip.exe")) {
+                AppLogger.info("Self-extracting ZIP archive detected, extracting: " + driverFile);
+                ProcessResult installResult = installDriverFile(driverFile, candidate);
+                if (!installResult.success()) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                            "Self-extracting archive installation failed: " + installResult.combinedOutput());
+                }
+                AppLogger.info("Driver installed from self-extracting archive: " + driverFile);
+                cleanupTempFiles(driverFile);
+                return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed from " + driverFile.toString());
+            } else if (lowerName.endsWith(".exe")) {
                 AppLogger.info("Launching silent installer: " + driverFile);
 
                 Path msiFile = extractMsiFromExe(driverFile);
@@ -401,6 +416,9 @@ public class DriverInstallService {
                             });
                 }
             }
+            String baseName = name.replaceAll("\\.[^.]+$", "");
+            Path msiCopy = driverFile.getParent().resolve(baseName + ".msi");
+            Files.deleteIfExists(msiCopy);
         } catch (Exception e) {
             AppLogger.debug("Could not clean up temp files: " + e.getMessage());
         }
@@ -507,8 +525,11 @@ public class DriverInstallService {
             if (header[0] == 'P' && header[1] == 'K' && header[2] == 0x03 && header[3] == 0x04) return ".zip";
             if (header[0] == 'M' && header[1] == 'Z') return ".exe";
             if (header[0] == 'M' && header[1] == 'S' && header[2] == 'C' && header[3] == 'F') return ".cab";
+            if (header[0] == 0xD0 && header[1] == 0xCF && header[2] == 0x11 && header[3] == 0xE0
+                    && header[4] == (byte) 0xA1 && header[5] == (byte) 0xB1
+                    && header[6] == 0x1A && header[7] == (byte) 0xE1) return ".msi";
             if (header[0] == 0x37 && header[1] == 0x7A && header[2] == 0xBC && header[3] == 0xAF) return ".7z";
-            if (header[0] == 0x1F && header[1] == (byte) 0x8B) return ".zip";
+            if (header[0] == 0x1F && header[1] == (byte) 0x8B) return ".gz";
         } catch (Exception e) {
             AppLogger.warning("Could not read magic bytes: " + e.getMessage());
         }
@@ -598,6 +619,28 @@ public class DriverInstallService {
             return new ProcessResult(1, "", "No setup.exe or .inf found in extracted cab: " + extractDir);
         } else if (filename.endsWith(".rar")) {
             return new ProcessResult(1, "", "RAR archives require manual extraction. Download: " + driverFile);
+        } else if (filename.endsWith(".msi")) {
+            AppLogger.info("Installing MSI driver package: " + driverFile);
+            ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
+                    "msiexec.exe", "/i", driverFile.toString(), "/qn"
+            ).command().toArray(new String[0])));
+            boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
+            if (result.success() || msiReboot) {
+                return new ProcessResult(0, "", msiReboot
+                        ? "Driver installed silently via MSI. A restart is required."
+                        : "Driver installed silently via MSI.");
+            }
+            AppLogger.warning("MSI /qn failed, trying /quiet: " + result.combinedOutput());
+            ProcessResult fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
+                    "msiexec.exe", "/i", driverFile.toString(), "/quiet"
+            ).command().toArray(new String[0])));
+            boolean fallbackReboot = isRebootRequiredExitCode(fallbackResult.exitCode());
+            if (fallbackResult.success() || fallbackReboot) {
+                return new ProcessResult(0, "", fallbackReboot
+                        ? "Driver installed silently via MSI. A restart is required."
+                        : "Driver installed silently via MSI.");
+            }
+            return new ProcessResult(1, "", "MSI installation failed: " + fallbackResult.combinedOutput());
         }
 
         String magicExt = detectExtensionByMagicBytes(driverFile);

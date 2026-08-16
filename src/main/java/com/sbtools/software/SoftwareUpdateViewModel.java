@@ -274,6 +274,10 @@ public class SoftwareUpdateViewModel {
         List<SoftwareUpdateEntry> finalTechMismatch = new ArrayList<>(techMismatchEntries);
 
         InstallerCleanupHelper.promptAndCleanupBatchAsync(service, finalSuccessful, batchStartTime)
+                .exceptionally(ex -> {
+                    AppLogger.warning("Batch cleanup failed: " + ex.getMessage());
+                    return false;
+                })
                 .thenRunAsync(() -> Platform.runLater(() -> {
                     if (disposed) return;
                     showBatchProgress.set(false);
@@ -334,12 +338,14 @@ public class SoftwareUpdateViewModel {
                 try {
                     res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS, installCancelled);
                 } catch (CancellationException cex) {
+                    resetEntryUiState(entry);
                     return;
                 }
             } else {
                 try {
                     res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_SECONDS, entry, installCancelled);
                 } catch (CancellationException cex) {
+                    resetEntryUiState(entry);
                     return;
                 }
             }
@@ -353,7 +359,7 @@ public class SoftwareUpdateViewModel {
                     entry.setStatus("");
                     entry.setProgress(0.0);
                 });
-                if (res.combinedOutput() != null && res.combinedOutput().contains("RebootRequired")) {
+                if (SoftwareUpdateService.isRebootRequired(res)) {
                     Platform.runLater(() -> {
                         if (!disposed) {
                             new Alert(Alert.AlertType.INFORMATION, "Restart required to finish installation.").showAndWait();
@@ -517,12 +523,14 @@ public class SoftwareUpdateViewModel {
                 try {
                     res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS, installCancelled);
                 } catch (CancellationException cex) {
+                    resetEntryUiState(entry);
                     return;
                 }
             } else {
                 try {
                     res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_SECONDS, entry, installCancelled);
                 } catch (CancellationException cex) {
+                    resetEntryUiState(entry);
                     return;
                 }
             }
@@ -537,7 +545,7 @@ public class SoftwareUpdateViewModel {
                     entry.setStatus("");
                     entry.setProgress(0.0);
                 });
-                if (res.combinedOutput() != null && res.combinedOutput().contains("RebootRequired")) {
+                if (SoftwareUpdateService.isRebootRequired(res)) {
                     Platform.runLater(() -> {
                         if (!disposed) {
                             new Alert(Alert.AlertType.INFORMATION, "Restart required for " + entry.getName() + ".").showAndWait();
@@ -593,6 +601,14 @@ public class SoftwareUpdateViewModel {
         }
     }
 
+    private static void resetEntryUiState(SoftwareUpdateEntry entry) {
+        Platform.runLater(() -> {
+            if (entry == null) return;
+            entry.setStatus("");
+            entry.setProgress(0.0);
+        });
+    }
+
     private static boolean isMsiCorruptionError(String output) {
         if (output == null) return false;
         String lower = output.toLowerCase();
@@ -626,17 +642,22 @@ public class SoftwareUpdateViewModel {
         }
         CompletableFuture<Void> f = new CompletableFuture<>();
         Platform.runLater(() -> {
-            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                    "Would you like to create a System Restore Point before proceeding with the updates?");
-            confirm.setHeaderText(AppInfo.DISPLAY_NAME);
-            confirm.showAndWait().ifPresent(result -> {
-                if (result == ButtonType.OK) {
-                    boolean created = restoreService.createRestorePoint("WinZenith software update").success();
-                    if (!created) AppLogger.warning("Restore point creation failed or skipped.");
-                    restorePointCreatedThisBatch.set(true);
-                }
-            });
-            f.complete(null);
+            try {
+                Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                        "Would you like to create a System Restore Point before proceeding with the updates?");
+                confirm.setHeaderText(AppInfo.DISPLAY_NAME);
+                confirm.showAndWait().ifPresent(result -> {
+                    if (result == ButtonType.OK) {
+                        boolean created = restoreService.createRestorePoint("WinZenith software update").success();
+                        if (!created) AppLogger.warning("Restore point creation failed or skipped.");
+                        restorePointCreatedThisBatch.set(true);
+                    }
+                });
+            } catch (Exception ex) {
+                AppLogger.warning("Restore point prompt failed: " + ex.getMessage());
+            } finally {
+                f.complete(null);
+            }
         });
         return f;
     }

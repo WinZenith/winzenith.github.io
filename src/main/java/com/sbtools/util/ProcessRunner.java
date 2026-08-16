@@ -48,13 +48,13 @@ public class ProcessRunner {
         try {
             boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
-                process.destroyForcibly();
+                killProcessTree(process);
                 joinReaders(stdoutReader, stderrReader);
                 throw new IOException("Process timed out after " + timeoutSeconds + "s");
             }
             joinReaders(stdoutReader, stderrReader);
         } catch (InterruptedException e) {
-            process.destroyForcibly();
+            killProcessTree(process);
             joinReaders(stdoutReader, stderrReader);
             Thread.currentThread().interrupt();
             throw e;
@@ -68,10 +68,29 @@ public class ProcessRunner {
      * Runs a command, reading stdout line by line in real-time.
      * Each line is passed to lineCallback. If a line is valid JSON with a "progress" (0-100)
      * field, it is also passed to progressCallback as a 0.0-1.0 double.
-     * Checks cancelled between lines; if true, destroys the process and throws CancellationException.
+     * The process is polled for cancellation and an end-to-end deadline, so cancel/timeout
+     * work even while the child process emits no output.
+     *
+     * @param command          the command to run
+     * @param lineCallback     callback invoked for each output line (may be null)
+     * @param progressCallback callback invoked with progress values (may be null)
+     * @param cancelled        flag checked while the process runs; when set, the process is
+     *                         destroyed and a CancellationException is thrown (may be null)
      */
     public ProcessResult runStreaming(List<String> command, Consumer<String> lineCallback,
                              Consumer<Double> progressCallback, AtomicBoolean cancelled)
+            throws IOException, CancellationException {
+        return runStreaming(command, lineCallback, progressCallback, cancelled, defaultTimeoutSeconds);
+    }
+
+    /**
+     * Same as {@link #runStreaming(List, Consumer, Consumer, AtomicBoolean)} but with an
+     * explicit end-to-end timeout. If the process is still running after timeoutSeconds, it
+     * is forcibly destroyed and an IOException is thrown.
+     */
+    public ProcessResult runStreaming(List<String> command, Consumer<String> lineCallback,
+                             Consumer<Double> progressCallback, AtomicBoolean cancelled,
+                             long timeoutSeconds)
             throws IOException, CancellationException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
@@ -80,65 +99,88 @@ public class ProcessRunner {
         // Track process so it can be terminated on application shutdown if still running
         try { ProcessManager.register(process); } catch (Throwable ignored) {}
         StringBuilder outBuf = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
+
+        Thread reader = new Thread(() -> {
+            try (BufferedReader bufferedReader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = bufferedReader.readLine()) != null) {
+                    synchronized (outBuf) {
+                        outBuf.append(line).append(System.lineSeparator());
+                    }
+                    try {
+                        if (lineCallback != null) {
+                            lineCallback.accept(line);
+                        }
+                        if (progressCallback != null) {
+                            handleProgress(line, progressCallback);
+                        }
+                    } catch (Throwable t) {
+                        AppLogger.warning("Stream callback error: " + t.getMessage());
+                    }
+                }
+            } catch (IOException ignored) {
+                // Stream closed because the process was destroyed
+            }
+        }, "process-stream-reader");
+        reader.setDaemon(true);
+        reader.start();
+
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, timeoutSeconds));
+        try {
+            while (process.isAlive()) {
                 if (cancelled != null && cancelled.get()) {
-                    process.destroyForcibly();
+                    killProcessTree(process);
                     throw new CancellationException("Operation cancelled by user");
                 }
-                if (lineCallback != null) {
-                    lineCallback.accept(line);
+                if (System.nanoTime() > deadlineNanos) {
+                    killProcessTree(process);
+                    throw new IOException("Process timed out after " + timeoutSeconds + "s");
                 }
-                outBuf.append(line).append(System.lineSeparator());
-                if (progressCallback != null) {
-                    boolean jsonProgressFired = false;
-                    try {
-                        var tree = JsonMapper.mapper().readTree(line);
-                        if (tree.has("progress")) {
-                            double pct = tree.get("progress").asDouble(0);
-                            progressCallback.accept(Math.min(1.0, Math.max(0, pct / 100.0)));
-                            jsonProgressFired = true;
-                        }
-                    } catch (Exception ignored) {
-                    }
-                    if (!jsonProgressFired) {
-                        String trimmed = line.trim();
-                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*%").matcher(trimmed);
-                        if (m.find()) {
-                            try {
-                                double pct = Double.parseDouble(m.group(1));
-                                progressCallback.accept(Math.min(1.0, Math.max(0, pct / 100.0)));
-                            } catch (NumberFormatException ignored) {
-                            }
-                        } else if (trimmed.toLowerCase().startsWith("downloading") || trimmed.toLowerCase().startsWith("installing")) {
-                            progressCallback.accept(-1.0);
-                        }
-                    }
-                }
+                Thread.sleep(100);
             }
-        } catch (IOException e) {
-            if (cancelled != null && cancelled.get()) {
-                process.destroyForcibly();
-                throw new CancellationException("Operation cancelled by user");
-            }
-            throw e;
-        }
-
-        try {
-            boolean finished = process.waitFor(defaultTimeoutSeconds, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                throw new IOException("Process timed out after " + defaultTimeoutSeconds + "s");
-            }
+            reader.join(TimeUnit.SECONDS.toMillis(STREAM_JOIN_SECONDS));
         } catch (InterruptedException e) {
-            process.destroyForcibly();
-            Thread.currentThread().interrupt();
+            killProcessTree(process);
+            try {
+                reader.join(TimeUnit.SECONDS.toMillis(STREAM_JOIN_SECONDS));
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
             throw new CancellationException("Operation cancelled by user");
         }
 
-        return new ProcessResult(process.exitValue(), outBuf.toString(), "");
+        String output;
+        synchronized (outBuf) {
+            output = outBuf.toString();
+        }
+        return new ProcessResult(process.exitValue(), output, "");
+    }
+
+    private static void handleProgress(String line, Consumer<Double> progressCallback) {
+        boolean jsonProgressFired = false;
+        try {
+            var tree = JsonMapper.mapper().readTree(line);
+            if (tree.has("progress")) {
+                double pct = tree.get("progress").asDouble(0);
+                progressCallback.accept(Math.min(1.0, Math.max(0, pct / 100.0)));
+                jsonProgressFired = true;
+            }
+        } catch (Exception ignored) {
+        }
+        if (!jsonProgressFired) {
+            String trimmed = line.trim();
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*%").matcher(trimmed);
+            if (m.find()) {
+                try {
+                    double pct = Double.parseDouble(m.group(1));
+                    progressCallback.accept(Math.min(1.0, Math.max(0, pct / 100.0)));
+                } catch (NumberFormatException ignored) {
+                }
+            } else if (trimmed.toLowerCase().startsWith("downloading") || trimmed.toLowerCase().startsWith("installing")) {
+                progressCallback.accept(-1.0);
+            }
+        }
     }
 
     private static Thread startStreamReader(InputStream stream, ByteArrayOutputStream target) {
@@ -151,6 +193,30 @@ public class ProcessRunner {
         reader.setDaemon(true);
         reader.start();
         return reader;
+    }
+
+    /**
+     * Terminates a process and, on Windows, its entire process tree (so child processes
+     * such as winget launched via cmd.exe are killed as well). Falls back to
+     * {@link Process#destroyForcibly()} when taskkill is unavailable or fails.
+     */
+    private static void killProcessTree(Process process) {
+        if (process == null) return;
+        if (AppPaths.isWindows()) {
+            try {
+                long pid = process.pid();
+                if (pid > 0) {
+                    Process kill = new ProcessBuilder(
+                            "taskkill", "/PID", String.valueOf(pid), "/T", "/F")
+                            .redirectErrorStream(true)
+                            .start();
+                    kill.waitFor(5, TimeUnit.SECONDS);
+                    if (!process.isAlive()) return;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        process.destroyForcibly();
     }
 
     private static void joinReaders(Thread... readers) throws InterruptedException {

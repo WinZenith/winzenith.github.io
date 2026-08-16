@@ -7,7 +7,7 @@ if ($UpdateIds.Count -eq 0) {
     $UpdateIds = @($args)
 }
 if ($UpdateIds.Count -eq 0) {
-    Write-Error 'No UpdateIDs provided'
+    [Console]::Error.WriteLine('No UpdateIDs provided')
     exit 1
 }
 
@@ -23,7 +23,7 @@ try {
         }
     }
     if ($toInstall.Count -eq 0) {
-        Write-Error 'No matching updates found'
+        [Console]::Error.WriteLine('No matching updates found')
         exit 1
     }
 
@@ -32,7 +32,7 @@ try {
     $downloader.Updates = $toInstall
     $downloadResult = $downloader.Download()
     if ($downloadResult.ResultCode -ne 2) {
-        Write-Error "Download failed: $($downloadResult.ResultCode)"
+        [Console]::Error.WriteLine("Download failed: ResultCode=$([int]$downloadResult.ResultCode)")
         exit 2
     }
 
@@ -42,11 +42,16 @@ try {
     $installResult = $installer.Install()
 
     @{
-        resultCode    = [int]$installResult.ResultCode
-        rebootRequired = $installResult.RebootRequired
-        installed     = $installResult.GetUpdateResult(0).ResultCode
+        resultCode     = [int]$installResult.ResultCode
+        rebootRequired = [bool]$installResult.RebootRequired
+        installed      = [int]$installResult.GetUpdateResult(0).ResultCode
     } | ConvertTo-Json -Compress
+
+    if ($installResult.ResultCode -ne 2) {
+        [Console]::Error.WriteLine("Windows Update install failed: ResultCode=$([int]$installResult.ResultCode)")
+        exit 4
+    }
 } catch {
-    Write-Error "Windows Update install failed: $_"
+    [Console]::Error.WriteLine("Windows Update install failed: $_")
     exit 3
 }
