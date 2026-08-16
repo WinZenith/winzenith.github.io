@@ -4,12 +4,8 @@ import com.sbtools.drivers.model.InstalledDriver;
 
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
-import java.util.regex.Pattern;
 
 public class DriverHealthService {
-
-    private static final Pattern DATE_PATTERN = Pattern.compile(
-            "(\\d{1,2})[/-](\\d{1,2})[/-](\\d{2,4})");
 
     public static DriverHealthScore scoreDriver(InstalledDriver driver) {
         int score = 100;

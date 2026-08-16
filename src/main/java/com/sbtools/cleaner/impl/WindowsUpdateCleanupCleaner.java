@@ -7,11 +7,6 @@ import com.sbtools.cleaner.CleanerUtils;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.ProcessManager;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.Stream;
 
 public class WindowsUpdateCleanupCleaner implements CleanerExtension {
 

@@ -2,7 +2,6 @@ package com.sbtools.cleaner;
 
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.FormatUtils;
-import com.sbtools.util.ProcessManager;
 
 import java.io.IOException;
 import java.nio.file.*;
