@@ -493,6 +493,7 @@ public class DuplicateFilesTabView extends BorderPane {
             new Alert(Alert.AlertType.WARNING, "Please add at least one directory to scan.").showAndWait();
             return;
         }
+        cancelled.set(false);
         busy.set(true);
         statusLabel.setText("Scanning for zero-byte files...");
         progressBar.setProgress(-1);
@@ -529,7 +530,12 @@ public class DuplicateFilesTabView extends BorderPane {
                     });
                 }
                 if (cancelled.get()) {
-                    Platform.runLater(() -> statusLabel.setText("Scan cancelled."));
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Scan cancelled.");
+                        progressBar.setVisible(false);
+                        progressLabel.setVisible(false);
+                        busy.set(false);
+                    });
                     return;
                 }
                 if (zeroByteFiles.isEmpty()) {
@@ -537,6 +543,7 @@ public class DuplicateFilesTabView extends BorderPane {
                         statusLabel.setText("No zero-byte files found.");
                         progressBar.setVisible(false);
                         progressLabel.setVisible(false);
+                        busy.set(false);
                     });
                     return;
                 }
@@ -548,41 +555,40 @@ public class DuplicateFilesTabView extends BorderPane {
                     ButtonType recycleBtn = new ButtonType("Move to Recycle Bin");
                     ButtonType deleteBtn = new ButtonType("Delete Permanently");
                     confirm.getButtonTypes().setAll(recycleBtn, deleteBtn, ButtonType.CANCEL);
-                    confirm.showAndWait().ifPresent(choice -> {
-                        if (choice == ButtonType.CANCEL) {
-                            busy.set(false);
-                            progressBar.setVisible(false);
-                            progressLabel.setVisible(false);
-                            return;
-                        }
-                        boolean useRecycleBin = choice == recycleBtn;
-                        new Thread(() -> {
-                            int deleted = 0;
-                            int failed = 0;
+                    var dialogResult = confirm.showAndWait();
+                    if (dialogResult.isEmpty() || dialogResult.get() == ButtonType.CANCEL) {
+                        busy.set(false);
+                        progressBar.setVisible(false);
+                        progressLabel.setVisible(false);
+                        return;
+                    }
+                    boolean useRecycleBin = dialogResult.get() == recycleBtn;
+                    new Thread(() -> {
+                        int deleted = 0;
+                        int failed = 0;
+                        if (useRecycleBin) {
+                            deleted = service.moveToRecycleBin(zeroByteFiles);
+                            failed = zeroByteFiles.size() - deleted;
+                        } else {
                             for (String path : zeroByteFiles) {
                                 try {
-                                    if (useRecycleBin) {
-                                        com.sbtools.util.AppLogger.info("Would recycle: " + path);
-                                        deleted++;
-                                    } else {
-                                        if (Files.deleteIfExists(Paths.get(path))) deleted++;
-                                    }
+                                    if (Files.deleteIfExists(Paths.get(path))) deleted++;
                                 } catch (Exception e) {
                                     com.sbtools.util.AppLogger.warning("Failed to delete: " + path + " — " + e.getMessage());
                                     failed++;
                                 }
                             }
-                            final int finalFailed = failed;
-                            String msg = "Deleted " + deleted + " zero-byte file(s)." + (finalFailed > 0 ? " " + finalFailed + " failed." : "");
-                            Platform.runLater(() -> {
-                                statusLabel.setText(msg);
-                                new Alert(finalFailed > 0 ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, msg).showAndWait();
-                                progressBar.setVisible(false);
-                                progressLabel.setVisible(false);
-                                busy.set(false);
-                            });
-                        }, "zero-byte-clean").start();
-                    });
+                        }
+                        final int finalFailed = failed;
+                        String msg = "Deleted " + deleted + " zero-byte file(s)." + (finalFailed > 0 ? " " + finalFailed + " failed." : "");
+                        Platform.runLater(() -> {
+                            statusLabel.setText(msg);
+                            new Alert(finalFailed > 0 ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, msg).showAndWait();
+                            progressBar.setVisible(false);
+                            progressLabel.setVisible(false);
+                            busy.set(false);
+                        });
+                    }, "zero-byte-clean").start();
                 });
             } catch (Exception e) {
                 AppLogger.error("Zero-byte scan failed", e);

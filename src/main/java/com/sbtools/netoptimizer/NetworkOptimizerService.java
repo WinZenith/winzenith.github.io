@@ -438,7 +438,7 @@ public class NetworkOptimizerService {
             sanitizeHost(host);
             Path script = PowerShellScripts.resolve("net-ping.ps1");
             ProcessResult pr = new ProcessRunner(30 + (long) count * 5).run(
-                    ProcessRunner.powershellScript(script.toString(), "-Host", host, "-Count", String.valueOf(count)));
+                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", host, "-Count", String.valueOf(count)));
             String stdout = pr.stdout().trim();
             if (!stdout.isEmpty() && !stdout.contains("\"error\"")) {
                 Map<String, Object> data = mapper.readValue(stdout,
@@ -467,7 +467,7 @@ public class NetworkOptimizerService {
             sanitizeHost(host);
             Path script = PowerShellScripts.resolve("net-traceroute.ps1");
             ProcessResult pr = new ProcessRunner(60 + (long) maxHops * 5).run(
-                    ProcessRunner.powershellScript(script.toString(), "-Host", host, "-MaxHops", String.valueOf(maxHops)));
+                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", host, "-MaxHops", String.valueOf(maxHops)));
             String stdout = pr.stdout().trim();
             if (!stdout.isEmpty() && !"[]".equals(stdout)) {
                 List<Map<String, Object>> raw = mapper.readValue(stdout,

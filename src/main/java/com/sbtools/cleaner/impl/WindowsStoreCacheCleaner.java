@@ -26,9 +26,9 @@ public class WindowsStoreCacheCleaner implements CleanerExtension {
                 try (DirectoryStream<Path> ds = Files.newDirectoryStream(packagesDir)) {
                     for (Path pkg : ds) {
                         if (Files.isDirectory(pkg)) {
-                            Path localState = pkg.resolve("LocalState");
-                            if (Files.isDirectory(localState)) {
-                                try (Stream<Path> walk = Files.walk(localState, 1)) {
+                            Path localCache = pkg.resolve("LocalCache");
+                            if (Files.isDirectory(localCache)) {
+                                try (Stream<Path> walk = Files.walk(localCache, 1)) {
                                     long cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS;
                                     var stats = walk.filter(Files::isRegularFile)
                                             .filter(f -> { try { return !Files.isHidden(f); } catch (Exception e) { return true; } })
@@ -58,12 +58,12 @@ public class WindowsStoreCacheCleaner implements CleanerExtension {
                 try (DirectoryStream<Path> ds = Files.newDirectoryStream(packagesDir)) {
                     for (Path pkg : ds) {
                         if (Files.isDirectory(pkg)) {
-                            Path localState = pkg.resolve("LocalState");
-                            if (Files.isDirectory(localState)) {
-                                try (Stream<Path> walk = Files.walk(localState, 1)) {
+                            Path localCache = pkg.resolve("LocalCache");
+                            if (Files.isDirectory(localCache)) {
+                                try (Stream<Path> walk = Files.walk(localCache, 1)) {
                                     long cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS;
                                     for (Path f : (Iterable<Path>) walk::iterator) {
-                                        if (!f.equals(localState) && Files.isRegularFile(f)) {
+                                        if (!f.equals(localCache) && Files.isRegularFile(f)) {
                                             try {
                                                 if (!Files.isHidden(f) && f.toFile().lastModified() > 0 && f.toFile().lastModified() < cutoff) {
                                                     long size = Files.size(f);

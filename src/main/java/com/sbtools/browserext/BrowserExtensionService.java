@@ -20,7 +20,6 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
-import java.util.stream.Stream;
 
 public class BrowserExtensionService {
 
@@ -28,11 +27,6 @@ public class BrowserExtensionService {
             "Chrome", "Chrome Canary",
             "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
             "Firefox", "Brave", "Opera", "Opera GX", "Vivaldi"
-    );
-
-    private static final List<String> CHROMIUM_BROWSERS = List.of(
-            "Chrome", "Chrome Canary", "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
-            "Brave", "Opera", "Opera GX", "Vivaldi"
     );
 
     private static final Map<String, String> BROWSER_PATHS = Map.ofEntries(
@@ -48,8 +42,6 @@ public class BrowserExtensionService {
             Map.entry("Opera GX",     "%APPDATA%\\Opera Software\\Opera GX Stable\\Extensions"),
             Map.entry("Vivaldi",      "%LOCALAPPDATA%\\Vivaldi\\User Data")
     );
-
-    public record ToggleResult(int success, int failed) {}
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -170,95 +162,27 @@ public class BrowserExtensionService {
             if (pathStr == null || pathStr.isBlank()) return false;
             Path extPath = Paths.get(pathStr);
             if (!Files.exists(extPath)) return false;
-            String browser = ext.getBrowser();
-            if (CHROMIUM_BROWSERS.contains(browser)) {
-                Path extFolder = extPath.resolve(ext.getExtensionId());
-                if (!Files.exists(extFolder)) return false;
-                Path versionDir;
-                try (Stream<Path> stream = Files.list(extFolder)) {
-                    versionDir = stream
-                            .filter(Files::isDirectory)
-                            .filter(p -> {
-                                String name = p.getFileName().toString();
-                                return !name.equals("metadata") && !name.startsWith(".");
-                            })
-                            .sorted((a, b) -> compareVersions(
-                                    b.getFileName().toString(),
-                                    a.getFileName().toString()))
-                            .findFirst().orElse(null);
-                }
-                if (versionDir == null) return false;
-                Path disabledMarker = versionDir.resolve("Disabled");
-                if (enable) {
-                    Files.deleteIfExists(disabledMarker);
-                } else {
-                    if (!Files.exists(disabledMarker)) {
-                        Files.createFile(disabledMarker);
-                    }
-                }
+            Path profileDir = extPath.getParent();
+            if (profileDir == null || !Files.exists(profileDir)) return false;
+            String extId = ext.getExtensionId();
+            Path script = PowerShellScripts.resolve("browser-extensions.ps1");
+            ProcessResult pr = new ProcessRunner(30).run(
+                    ProcessRunner.powershellScript(script.toString(),
+                            "-Action", "Toggle",
+                            "-ProfilePath", profileDir.toString(),
+                            "-ExtId", extId,
+                            "-Enable", String.valueOf(enable)));
+            String stdout = pr.stdout().trim();
+            boolean success = "true".equals(stdout);
+            if (success) {
                 Platform.runLater(() -> ext.setEnabled(enable));
-                return true;
-            } else if ("Firefox".equals(browser)) {
-                String extId = ext.getExtensionId();
-                return toggleFirefoxExtension(extPath, extId, enable, ext);
+            } else {
+                AppLogger.warning("Toggle PowerShell returned: " + stdout
+                        + " stderr=" + pr.stderr().trim());
             }
-            return false;
+            return success;
         } catch (Exception e) {
             AppLogger.warning("Failed to toggle extension: " + e.getMessage());
-            return false;
-        }
-    }
-
-    private boolean toggleFirefoxExtension(Path extPath, String extId, boolean enable,
-                                           BrowserExtensionRow ext) throws Exception {
-        if (enable) {
-            Path disabledXpi = extPath.resolve(extId + ".xpi.disabled");
-            if (Files.exists(disabledXpi)) {
-                Files.move(disabledXpi, disabledXpi.resolveSibling(extId + ".xpi"));
-                Platform.runLater(() -> ext.setEnabled(true));
-                return true;
-            }
-            Path disabledJson = extPath.resolve(extId + ".json.disabled");
-            if (Files.exists(disabledJson)) {
-                Files.move(disabledJson, disabledJson.resolveSibling(extId + ".json"));
-                Platform.runLater(() -> ext.setEnabled(true));
-                return true;
-            }
-            Path disabledDir = extPath.resolve(extId + ".dir.disabled");
-            if (Files.exists(disabledDir)) {
-                Files.move(disabledDir, disabledDir.resolveSibling(extId));
-                Platform.runLater(() -> ext.setEnabled(true));
-                return true;
-            }
-            return false;
-        } else {
-            Path xpiPath = extPath.resolve(extId + ".xpi");
-            if (Files.exists(xpiPath)) {
-                Path disabledPath = extPath.resolve(extId + ".xpi.disabled");
-                if (!Files.exists(disabledPath)) {
-                    Files.move(xpiPath, disabledPath);
-                }
-                Platform.runLater(() -> ext.setEnabled(false));
-                return true;
-            }
-            Path jsonPath = extPath.resolve(extId + ".json");
-            if (Files.exists(jsonPath)) {
-                Path disabledPath = extPath.resolve(extId + ".json.disabled");
-                if (!Files.exists(disabledPath)) {
-                    Files.move(jsonPath, disabledPath);
-                }
-                Platform.runLater(() -> ext.setEnabled(false));
-                return true;
-            }
-            Path dirPath = extPath.resolve(extId);
-            if (Files.isDirectory(dirPath)) {
-                Path disabledPath = extPath.resolve(extId + ".dir.disabled");
-                if (!Files.exists(disabledPath)) {
-                    Files.move(dirPath, disabledPath);
-                }
-                Platform.runLater(() -> ext.setEnabled(false));
-                return true;
-            }
             return false;
         }
     }

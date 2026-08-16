@@ -89,7 +89,8 @@ public class DriverInstallService {
             try {
                 backupEntry = backupService.backupBeforeUpdate(candidate.installed(), settings);
             } catch (Exception e) {
-                AppLogger.warning("Pre-install driver backup failed (non-fatal): " + e.getMessage());
+                AppLogger.warning("Pre-install driver backup failed: " + e.getMessage());
+                reportStatus("Warning: Driver backup failed \u2014 " + e.getMessage());
             }
         }
 

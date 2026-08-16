@@ -23,7 +23,10 @@ try {
 } catch { $defragOut = '' }
 
 if ($defragOut) {
-    if ($defragOut -match 'Total fragmented space\s*[=:]\s*([\d,]+)\s*(bytes|KB|MB|GB|fragments)') {
+    if ($defragOut -match 'Total fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*%') {
+        $fragmentationPercent = [int]$matches[1]
+    }
+    if ($defragOut -match 'Total fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*(bytes|KB|MB|GB|fragments)') {
         $val = $matches[1] -replace ',', ''
         $unit = $matches[2]
         switch ($unit) {
@@ -34,7 +37,7 @@ if ($defragOut) {
             'fragments' { $fragmentedFileCount = [long]$val }
         }
     }
-    if ($fragmentsFound -eq 0 -and $defragOut -match 'Fragmented space\s*[=:]\s*([\d,]+)\s*(bytes|KB|MB|GB|fragments)') {
+    if ($fragmentsFound -eq 0 -and $defragOut -match 'Fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*(bytes|KB|MB|GB|fragments)') {
         $val = $matches[1] -replace ',', ''
         $unit = $matches[2]
         switch ($unit) {
@@ -47,16 +50,16 @@ if ($defragOut) {
     }
 
     if ($fragmentationPercent -eq 0) {
-        if ($defragOut -match 'Volume fragmentation ratio\s*[=:]\s*(\d+)\s*percent') {
+        if ($defragOut -match 'Volume fragmentation ratio\s*[=:]\s*(\d+\.?\d*)\s*percent') {
             $fragmentationPercent = [int]$matches[1]
         }
-        elseif ($defragOut -match 'Fragmentation ratio\s*[=:]\s*(\d+)\s*%') {
+        elseif ($defragOut -match 'Fragmentation ratio\s*[=:]\s*(\d+\.?\d*)\s*%') {
             $fragmentationPercent = [int]$matches[1]
         }
-        elseif ($defragOut -match 'Fragmentation\s*[=:]\s*(\d+)\s*%') {
+        elseif ($defragOut -match 'Fragmentation\s*[=:]\s*(\d+\.?\d*)\s*%') {
             $fragmentationPercent = [int]$matches[1]
         }
-        elseif ($defragOut -match '\((\d+)\s*%\)') {
+        elseif ($defragOut -match '\((\d+\.?\d*)\s*%\)') {
             $fragmentationPercent = [int]$matches[1]
         }
     }
@@ -73,12 +76,12 @@ if ($defragOut) {
 if ($fragmentationPercent -eq 0 -and $fragmentsFound -eq 0) {
     Write-Output "stage:Running deep analysis (Optimize-Volume)..."
     try {
-        $optOut = @(Optimize-Volume -DriveLetter $drive -Analyze 2>&1 6>&1)
+        $optOut = @(Optimize-Volume -DriveLetter $drive -Analyze -Verbose 2>&1 6>&1)
     } catch { $optOut = @() }
 
     foreach ($line in $optOut) {
         if ($line -isnot [string]) { continue }
-        if ($line -match 'Total fragmented space\s*:\s*([\d,]+)\s*(KB|MB|GB|Bytes|bytes)') {
+        if ($line -match 'Total fragmented space\s*:\s*([\d,]+\.?\d*)\s*(KB|MB|GB|Bytes|bytes)') {
             if ($fragmentsFound -eq 0) {
                 $val = $matches[1] -replace ',', ''
                 $unit = $matches[2]
@@ -91,10 +94,10 @@ if ($fragmentationPercent -eq 0 -and $fragmentsFound -eq 0) {
                 }
             }
         }
-        if ($line -match 'Fragmentation percentage\s*:\s*([\d]+)') {
+        if ($line -match 'Fragmentation percentage\s*:\s*([\d]+\.?\d*)') {
             if ($fragmentationPercent -eq 0) { $fragmentationPercent = [int]$matches[1] }
         }
-        if ($line -match 'Fragmentation\s*:\s*([\d]+)\s*%') {
+        if ($line -match 'Fragmentation\s*:\s*([\d]+\.?\d*)\s*%') {
             if ($fragmentationPercent -eq 0) { $fragmentationPercent = [int]$matches[1] }
         }
         if ($line -match 'Fragmented files\s*:\s*([\d]+)') {

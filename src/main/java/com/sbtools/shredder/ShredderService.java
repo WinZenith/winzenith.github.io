@@ -165,37 +165,43 @@ public class ShredderService {
         File stopFlag = File.createTempFile("winzenith-wipe-stop-", ".flag");
         stopFlag.deleteOnExit();
 
-        List<String> cmd = new ArrayList<>(ProcessRunner.powershellScript(script.toString()));
-        cmd.addAll(driveLetters);
-        cmd.add("-StopFlagPath");
-        cmd.add(stopFlag.getAbsolutePath());
-        cmd.add("-PassCount");
-        cmd.add(String.valueOf(passCount));
-
-        ProcessBuilder pb = new ProcessBuilder(cmd);
-        pb.redirectErrorStream(true);
-        Process process = ProcessManager.start(pb);
-
-        ProcessWatcher watcher = new ProcessWatcher(process, progressCallback, cancelled, stopFlag);
-        watcher.watch();
-
         try {
-            boolean finished = process.waitFor(3600, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                throw new IOException("Free space wipe timed out.");
+            for (String driveLetter : driveLetters) {
+                if (cancelled != null && cancelled.get()) break;
+
+                List<String> cmd = new ArrayList<>(ProcessRunner.powershellScript(script.toString()));
+                cmd.add(driveLetter);
+                cmd.add("-StopFlagPath");
+                cmd.add(stopFlag.getAbsolutePath());
+                cmd.add("-PassCount");
+                cmd.add(String.valueOf(passCount));
+
+                ProcessBuilder pb = new ProcessBuilder(cmd);
+                pb.redirectErrorStream(true);
+                Process process = ProcessManager.start(pb);
+
+                ProcessWatcher watcher = new ProcessWatcher(process, progressCallback, cancelled, stopFlag);
+                watcher.watch();
+
+                try {
+                    boolean finished = process.waitFor(3600, TimeUnit.SECONDS);
+                    if (!finished) {
+                        process.destroyForcibly();
+                        throw new IOException("Free space wipe timed out for drive " + driveLetter + ".");
+                    }
+                } catch (InterruptedException e) {
+                    process.destroyForcibly();
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Free space wipe interrupted.", e);
+                }
+                if (process.exitValue() != 0 && (cancelled == null || !cancelled.get())) {
+                    throw new IOException("Free space wipe failed with exit code " + process.exitValue()
+                            + " on drive " + driveLetter + ".");
+                }
             }
-        } catch (InterruptedException e) {
-            process.destroyForcibly();
-            Thread.currentThread().interrupt();
-            throw new IOException("Free space wipe interrupted.", e);
         } finally {
             cleanupTempFiles();
             stopFlag.delete();
-        }
-
-        if (process.exitValue() != 0 && !cancelled.get()) {
-            throw new IOException("Free space wipe failed with exit code " + process.exitValue());
         }
     }
 

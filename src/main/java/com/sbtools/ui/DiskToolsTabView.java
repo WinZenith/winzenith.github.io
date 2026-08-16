@@ -1655,6 +1655,15 @@ public class DiskToolsTabView extends BorderPane {
             try {
                 int passCount = getSelectedPassCount();
                 FolderDeleteResult result = shredderService.secureDeleteFolder(folderPath, passCount);
+                if (result.isSuccess() && !result.getScheduledForReboot().isEmpty()) {
+                    for (String path : result.getScheduledForReboot()) {
+                        try {
+                            shredderService.scheduleForReboot(path);
+                        } catch (Exception ex) {
+                            AppLogger.error("Failed to schedule reboot delete: " + path, ex);
+                        }
+                    }
+                }
                 Platform.runLater(() -> {
                     if (result.isSuccess()) {
                         String msg = "Folder securely deleted: " + result.getFilesDeleted() + " files, "

@@ -296,6 +296,7 @@ try {
     $ErrorActionPreference = 'Stop'
     $disks = @()
     $diskIndexMap = @{}
+    $diskDeviceIdMap = @{}
     $diskIdx = 0
     Get-CimInstance Win32_DiskDrive | ForEach-Object {
         $sizeBytes = 0
@@ -312,6 +313,7 @@ try {
             partitions  = if ($_.Partitions) { $_.Partitions } else { 0 }
         }
         if ($serial) { $diskIndexMap[$serial] = $diskIdx }
+        if ($_.DeviceID) { $diskDeviceIdMap[[string]$_.DeviceID] = $serial }
         $disks += $disk
         $diskIdx++
     }
@@ -321,16 +323,13 @@ try {
     $allLogicalToPartition = @(Get-CimInstance Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue)
     Get-CimInstance Win32_DiskDriveToDiskPartition -ErrorAction SilentlyContinue | ForEach-Object {
         $physDeviceId = ''
-        if ([string]$_.Antecedent -match 'DeviceID="(.+?)"') { $physDeviceId = $Matches[1] }
+        if ([string]$_.Antecedent -match 'DeviceID\s*=\s*"(.+?)"') { $physDeviceId = $Matches[1] }
         $partDeviceId = ''
-        if ([string]$_.Dependent -match 'DeviceID="(.+?)"') { $partDeviceId = $Matches[1] }
+        if ([string]$_.Dependent -match 'DeviceID\s*=\s*"(.+?)"') { $partDeviceId = $Matches[1] }
         if (-not $physDeviceId -or -not $partDeviceId) { return }
 
         $physSerial = ''
-        try {
-            $physObj = Get-CimInstance -Query "SELECT SerialNumber FROM Win32_DiskDrive WHERE DeviceID='$physDeviceId'" -ErrorAction SilentlyContinue
-            if ($physObj -and $physObj.SerialNumber) { $physSerial = $physObj.SerialNumber.Trim() }
-        } catch {}
+        if ($diskDeviceIdMap.ContainsKey($physDeviceId)) { $physSerial = $diskDeviceIdMap[$physDeviceId] }
         if (-not $physSerial) { return }
         $physIdx = -1
         if ($diskIndexMap.ContainsKey($physSerial)) { $physIdx = $diskIndexMap[$physSerial] }
@@ -338,10 +337,10 @@ try {
 
         $allLogicalToPartition | ForEach-Object {
             $logPartId = ''
-            if ([string]$_.Antecedent -match 'DeviceID="(.+?)"') { $logPartId = $Matches[1] }
+            if ([string]$_.Antecedent -match 'DeviceID\s*=\s*"(.+?)"') { $logPartId = $Matches[1] }
             if ($logPartId -eq $partDeviceId) {
                 $logDevId = ''
-                if ([string]$_.Dependent -match 'DeviceID="(.+?)"') { $logDevId = $Matches[1] }
+                if ([string]$_.Dependent -match 'DeviceID\s*=\s*"(.+?)"') { $logDevId = $Matches[1] }
                 if ($logDevId) { $logicalToPhysical[$logDevId] = $physIdx }
             }
         }

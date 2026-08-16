@@ -10,6 +10,7 @@ import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.CancelableCompletableFuture;
+import com.sbtools.util.CancellationToken;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
@@ -37,6 +38,8 @@ import java.util.concurrent.atomic.AtomicInteger;
     private final SettingsStore settingsStore;
     private CancelableCompletableFuture<java.util.List<CleanupRow>> activeScanFuture;
     private CancelableCompletableFuture<CleanupService.CleanSummary> activeCleanFuture;
+    private CancellationToken activeScanToken;
+    private CancellationToken activeCleanToken;
     private final ObservableList<CleanupRow> sessionRows = FXCollections.observableArrayList();
     private volatile boolean hasScanned = false;
     private final AtomicBoolean cancelling = new AtomicBoolean(false);
@@ -143,6 +146,8 @@ import java.util.concurrent.atomic.AtomicInteger;
     private void cancelActive() {
         cancelling.set(true);
         try {
+            if (activeScanToken != null) activeScanToken.cancel();
+            if (activeCleanToken != null) activeCleanToken.cancel();
             if (activeScanFuture != null && !activeScanFuture.isDone()) activeScanFuture.cancel(true);
             if (activeCleanFuture != null && !activeCleanFuture.isDone()) activeCleanFuture.cancel(true);
         } catch (Exception ignored) {}
@@ -294,13 +299,14 @@ import java.util.concurrent.atomic.AtomicInteger;
         int totalCategories = CleanupCategory.values().length;
         AtomicInteger scanned = new AtomicInteger();
 
+        activeScanToken = new CancellationToken();
         activeScanFuture = service.scanAsync(() -> {
             int done = scanned.incrementAndGet();
             Platform.runLater(() -> {
                 progressBar.setProgress((double) done / totalCategories);
                 statusLabel.setText("Scanning: " + done + "/" + totalCategories + "...");
             });
-        });
+        }, activeScanToken);
         cancelButton.setDisable(false);
 
         activeScanFuture.whenComplete((results, ex) -> {
@@ -333,6 +339,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                     updateSummary();
                 }
                 cancelling.set(false);
+                activeScanToken = null;
                 busy.set(false);
             });
         });
@@ -449,13 +456,14 @@ import java.util.concurrent.atomic.AtomicInteger;
             int totalCategories = selected.size();
             AtomicInteger cleaned = new AtomicInteger();
 
+            activeCleanToken = new CancellationToken();
             activeCleanFuture = service.cleanAsync(selected, registryBackup, () -> {
                 int done = cleaned.incrementAndGet();
                 Platform.runLater(() -> {
                     progressBar.setProgress((double) done / totalCategories);
                     statusLabel.setText("Cleaning: " + done + "/" + totalCategories + "...");
                 });
-            });
+            }, activeCleanToken);
             cancelButton.setDisable(false);
 
             activeCleanFuture.whenComplete((summary, ex) -> {
@@ -483,7 +491,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                             .map(CleanupRow::getCategory).toList();
 
                     CancelableCompletableFuture<java.util.List<CleanupRow>> rescanFuture =
-                            service.scanCategoriesAsync(cleanedCategories, () -> {});
+                            service.scanCategoriesAsync(cleanedCategories, () -> {}, activeCleanToken);
 
                     rescanFuture.whenComplete((rescanResults, rescanEx) -> {
                         Platform.runLater(() -> {
@@ -531,6 +539,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                             resultAlert.showAndWait();
 
                             cancelling.set(false);
+                            activeCleanToken = null;
                             busy.set(false);
                         });
                     });

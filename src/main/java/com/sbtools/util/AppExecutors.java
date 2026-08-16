@@ -16,6 +16,11 @@ public final class AppExecutors {
         t.setDaemon(true);
         return t;
     });
+    private static final ExecutorService CLEAN_POOL = Executors.newFixedThreadPool(4, r -> {
+        Thread t = new Thread(r, "clean-worker");
+        t.setDaemon(true);
+        return t;
+    });
 
     private AppExecutors() {
     }
@@ -28,9 +33,14 @@ public final class AppExecutors {
         return SCAN_POOL;
     }
 
+    public static ExecutorService cleanPool() {
+        return CLEAN_POOL;
+    }
+
     public static void shutdown() {
         UI_POOL.shutdownNow();
         IO_POOL.shutdownNow();
         SCAN_POOL.shutdownNow();
+        CLEAN_POOL.shutdownNow();
     }
 }

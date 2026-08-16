@@ -1,12 +1,12 @@
-param([string]$Host = "", [int]$MaxHops = 30)
+param([string]$TargetHost = "", [int]$MaxHops = 30)
 
 try {
-    if (-not $Host) {
+    if (-not $TargetHost) {
         Write-Output '[]'
         exit 1
     }
 
-    $output = tracert -d -h $MaxHops $Host 2>&1
+    $output = tracert -d -h $MaxHops $TargetHost 2>&1
     $rawOutput = ($output | Out-String).Trim()
 
     $hops = @()

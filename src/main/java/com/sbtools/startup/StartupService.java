@@ -29,8 +29,10 @@ public class StartupService {
     private static final String REG_STARTUP_APPROVED = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
     private static final String REG_WOW6432_RUN = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run";
     private static final String REG_WOW6432_RUN_ONCE = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnce";
+    private static final String REG_WOW6432_RUN_DISABLED = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\RunDisabled";
     private static final String REG_WOW6432_APPROVED = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
     private static final String REG_STARTUP_APPROVED_RUNONCE = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\RunOnce";
+    private static final String REG_WOW6432_APPROVED_RUNONCE = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\RunOnce";
 
     private final ProcessRunner processRunner = new ProcessRunner(60);
     private final ReentrantLock backupIndexLock = new ReentrantLock();
@@ -219,10 +221,14 @@ public class StartupService {
         boolean isHkcu = location.contains("HKCU");
         HKEY hive = isHkcu ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
 
-        if (location.contains("32-bit") && location.contains("RunOnce")) {
-            return new RegistryPaths(hive, REG_WOW6432_RUN_ONCE, REG_WOW6432_APPROVED);
-        } else if (location.contains("32-bit")) {
-            return new RegistryPaths(hive, REG_WOW6432_RUN, REG_WOW6432_APPROVED);
+        if (location.contains("32-bit")) {
+            if (location.contains("RunOnce")) {
+                return new RegistryPaths(hive, REG_WOW6432_RUN_ONCE, REG_WOW6432_APPROVED_RUNONCE);
+            } else if (location.contains("(Disabled)")) {
+                return new RegistryPaths(hive, REG_WOW6432_RUN_DISABLED, REG_WOW6432_APPROVED);
+            } else {
+                return new RegistryPaths(hive, REG_WOW6432_RUN, REG_WOW6432_APPROVED);
+            }
         } else if (location.contains("RunOnce")) {
             return new RegistryPaths(hive, REG_RUN_ONCE, REG_STARTUP_APPROVED_RUNONCE);
         } else if (location.contains("(Disabled)")) {
@@ -560,11 +566,27 @@ public class StartupService {
             if (!Advapi32Util.registryKeyExists(hive, keyPath)) {
                 return;
             }
+            Map<String, Object> approvedValues = new HashMap<>();
+            String approvedPath = locationLabel.contains("RunOnce") ? REG_STARTUP_APPROVED_RUNONCE : null;
+            if (approvedPath != null) {
+                try {
+                    if (Advapi32Util.registryKeyExists(hive, approvedPath)) {
+                        approvedValues.putAll(Advapi32Util.registryGetValues(hive, approvedPath));
+                    }
+                } catch (Exception ignored) {}
+            }
             Map<String, Object> values = Advapi32Util.registryGetValues(hive, keyPath);
             for (Map.Entry<String, Object> entry : values.entrySet()) {
                 String valName = entry.getKey();
                 Object valData = entry.getValue();
                 if (valData instanceof String cmd) {
+                    boolean enabled = active;
+                    if (approvedPath != null) {
+                        Object approvedData = approvedValues.get(valName);
+                        if (approvedData instanceof byte[] bytes && bytes.length > 0) {
+                            enabled = bytes[0] == 0x02;
+                        }
+                    }
                     String exePath = extractExecutablePath(cmd);
                     String publisher = getCompanyName(exePath);
                     if (publisher == null || publisher.isBlank()) {
@@ -574,7 +596,7 @@ public class StartupService {
                             valName,
                             publisher,
                             cmd,
-                            active,
+                            enabled,
                             locationLabel,
                             valName,
                             "",
@@ -616,8 +638,8 @@ public class StartupService {
                 throw new IOException("Failed to toggle startup item: registry value '" + valName + "' may have been deleted externally.");
             }
             item.setEnabled(!item.isEnabled());
-            if (item.isEnabled() && item.getLocation().contains("Run (disabled)")) {
-                item.setLocation(item.getLocation().replace("Run (disabled)", "Run"));
+            if (item.isEnabled() && item.getLocation().contains("Run (Disabled)")) {
+                item.setLocation(item.getLocation().replace("Run (Disabled)", "Run"));
             }
         } else if (item.getType() == StartupItemType.SERVICE) {
             String serviceName = item.getName();
@@ -653,6 +675,8 @@ public class StartupService {
             throw new UnsupportedOperationException("Windows services cannot be deleted.");
         }
 
+        createBackup(item);
+
         if (item.getType() == StartupItemType.TASK) {
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
                     "Unregister-ScheduledTask -TaskName " + ProcessRunner.psQuote(item.getName()) + " -TaskPath " + ProcessRunner.psQuote(item.getTaskPath()) + " -Confirm:$false"));
@@ -662,8 +686,20 @@ public class StartupService {
         } else if (item.getType() == StartupItemType.REGISTRY) {
             RegistryPaths paths = resolveRegistryPaths(item);
             String valName = item.getRegistryValueName();
+            String location = item.getLocation();
 
-            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
+            // A disabled item can live in the RunDisabled key (disabled by the OS or other tools)
+            // or in the Run key (RunOnce items disabled by this app) — remove it from wherever it exists.
+            if (location.contains("(Disabled)")) {
+                List<String> valueKeys = location.contains("32-bit")
+                        ? List.of(REG_WOW6432_RUN_DISABLED, REG_WOW6432_RUN)
+                        : List.of(REG_RUN_DISABLED, REG_RUN);
+                for (String keyPath : valueKeys) {
+                    if (Advapi32Util.registryValueExists(paths.hive(), keyPath, valName)) {
+                        Advapi32Util.registryDeleteValue(paths.hive(), keyPath, valName);
+                    }
+                }
+            } else if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
                 Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
             }
 
@@ -672,7 +708,6 @@ public class StartupService {
             }
         }
 
-        createBackup(item);
         invalidateCache();
     }
 
@@ -695,27 +730,42 @@ public class StartupService {
         String location = item.getLocation();
         boolean is32bit = location.contains("32-bit");
         String enableKeyPath = is32bit ? REG_WOW6432_RUN : REG_RUN;
+        String disabledKeyPath = is32bit ? REG_WOW6432_RUN_DISABLED : REG_RUN_DISABLED;
 
         if (item.isEnabled()) {
+            if (!Advapi32Util.registryKeyExists(paths.hive(), paths.approvedPath())) {
+                Advapi32Util.registryCreateKey(paths.hive(), paths.approvedPath());
+            }
             byte[] disableBytes = new byte[]{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
             Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, disableBytes);
             return true;
-        } else {
-            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
-                Object valData = Advapi32Util.registryGetValue(paths.hive(), paths.keyPath(), valName);
-                if (valData instanceof String cmd) {
-                    if (!Advapi32Util.registryKeyExists(paths.hive(), enableKeyPath)) {
-                        Advapi32Util.registryCreateKey(paths.hive(), enableKeyPath);
-                    }
-                    Advapi32Util.registrySetStringValue(paths.hive(), enableKeyPath, valName, cmd);
-                    Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
-                    byte[] enableBytes = new byte[]{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-                    Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, enableBytes);
-                    return true;
-                }
-            }
+        }
+
+        // Enable: the value can live in RunDisabled (disabled by the OS or other tools)
+        // or in Run (RunOnce items disabled via toggleRunOnceItem).
+        String cmd = getRegistryString(paths.hive(), disabledKeyPath, valName);
+        boolean inRun = false;
+        if (cmd == null) {
+            cmd = getRegistryString(paths.hive(), enableKeyPath, valName);
+            inRun = cmd != null;
+        }
+        if (cmd == null) {
             return false;
         }
+
+        if (!inRun) {
+            if (!Advapi32Util.registryKeyExists(paths.hive(), enableKeyPath)) {
+                Advapi32Util.registryCreateKey(paths.hive(), enableKeyPath);
+            }
+            Advapi32Util.registrySetStringValue(paths.hive(), enableKeyPath, valName, cmd);
+            Advapi32Util.registryDeleteValue(paths.hive(), disabledKeyPath, valName);
+        }
+        if (!Advapi32Util.registryKeyExists(paths.hive(), paths.approvedPath())) {
+            Advapi32Util.registryCreateKey(paths.hive(), paths.approvedPath());
+        }
+        byte[] enableBytes = new byte[]{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, enableBytes);
+        return true;
     }
 
     private boolean toggleRunOnceItem(StartupItem item, RegistryPaths paths) throws Exception {
@@ -724,38 +774,72 @@ public class StartupService {
         boolean is32bit = location.contains("32-bit");
         String runKeyPath = is32bit ? REG_WOW6432_RUN : REG_RUN;
         String runOnceKeyPath = is32bit ? REG_WOW6432_RUN_ONCE : REG_RUN_ONCE;
+        String runApprovedPath = is32bit ? REG_WOW6432_APPROVED : REG_STARTUP_APPROVED;
+        String runOnceApprovedPath = is32bit ? REG_WOW6432_APPROVED_RUNONCE : REG_STARTUP_APPROVED_RUNONCE;
+        String prefix = is32bit ? "HKLM (32-bit)" : (location.contains("HKCU") ? "HKCU" : "HKLM");
 
         if (item.isEnabled()) {
-            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
-                Object valData = Advapi32Util.registryGetValue(paths.hive(), paths.keyPath(), valName);
-                if (valData instanceof String cmd) {
-                    if (!Advapi32Util.registryKeyExists(paths.hive(), runKeyPath)) {
-                        Advapi32Util.registryCreateKey(paths.hive(), runKeyPath);
-                    }
-                    Advapi32Util.registrySetStringValue(paths.hive(), runKeyPath, valName, cmd);
-                    Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
-                    String prefix = is32bit ? "HKLM (32-bit)" : (location.contains("HKCU") ? "HKCU" : "HKLM");
-                    item.setLocation(prefix + " Run (disabled)");
-                    return true;
-                }
+            // Disable: move the value from RunOnce to Run and mark it disabled in
+            // StartupApproved\Run, otherwise it would run at every logon.
+            String cmd = getRegistryString(paths.hive(), runOnceKeyPath, valName);
+            if (cmd == null) {
+                return false;
             }
-            return false;
-        } else {
-            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
-                Object valData = Advapi32Util.registryGetValue(paths.hive(), paths.keyPath(), valName);
-                if (valData instanceof String cmd) {
-                    if (!Advapi32Util.registryKeyExists(paths.hive(), runOnceKeyPath)) {
-                        Advapi32Util.registryCreateKey(paths.hive(), runOnceKeyPath);
-                    }
-                    Advapi32Util.registrySetStringValue(paths.hive(), runOnceKeyPath, valName, cmd);
-                    Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
-                    String prefix = is32bit ? "HKLM (32-bit)" : (location.contains("HKCU") ? "HKCU" : "HKLM");
-                    item.setLocation(prefix + " RunOnce");
-                    return true;
-                }
+            if (!Advapi32Util.registryKeyExists(paths.hive(), runKeyPath)) {
+                Advapi32Util.registryCreateKey(paths.hive(), runKeyPath);
             }
+            Advapi32Util.registrySetStringValue(paths.hive(), runKeyPath, valName, cmd);
+            Advapi32Util.registryDeleteValue(paths.hive(), runOnceKeyPath, valName);
+
+            if (Advapi32Util.registryValueExists(paths.hive(), runOnceApprovedPath, valName)) {
+                Advapi32Util.registryDeleteValue(paths.hive(), runOnceApprovedPath, valName);
+            }
+            if (!Advapi32Util.registryKeyExists(paths.hive(), runApprovedPath)) {
+                Advapi32Util.registryCreateKey(paths.hive(), runApprovedPath);
+            }
+            byte[] disableBytes = new byte[]{0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            Advapi32Util.registrySetBinaryValue(paths.hive(), runApprovedPath, valName, disableBytes);
+
+            item.setLocation(prefix + " Run (Disabled)");
+            return true;
+        }
+
+        // Enable: move the value back from Run to RunOnce and mark it enabled.
+        String cmd = getRegistryString(paths.hive(), runKeyPath, valName);
+        boolean wasInRun = cmd != null;
+        if (cmd == null) {
+            cmd = getRegistryString(paths.hive(), runOnceKeyPath, valName);
+        }
+        if (cmd == null) {
             return false;
         }
+        if (!Advapi32Util.registryKeyExists(paths.hive(), runOnceKeyPath)) {
+            Advapi32Util.registryCreateKey(paths.hive(), runOnceKeyPath);
+        }
+        Advapi32Util.registrySetStringValue(paths.hive(), runOnceKeyPath, valName, cmd);
+        if (wasInRun) {
+            Advapi32Util.registryDeleteValue(paths.hive(), runKeyPath, valName);
+        }
+
+        if (Advapi32Util.registryValueExists(paths.hive(), runApprovedPath, valName)) {
+            Advapi32Util.registryDeleteValue(paths.hive(), runApprovedPath, valName);
+        }
+        if (!Advapi32Util.registryKeyExists(paths.hive(), runOnceApprovedPath)) {
+            Advapi32Util.registryCreateKey(paths.hive(), runOnceApprovedPath);
+        }
+        byte[] enableBytes = new byte[]{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        Advapi32Util.registrySetBinaryValue(paths.hive(), runOnceApprovedPath, valName, enableBytes);
+
+        item.setLocation(prefix + " RunOnce");
+        return true;
+    }
+
+    private static String getRegistryString(HKEY hive, String keyPath, String valueName) {
+        if (!Advapi32Util.registryValueExists(hive, keyPath, valueName)) {
+            return null;
+        }
+        Object valData = Advapi32Util.registryGetValue(hive, keyPath, valueName);
+        return valData instanceof String s ? s : null;
     }
 
     // ── Backup / Restore Mechanism ────────────────────────────────────────────
@@ -838,8 +922,9 @@ public class StartupService {
             }
             Advapi32Util.registrySetStringValue(hive, entry.getKeyPath(), entry.getValueName(), entry.getCommand());
 
-            String approvedKeyPath = entry.getKeyPath().replace(
-                    "CurrentVersion\\Run", "CurrentVersion\\Explorer\\StartupApproved\\Run");
+            String approvedKeyPath = entry.getKeyPath()
+                    .replace("CurrentVersion\\RunDisabled", "CurrentVersion\\Explorer\\StartupApproved\\Run")
+                    .replace("CurrentVersion\\Run", "CurrentVersion\\Explorer\\StartupApproved\\Run");
             if (!approvedKeyPath.equals(entry.getKeyPath())) {
                 if (!Advapi32Util.registryKeyExists(hive, approvedKeyPath)) {
                     Advapi32Util.registryCreateKey(hive, approvedKeyPath);

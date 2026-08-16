@@ -262,8 +262,8 @@ public class DuplicateFinderService {
 
             return result;
         } catch (Exception e) {
-            AppLogger.warning("Duplicate scan failed: " + e.getMessage());
-            return result;
+            AppLogger.error("Duplicate scan failed", e);
+            throw new RuntimeException("Duplicate scan failed: " + e.getMessage(), e);
         } finally {
             if (executor != null) {
                 executor.shutdown();
@@ -312,7 +312,7 @@ public class DuplicateFinderService {
         return new CleanResult(deleted, failed, fullyCleanedRows);
     }
 
-    private int moveToRecycleBin(List<String> paths) {
+    public int moveToRecycleBin(List<String> paths) {
         if (paths.isEmpty()) return 0;
         List<String> validPaths = new ArrayList<>(paths.size());
         for (String p : paths) {

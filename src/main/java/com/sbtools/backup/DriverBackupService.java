@@ -51,7 +51,9 @@ public class DriverBackupService {
             throws IOException, InterruptedException {
         String inf = driver.infName();
         if (inf == null || inf.isBlank()) {
-            inf = "driver.inf";
+            throw new IOException("Cannot backup driver: INF name not available for "
+                    + driver.friendlyName() + " (" + driver.deviceId()
+                    + "). Automatic backup is not supported for this device.");
         }
         String safeId = driver.deviceId().replaceAll("[^a-zA-Z0-9_-]", "_");
         Path root = (settings.backupDirectory() != null && !settings.backupDirectory().isBlank())
@@ -109,7 +111,7 @@ public class DriverBackupService {
 
         Path script = PowerShellScripts.resolve("pnputil-restore.ps1");
         ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
-                script.toString(), folder.toString()));
+                script.toString(), folder.toString(), entry.deviceId()));
         if (!result.success()) {
             throw new IOException("Driver revert failed: " + result.combinedOutput());
         }

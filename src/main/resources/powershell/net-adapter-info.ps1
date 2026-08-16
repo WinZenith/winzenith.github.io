@@ -20,5 +20,5 @@ $result = $adapters | ForEach-Object {
 if ($result.Count -eq 0) {
     Write-Output "[]"
 } else {
-    ConvertTo-Json -Compress $result
+    ConvertTo-Json -Compress @($result)
 }

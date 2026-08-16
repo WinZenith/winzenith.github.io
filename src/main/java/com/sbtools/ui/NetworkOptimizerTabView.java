@@ -15,6 +15,7 @@ public class NetworkOptimizerTabView extends BorderPane {
 
     private final NetworkOptimizerService service = new NetworkOptimizerService();
     private final AdaptersPanel adaptersPanel;
+    private final OptimizationPanel optimizationPanel;
     private final DnsCachePanel dnsCachePanel;
     private final AdapterSettingsPanel adapterSettingsPanel;
     private final WiFiPanel wiFiPanel;
@@ -35,6 +36,7 @@ public class NetworkOptimizerTabView extends BorderPane {
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
         adaptersPanel = new AdaptersPanel(service, busy);
+        optimizationPanel = new OptimizationPanel(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved);
         dnsCachePanel = new DnsCachePanel(service, busy, statusLabel);
         adapterSettingsPanel = new AdapterSettingsPanel(service, busy);
         wiFiPanel = new WiFiPanel(service, busy);
@@ -42,6 +44,7 @@ public class NetworkOptimizerTabView extends BorderPane {
         changeLogPanel = new ChangeLogPanel(service, busy);
 
         Tab adaptersTab = new Tab("Network Adapters", adaptersPanel);
+        Tab optimizationTab = new Tab("Optimization", optimizationPanel);
         Tab dnsTab = new Tab("DNS & Cache", dnsCachePanel);
         Tab adapterSettingsTab = new Tab("Adapter Settings", adapterSettingsPanel);
         Tab wifiTab = new Tab("Wi-Fi", wiFiPanel);
@@ -49,7 +52,7 @@ public class NetworkOptimizerTabView extends BorderPane {
         Tab changeHistoryTab = new Tab("Change History", changeLogPanel);
 
         tabPane.getTabs().addAll(
-                adaptersTab, dnsTab, adapterSettingsTab,
+                adaptersTab, optimizationTab, dnsTab, adapterSettingsTab,
                 wifiTab, connectionOverviewTab, changeHistoryTab
         );
 
@@ -57,6 +60,8 @@ public class NetworkOptimizerTabView extends BorderPane {
             if (sel == null) return;
             if (sel == adaptersTab && adaptersPanel.lookup(".table-view") != null) {
                 adaptersPanel.loadAdapters();
+            } else if (sel == optimizationTab) {
+                optimizationPanel.refreshPresetSelection();
             } else if (sel == dnsTab) {
                 dnsCachePanel.refreshAdapters();
             } else if (sel == adapterSettingsTab) {

@@ -1,12 +1,12 @@
-param([string]$Host = "", [int]$Count = 4)
+param([string]$TargetHost = "", [int]$Count = 4)
 
 try {
-    if (-not $Host) {
+    if (-not $TargetHost) {
         Write-Output '{"error": "Host parameter is required"}'
         exit 1
     }
 
-    $output = ping -n $Count $Host 2>&1
+    $output = ping -n $Count $TargetHost 2>&1
     $rawOutput = ($output | Out-String).Trim()
 
     $sent = $Count
@@ -31,7 +31,7 @@ try {
     }
 
     $result = @{
-        host             = $Host
+        host             = $TargetHost
         packetsSent      = $sent
         packetsReceived  = $received
         packetLossPercent = $lossPct

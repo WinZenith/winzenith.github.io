@@ -25,7 +25,7 @@ public class DefragService {
         FREE_SPACE
     }
 
-    private static final long TIMEOUT_SECONDS = 600;
+    private static final long TIMEOUT_SECONDS = 3600;
     private static final long METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
     private final ProcessRunner processRunner = new ProcessRunner(TIMEOUT_SECONDS);
     private final Map<String, MetadataCacheEntry> metadataCache = new ConcurrentHashMap<>();

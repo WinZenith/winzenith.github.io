@@ -1,27 +1,26 @@
 param()
 
 $results = @()
+$allSuccess = $true
 
-try {
-    netsh int ip reset 2>&1 | Out-Null
-    $results += [PSCustomObject]@{ Key = "TCP/IP Reset"; Value = "completed" }
-} catch {
-    $results += [PSCustomObject]@{ Key = "TCP/IP Reset"; Value = "failed" }
-}
+netsh int ip reset 2>&1 | Out-Null
+$resetOk = $LASTEXITCODE -eq 0
+$results += [PSCustomObject]@{ Key = "TCP/IP Reset"; Value = if ($resetOk) { "completed" } else { "failed" } }
+if (-not $resetOk) { $allSuccess = $false }
 
-try {
-    netsh winsock reset 2>&1 | Out-Null
-    $results += [PSCustomObject]@{ Key = "Winsock Reset"; Value = "completed" }
-} catch {
-    $results += [PSCustomObject]@{ Key = "Winsock Reset"; Value = "failed" }
-}
-
-$allSuccess = ($results | Where-Object { $_.Value -eq "failed" }).Count -eq 0
+netsh winsock reset 2>&1 | Out-Null
+$winsockOk = $LASTEXITCODE -eq 0
+$results += [PSCustomObject]@{ Key = "Winsock Reset"; Value = if ($winsockOk) { "completed" } else { "failed" } }
+if (-not $winsockOk) { $allSuccess = $false }
 
 $output = @{
     success = $allSuccess
-    rebootRequired = $true
+    rebootRequired = $allSuccess
     results = @($results)
 }
 
 ConvertTo-Json -Compress $output
+
+if (-not $allSuccess) {
+    exit 1
+}
