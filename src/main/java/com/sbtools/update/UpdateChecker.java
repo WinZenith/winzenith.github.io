@@ -111,15 +111,23 @@ public class UpdateChecker {
 
     private String extractAssetDownloadUrl(JsonNode root) {
         JsonNode assets = root.get("assets");
-        if (assets != null && assets.isArray() && !assets.isEmpty()) {
-            JsonNode firstAsset = assets.get(0);
-            JsonNode urlNode = firstAsset.get("browser_download_url");
+        if (assets == null || !assets.isArray() || assets.isEmpty()) return null;
+
+        for (JsonNode asset : assets) {
+            JsonNode urlNode = asset.get("browser_download_url");
             if (urlNode != null && urlNode.isTextual()) {
                 String url = urlNode.asText();
-                if (!url.isBlank()) {
+                if (!url.isBlank() && url.toLowerCase().endsWith(".zip")) {
                     return url;
                 }
             }
+        }
+
+        JsonNode firstAsset = assets.get(0);
+        JsonNode urlNode = firstAsset.get("browser_download_url");
+        if (urlNode != null && urlNode.isTextual()) {
+            String url = urlNode.asText();
+            if (!url.isBlank()) return url;
         }
         return null;
     }

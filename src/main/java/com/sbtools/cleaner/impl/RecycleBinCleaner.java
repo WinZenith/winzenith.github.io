@@ -48,27 +48,31 @@ public class RecycleBinCleaner implements CleanerExtension {
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
             boolean finished = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+            if (finished && p.exitValue() == 0) {
+                return size;
+            }
             if (!finished) { p.destroyForcibly(); AppLogger.warning("Recycle Bin cleanup timed out"); }
         } catch (Exception ex) {
-            AppLogger.warning("Failed to empty Recycle Bin via PowerShell, trying fallback: " + ex.getMessage());
-            try {
-                for (java.io.File root : java.io.File.listRoots()) {
-                    Path recycleBin = root.toPath().resolve("$Recycle.Bin");
-                    if (Files.isDirectory(recycleBin)) {
-                        try (Stream<Path> walk = Files.walk(recycleBin)) {
-                            walk.sorted(Comparator.reverseOrder()).forEach(f -> {
-                                if (!f.equals(recycleBin)) {
-                                    try { CleanerUtils.deletePermanently(f); } catch (Exception ignored) {}
-                                }
-                            });
-                        }
+            AppLogger.warning("Failed to empty Recycle Bin via PowerShell: " + ex.getMessage());
+        }
+        long cleaned = 0;
+        try {
+            for (java.io.File root : java.io.File.listRoots()) {
+                Path recycleBin = root.toPath().resolve("$Recycle.Bin");
+                if (Files.isDirectory(recycleBin)) {
+                    try (Stream<Path> walk = Files.walk(recycleBin)) {
+                        walk.sorted(Comparator.reverseOrder()).forEach(f -> {
+                            if (!f.equals(recycleBin)) {
+                                try { CleanerUtils.deletePermanently(f); } catch (Exception ignored) {}
+                            }
+                        });
                     }
                 }
-            } catch (Exception ex2) {
-                AppLogger.warning("Failed to empty Recycle Bin: " + ex2.getMessage());
             }
+        } catch (Exception ex2) {
+            AppLogger.warning("Failed to empty Recycle Bin: " + ex2.getMessage());
         }
-        return size;
+        return cleaned > 0 ? cleaned : size;
     }
 
     private long getRecycleBinSize() {

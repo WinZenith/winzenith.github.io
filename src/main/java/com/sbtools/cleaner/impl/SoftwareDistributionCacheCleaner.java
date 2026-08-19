@@ -6,6 +6,7 @@ import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.ProcessManager;
+import com.sbtools.util.WindowsServicingSafety;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,6 +21,13 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
+        if (WindowsServicingSafety.isServicingPending()) {
+            String reasons = String.join("; ", WindowsServicingSafety.getPendingReasons());
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Skipped (pending system restart: " + reasons + ")");
+            return;
+        }
         if (isWindowsUpdateRunning()) {
             row.setTotalBytes(0);
             row.setItemCount(0);
@@ -50,6 +58,11 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        if (WindowsServicingSafety.isServicingPending()) {
+            AppLogger.info("Skipping SoftwareDistribution cache: pending system restart ("
+                    + String.join("; ", WindowsServicingSafety.getPendingReasons()) + ")");
+            return 0;
+        }
         if (isWindowsUpdateRunning() || isDismRunning()) {
             AppLogger.info("Skipping SoftwareDistribution cache: Windows Update or DISM is running");
             return 0;

@@ -11,6 +11,7 @@ import com.sbtools.settings.SettingsStore;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.CancelableCompletableFuture;
 import com.sbtools.util.CancellationToken;
+import com.sbtools.util.WindowsVersionUtil;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
@@ -358,6 +359,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                 CleanupCategory.REGISTRY,
                 CleanupCategory.WINDOWS_UPDATE_CLEANUP,
                 CleanupCategory.OLD_WINDOWS_INSTALL,
+                CleanupCategory.SOFTWARE_DISTRIBUTION_CACHE,
                 CleanupCategory.WINDOWS_DEFENDER_CACHE,
                 CleanupCategory.WINDOWS_LOG_FILES,
                 CleanupCategory.FONT_CACHE,
@@ -409,17 +411,46 @@ import java.util.concurrent.atomic.AtomicInteger;
         boolean hasHighRisk = selected.stream()
                 .anyMatch(r -> r.getCategory().getRiskLevel() == CleanupCategory.RiskLevel.HIGH);
 
+        StringBuilder dialogMsg = new StringBuilder();
+        if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
+            dialogMsg.append("WARNING: Running on a newer Windows version (")
+                    .append(WindowsVersionUtil.getWindowsVersionString())
+                    .append("). Some cleanup operations will be skipped for safety.\n\n");
+        }
         String riskLabel = hasHighRisk ? " (includes HIGH-risk categories)" : "";
-        String dialogMessage = "Do you confirm the cleanup of " + selected.size() + " categories"
-                + riskLabel + "?\n\n"
-                + selected.stream().map(r -> "  - " + r.getCategory().getDisplayName())
-                .collect(java.util.stream.Collectors.joining("\n"))
-                + "\n\nThis action cannot be undone.";
+        dialogMsg.append("Do you confirm the cleanup of ").append(selected.size()).append(" categories")
+                .append(riskLabel).append("?\n\n");
+        for (CleanupRow r : selected) {
+            String prefix = r.getCategory().getRiskLevel() == CleanupCategory.RiskLevel.HIGH ? "  [!] " : "  - ";
+            dialogMsg.append(prefix).append(r.getCategory().getDisplayName())
+                    .append(" (").append(r.getCategory().getRiskLevel().getDisplayName()).append(")\n");
+        }
+        if (hasHighRisk) {
+            dialogMsg.append("\nHIGH-RISK CATEGORIES:\n");
+            for (CleanupRow r : selected) {
+                if (r.getCategory().getRiskLevel() == CleanupCategory.RiskLevel.HIGH) {
+                    dialogMsg.append("  - ").append(r.getCategory().getDisplayName())
+                            .append(": ").append(r.getCategory().getDescription()).append("\n");
+                }
+            }
+        }
+        dialogMsg.append("\nThis action cannot be undone.");
 
-        Alert confirmAlert = new Alert(Alert.AlertType.CONFIRMATION, dialogMessage,
+        Alert confirmAlert = new Alert(Alert.AlertType.CONFIRMATION, null,
                 ButtonType.OK, ButtonType.CANCEL);
+        Label msgLabel = new Label(dialogMsg.toString());
+        msgLabel.setWrapText(true);
+        msgLabel.setMaxWidth(380);
+        ScrollPane scrollPane = new ScrollPane(msgLabel);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setPrefHeight(Math.min(
+                javafx.stage.Screen.getPrimary().getVisualBounds().getHeight() * 0.6, 450));
+        scrollPane.setMinHeight(100);
+        confirmAlert.getDialogPane().setContent(scrollPane);
         confirmAlert.setHeaderText("Confirm Cleanup");
         confirmAlert.getDialogPane().setMinWidth(400);
+        confirmAlert.getDialogPane().setMaxHeight(Math.min(
+                javafx.stage.Screen.getPrimary().getVisualBounds().getHeight() * 0.75, 600));
         if (confirmAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
             busy.set(false);
             return;

@@ -68,7 +68,7 @@ public class WindowsStoreCacheCleaner implements CleanerExtension {
                                                 if (!Files.isHidden(f) && f.toFile().lastModified() > 0 && f.toFile().lastModified() < cutoff) {
                                                     long size = Files.size(f);
                                                     CleanerUtils.deletePermanently(f);
-                                                    cleaned += size;
+                                                    if (!Files.exists(f)) cleaned += size;
                                                 }
                                             } catch (Exception ignored) {}
                                         }

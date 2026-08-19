@@ -6,15 +6,32 @@ import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.ProcessManager;
+import com.sbtools.util.WindowsServicingSafety;
+import com.sbtools.util.WindowsVersionUtil;
 
 
 public class WindowsUpdateCleanupCleaner implements CleanerExtension {
+
+    private volatile long lastScannedBytes;
 
     @Override
     public CleanupCategory getCategory() { return CleanupCategory.WINDOWS_UPDATE_CLEANUP; }
 
     @Override
     public void scan(CleanupRow row) {
+        if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Skipped (not supported on this Windows version)");
+            return;
+        }
+        if (WindowsServicingSafety.isServicingPending()) {
+            String reasons = String.join("; ", WindowsServicingSafety.getPendingReasons());
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Skipped (pending system restart: " + reasons + ")");
+            return;
+        }
         long totalSize = 0;
         int itemCount = 0;
         try {
@@ -25,28 +42,21 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
             if (finished) {
                 String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
                 for (String line : output.split("\\n")) {
-                    if (line.contains("Size of superseded components")) {
-                        String[] parts = line.split(":");
-                        if (parts.length >= 2) {
-                            String sizePart = parts[1].trim();
-                            String sizeStr = sizePart.replaceAll("[^0-9.]", "").trim();
-                            if (!sizeStr.isEmpty()) {
-                                try {
-                                    double numericValue = Double.parseDouble(sizeStr);
-                                    long bytes;
-                                    if (sizePart.toUpperCase().contains("GB")) bytes = (long) (numericValue * 1024L * 1024L * 1024L);
-                                    else if (sizePart.toUpperCase().contains("MB")) bytes = (long) (numericValue * 1024L * 1024L);
-                                    else if (sizePart.toUpperCase().contains("KB")) bytes = (long) (numericValue * 1024L);
-                                    else bytes = (long) (numericValue * 1024L * 1024L);
-                                    totalSize += bytes;
-                                    itemCount = Math.max(itemCount, 1);
-                                } catch (NumberFormatException ignored) {}
+                    String lower = line.toLowerCase();
+                    if (lower.contains("superseded")) {
+                        String sizePart = parseSizeFromLine(line);
+                        if (sizePart != null) {
+                            long bytes = parseBytesFromSizeString(sizePart);
+                            if (bytes > 0) {
+                                totalSize += bytes;
+                                itemCount = Math.max(itemCount, 1);
                             }
                         }
                     }
                 }
             } else { p.destroyForcibly(); }
         } catch (Exception ignored) {}
+        lastScannedBytes = totalSize;
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
         row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (superseded components)" : " (none found)"));
@@ -59,6 +69,16 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
+            AppLogger.info("Skipping DISM component cleanup on newer Windows version (Build "
+                    + WindowsVersionUtil.getBuildNumber() + ")");
+            return 0;
+        }
+        if (WindowsServicingSafety.isServicingPending()) {
+            AppLogger.info("Skipping DISM component cleanup: pending system restart ("
+                    + String.join("; ", WindowsServicingSafety.getPendingReasons()) + ")");
+            return 0;
+        }
         long cleaned = 0;
         try {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image", "/StartComponentCleanup");
@@ -66,9 +86,15 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
             Process p = ProcessManager.start(pb);
             boolean finished = p.waitFor(900, java.util.concurrent.TimeUnit.SECONDS);
             if (finished) {
-                AppLogger.info("DISM component cleanup completed successfully");
-                String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                cleaned = parseCleanedBytes(output);
+                int exitCode = p.exitValue();
+                AppLogger.info("DISM component cleanup completed with exit code " + exitCode);
+                if (exitCode == 0) {
+                    String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                    cleaned = parseCleanedBytes(output);
+                    if (cleaned == 0 && lastScannedBytes > 0) {
+                        cleaned = lastScannedBytes;
+                    }
+                }
             } else {
                 AppLogger.warning("DISM cleanup timed out after ~15 minutes");
                 p.destroyForcibly();
@@ -77,19 +103,45 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
         return cleaned;
     }
 
+    private String parseSizeFromLine(String line) {
+        String[] parts = line.split(":");
+        if (parts.length >= 2) {
+            String afterColon = parts[1].trim();
+            int unitIdx = -1;
+            String upper = afterColon.toUpperCase();
+            for (String unit : new String[]{"GB", "MB", "KB"}) {
+                int idx = upper.indexOf(unit);
+                if (idx >= 0) { unitIdx = idx; break; }
+            }
+            if (unitIdx > 0) {
+                return afterColon.substring(0, unitIdx + 2).trim();
+            }
+        }
+        return null;
+    }
+
+    private long parseBytesFromSizeString(String sizePart) {
+        String numStr = sizePart.replaceAll("[^0-9.]", "").trim();
+        if (numStr.isEmpty()) return 0;
+        try {
+            double numericValue = Double.parseDouble(numStr);
+            String upper = sizePart.toUpperCase();
+            if (upper.contains("GB")) return (long) (numericValue * 1024L * 1024L * 1024L);
+            if (upper.contains("MB")) return (long) (numericValue * 1024L * 1024L);
+            if (upper.contains("KB")) return (long) (numericValue * 1024L);
+            return (long) (numericValue * 1024L * 1024L);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     private long parseCleanedBytes(String output) {
         for (String line : output.split("\\n")) {
             String lower = line.toLowerCase();
             if (lower.contains("successfully") && lower.contains("freed")) {
-                String cleanedStr = line.replaceAll("[^0-9.]", "").trim();
-                if (!cleanedStr.isEmpty()) {
-                    try {
-                        double numericValue = Double.parseDouble(cleanedStr);
-                        if (lower.contains("gb")) return (long) (numericValue * 1024L * 1024L * 1024L);
-                        if (lower.contains("mb")) return (long) (numericValue * 1024L * 1024L);
-                        if (lower.contains("kb")) return (long) (numericValue * 1024L);
-                        return (long) (numericValue * 1024L * 1024L);
-                    } catch (NumberFormatException ignored) {}
+                String sizePart = parseSizeFromLine(line);
+                if (sizePart != null) {
+                    return parseBytesFromSizeString(sizePart);
                 }
             }
         }

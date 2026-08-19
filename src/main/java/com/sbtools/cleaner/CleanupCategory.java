@@ -8,10 +8,10 @@ public enum CleanupCategory {
     WEB_BROWSING_TRACES("Web browsing traces", "Browser cache, cookies, history, and saved passwords (WARNING: saves passwords, cookies, and history will be deleted)", RiskLevel.MEDIUM),
     CACHE("Cache", "System and application cache data (including INetCache; INetCookies not cleaned for safety)", RiskLevel.LOW),
     INSTALLER_FILES("Installer Files", "Cached installer packages and downloaded setup files (TEMP only)", RiskLevel.MEDIUM),
-    TEMPORARY_SYSTEM_FILES("Temporary System Files", "Windows temporary system files and prefetch", RiskLevel.MEDIUM),
+    TEMPORARY_SYSTEM_FILES("Temporary System Files", "Prefetch cache only (system upgrade directories excluded for safety)", RiskLevel.LOW),
     MEMORY_DUMPS("Memory Dumps", "System crash dump files (.dmp)", RiskLevel.LOW),
     WINDOWS_ERROR_REPORTING("Windows Error Reporting", "Archived error reports from Windows Error Reporting", RiskLevel.LOW),
-    WINDOWS_UPDATE_CLEANUP("Windows Update Cleanup", "Superseded components in WinSxS via DISM", RiskLevel.HIGH),
+    WINDOWS_UPDATE_CLEANUP("Windows Update Cleanup", "Superseded components in WinSxS via DISM (may be skipped on newer Windows versions)", RiskLevel.HIGH),
     THUMBNAIL_CACHE("Thumbnail Cache", "Explorer thumbnail database cache", RiskLevel.MEDIUM),
     EMPTY_FOLDERS("Empty Folders", "Empty directories under temp folders only (user profile folders excluded for safety)", RiskLevel.LOW),
     NOTIFICATION_HISTORY("Notification History", "Windows toast notification cache", RiskLevel.MEDIUM),
@@ -23,7 +23,7 @@ public enum CleanupCategory {
     WINDOWS_STORE_CACHE("Windows Store Cache", "Per-app Windows Store package caches", RiskLevel.LOW),
     OTHER_PROGRAMS_CACHE("Other Programs Cache", "Cache data from Discord, VS Code, Adobe, Steam, Slack, Zoom, and Teams", RiskLevel.LOW),
     NVIDIA_SHADER_CACHE("NVIDIA/AMD Shader Cache", "GPU shader cache files that are regenerated on demand", RiskLevel.LOW),
-    SOFTWARE_DISTRIBUTION_CACHE("Software Distribution Cache", "Windows Update download cache in SoftwareDistribution\\Download (skipped during active updates)", RiskLevel.MEDIUM),
+    SOFTWARE_DISTRIBUTION_CACHE("Software Distribution Cache", "Windows Update download cache in SoftwareDistribution\\Download (skipped during active updates or pending restart)", RiskLevel.HIGH),
     WINDOWS_DIAGNOSTICS_CACHE("Diagnostics Cache", "Windows diagnostic and error reporting data files", RiskLevel.LOW),
     OLD_WINDOWS_INSTALL("Previous Windows Installation", "Windows.old folder from a previous OS upgrade (large)", RiskLevel.HIGH),
     DOCKER_CACHE("Docker Cache", "Docker images, containers, volumes at %PROGRAMDATA%\\Docker", RiskLevel.HIGH),
@@ -39,7 +39,7 @@ public enum CleanupCategory {
     public enum RiskLevel {
         LOW("Low", "Safe to clean, files are regenerated as needed"),
         MEDIUM("Medium", "May affect some app state or require system restart, review recommended"),
-        HIGH("High", "Irreversible or system-critical, review before cleaning");
+        HIGH("High", "WARNING: Can break Windows functionality or prevent rollback of updates. Review carefully before cleaning");
 
         private final String displayName;
         private final String description;

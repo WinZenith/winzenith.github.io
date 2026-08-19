@@ -1,13 +1,17 @@
 package com.sbtools.cleaner;
 
 import com.sbtools.util.AppLogger;
+import com.sbtools.util.CancelableCompletableFuture;
+import com.sbtools.util.CancellationToken;
 import com.sbtools.util.FormatUtils;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -15,6 +19,32 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 public final class CleanerUtils {
+
+    private static final Set<String> PROTECTED_ABSOLUTE_PREFIXES = new HashSet<>();
+
+    private static final Set<String> PROTECTED_ROOT_FILE_NAMES = new HashSet<>(Set.of(
+            "$Windows.~BT", "$Windows.~WS", "$SysReset",
+            "pagefile.sys", "hiberfil.sys", "swapfile.sys",
+            "bootmgr", "bootmgr.efi", "ntldr", "ntdetect.com",
+            "BOOTNXT", "Recovery"
+    ));
+
+    static {
+        String windir = System.getenv("WINDIR");
+        if (windir != null) {
+            String w = windir.toLowerCase().replace('/', '\\');
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\system32");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\syswow64");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\winsxs");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\boot");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\fonts");
+        }
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\system32");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\syswow64");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\winsxs");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\boot");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\fonts");
+    }
 
     private CleanerUtils() {
     }
@@ -209,11 +239,28 @@ public final class CleanerUtils {
     }
 
     public static long deleteDirectoryContents(Path dir) {
+        return deleteDirectoryContents(dir, null);
+    }
+
+    public static long deleteDirectoryContents(Path dir, CancellationToken token) {
         java.util.concurrent.atomic.AtomicLong cleaned = new java.util.concurrent.atomic.AtomicLong();
         try {
             Files.walkFileTree(dir, new SimpleFileVisitor<>() {
                 @Override
+                public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                    if (!d.equals(dir) && isProtectedPath(d)) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                    if (isProtectedPath(file)) {
+                        return FileVisitResult.CONTINUE;
+                    }
                     try {
                         Files.deleteIfExists(file);
                         cleaned.addAndGet(attrs.size());
@@ -224,7 +271,8 @@ public final class CleanerUtils {
 
                 @Override
                 public FileVisitResult postVisitDirectory(Path d, IOException exc) {
-                    if (!d.equals(dir)) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                    if (!d.equals(dir) && !isProtectedPath(d)) {
                         try {
                             Files.deleteIfExists(d);
                         } catch (Exception ignored) {
@@ -244,10 +292,15 @@ public final class CleanerUtils {
     }
 
     public static long deleteDirectoryContentsOlderThan(Path dir, long cutoffMillis) {
+        return deleteDirectoryContentsOlderThan(dir, cutoffMillis, null);
+    }
+
+    public static long deleteDirectoryContentsOlderThan(Path dir, long cutoffMillis, CancellationToken token) {
         long cleaned = 0;
         try (Stream<Path> walk = Files.walk(dir)) {
             List<Path> sorted = walk.sorted(Comparator.reverseOrder()).toList();
             for (Path f : sorted) {
+                if (token != null && token.isCancelled()) break;
                 if (f.equals(dir)) continue;
                     try {
                         long lastModified = f.toFile().lastModified();
@@ -269,6 +322,15 @@ public final class CleanerUtils {
     }
 
     public static void deletePermanently(Path source) {
+        deletePermanently(source, null);
+    }
+
+    public static void deletePermanently(Path source, CancellationToken token) {
+        if (token != null && token.isCancelled()) return;
+        if (isProtectedPath(source)) {
+            AppLogger.warning("Skipping protected path: " + source);
+            return;
+        }
         try {
             Files.deleteIfExists(source);
         } catch (IOException e) {
@@ -282,6 +344,41 @@ public final class CleanerUtils {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    public static boolean isProtectedPath(Path path) {
+        if (path == null) return false;
+        try {
+            Path abs = path.toAbsolutePath().normalize();
+            String absStr = abs.toString().toLowerCase().replace('/', '\\');
+
+            for (String prefix : PROTECTED_ABSOLUTE_PREFIXES) {
+                if (absStr.equals(prefix) || absStr.startsWith(prefix + "\\")) {
+                    return true;
+                }
+            }
+
+            Path root = abs.getRoot();
+            if (root != null && abs.getParent() != null && abs.getParent().equals(root)) {
+                String fileName = abs.getFileName().toString();
+                if (PROTECTED_ROOT_FILE_NAMES.contains(fileName.toLowerCase())) return true;
+            }
+
+            for (File driveRoot : File.listRoots()) {
+                if (abs.startsWith(driveRoot.toPath())) {
+                    int namesCount = abs.getNameCount();
+                    if (namesCount <= 1) {
+                        String fileName = abs.getFileName() != null ? abs.getFileName().toString() : "";
+                        if (fileName.equalsIgnoreCase("$Windows.~BT")
+                                || fileName.equalsIgnoreCase("$Windows.~WS")
+                                || fileName.equalsIgnoreCase("$SysReset")) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     public static String formatBytes(long bytes) {

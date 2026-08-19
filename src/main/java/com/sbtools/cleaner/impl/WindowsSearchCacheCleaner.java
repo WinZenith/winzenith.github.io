@@ -81,7 +81,6 @@ public class WindowsSearchCacheCleaner implements CleanerExtension {
         List<Path> dirs = new ArrayList<>();
         Path searchData = CleanerUtils.safeEnvPath("PROGRAMDATA", "Microsoft", "Search", "Data");
         if (searchData != null && Files.isDirectory(searchData)) {
-            CleanerUtils.addPath(dirs, searchData.resolve("Applications").toString());
             CleanerUtils.addPath(dirs, searchData.resolve("Temp").toString());
         }
         Path programData = CleanerUtils.safeEnvPath("PROGRAMDATA");

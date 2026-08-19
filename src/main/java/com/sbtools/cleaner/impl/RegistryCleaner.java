@@ -45,15 +45,14 @@ public class RegistryCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
-        long cleaned = 0;
         for (String keyPath : SAFE_DELETE_HKCU_RUN_PATHS) {
-            cleaned += deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_CURRENT_USER, keyPath);
+            deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_CURRENT_USER, keyPath);
         }
         for (String keyPath : SAFE_DELETE_HKLM_RUN_PATHS) {
-            cleaned += deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_LOCAL_MACHINE, keyPath);
+            deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_LOCAL_MACHINE, keyPath);
         }
-        cleaned += cleanOrphanedSharedDLLs(backupRootOrNull);
-        return cleaned;
+        cleanOrphanedSharedDLLs(backupRootOrNull);
+        return 0;
     }
 
     private int countInvalidRegistryValues(WinReg.HKEY hive, String keyPath) {

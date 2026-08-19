@@ -20,9 +20,7 @@ public enum CleanerPresets {
     HIGH_IMPACT("High Impact", "Categories that free the most space", EnumSet.of(
             CleanupCategory.REGISTRY,
             CleanupCategory.WEB_BROWSING_TRACES,
-            CleanupCategory.WINDOWS_UPDATE_CLEANUP,
             CleanupCategory.OTHER_PROGRAMS_CACHE,
-            CleanupCategory.OLD_WINDOWS_INSTALL,
             CleanupCategory.SOFTWARE_DISTRIBUTION_CACHE,
             CleanupCategory.DOCKER_CACHE,
             CleanupCategory.GRADLE_CACHE,
