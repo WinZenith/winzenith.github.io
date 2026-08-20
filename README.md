@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.3/WinZenith-1.2.3-portable.zip">
-    <img src="https://img.shields.io/badge/Download-v1.2.3-brightgreen?style=for-the-badge" alt="Download WinZenith">
+  <a href="https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.4/WinZenith-1.2.4-portable.zip">
+    <img src="https://img.shields.io/badge/Download-v1.2.4-brightgreen?style=for-the-badge" alt="Download WinZenith">
   </a>
   <img src="https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-blue?style=for-the-badge" alt="Platform">
   <img src="https://img.shields.io/badge/Price-Free-brightgreen?style=for-the-badge" alt="Price">
@@ -66,11 +66,11 @@
 
 ## Download
 
-Download the latest release from [GitHub Releases](https://github.com/WinZenith/winzenith.github.io/releases/tag/v1.2.3).
+Download the latest release from [GitHub Releases](https://github.com/WinZenith/winzenith.github.io/releases/tag/v1.2.4).
 
 ### How to Run
 
-1. Download `WinZenith-1.2.3-portable.zip`
+1. Download `WinZenith-1.2.4-portable.zip`
 2. Extract to any folder
 3. Run `WinZenith.exe` as Administrator
 
