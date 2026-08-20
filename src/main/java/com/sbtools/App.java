@@ -59,7 +59,7 @@ public class App extends Application {
     private static final String[] TAB_NAMES = {
             "Dashboard", "Drivers", "Backup/Rollback", "Software Update",
             "System Information", "Uninstaller", "Startup items/services",
-            "System cleanup", "Duplicate Files", "Disk Tools",
+            "System cleanup", "Disk Tools",
             "Browser Extensions", "Network Optimizer"
     };
 
@@ -265,10 +265,9 @@ public class App extends Application {
             case 5 -> new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin);
             case 6 -> new StartupTabView(busy, AdminCheck::isRunningAsAdmin);
             case 7 -> new CleanerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore);
-            case 8 -> new DuplicateFilesTabView(AdminCheck::isRunningAsAdmin);
-            case 9 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
-            case 10 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin, settingsStore);
-            case 11 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings,
+            case 8 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
+            case 9 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin, settingsStore);
+            case 10 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings,
                     updatedSettings -> this.appSettings = updatedSettings);
             default -> throw new IllegalArgumentException("Unknown tab index: " + index);
         };
@@ -717,8 +716,6 @@ public class App extends Application {
                     betv.dispose();
                 } else if (view instanceof NetworkOptimizerTabView notv) {
                     notv.dispose();
-                } else if (view instanceof DuplicateFilesTabView dftv) {
-                    dftv.dispose();
                 }
             }
         }
