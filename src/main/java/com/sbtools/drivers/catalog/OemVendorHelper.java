@@ -41,9 +41,21 @@ public enum OemVendorHelper {
         AppLogger.debug("VendorDetect: Driver='" + driver.friendlyName() + "', HW='" + hw + "', Provider='" + prov + "'");
 
         for (OemVendorHelper v : values()) {
+            // PCI pattern must be exact token "VEN_xxxx" – avoids false substring 1002 matching.
             boolean hwMatch = v.pciPattern.startsWith("VEN_") && hw.contains(v.pciPattern);
-            boolean venIdMatch = v.venId != null
-                    && (hw.contains(v.venId) || name.contains(v.venId) || prov.contains(v.venId));
+            // venId (e.g. 1002) must appear as VEN_1002 or DEV_1002 or isolated, not arbitrary substring.
+            boolean venIdMatch = false;
+            if (v.venId != null && v.venId.length() == 4) {
+                String venToken = "VEN_" + v.venId;
+                String devToken = "DEV_" + v.venId;
+                venIdMatch = hw.contains(venToken) || hw.contains(devToken);
+                // For name/provider, require word boundary for 4-digit ID
+                if (!venIdMatch) {
+                    venIdMatch = name.matches(".*\\b" + v.venId + "\\b.*") || prov.matches(".*\\b" + v.venId + "\\b.*");
+                }
+            } else if (v.venId != null) {
+                venIdMatch = hw.contains(v.venId) || name.contains(v.venId) || prov.contains(v.venId);
+            }
             boolean nameMatch = name.contains(v.label.toUpperCase());
             boolean provMatch = prov.contains(v.label.toUpperCase());
             if (hwMatch || venIdMatch || nameMatch || provMatch) {

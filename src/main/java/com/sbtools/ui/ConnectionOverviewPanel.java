@@ -1,6 +1,7 @@
 package com.sbtools.ui;
 
 import com.sbtools.netoptimizer.NetworkOptimizerService;
+import com.sbtools.util.AppExecutors;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.geometry.Insets;
@@ -13,11 +14,14 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
+import java.util.concurrent.Future;
+
 class ConnectionOverviewPanel extends VBox {
 
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
     private final TextArea outputArea;
+    private volatile Future<?> currentTask;
 
     ConnectionOverviewPanel(NetworkOptimizerService service, BooleanProperty busy) {
         this.service = service;
@@ -33,20 +37,21 @@ class ConnectionOverviewPanel extends VBox {
         }
         busy.set(true);
         outputArea.setText("Loading network information...");
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 String info = service.getIpConfigAll();
-                Platform.runLater(() -> {
-                    outputArea.setText(info);
-                });
+                Platform.runLater(() -> outputArea.setText(info));
             } catch (Exception e) {
-                Platform.runLater(() -> {
-                    outputArea.setText("Failed to load network information: " + e.getMessage());
-                });
+                Platform.runLater(() -> outputArea.setText("Failed to load network information: " + e.getMessage()));
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-overview").start();
+        });
+    }
+
+    void dispose() {
+        Future<?> t = currentTask;
+        if (t != null) t.cancel(true);
     }
 
     private VBox buildContent() {

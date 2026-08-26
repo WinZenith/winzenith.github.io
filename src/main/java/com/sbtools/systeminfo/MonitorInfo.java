@@ -9,6 +9,7 @@ public record MonitorInfo(
         @JsonProperty("manufacturer") String manufacturer,
         @JsonProperty("screenSize") String screenSize,
         @JsonProperty("resolution") String resolution,
-        @JsonProperty("status") String status
+        @JsonProperty("status") String status,
+        @JsonProperty("pnpDeviceId") String pnpDeviceId
 ) {
 }

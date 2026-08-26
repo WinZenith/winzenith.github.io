@@ -5,6 +5,7 @@ import com.sbtools.netoptimizer.OptimizationPreset;
 import com.sbtools.netoptimizer.TcpSettings;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
+import com.sbtools.util.AppExecutors;
 import com.sbtools.util.AppLogger;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
@@ -21,23 +22,35 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 
 import java.io.IOException;
+import java.util.concurrent.Future;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 class OptimizationPanel extends VBox {
 
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
+    private final BooleanSupplier adminCheck;
     private final SettingsStore settingsStore;
     private AppSettings currentSettings;
     private final Label statusLabel;
     private final Consumer<AppSettings> onSettingsSaved;
     private ToggleGroup presetGroup;
+    private Label descLabel;
+    private volatile Future<?> currentTask;
 
     OptimizationPanel(NetworkOptimizerService service, BooleanProperty busy,
                       SettingsStore settingsStore, AppSettings currentSettings,
                       Label statusLabel, Consumer<AppSettings> onSettingsSaved) {
+        this(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved, () -> false);
+    }
+
+    OptimizationPanel(NetworkOptimizerService service, BooleanProperty busy,
+                      SettingsStore settingsStore, AppSettings currentSettings,
+                      Label statusLabel, Consumer<AppSettings> onSettingsSaved, BooleanSupplier adminCheck) {
         this.service = service;
         this.busy = busy;
+        this.adminCheck = adminCheck != null ? adminCheck : () -> false;
         this.settingsStore = settingsStore;
         this.currentSettings = currentSettings;
         this.statusLabel = statusLabel;
@@ -56,9 +69,10 @@ class OptimizationPanel extends VBox {
         ToggleGroup group = new ToggleGroup();
         this.presetGroup = group;
 
-        Label descLabel = new Label("Choose a preset and click Apply.");
+        this.descLabel = new Label("Choose a preset and click Apply.");
         descLabel.setWrapText(true);
         descLabel.setPrefWidth(500);
+        Label descLabel = this.descLabel;
 
         OptimizationPreset savedPreset = OptimizationPreset.DEFAULT;
         try {
@@ -98,10 +112,7 @@ class OptimizationPanel extends VBox {
             applyOptimization(preset, progressBar);
         });
 
-        resetBtn.setOnAction(e -> {
-            applyOptimization(OptimizationPreset.DEFAULT, progressBar);
-            group.selectToggle(group.getToggles().get(0));
-        });
+        resetBtn.setOnAction(e -> applyOptimization(OptimizationPreset.DEFAULT, progressBar));
 
         HBox btnBox = new HBox(12, applyBtn, resetBtn, progressBar);
         btnBox.setAlignment(Pos.CENTER_LEFT);
@@ -110,8 +121,17 @@ class OptimizationPanel extends VBox {
         return new VBox(box, btnBox);
     }
 
+    private boolean requireAdmin() {
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING, "Administrator privileges required.\n\nRight-click WinZenith.exe → Run as administrator.\n\nOptimization changes TCP/IP and registry settings.").showAndWait();
+            return false;
+        }
+        return true;
+    }
+
     private void applyOptimization(OptimizationPreset preset, ProgressBar progressBar) {
         if (busy.get()) return;
+        if (!requireAdmin()) return;
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Apply " + preset.getDisplayName() + "?\n\n" + preset.getDescription());
@@ -124,10 +144,9 @@ class OptimizationPanel extends VBox {
         progressBar.setProgress(-1);
         statusLabel.setText("Applying " + preset.getDisplayName() + "...");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.applyOptimization(preset);
-                boolean saved = false;
                 String saveError = null;
                 if (result.success()) {
                     try {
@@ -139,52 +158,66 @@ class OptimizationPanel extends VBox {
                         if (onSettingsSaved != null) {
                             onSettingsSaved.accept(newSettings);
                         }
-                        saved = true;
                     } catch (IOException e) {
                         AppLogger.warning("Failed to save optimization preset: " + e.getMessage());
                         saveError = e.getMessage();
                     }
                 }
-                final boolean finalSaved = saved;
                 final String finalSaveError = saveError;
+                final boolean wasSuccess = result.success();
                 Platform.runLater(() -> {
                     progressBar.setVisible(false);
-                    statusLabel.setText(result.success()
+                    busy.set(false);
+                    if (wasSuccess) {
+                        // update toggle to reflect actual applied preset
+                        for (javafx.scene.control.Toggle t : presetGroup.getToggles()) {
+                            if (t instanceof RadioButton rb && rb.getUserData() == preset) {
+                                rb.setSelected(true);
+                                if (descLabel != null) descLabel.setText(preset.getDescription());
+                                break;
+                            }
+                        }
+                    }
+                    statusLabel.setText(wasSuccess
                             ? "Optimization applied: " + preset.getDisplayName()
                             : "Optimization failed.");
-                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                    Alert a = new Alert(wasSuccess ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : ""));
+                    a.showAndWait();
                     if (finalSaveError != null) {
                         new Alert(Alert.AlertType.WARNING,
                                 "Preset applied successfully, but failed to save preference:\n" + finalSaveError
                                         + "\n\nThe preset will revert on next launch.").showAndWait();
                     }
-                    if (result.success()) {
-                        showCurrentSettings();
+                    if (wasSuccess) {
+                        // defer so busy is already false
+                        Platform.runLater(this::showCurrentSettings);
                     }
                 });
+                return;
             } catch (Exception e) {
                 Platform.runLater(() -> {
                     progressBar.setVisible(false);
+                    busy.set(false);
                     statusLabel.setText("Optimization failed.");
                     new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
                 });
-            } finally {
-                Platform.runLater(() -> busy.set(false));
             }
-        }, "net-optimize-apply").start();
+        });
     }
 
     void refreshPresetSelection() {
         if (presetGroup == null) return;
         OptimizationPreset savedPreset = OptimizationPreset.DEFAULT;
         try {
-            savedPreset = OptimizationPreset.valueOf(currentSettings.networkOptimizationPreset());
+            String raw = currentSettings.networkOptimizationPreset();
+            if (raw != null) savedPreset = OptimizationPreset.valueOf(raw.trim().toUpperCase());
         } catch (IllegalArgumentException ignored) {
         }
         for (javafx.scene.control.Toggle toggle : presetGroup.getToggles()) {
             if (toggle instanceof RadioButton rb && rb.getUserData() instanceof OptimizationPreset p && p == savedPreset) {
                 rb.setSelected(true);
+                if (descLabel != null) descLabel.setText(p.getDescription());
                 break;
             }
         }
@@ -195,12 +228,16 @@ class OptimizationPanel extends VBox {
         busy.set(true);
         statusLabel.setText("Loading TCP/IP settings...");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 TcpSettings settings = service.getCurrentTcpSettings();
                 Platform.runLater(() -> {
                     StringBuilder sb = new StringBuilder();
-                    settings.settings().forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
+                    if (settings.settings().isEmpty()) {
+                        sb.append("No TCP global settings returned.\n\nPossible causes:\n- Not running on Windows\n- netsh output localized or permission denied (run as Administrator)\n");
+                    } else {
+                        settings.settings().forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
+                    }
                     Alert alert = new Alert(Alert.AlertType.INFORMATION);
                     alert.setTitle("Current TCP/IP Settings");
                     alert.setHeaderText("Active TCP Global Settings");
@@ -214,12 +251,15 @@ class OptimizationPanel extends VBox {
                     statusLabel.setText("Ready.");
                 });
             } catch (Exception e) {
-                Platform.runLater(() -> {
-                    statusLabel.setText("Failed to load TCP/IP settings.");
-                });
+                Platform.runLater(() -> statusLabel.setText("Failed to load TCP/IP settings."));
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-tcp-settings").start();
+        });
+    }
+
+    void dispose() {
+        Future<?> t = currentTask;
+        if (t != null) t.cancel(true);
     }
 }

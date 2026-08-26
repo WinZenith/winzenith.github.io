@@ -23,10 +23,10 @@ public final class CleanerUtils {
     private static final Set<String> PROTECTED_ABSOLUTE_PREFIXES = new HashSet<>();
 
     private static final Set<String> PROTECTED_ROOT_FILE_NAMES = new HashSet<>(Set.of(
-            "$Windows.~BT", "$Windows.~WS", "$SysReset",
+            "$windows.~bt", "$windows.~ws", "$sysreset",
             "pagefile.sys", "hiberfil.sys", "swapfile.sys",
             "bootmgr", "bootmgr.efi", "ntldr", "ntdetect.com",
-            "BOOTNXT", "Recovery"
+            "bootnxt", "recovery"
     ));
 
     static {
@@ -176,7 +176,9 @@ public final class CleanerUtils {
             if (dir != null && Files.isDirectory(dir)) {
                 try (Stream<Path> walk = maxDepth > 0 ? Files.walk(dir, maxDepth) : Files.walk(dir)) {
                     var stats = walk.filter(Files::isRegularFile)
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> {
+                                try { return Files.size(p); } catch (Exception e) { return p.toFile().length(); }
+                            }));
                     totalSize += stats.getSum();
                     itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
@@ -202,10 +204,12 @@ public final class CleanerUtils {
                                     long lastModified = p.toFile().lastModified();
                                     return lastModified > 0 && lastModified < cutoff;
                                 } catch (Exception e) {
-                                    return true;
+                                    return false;
                                 }
                             })
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> {
+                                try { return Files.size(p); } catch (Exception e) { return p.toFile().length(); }
+                            }));
                     totalSize += stats.getSum();
                     itemCount += (int) stats.getCount();
                 } catch (Exception ignored) {
@@ -218,21 +222,29 @@ public final class CleanerUtils {
     }
 
     public static long cleanDirectoryPattern(List<Path> dirs) {
+        return cleanDirectoryPattern(dirs, null);
+    }
+
+    public static long cleanDirectoryPattern(List<Path> dirs, CancellationToken token) {
         long cleaned = 0;
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
-                cleaned += deleteDirectoryContents(dir);
+                cleaned += deleteDirectoryContents(dir, token);
             }
         }
         return cleaned;
     }
 
     public static long cleanDirectoryPatternOlderThan(List<Path> dirs, java.time.Duration maxAge) {
+        return cleanDirectoryPatternOlderThan(dirs, maxAge, null);
+    }
+
+    public static long cleanDirectoryPatternOlderThan(List<Path> dirs, java.time.Duration maxAge, CancellationToken token) {
         long cleaned = 0;
         long cutoff = System.currentTimeMillis() - maxAge.toMillis();
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
-                cleaned += deleteDirectoryContentsOlderThan(dir, cutoff);
+                cleaned += deleteDirectoryContentsOlderThan(dir, cutoff, token);
             }
         }
         return cleaned;
@@ -245,13 +257,24 @@ public final class CleanerUtils {
     public static long deleteDirectoryContents(Path dir, CancellationToken token) {
         java.util.concurrent.atomic.AtomicLong cleaned = new java.util.concurrent.atomic.AtomicLong();
         try {
-            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
+            Files.walkFileTree(dir, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), Integer.MAX_VALUE, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
                     if (!d.equals(dir) && isProtectedPath(d)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
+                    // Skip reparse points / junctions to avoid traversing outside target
+                    if (!d.equals(dir) && attrs.isOther()) {
+                        try {
+                            Object reparse = Files.getAttribute(d, "dos:isReparsePoint", java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                            if (reparse instanceof Boolean && (Boolean) reparse) return FileVisitResult.SKIP_SUBTREE;
+                        } catch (Exception ignored) {}
+                    }
+                    if (attrs.isSymbolicLink()) return FileVisitResult.SKIP_SUBTREE;
+                    try {
+                        if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
+                    } catch (Exception ignored) {}
                     return FileVisitResult.CONTINUE;
                 }
 
@@ -298,7 +321,8 @@ public final class CleanerUtils {
     public static long deleteDirectoryContentsOlderThan(Path dir, long cutoffMillis, CancellationToken token) {
         long cleaned = 0;
         try (Stream<Path> walk = Files.walk(dir)) {
-            List<Path> sorted = walk.sorted(Comparator.reverseOrder()).toList();
+            List<Path> sorted = walk.sorted(Comparator.comparingInt(Path::getNameCount).reversed()
+                    .thenComparing(Comparator.reverseOrder())).toList();
             for (Path f : sorted) {
                 if (token != null && token.isCancelled()) break;
                 if (f.equals(dir)) continue;
@@ -306,12 +330,13 @@ public final class CleanerUtils {
                         long lastModified = f.toFile().lastModified();
                         if (lastModified > 0 && lastModified >= cutoffMillis) continue;
                         if (Files.isHidden(f)) continue;
+                        if (isProtectedPath(f)) continue;
                         if (Files.isRegularFile(f) || Files.isSymbolicLink(f)) {
                         long size = Files.size(f);
-                        deletePermanently(f);
+                        deletePermanently(f, token);
                         if (!Files.exists(f)) cleaned += size;
                     } else if (Files.isDirectory(f)) {
-                        deletePermanently(f);
+                        deletePermanently(f, token);
                     }
                 } catch (Exception ignored) {
                 }
@@ -331,11 +356,38 @@ public final class CleanerUtils {
             AppLogger.warning("Skipping protected path: " + source);
             return;
         }
+        // Handle reparse points / junctions safely: delete link itself, not target
+        try {
+            if (Files.isSymbolicLink(source)) {
+                Files.deleteIfExists(source);
+                return;
+            }
+            try {
+                Object reparse = Files.getAttribute(source, "dos:isReparsePoint", java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                if (reparse instanceof Boolean && (Boolean) reparse) {
+                    Files.deleteIfExists(source);
+                    return;
+                }
+            } catch (Exception ignored) {}
+        } catch (Exception ignored) {}
         try {
             Files.deleteIfExists(source);
         } catch (IOException e) {
             AppLogger.warning("Could not delete " + source + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * Safely delete a directory if empty and not protected. Uses deletePermanently check.
+     */
+    public static boolean deleteDirectoryIfEmptySafe(Path dir, CancellationToken token) {
+        if (token != null && token.isCancelled()) return false;
+        if (isProtectedPath(dir)) return false;
+        try {
+            if (!isEmptyDirectory(dir)) return false;
+            Files.deleteIfExists(dir);
+            return !Files.exists(dir);
+        } catch (Exception ignored) { return false; }
     }
 
     public static boolean isEmptyDirectory(Path dir) {

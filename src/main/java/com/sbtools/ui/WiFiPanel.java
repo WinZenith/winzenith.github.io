@@ -3,6 +3,7 @@ package com.sbtools.ui;
 import com.sbtools.netoptimizer.NetworkAdapterRow;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
 import com.sbtools.netoptimizer.WiFiInfo;
+import com.sbtools.util.AppExecutors;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.geometry.Insets;
@@ -16,11 +17,14 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 
 import java.util.List;
+import java.util.concurrent.Future;
+import java.util.function.BooleanSupplier;
 
 class WiFiPanel extends VBox {
 
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
+    private final BooleanSupplier adminCheck;
     private final Label statusLabel = new Label("Ready.");
     private final Label ssidLabel = new Label("SSID: -");
     private final Label stateLabel = new Label("State: -");
@@ -29,12 +33,33 @@ class WiFiPanel extends VBox {
     private final Label channelLabel = new Label("Channel: -");
     private final Label rateLabel = new Label("Rates: -");
     private final ComboBox<String> profileCombo = new ComboBox<>();
+    private volatile Future<?> currentTask;
+    // Separate loading flag for profiles so it doesn't collide with currentInfo busy
+    private final java.util.concurrent.atomic.AtomicBoolean profileLoading = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    WiFiPanel(NetworkOptimizerService service, BooleanProperty busy) {
+    WiFiPanel(NetworkOptimizerService service, BooleanProperty busy, BooleanSupplier adminCheck) {
         this.service = service;
         this.busy = busy;
+        this.adminCheck = adminCheck != null ? adminCheck : () -> false;
         getChildren().addAll(buildContent());
         setPadding(new Insets(12, 16, 12, 16));
+    }
+
+    WiFiPanel(NetworkOptimizerService service, BooleanProperty busy) {
+        this(service, busy, () -> false);
+    }
+
+    private boolean requireAdmin() {
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING, "Administrator privileges required.\n\nRight-click WinZenith.exe → Run as administrator.").showAndWait();
+            return false;
+        }
+        return true;
+    }
+
+    void dispose() {
+        Future<?> t = currentTask;
+        if (t != null) t.cancel(true);
     }
 
     private VBox buildContent() {
@@ -110,7 +135,8 @@ class WiFiPanel extends VBox {
             return;
         }
         busy.set(true);
-        new Thread(() -> {
+        statusLabel.setText("Loading Wi-Fi info...");
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 WiFiInfo info = service.getCurrentWifiInfo();
                 Platform.runLater(() -> {
@@ -121,6 +147,7 @@ class WiFiPanel extends VBox {
                         radioLabel.setText("Radio: -");
                         channelLabel.setText("Channel: -");
                         rateLabel.setText("Rates: -");
+                        statusLabel.setText("Wi-Fi: No adapter/info found.");
                     } else {
                         ssidLabel.setText("SSID: " + (info.ssid() != null && !info.ssid().isEmpty() ? info.ssid() : "-"));
                         stateLabel.setText("State: " + (info.state() != null ? info.state() : "-"));
@@ -134,29 +161,38 @@ class WiFiPanel extends VBox {
                             rates += "Tx: " + info.transmitRate();
                         }
                         rateLabel.setText("Rates: " + (rates.isEmpty() ? "-" : rates));
+                        statusLabel.setText("Wi-Fi info loaded.");
                     }
                 });
             } catch (Exception e) {
-                Platform.runLater(() -> statusLabel.setText("Failed to load Wi-Fi info."));
+                Platform.runLater(() -> statusLabel.setText("Failed to load Wi-Fi info: " + e.getMessage()));
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-wifi-info").start();
+        });
     }
 
     void loadProfiles() {
-        new Thread(() -> {
+        if (!profileLoading.compareAndSet(false, true)) return;
+        AppExecutors.ioPool().submit(() -> {
             try {
                 List<String> profiles = service.getWifiProfiles();
                 Platform.runLater(() -> {
+                    String prev = profileCombo.getSelectionModel().getSelectedItem();
                     profileCombo.getItems().clear();
                     profileCombo.getItems().addAll(profiles);
-                    if (!profiles.isEmpty()) profileCombo.getSelectionModel().selectFirst();
+                    if (prev != null && profiles.contains(prev)) {
+                        profileCombo.getSelectionModel().select(prev);
+                    } else if (!profiles.isEmpty()) {
+                        profileCombo.getSelectionModel().selectFirst();
+                    }
                 });
             } catch (Exception e) {
-                Platform.runLater(() -> statusLabel.setText("Failed to load profiles."));
+                Platform.runLater(() -> statusLabel.setText("Failed to load profiles: " + e.getMessage()));
+            } finally {
+                profileLoading.set(false);
             }
-        }, "net-wifi-profiles").start();
+        });
     }
 
     void disconnectWifi() {
@@ -165,13 +201,14 @@ class WiFiPanel extends VBox {
             return;
         }
         busy.set(true);
-        new Thread(() -> {
+        statusLabel.setText("Disconnecting Wi-Fi...");
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.disconnectWifi();
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "Disconnected." : "Disconnect failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -181,7 +218,7 @@ class WiFiPanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-wifi-disconnect").start();
+        });
     }
 
     void forgetProfile() {
@@ -200,14 +237,16 @@ class WiFiPanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
+        if (!requireAdmin()) return;
         busy.set(true);
-        new Thread(() -> {
+        statusLabel.setText("Forgetting profile: " + profile + "...");
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.forgetWifiProfile(profile);
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? result.message() : "Failed to forget profile.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                     if (result.success()) loadProfiles();
                 });
             } catch (Exception e) {
@@ -218,7 +257,7 @@ class WiFiPanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-wifi-forget").start();
+        });
     }
 
     private void setWifiAdapterState(boolean enable) {
@@ -226,11 +265,12 @@ class WiFiPanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
+        if (!requireAdmin()) return;
         busy.set(true);
         String action = enable ? "Enabling" : "Disabling";
         statusLabel.setText(action + " Wi-Fi adapter...");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 List<NetworkAdapterRow> adapters = service.listAdapters();
                 String wifiAdapterName = null;
@@ -253,15 +293,13 @@ class WiFiPanel extends VBox {
                             ? "Wi-Fi adapter " + (enable ? "enabled" : "disabled") + "."
                             : "Failed to " + (enable ? "enable" : "disable") + " Wi-Fi adapter.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });
             } catch (Exception e) {
-                Platform.runLater(() -> {
-                    statusLabel.setText("Failed to set Wi-Fi adapter state.");
-                });
+                Platform.runLater(() -> statusLabel.setText("Failed to set Wi-Fi adapter state: " + e.getMessage()));
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-wifi-set-state").start();
+        });
     }
 }

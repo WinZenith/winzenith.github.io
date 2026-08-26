@@ -54,12 +54,12 @@ public class App extends Application {
 
     private final SettingsStore settingsStore = new SettingsStore();
     private final UpdateChecker updateChecker = new UpdateChecker();
-    private final BooleanProperty busy = new SimpleBooleanProperty(false);
+    private final BooleanProperty busy = new com.sbtools.util.BusyProperty();
 
     private static final String[] TAB_NAMES = {
             "Dashboard", "Drivers", "Backup/Rollback", "Software Update",
             "System Information", "Uninstaller", "Startup items/services",
-            "System cleanup", "Disk Tools",
+            "System cleanup", "Duplicate Files", "Disk Tools",
             "Browser Extensions", "Network Optimizer"
     };
 
@@ -87,21 +87,26 @@ public class App extends Application {
             showEula(settings);
         }
 
-        boolean admin = AdminCheck.isRunningAsAdmin();
-        if (!admin && AppPaths.isWindows()) {
-            AppLogger.info("Requesting administrator privileges...");
-            try {
-                if (AdminCheck.requestElevation()) {
-                    Platform.exit();
-                    return;
-                }
-            } catch (IOException ex) {
-                AppLogger.warning("Failed to request elevation: " + ex.getMessage());
-            }
-            AppLogger.info("Elevation not available. Continuing without administrator privileges.");
-        }
-
+        // Async elevation check to avoid FX freeze (B1). UI is built immediately;
+        // elevation is requested off FX thread and exits if successful.
         logoImage = new Image(getClass().getResourceAsStream("/logo-ico.png"));
+        if (AppPaths.isWindows()) {
+            AdminCheck.isRunningAsAdminAsync().thenAccept(admin -> Platform.runLater(() -> {
+                if (!admin) {
+                    AppLogger.info("Requesting administrator privileges...");
+                    try {
+                        if (AdminCheck.requestElevation()) {
+                            Platform.exit();
+                        }
+                    } catch (IOException ex) {
+                        AppLogger.warning("Failed to request elevation: " + ex.getMessage());
+                    }
+                    if (!AdminCheck.isRunningAsAdmin()) {
+                        AppLogger.info("Elevation not available. Continuing without administrator privileges.");
+                    }
+                }
+            }));
+        }
 
         appSettings = settings;
         tabViews = new Node[TAB_NAMES.length];
@@ -259,15 +264,16 @@ public class App extends Application {
                         root.setCenter(createTab(idx));
                     });
             case 1 -> new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
-            case 2 -> new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 2 -> new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdminFresh);
             case 3 -> new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
             case 4 -> new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin);
             case 5 -> new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin);
             case 6 -> new StartupTabView(busy, AdminCheck::isRunningAsAdmin);
             case 7 -> new CleanerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore);
-            case 8 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
-            case 9 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin, settingsStore);
-            case 10 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings,
+            case 8 -> new DuplicateFilesTabView(busy, AdminCheck::isRunningAsAdmin);
+            case 9 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
+            case 10 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin, settingsStore);
+            case 11 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings,
                     updatedSettings -> this.appSettings = updatedSettings);
             default -> throw new IllegalArgumentException("Unknown tab index: " + index);
         };
@@ -716,6 +722,12 @@ public class App extends Application {
                     betv.dispose();
                 } else if (view instanceof NetworkOptimizerTabView notv) {
                     notv.dispose();
+                } else if (view instanceof DuplicateFilesTabView dftv) {
+                    dftv.dispose();
+                } else if (view instanceof CleanerTabView ctv) {
+                    ctv.dispose();
+                } else if (view instanceof DiskToolsTabView dttv) {
+                    dttv.dispose();
                 }
             }
         }

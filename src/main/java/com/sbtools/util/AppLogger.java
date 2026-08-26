@@ -26,13 +26,33 @@ public final class AppLogger {
                 return;
             }
             try {
-                Files.createDirectories(AppPaths.logsDir());
-                FileHandler handler = new FileHandler(AppPaths.logFile().toString(), true);
+                // Try portable logs dir first (next to exe) for true portable mode; fallback to LOCALAPPDATA
+                java.nio.file.Path portableDir = AppPaths.portableLogsDir();
+                java.nio.file.Path appDataDir = AppPaths.logsDir();
+                java.nio.file.Path chosen = portableDir;
+                try {
+                    Files.createDirectories(chosen);
+                    if (!Files.isWritable(chosen)) throw new IOException("not writable");
+                } catch (IOException ex) {
+                    chosen = appDataDir;
+                    Files.createDirectories(chosen);
+                }
+                java.nio.file.Path logFile = chosen.resolve("app.log");
+                FileHandler handler = new FileHandler(logFile.toString(), 500 * 1024, 3, true);
                 handler.setFormatter(new SimpleFormatter());
                 LOG.addHandler(handler);
                 LOG.setUseParentHandlers(false);
+                LOG.info("Logging to " + logFile.toString() + " (portable=" + chosen.equals(portableDir) + ")");
             } catch (IOException e) {
-                LOG.setUseParentHandlers(true);
+                try {
+                    Files.createDirectories(AppPaths.logsDir());
+                    FileHandler fallback = new FileHandler(AppPaths.logFile().toString(), true);
+                    fallback.setFormatter(new SimpleFormatter());
+                    LOG.addHandler(fallback);
+                    LOG.setUseParentHandlers(false);
+                } catch (IOException ex) {
+                    LOG.setUseParentHandlers(true);
+                }
             }
             initialized = true;
         }

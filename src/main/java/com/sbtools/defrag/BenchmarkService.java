@@ -9,6 +9,7 @@ import com.sbtools.util.ProcessRunner;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -26,30 +27,50 @@ public class BenchmarkService {
         }
         String letter = driveLetter.replace(":", "");
         Path script = PowerShellScripts.resolve("benchmark-drive.ps1");
-        ProcessResult result = processRunner.runStreaming(
-                ProcessRunner.powershellScript(script.toString(), letter, String.valueOf(testSizeMB)),
-                line -> {
-                    if (statusCallback != null) {
-                        try {
-                            var tree = JsonMapper.mapper().readTree(line);
-                            if (tree.has("phase")) {
-                                String phase = tree.get("phase").asText();
-                                String msg = switch (phase) {
-                                    case "write" -> "Sequential write test...";
-                                    case "read" -> "Sequential read test...";
-                                    case "random_read" -> "Random read test...";
-                                    case "done" -> "Benchmark complete.";
-                                    case "error" -> tree.has("message") ? tree.get("message").asText() : "Error";
-                                    default -> "Running...";
-                                };
-                                statusCallback.accept(msg);
-                            }
-                        } catch (Exception ignored) {
-                        }
+        Consumer<String> lineHandler = line -> {
+            if (statusCallback != null) {
+                try {
+                    var tree = JsonMapper.mapper().readTree(line);
+                    if (tree.has("phase")) {
+                        String phase = tree.get("phase").asText();
+                        String msg = switch (phase) {
+                            case "write" -> "Sequential write test...";
+                            case "read" -> "Sequential read test...";
+                            case "random_read" -> "Random read test...";
+                            case "done" -> "Benchmark complete.";
+                            case "error" -> tree.has("message") ? tree.get("message").asText() : "Error";
+                            default -> "Running...";
+                        };
+                        statusCallback.accept(msg);
                     }
-                },
-                null,
-                cancelled);
+                } catch (Exception ignored) {
+                }
+            }
+        };
+        ProcessResult result = null;
+        IOException pendingIo = null;
+        List<List<String>> candidates = List.of(
+                ProcessRunner.powershellScript(script.toString(), letter, String.valueOf(testSizeMB)),
+                ProcessRunner.pwshScript(script.toString(), letter, String.valueOf(testSizeMB))
+        );
+        for (List<String> cmd : candidates) {
+            try {
+                result = processRunner.runStreaming(cmd, lineHandler, null, cancelled);
+                pendingIo = null;
+                break;
+            } catch (IOException e) {
+                String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                boolean missing = msg.contains("cannot run program") || msg.contains("no such file") || msg.contains("error=2");
+                if (missing && !cmd.get(0).equals("pwsh.exe")) {
+                    AppLogger.warning("Benchmark: powershell.exe not found, trying pwsh.exe: " + e.getMessage());
+                    pendingIo = e;
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (pendingIo != null && result == null) throw pendingIo;
+        if (result == null) throw new IOException("No PowerShell executable available for benchmark");
 
         if (!result.success() && !cancelled.get()) {
             throw new IOException("Benchmark failed: " + result.combinedOutput());

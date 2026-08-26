@@ -136,8 +136,14 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
     private static final long HTTP_INITIAL_BACKOFF_MS = 500;
 
     protected String httpGet(String url) {
+        if (Thread.currentThread().isInterrupted()) {
+            return null;
+        }
         long backoffMs = HTTP_INITIAL_BACKOFF_MS;
         for (int attempt = 1; attempt <= HTTP_MAX_RETRIES; attempt++) {
+            if (Thread.currentThread().isInterrupted()) {
+                return null;
+            }
             try {
                 HttpRequest req = HttpRequest.newBuilder()
                         .uri(URI.create(url))
@@ -146,10 +152,18 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                         .GET()
                         .build();
                 HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                if (Thread.currentThread().isInterrupted()) {
+                    return null;
+                }
                 if (resp.statusCode() == 429) {
                     AppLogger.warning(vendor.label() + ": HTTP 429 rate limited on " + url + " (attempt " + attempt + "/" + HTTP_MAX_RETRIES + ")");
                     if (attempt < HTTP_MAX_RETRIES) {
-                        Thread.sleep(backoffMs);
+                        try {
+                            Thread.sleep(backoffMs);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            return null;
+                        }
                         backoffMs *= 2;
                         continue;
                     }
@@ -160,7 +174,12 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                 }
                 if (resp.statusCode() >= 500 && attempt < HTTP_MAX_RETRIES) {
                     AppLogger.warning(vendor.label() + ": HTTP " + resp.statusCode() + " on " + url + " (attempt " + attempt + "/" + HTTP_MAX_RETRIES + "), retrying…");
-                    Thread.sleep(backoffMs);
+                    try {
+                        Thread.sleep(backoffMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
                     backoffMs *= 2;
                     continue;
                 }
@@ -168,6 +187,9 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             } catch (IOException | InterruptedException e) {
                 if (e instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
+                    return null;
+                }
+                if (Thread.currentThread().isInterrupted()) {
                     return null;
                 }
                 if (attempt < HTTP_MAX_RETRIES) {

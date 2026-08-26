@@ -17,6 +17,7 @@ public class DriverRow {
     private final StringProperty source = new SimpleStringProperty();
     private final BooleanProperty excluded = new SimpleBooleanProperty(false);
     private final BooleanProperty selected = new SimpleBooleanProperty(false);
+    private final BooleanProperty rebootPending = new SimpleBooleanProperty(false);
     private final ObjectProperty<DriverHealthService.DriverHealthScore> healthScore = new SimpleObjectProperty<>();
     private final ObjectProperty<UpdateSeverity> severity = new SimpleObjectProperty<>();
     private volatile DriverUpdateCandidate candidate;
@@ -108,11 +109,35 @@ public class DriverRow {
         return selected;
     }
 
+    public boolean isRebootPending() {
+        return rebootPending.get();
+    }
+
+    public void setRebootPending(boolean v) {
+        this.rebootPending.set(v);
+    }
+
+    public BooleanProperty rebootPendingProperty() {
+        return rebootPending;
+    }
+
     public UpdateSeverity getSeverity() {
         return severity.get();
     }
 
     public ObjectProperty<UpdateSeverity> severityProperty() {
         return severity;
+    }
+
+    /**
+     * Updates the displayed current version and health score from a fresh scan.
+     * The underlying {@link #installed} record remains immutable; this only refreshes UI properties
+     * so the row reflects the post-install state without requiring a full rescan.
+     */
+    public void refreshFrom(InstalledDriver fresh) {
+        if (fresh == null) return;
+        String ver = fresh.driverVersion() != null ? fresh.driverVersion() : "—";
+        currentVersion.set(ver);
+        healthScore.set(DriverHealthService.scoreDriver(fresh));
     }
 }

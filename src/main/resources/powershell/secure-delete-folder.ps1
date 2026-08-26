@@ -27,10 +27,11 @@ try {
         $pct = [int]([double]$currentFile / $totalFiles * 100)
         Write-Output "{`"progress`":$pct,`"phase`":`"overwrite`",`"file`":`"$($file.Name.Replace('"','\"'))`",`"current`":$currentFile,`"total`":$totalFiles}"
 
+        $stream = $null
         try {
             if ($file.Length -eq 0) {
-                Remove-Item -LiteralPath $file.FullName -Force
-                $result.filesDeleted++
+                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path -LiteralPath $file.FullName)) { $result.filesDeleted++ } else { $result.scheduledForReboot += $file.FullName }
                 continue
             }
 
@@ -38,50 +39,62 @@ try {
             $buffer = New-Object byte[] $bufferSize
             for ($pass = 0; $pass -lt $PassCount; $pass++) {
                 $passType = $pass % 3
-                if ($passType -eq 0) { [Array]::Clear($buffer, 0, $bufferSize) }
-                elseif ($passType -eq 1) { for ($i = 0; $i -lt $bufferSize; $i++) { $buffer[$i] = 0xFF } }
-                else { $rng.GetBytes($buffer) }
-
                 $stream.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
                 $remaining = $file.Length
                 while ($remaining -gt 0) {
                     $writeSize = [Math]::Min($bufferSize, $remaining)
-                    $stream.Write($buffer, 0, [int]$writeSize)
+                    $chunk = $buffer
+                    if ($writeSize -lt $bufferSize) { $chunk = New-Object byte[] $writeSize }
+                    if ($passType -eq 0) { [Array]::Clear($chunk, 0, $writeSize) }
+                    elseif ($passType -eq 1) { for ($i = 0; $i -lt $writeSize; $i++) { $chunk[$i] = 0xFF } }
+                    else { $rng.GetBytes($chunk) }
+                    $stream.Write($chunk, 0, [int]$writeSize)
                     $remaining -= $writeSize
                 }
                 $stream.Flush()
             }
-            $stream.Close()
-            $stream.Dispose()
-            Remove-Item -LiteralPath $file.FullName -Force
-            $result.filesDeleted++
+            $stream.Close(); $stream.Dispose(); $stream = $null
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $file.FullName)) { $result.filesDeleted++ } else { $result.scheduledForReboot += $file.FullName }
         } catch [System.UnauthorizedAccessException] {
+            if ($stream) { try { $stream.Close(); $stream.Dispose() } catch {} ; $stream = $null }
             $result.scheduledForReboot += $file.FullName
         } catch [System.IO.IOException] {
-            if ($_.Exception.Message -match 'being used|cannot access') {
-                $result.scheduledForReboot += $file.FullName
-            } else {
-                $result.scheduledForReboot += $file.FullName
-            }
-        } catch {
+            if ($stream) { try { $stream.Close(); $stream.Dispose() } catch {} ; $stream = $null }
             $result.scheduledForReboot += $file.FullName
+        } catch {
+            if ($stream) { try { $stream.Close(); $stream.Dispose() } catch {} ; $stream = $null }
+            $result.scheduledForReboot += $file.FullName
+        } finally {
+            if ($stream) { try { $stream.Close(); $stream.Dispose() } catch {} }
         }
     }
 
     $remainingDirs = Get-ChildItem -LiteralPath $FolderPath -Recurse -Directory -Force -ErrorAction SilentlyContinue | Sort-Object -Property FullName -Descending
     foreach ($dir in $remainingDirs) {
         try {
+            if (-not (Test-Path -LiteralPath $dir.FullName)) { continue }
             Remove-Item -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue
-            $result.foldersDeleted++
+            if (-not (Test-Path -LiteralPath $dir.FullName)) { $result.foldersDeleted++ }
         } catch {}
     }
     try {
-        Remove-Item -LiteralPath $FolderPath -Force -ErrorAction SilentlyContinue
-        $result.foldersDeleted++
+        if (Test-Path -LiteralPath $FolderPath) {
+            Remove-Item -LiteralPath $FolderPath -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $FolderPath)) { $result.foldersDeleted++ }
+        } else {
+            # Already removed if empty
+            if ($result.foldersDeleted -eq 0) { $result.foldersDeleted = 1 }
+        }
     } catch {}
 
-    $result.success = $true
-    $result.message = "Secure folder delete: $($result.filesDeleted) files overwritten, $($result.foldersDeleted) folders removed."
+    $allFilesHandled = ($result.filesDeleted + $result.scheduledForReboot.Count) -ge $totalFiles
+    $result.success = $allFilesHandled
+    if ($result.scheduledForReboot.Count -gt 0) {
+        $result.message = "Secure folder delete: $($result.filesDeleted) files overwritten, $($result.foldersDeleted) folders removed, $($result.scheduledForReboot.Count) scheduled for reboot."
+    } else {
+        $result.message = "Secure folder delete: $($result.filesDeleted) files overwritten, $($result.foldersDeleted) folders removed."
+    }
 
 } catch {
     $result.message = $_.Exception.Message

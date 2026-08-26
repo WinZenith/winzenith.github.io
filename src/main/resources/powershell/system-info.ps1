@@ -83,6 +83,34 @@ try {
             }
         }
 
+        # Registry fallback for AMD/Intel >4GB (AdapterRAM capped at 32-bit sentinel)
+        if ($vramBytes -eq 0 -and $gpuName) {
+            try {
+                $regVram = [uint64]0
+                $classPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+                if (Test-Path $classPath) {
+                    Get-ChildItem $classPath -ErrorAction SilentlyContinue | ForEach-Object {
+                        try {
+                            $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                            $desc = ''
+                            if ($props.DriverDesc) { $desc = [string]$props.DriverDesc }
+                            elseif ($props.DeviceDesc) { $desc = [string]$props.DeviceDesc }
+                            if ($desc -and $gpuName) {
+                                $key = $gpuName.Substring(0, [Math]::Min(12, $gpuName.Length))
+                                if ($desc -like "*$key*") {
+                                    $cand = [uint64]0
+                                    if ($props.'HardwareInformation.qwMemorySize') { $cand = [uint64]$props.'HardwareInformation.qwMemorySize' }
+                                    elseif ($props.'HardwareInformation.MemorySize') { $cand = [uint64]$props.'HardwareInformation.MemorySize' }
+                                    if ($cand -gt $regVram) { $regVram = $cand }
+                                }
+                            }
+                        } catch {}
+                    }
+                    if ($regVram -gt 0) { $vramBytes = $regVram }
+                }
+            } catch {}
+        }
+
         $memoryType = ''
         try {
             $vmtRaw = $vc['VideoMemoryType']
@@ -244,7 +272,15 @@ try {
         $sticks += $stick
     }
     } finally { $memSearcher.Dispose() }
-    $channel = if ($sticks.Count -ge 2) { 'Dual' } elseif ($sticks.Count -eq 1) { 'Single' } else { '' }
+    $cnt = $sticks.Count
+    $channel = switch ($cnt) {
+        1 { 'Single' }
+        2 { 'Dual*' }
+        3 { 'Triple' }
+        4 { 'Quad' }
+        default { if ($cnt -gt 4) { "$cnt sticks" } else { '' } }
+    }
+    # * Dual denotes 2 sticks installed; actual channel mode depends on slot population/motherboard
     $ramSection = [ordered]@{
         totalBytes = $totalRamBytes
         channel    = $channel
@@ -366,6 +402,46 @@ try {
         $partitions += $part
     }
 
+    # Fallback via Get-Partition/Get-Disk if WMI mapping produced all -1 (Storage Spaces / ReFS)
+    if ($partitions.Count -gt 0) {
+        $mappedCount = @($partitions | Where-Object { $_.diskIndex -ge 0 }).Count
+        if ($mappedCount -eq 0) {
+            try {
+                $partitionToDisk = @{}
+                Get-Partition -ErrorAction SilentlyContinue | ForEach-Object {
+                    try {
+                        $d = Get-Disk -Number $_.DiskNumber -ErrorAction SilentlyContinue
+                        if ($d -and $_.DriveLetter) {
+                            $dev = "$($_.DriveLetter):"
+                            # Find disk index by serial or model match
+                            $diskIdxFallback = -1
+                            for ($i = 0; $i -lt $disks.Count; $i++) {
+                                if ($disks[$i].serialNumber -and $d.SerialNumber -and $disks[$i].serialNumber.Trim() -eq $d.SerialNumber.Trim()) {
+                                    $diskIdxFallback = $i; break
+                                }
+                                if ($disks[$i].model -and $d.FriendlyName -and $disks[$i].model -eq $d.FriendlyName) {
+                                    $diskIdxFallback = $i
+                                }
+                            }
+                            if ($diskIdxFallback -ge 0) { $partitionToDisk[$dev] = $diskIdxFallback }
+                            elseif ($_.DiskNumber -lt $disks.Count) { $partitionToDisk[$dev] = [int]$_.DiskNumber }
+                        }
+                    } catch {}
+                }
+                if ($partitionToDisk.Count -gt 0) {
+                    for ($pi = 0; $pi -lt $partitions.Count; $pi++) {
+                        $devKey = $partitions[$pi].deviceID
+                        if ($partitionToDisk.ContainsKey($devKey)) {
+                            $partitions[$pi].diskIndex = $partitionToDisk[$devKey]
+                        }
+                    }
+                }
+            } catch {
+                $warnings += "Storage mapping fallback: $($_.Exception.Message)"
+            }
+        }
+    }
+
     $nvmes = @()
     $nvmeAccessFailed = $false
     try {
@@ -424,21 +500,32 @@ try {
 
     $chipset = ''
     $southbridge = ''
-    Get-CimInstance Win32_PnPEntity | Where-Object { $_.DeviceID -match 'PCI\\CC_0601' } | ForEach-Object {
-        if (-not $chipset -and $_.Name) { $chipset = $_.Name.Trim() }
-    }
-    Get-CimInstance Win32_PnPEntity | Where-Object {
-        $_.Name -match 'southbridge|PCH|FCH|fusion controller' -and $_.DeviceClass -eq 'System'
-    } | Select-Object -First 1 | ForEach-Object {
-        $southbridge = $_.Name.Trim()
+    # Throttled queries: filter at WMI provider level to avoid enumerating all PnP entities
+    try {
+        $chipsetCandidates = Get-CimInstance -Query "SELECT Name, DeviceID FROM Win32_PnPEntity WHERE DeviceID LIKE 'PCI\\CC_0601%'" -ErrorAction SilentlyContinue
+        foreach ($c in $chipsetCandidates) {
+            if (-not $chipset -and $c.Name) { $chipset = $c.Name.Trim(); break }
+        }
+    } catch {}
+    try {
+        $sbCandidates = Get-CimInstance -Query "SELECT Name, DeviceClass FROM Win32_PnPEntity WHERE DeviceClass='System'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match 'southbridge|PCH|FCH|fusion controller' } | Select-Object -First 1
+        if ($sbCandidates) { $southbridge = $sbCandidates.Name.Trim() }
+    } catch {}
+    if (-not $chipset) {
+        try {
+            $fallback = Get-CimInstance -Query "SELECT Name, DeviceID, DeviceClass FROM Win32_PnPEntity WHERE DeviceID LIKE 'PCI\\CC_0600%'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match 'chipset|PCH|southbridge|fusion controller|A-series|B-series|X-series|Z-series' } | Select-Object -First 1
+            if ($fallback -and $fallback.Name) { $chipset = $fallback.Name.Trim() }
+        } catch {}
     }
     if (-not $chipset) {
-        Get-CimInstance Win32_PnPEntity | Where-Object {
-            ($_.Name -match 'chipset|PCH|southbridge|fusion controller|A-series|B-series|X-series|Z-series') -and
-            ($_.DeviceClass -eq 'System' -or $_.DeviceID -match 'PCI\\CC_0600')
-        } | Select-Object -First 1 | ForEach-Object {
-            $chipset = $_.Name.Trim()
-        }
+        # Last resort: narrow System class only
+        try {
+            $narrow = Get-CimInstance Win32_PnPEntity -Filter "PNPClass='System'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match 'chipset|PCH|southbridge' } | Select-Object -First 1
+            if ($narrow -and $narrow.Name) { $chipset = $narrow.Name.Trim() }
+        } catch {}
     }
     if (-not $chipset) {
         try {
@@ -475,32 +562,46 @@ try {
 }
 
 # ── OTHER DEVICES ────────────────────────────────────────────────────────────
+# Optimized B2: server-side WQL filtering + limited columns to avoid pulling 2-4k objects with all properties
+# (~30-60s -> <5s on device-rich hosts). Client-side regex filters retained for correctness.
 try {
     $ErrorActionPreference = 'Stop'
     $others = @()
     $seenIds = @{}
-    Get-CimInstance Win32_PnPEntity | Where-Object { $_.DeviceID -and $_.Name -ne 'Unknown device' } | ForEach-Object {
-        $devid = $_.DeviceID
-        if ($devid -match 'CPU\\|Processor\\') { return }
-        if ($devid -match 'VID_') { return }
-        if ($devid -match 'PCI\\CC_03') { return }
-        if ($devid -match 'SCSI\\Disk|SCSI\\CDRom|IDE\\Disk|IDE\\CDRom|USBSTOR\\') { return }
-        if ($devid -match 'PCI\\CC_010[0-9a-fA-F]') { return }
-        if ($devid -match 'ACPI\\MSACPI') { return }
-        if ($devid -match 'SW\\{') { return }
+    # Use WQL with limited columns; filter obvious classes server-side while preserving NULL PNPClass rows.
+    $wqlOthers = "SELECT DeviceID,Name,Manufacturer,PNPClass,Status,ClassGuid FROM Win32_PnPEntity WHERE Name <> 'Unknown device' AND (PNPClass IS NULL OR PNPClass <> 'Display') AND (PNPClass IS NULL OR PNPClass <> 'Processor') AND (PNPClass IS NULL OR PNPClass <> 'DiskDrive')"
+    $otherCandidates = $null
+    try {
+        $otherCandidates = Get-CimInstance -Query $wqlOthers -ErrorAction Stop
+    } catch {
+        # Fallback: pull with limited columns without WHERE (still cheaper than *), then client-filter
+        try { $otherCandidates = Get-CimInstance -Query "SELECT DeviceID,Name,Manufacturer,PNPClass,Status,ClassGuid FROM Win32_PnPEntity" -ErrorAction Stop } catch {
+            $otherCandidates = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($devEnt in $otherCandidates) {
+        if (-not $devEnt.DeviceID -or -not $devEnt.Name -or $devEnt.Name -eq 'Unknown device') { continue }
+        $devid = [string]$devEnt.DeviceID
+        if ($devid -match 'CPU\\|Processor\\') { continue }
+        if ($devid -match 'VID_') { continue }
+        if ($devid -match 'PCI\\CC_03') { continue }
+        if ($devid -match 'SCSI\\Disk|SCSI\\CDRom|IDE\\Disk|IDE\\CDRom|USBSTOR\\') { continue }
+        if ($devid -match 'PCI\\CC_010[0-9a-fA-F]') { continue }
+        if ($devid -match 'ACPI\\MSACPI') { continue }
+        if ($devid -match 'SW\\{') { continue }
         $pnpClassRaw = ''
-        try { $p = $_.PNPClass; if ($null -ne $p) { $pnpClassRaw = [string]$p } } catch {}
-        if ($pnpClassRaw -eq 'Display' -or $pnpClassRaw -eq 'Processor' -or $pnpClassRaw -eq 'DiskDrive') { return }
-        if ($seenIds.ContainsKey($devid)) { return }
+        try { $p = $devEnt.PNPClass; if ($null -ne $p) { $pnpClassRaw = [string]$p } } catch {}
+        if ($pnpClassRaw -eq 'Display' -or $pnpClassRaw -eq 'Processor' -or $pnpClassRaw -eq 'DiskDrive') { continue }
+        if ($seenIds.ContainsKey($devid)) { continue }
         $seenIds[$devid] = $true
 
         $devClass = ''
         try {
-            $raw = $_.PNPClass
+            $raw = $devEnt.PNPClass
             if ($null -ne $raw -and [string]$raw -ne '') { $devClass = [string]$raw }
         } catch {}
         if (-not $devClass) {
-            $raw2 = $_.ClassGuid
+            $raw2 = $devEnt.ClassGuid
             if ($null -ne $raw2) {
                 $guid = [string]$raw2
                 $devClass = switch -Regex ($guid) {
@@ -569,12 +670,12 @@ try {
         if (-not $devClass) { $devClass = 'Other' }
 
         $mfr = ''
-        try { $raw = $_.Manufacturer; if ($null -ne $raw) { $mfr = ([string]$raw).Trim() } } catch {}
+        try { $raw = $devEnt.Manufacturer; if ($null -ne $raw) { $mfr = ([string]$raw).Trim() } } catch {}
         $status = ''
-        try { $raw = $_.Status; if ($null -ne $raw) { $status = [string]$raw } } catch {}
+        try { $raw = $devEnt.Status; if ($null -ne $raw) { $status = [string]$raw } } catch {}
 
         $others += [ordered]@{
-            name           = [string]$_.Name
+            name           = [string]$devEnt.Name
             deviceClass    = $devClass
             manufacturer   = $mfr
             deviceId       = $devid
@@ -617,7 +718,16 @@ try {
         $ipAddresses = @()
         $dhcpEnabled = $false
         try {
-            $config = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "Index=$($na.Index)" -ErrorAction SilentlyContinue
+            $ifaceIdx = $null
+            try { $ifaceIdx = $na.InterfaceIndex } catch {}
+            if ($null -eq $ifaceIdx) { try { $ifaceIdx = $na.Index } catch {} }
+            $config = $null
+            if ($null -ne $ifaceIdx) {
+                $config = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$ifaceIdx" -ErrorAction SilentlyContinue
+            }
+            if (-not $config -and $null -ne $na.Index) {
+                $config = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "Index=$($na.Index)" -ErrorAction SilentlyContinue
+            }
             if ($config) {
                 if ($config.IPAddress) { $ipAddresses = @($config.IPAddress) }
                 if ($null -ne $config.DHCPEnabled) { $dhcpEnabled = [bool]$config.DHCPEnabled }
@@ -717,55 +827,39 @@ try {
 try {
     $ErrorActionPreference = 'Stop'
     $temps = @()
-    $thermalZones = Get-CimInstance MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue
-    if ($thermalZones) {
-        foreach ($tz in $thermalZones) {
-            $tempKelvin = 0
-            try {
-                if ($tz.CurrentTemperature) {
-                    $tempKelvin = [double]$tz.CurrentTemperature / 10.0
+    try {
+        $thermalZones = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue
+        if ($thermalZones) {
+            foreach ($tz in $thermalZones) {
+                $tempKelvin = 0
+                try {
+                    if ($tz.CurrentTemperature) {
+                        $tempKelvin = [double]$tz.CurrentTemperature / 10.0
+                    }
+                } catch {}
+                if ($tempKelvin -le 0) { continue }
+                # Filter unrealistic values (<0C or >125C typically invalid sensor)
+                $tempCelsius = [math]::Round($tempKelvin - 273.15, 1)
+                if ($tempCelsius -lt -20 -or $tempCelsius -gt 125) { continue }
+                $zoneName = ''
+                try { if ($tz.InstanceName) {
+                    $parts = $tz.InstanceName -split '\\'
+                    $zoneName = $parts[-1] -replace '_', ' '
+                    if (-not $zoneName) { $zoneName = "Thermal Zone $($temps.Count + 1)" }
+                } } catch {}
+                if (-not $zoneName) { $zoneName = "Thermal Zone $($temps.Count + 1)" }
+                $temps += [ordered]@{
+                    zoneName          = $zoneName
+                    temperatureCelsius = $tempCelsius
                 }
-            } catch {}
-            if ($tempKelvin -le 0) { continue }
-            $tempCelsius = [math]::Round($tempKelvin - 273.15, 1)
-            $zoneName = ''
-            try { if ($tz.InstanceName) {
-                $parts = $tz.InstanceName -split '\\'
-                $zoneName = $parts[-1] -replace '_', ' '
-            } } catch {}
-            $temps += [ordered]@{
-                zoneName          = $zoneName
-                temperatureCelsius = $tempCelsius
             }
         }
+    } catch {
+        $warnings += "Temperatures: query failed ($($_.Exception.Message))"
     }
     $result['temperatures'] = $temps
     if ($temps.Count -eq 0) {
-        # Fallback: try wmic thermal zone
-        try {
-            $wmicOutput = & wmic /namespace:\\root\wmi PATH MSAcpi_ThermalZoneTemperature get CurrentTemperature /format:csv 2>$null
-            if ($wmicOutput) {
-                foreach ($line in $wmicOutput) {
-                    $line = $line.Trim()
-                    if ($line -match '^\d+$' -or $line -match '^Node,CurrentTemperature$' -or $line -eq '') { continue }
-                    $parts = $line -split ','
-                    if ($parts.Count -ge 2) {
-                        $val = 0
-                        try { $val = [double]$parts[1].Trim() } catch { continue }
-                        if ($val -le 0) { continue }
-                        $tempCelsius = [math]::Round($val / 10.0 - 273.15, 1)
-                        $temps += [ordered]@{
-                            zoneName          = "Thermal Zone " + ($temps.Count + 1)
-                            temperatureCelsius = $tempCelsius
-                        }
-                    }
-                }
-            }
-        } catch {}
-        if ($temps.Count -eq 0) {
-            $warnings += "Temperatures: No thermal zone data available. This may require admin privileges."
-        }
-        $result['temperatures'] = $temps
+        $warnings += "Temperatures: No thermal zone data (requires admin or not supported on this motherboard)."
     }
 } catch {
     $warnings += "Temperatures: $($_.Exception.Message)"
@@ -773,16 +867,21 @@ try {
 }
 
 # ── USB DEVICES ──────────────────────────────────────────────────────────────
+# Optimized B2: single WQL query for PNPClass='USB' or DeviceID LIKE 'USB%' (~200ms) instead of
+# N+1 association walk via Win32_USBControllerDevice + [wmi] per device (5-15s on device-rich hosts).
+# Fallback retains legacy method for older WMI providers where WQL LIKE fails.
 try {
     $ErrorActionPreference = 'Stop'
     $usbDevices = @()
-    $usbSearcher = New-Object System.Management.ManagementObjectSearcher('root\cimv2',
-        'SELECT * FROM Win32_USBControllerDevice')
+    $seenUsbIds = @{}
+    $fastUsbSucceeded = $false
     try {
-        foreach ($assoc in $usbSearcher.Get()) {
-            $dep = [wmi]$assoc.Dependent
+        $usbCandidates = Get-CimInstance -Query "SELECT DeviceID,Name,Manufacturer,Status FROM Win32_PnPEntity WHERE PNPClass = 'USB' OR DeviceID LIKE 'USB%'" -ErrorAction Stop
+        foreach ($dep in $usbCandidates) {
             $devid = if ($dep.DeviceID) { [string]$dep.DeviceID } else { '' }
             if (-not $devid) { continue }
+            if ($seenUsbIds.ContainsKey($devid)) { continue }
+            $seenUsbIds[$devid] = $true
             $usbDevices += [ordered]@{
                 name         = if ($dep.Name) { [string]$dep.Name } else { '' }
                 manufacturer = if ($dep.Manufacturer) { [string]$dep.Manufacturer } else { '' }
@@ -790,7 +889,31 @@ try {
                 status       = if ($dep.Status) { [string]$dep.Status } else { '' }
             }
         }
-    } finally { $usbSearcher.Dispose() }
+        # Consider fast path successful even if 0 results (e.g., desktop with no USB PnP entries)
+        $fastUsbSucceeded = $true
+    } catch {
+        $fastUsbSucceeded = $false
+    }
+    if (-not $fastUsbSucceeded) {
+        # Legacy fallback: association walk (preserved for compatibility)
+        $usbSearcher = New-Object System.Management.ManagementObjectSearcher('root\cimv2',
+            'SELECT * FROM Win32_USBControllerDevice')
+        try {
+            foreach ($assoc in $usbSearcher.Get()) {
+                $dep = [wmi]$assoc.Dependent
+                $devid = if ($dep.DeviceID) { [string]$dep.DeviceID } else { '' }
+                if (-not $devid) { continue }
+                if ($seenUsbIds.ContainsKey($devid)) { continue }
+                $seenUsbIds[$devid] = $true
+                $usbDevices += [ordered]@{
+                    name         = if ($dep.Name) { [string]$dep.Name } else { '' }
+                    manufacturer = if ($dep.Manufacturer) { [string]$dep.Manufacturer } else { '' }
+                    deviceId     = $devid
+                    status       = if ($dep.Status) { [string]$dep.Status } else { '' }
+                }
+            }
+        } finally { $usbSearcher.Dispose() }
+    }
     $result['usbDevices'] = $usbDevices
 } catch {
     $warnings += "USB Devices: $($_.Exception.Message)"
@@ -801,36 +924,116 @@ try {
 try {
     $ErrorActionPreference = 'Stop'
     $monitors = @()
-    Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue | ForEach-Object {
-        $mon = [ordered]@{
-            name         = if ($_.Name) { $_.Name.Trim() } else { '' }
-            manufacturer = if ($_.MonitorManufacturer) { $_.MonitorManufacturer.Trim() } else { '' }
-            screenSize   = ''
-            resolution   = ''
-            status       = if ($_.Status) { [string]$_.Status } else { '' }
+    # Primary: WmiMonitorID in root/wmi (accurate on Win10+ with DP/HDMI, not deprecated)
+    $wmiMonitors = @()
+    try {
+        $wmiMonitors = @(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue)
+    } catch {}
+    if ($wmiMonitors -and $wmiMonitors.Count -gt 0) {
+        $decode = {
+            param($arr)
+            if ($null -eq $arr) { return '' }
+            $chars = @()
+            foreach ($b in $arr) { if ($b -ne 0) { $chars += [char]$b } }
+            return (-join $chars).Trim()
         }
-        $w = 0; $h = 0
-        try { if ($_.ScreenWidth) { $w = [int]$_.ScreenWidth } } catch {}
-        try { if ($_.ScreenHeight) { $h = [int]$_.ScreenHeight } } catch {}
-        if ($w -gt 0 -and $h -gt 0) { $mon['resolution'] = "${w}x${h}" }
+        # Also fetch basic display params for resolution if available
+        $basicParams = @()
+        try { $basicParams = @(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBasicDisplayParams -ErrorAction SilentlyContinue) } catch {}
+        for ($mi = 0; $mi -lt $wmiMonitors.Count; $mi++) {
+            $wm = $wmiMonitors[$mi]
+            $monName = ''
+            $monMfr = ''
+            $monSerial = ''
+            try { $monName = & $decode $wm.UserFriendlyName } catch {}
+            try { $monMfr = & $decode $wm.ManufacturerName } catch {}
+            # Fallback to InstanceName parsing for PNP ID
+            $pnpId = ''
+            try { if ($wm.InstanceName) { $pnpRaw = [string]$wm.InstanceName; $pnpId = ($pnpRaw -split '\\')[0] } } catch {}
+            if (-not $monName) {
+                try { $monName = ($wm.InstanceName -split '\\')[0] -replace '_', ' ' } catch {}
+            }
+            if (-not $monName) { $monName = "Monitor $($mi+1)" }
+            $res = ''
+            if ($mi -lt $basicParams.Count) {
+                try {
+                    $bp = $basicParams[$mi]
+                    if ($bp.MaxHorizontalImageSize -and $bp.MaxVerticalImageSize) {
+                        # BasicDisplayParams does not hold resolution, try to get via VideoController match
+                        $res = ''
+                    }
+                } catch {}
+            }
+            # Try to complement resolution via Win32_VideoController current resolution (primary)
+            if (-not $res) {
+                try {
+                    $vcRes = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.CurrentHorizontalResolution -and $_.CurrentVerticalResolution } | Select-Object -First 1
+                    if ($vcRes) { $res = "$($vcRes.CurrentHorizontalResolution)x$($vcRes.CurrentVerticalResolution)" }
+                } catch {}
+            }
+            $mon = [ordered]@{
+                name         = $monName
+                manufacturer = $monMfr
+                screenSize   = ''
+                resolution   = $res
+                status       = 'OK'
+                pnpDeviceId  = $pnpId
+            }
+            $monitors += $mon
+        }
+    }
+    # Fallback 1: Win32_PnPEntity where PNPClass=Monitor (also works, includes EDID devices)
+    if ($monitors.Count -eq 0) {
         try {
-            $raw = $_.PNPDeviceID
-            if ($null -ne $raw -and [string]$raw -ne '') {
-                $mon['pnpDeviceId'] = [string]$raw
+            Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Monitor'" -ErrorAction SilentlyContinue | ForEach-Object {
+                $pnpId2 = if ($_.DeviceID) { [string]$_.DeviceID } else { '' }
+                $mName = if ($_.Name) { $_.Name.Trim() } else { 'Monitor' }
+                $mMfr = if ($_.Manufacturer) { $_.Manufacturer.Trim() } else { '' }
+                # Avoid duplicates
+                $exists = $false
+                foreach ($m in $monitors) { if ($m.pnpDeviceId -eq $pnpId2 -and $pnpId2) { $exists = $true; break } }
+                if (-not $exists) {
+                    $monitors += [ordered]@{
+                        name         = $mName
+                        manufacturer = $mMfr
+                        screenSize   = ''
+                        resolution   = ''
+                        status       = if ($_.Status) { [string]$_.Status } else { 'OK' }
+                        pnpDeviceId  = $pnpId2
+                    }
+                }
             }
         } catch {}
-        $monitors += $mon
     }
-    # Also try Win32_DisplayConfiguration for more details
-    try {
-        $dispCfg = Get-CimInstance Win32_DisplayConfiguration -ErrorAction Stop | Select-Object -First 1
-        if ($dispCfg -and $monitors.Count -gt 0) {
-            $first = $monitors[0]
-            if (-not $first['resolution'] -and $dispCfg.PelsWidth -and $dispCfg.PelsHeight) {
-                $first['resolution'] = "$($dispCfg.PelsWidth)x$($dispCfg.PelsHeight)"
+    # Fallback 2: Legacy Win32_DesktopMonitor (deprecated but may have data on old systems)
+    if ($monitors.Count -eq 0) {
+        Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue | ForEach-Object {
+            $mon = [ordered]@{
+                name         = if ($_.Name) { $_.Name.Trim() } else { '' }
+                manufacturer = if ($_.MonitorManufacturer) { $_.MonitorManufacturer.Trim() } else { '' }
+                screenSize   = ''
+                resolution   = ''
+                status       = if ($_.Status) { [string]$_.Status } else { '' }
+                pnpDeviceId  = ''
             }
+            $w = 0; $h = 0
+            try { if ($_.ScreenWidth) { $w = [int]$_.ScreenWidth } } catch {}
+            try { if ($_.ScreenHeight) { $h = [int]$_.ScreenHeight } } catch {}
+            if ($w -gt 0 -and $h -gt 0) { $mon['resolution'] = "${w}x${h}" }
+            try {
+                $raw = $_.PNPDeviceID
+                if ($null -ne $raw -and [string]$raw -ne '') { $mon['pnpDeviceId'] = [string]$raw }
+            } catch {}
+            $monitors += $mon
         }
-    } catch {}
+    }
+    # Enrich first monitor resolution via VideoController if still missing
+    if ($monitors.Count -gt 0 -and -not $monitors[0].resolution) {
+        try {
+            $vcRes2 = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.CurrentHorizontalResolution -and $_.CurrentVerticalResolution } | Select-Object -First 1
+            if ($vcRes2) { $monitors[0].resolution = "$($vcRes2.CurrentHorizontalResolution)x$($vcRes2.CurrentVerticalResolution)" }
+        } catch {}
+    }
     $result['monitors'] = $monitors
 } catch {
     $warnings += "Monitors: $($_.Exception.Message)"

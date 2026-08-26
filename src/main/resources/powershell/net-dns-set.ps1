@@ -5,6 +5,7 @@ param(
 )
 
 try {
+    $escapedAlias = [WildcardPattern]::Escape($AdapterName)
     $serverAddresses = @()
     if ($PrimaryDNS -and $PrimaryDNS.Trim() -ne "") {
         $serverAddresses += $PrimaryDNS.Trim()
@@ -14,7 +15,7 @@ try {
     }
     if ($serverAddresses.Count -eq 0) {
         # Reset to DHCP (automatic DNS)
-        Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ResetServerAddresses -ErrorAction Stop
+        Set-DnsClientServerAddress -InterfaceAlias $escapedAlias -ResetServerAddresses -ErrorAction Stop
         $output = @{
             success = $true
             message = "DNS reset to automatic (DHCP)."
@@ -22,7 +23,7 @@ try {
             dnsServers = @()
         }
     } else {
-        Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ServerAddresses $serverAddresses -ErrorAction Stop
+        Set-DnsClientServerAddress -InterfaceAlias $escapedAlias -ServerAddresses $serverAddresses -ErrorAction Stop
         $output = @{
             success = $true
             message = "DNS servers updated successfully."

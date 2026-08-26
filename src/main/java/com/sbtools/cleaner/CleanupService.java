@@ -18,7 +18,7 @@ import java.util.concurrent.ExecutorService;
 public class CleanupService {
 
     private static final long SCAN_OVERALL_TIMEOUT_SECONDS = 300;
-    private static final long CLEAN_OVERALL_TIMEOUT_SECONDS = 600;
+    private static final long CLEAN_OVERALL_TIMEOUT_SECONDS = 960;
 
     public static final class CleanSummary {
         private final long totalBytes;
@@ -53,7 +53,7 @@ public class CleanupService {
         for (int i = 0; i < categories.length; i++) {
             rows[i] = new CleanupRow(categories[i]);
         }
-        ExecutorService executor = AppExecutors.scanPool();
+        ExecutorService executor = AppExecutors.cleanPool();
         return scanWithExecutor(rows, categories, onProgress, executor, CancellationToken.NONE);
     }
 
@@ -64,6 +64,15 @@ public class CleanupService {
             rows[i] = new CleanupRow(categories[i]);
         }
         return scanWithExecutor(rows, categories, onProgress, sharedExecutor, CancellationToken.NONE);
+    }
+
+    public List<CleanupRow> scan(Runnable onProgress, ExecutorService sharedExecutor, CancellationToken token) {
+        CleanupCategory[] categories = CleanupCategory.values();
+        CleanupRow[] rows = new CleanupRow[categories.length];
+        for (int i = 0; i < categories.length; i++) {
+            rows[i] = new CleanupRow(categories[i]);
+        }
+        return scanWithExecutor(rows, categories, onProgress, sharedExecutor, token != null ? token : CancellationToken.NONE);
     }
 
     private List<CleanupRow> scanWithExecutor(CleanupRow[] rows, CleanupCategory[] categories,
@@ -81,18 +90,39 @@ public class CleanupService {
                 scanCategory(row);
                 if (onProgress != null) onProgress.run();
             }, executor).exceptionally(ex -> {
-                if (ex instanceof java.util.concurrent.TimeoutException) {
+                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                if (cause instanceof java.util.concurrent.TimeoutException || ex instanceof java.util.concurrent.TimeoutException) {
                     row.setSizeOrCountText("Timed out");
                     row.setScanStatus(CleanupRow.ScanStatus.ERROR);
                     row.setErrorMessage("Scan timed out");
+                } else {
+                    AppLogger.warning("Scan task failed for " + row.getCategory().getDisplayName() + ": " + cause.getMessage());
                 }
                 return null;
             });
         }
         try {
-            CompletableFuture.allOf(futures).join();
+            CompletableFuture.allOf(futures)
+                    .orTimeout(SCAN_OVERALL_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+                    .join();
+        } catch (java.util.concurrent.CompletionException ce) {
+            Throwable cause = ce.getCause();
+            if (cause instanceof java.util.concurrent.TimeoutException) {
+                AppLogger.warning("Synchronous scan timed out after " + SCAN_OVERALL_TIMEOUT_SECONDS + "s");
+                for (CleanupRow r : rows) {
+                    if (r.getScanStatus() == CleanupRow.ScanStatus.PENDING || r.getScanStatus() == CleanupRow.ScanStatus.SCANNING) {
+                        r.setSizeOrCountText("Timed out");
+                        r.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                        r.setErrorMessage("Scan timed out");
+                    }
+                }
+            } else {
+                AppLogger.warning("Synchronous scan failed: " + (cause != null ? cause.getMessage() : ce.getMessage()));
+            }
+        } catch (java.util.concurrent.CancellationException ce) {
+            AppLogger.warning("Synchronous scan canceled: " + ce.getMessage());
         } catch (Exception e) {
-            AppLogger.warning("Synchronous scan timed out or failed: " + e.getMessage());
+            AppLogger.warning("Synchronous scan failed: " + e.getMessage());
         }
         return List.of(rows);
     }
@@ -142,7 +172,7 @@ public class CleanupService {
             try {
                 long scannedBytes = row.getTotalBytes();
                 int scannedItems = row.getItemCount();
-                long cleaned = cleanCategory(row.getCategory(), registryBackup ? backupRoot : null);
+                long cleaned = cleanCategory(row.getCategory(), registryBackup ? backupRoot : null, token);
                 totalBytes += cleaned;
                 if (cleaned == 0) {
                     totalItems += 0;
@@ -173,7 +203,7 @@ public class CleanupService {
             rows[i] = new CleanupRow(categories[i]);
         }
 
-        ExecutorService executor = AppExecutors.scanPool();
+        ExecutorService executor = AppExecutors.cleanPool();
         java.util.List<CompletableFuture<?>> futures = new java.util.ArrayList<>();
         for (int i = 0; i < categories.length; i++) {
             final CleanupRow row = rows[i];
@@ -209,7 +239,22 @@ public class CleanupService {
                 .allOf(futures.toArray(new CompletableFuture[0]))
                 .orTimeout(SCAN_OVERALL_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
                 .thenApply(v -> java.util.List.of(rows));
-        finalFuture.whenComplete((r, ex) -> {});
+        finalFuture.whenComplete((r, ex) -> {
+            if (ex != null) {
+                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                if (cause instanceof java.util.concurrent.TimeoutException) {
+                    if (token != null) token.cancel();
+                    for (CompletableFuture<?> f : futures) { try { f.cancel(true); } catch (Exception ignored) {} }
+                    for (CleanupRow row : rows) {
+                        if (row.getScanStatus() == CleanupRow.ScanStatus.PENDING || row.getScanStatus() == CleanupRow.ScanStatus.SCANNING) {
+                            row.setSizeOrCountText("Timed out");
+                            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                            row.setErrorMessage("Scan timed out");
+                        }
+                    }
+                }
+            }
+        });
 
         CancelableCompletableFuture<java.util.List<CleanupRow>> result = new CancelableCompletableFuture<>(
                 futures, executor, false);
@@ -229,7 +274,7 @@ public class CleanupService {
             rows[i] = new CleanupRow(categories.get(i));
         }
 
-        ExecutorService executor = AppExecutors.scanPool();
+        ExecutorService executor = AppExecutors.cleanPool();
         java.util.List<CompletableFuture<?>> futures = new java.util.ArrayList<>();
         for (int i = 0; i < categories.size(); i++) {
             final CleanupRow row = rows[i];
@@ -264,7 +309,22 @@ public class CleanupService {
                 .allOf(futures.toArray(new CompletableFuture[0]))
                 .orTimeout(SCAN_OVERALL_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
                 .thenApply(v -> java.util.List.of(rows));
-        finalFuture.whenComplete((r, ex) -> {});
+        finalFuture.whenComplete((r, ex) -> {
+            if (ex != null) {
+                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                if (cause instanceof java.util.concurrent.TimeoutException) {
+                    if (token != null) token.cancel();
+                    for (CompletableFuture<?> f : futures) { try { f.cancel(true); } catch (Exception ignored) {} }
+                    for (CleanupRow row : rows) {
+                        if (row.getScanStatus() == CleanupRow.ScanStatus.PENDING || row.getScanStatus() == CleanupRow.ScanStatus.SCANNING) {
+                            row.setSizeOrCountText("Timed out");
+                            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                            row.setErrorMessage("Rescan timed out");
+                        }
+                    }
+                }
+            }
+        });
 
         CancelableCompletableFuture<java.util.List<CleanupRow>> result = new CancelableCompletableFuture<>(
                 futures, executor, false);
@@ -294,16 +354,25 @@ public class CleanupService {
 
         ExecutorService executor = AppExecutors.cleanPool();
         java.util.List<CompletableFuture<Long>> futures = new java.util.ArrayList<>();
-        for (CleanupRow row : tasks) {
-            final CleanupRow taskRow = row;
+        java.util.Map<Integer, String> taskErrorMap = new java.util.concurrent.ConcurrentHashMap<>();
+        for (int idx = 0; idx < tasks.size(); idx++) {
+            final int taskIdx = idx;
+            final CleanupRow taskRow = tasks.get(idx);
             CompletableFuture<Long> f = CompletableFuture.supplyAsync(() -> {
                 if (token.isCancelled()) {
+                    if (onProgress != null) onProgress.run();
                     return 0L;
                 }
                 try {
-                    return cleanCategory(taskRow.getCategory(), backupRoot);
+                    return cleanCategory(taskRow.getCategory(), backupRoot, token);
+                } catch (java.util.concurrent.CancellationException ce) {
+                    // Cooperative cancel — not an error
+                    return 0L;
                 } catch (Exception e) {
-                    AppLogger.warning("Clean failed for " + taskRow.getCategory().getDisplayName() + ": " + e.getMessage());
+                    String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
+                    String err = taskRow.getCategory().getDisplayName() + ": " + msg;
+                    taskErrorMap.put(taskIdx, err);
+                    AppLogger.warning("Clean failed for " + err);
                     return 0L;
                 } finally {
                     if (onProgress != null) onProgress.run();
@@ -312,9 +381,17 @@ public class CleanupService {
             futures.add(f);
         }
 
+        long effectiveTimeoutTmp = CLEAN_OVERALL_TIMEOUT_SECONDS;
+        for (CleanupRow tr : tasks) {
+            try {
+                CleanerExtension ext = CleanerRegistry.get(tr.getCategory());
+                if (ext != null) effectiveTimeoutTmp = Math.max(effectiveTimeoutTmp, ext.getCleanTimeoutSeconds());
+            } catch (Exception ignored) {}
+        }
+        final long effectiveTimeout = effectiveTimeoutTmp;
         CompletableFuture<CleanSummary> finalFuture = CompletableFuture
                 .allOf(futures.toArray(new CompletableFuture[0]))
-                .orTimeout(CLEAN_OVERALL_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+                .orTimeout(effectiveTimeout, java.util.concurrent.TimeUnit.SECONDS)
                 .thenApply(v -> {
                     long totalBytes = 0;
                     int totalItems = 0;
@@ -322,14 +399,25 @@ public class CleanupService {
                     java.util.List<String> errors = new java.util.ArrayList<>();
                     boolean wasCanceled = token.isCancelled();
                     for (int i = 0; i < tasks.size(); i++) {
-                        long cleaned = futures.get(i).join();
+                        long cleaned = 0;
+                        try {
+                            cleaned = futures.get(i).join();
+                        } catch (java.util.concurrent.CompletionException ce) {
+                            String msg = ce.getCause() != null ? ce.getCause().getMessage() : ce.getMessage();
+                            errors.add(tasks.get(i).getCategory().getDisplayName() + ": " + (msg != null ? msg : "unknown error"));
+                            continue;
+                        }
                         CleanupRow r = tasks.get(i);
+                        String taskErr = taskErrorMap.get(i);
+                        if (taskErr != null) {
+                            errors.add(taskErr);
+                        } else if (cleaned == 0 && r.getTotalBytes() > 0 && !wasCanceled) {
+                            // Only generic if no specific error captured
+                            errors.add(r.getCategory().getDisplayName() + ": nothing was cleaned (files may be locked or in use)");
+                        }
                         totalBytes += cleaned;
                         int scannedItems = r.getItemCount();
                         long scannedBytes = r.getTotalBytes();
-                        if (cleaned == 0 && scannedBytes > 0 && !wasCanceled) {
-                            errors.add(r.getCategory().getDisplayName() + ": nothing was cleaned (files may be locked or in use)");
-                        }
                         if (cleaned == 0) {
                             totalItems += 0;
                         } else if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
@@ -341,7 +429,16 @@ public class CleanupService {
                     }
                     return new CleanSummary(totalBytes, totalItems, perCategory, errors);
                 });
-        finalFuture.whenComplete((r, ex) -> {});
+        finalFuture.whenComplete((r, ex) -> {
+            if (ex != null) {
+                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                if (cause instanceof java.util.concurrent.TimeoutException || ex instanceof java.util.concurrent.TimeoutException) {
+                    if (token != null) token.cancel();
+                    for (CompletableFuture<Long> f : futures) { try { f.cancel(true); } catch (Exception ignored) {} }
+                    AppLogger.warning("Clean timed out after " + effectiveTimeout + "s for " + tasks.size() + " categories");
+                }
+            }
+        });
 
         CancelableCompletableFuture<CleanSummary> result = new CancelableCompletableFuture<>(
                 new java.util.ArrayList<>(futures), executor, false);
@@ -350,8 +447,15 @@ public class CleanupService {
     }
 
     private long cleanCategory(CleanupCategory category, Path backupRootOrNull) throws Exception {
+        return cleanCategory(category, backupRootOrNull, CancellationToken.NONE);
+    }
+
+    private long cleanCategory(CleanupCategory category, Path backupRootOrNull, CancellationToken token) throws Exception {
+        if (token != null && token.isCancelled()) {
+            throw new java.util.concurrent.CancellationException("Clean canceled");
+        }
         CleanerExtension c = CleanerRegistry.get(category);
-        if (c != null) return c.clean(backupRootOrNull);
+        if (c != null) return c.clean(backupRootOrNull, token);
         throw new UnsupportedOperationException("No cleaner registered for " + category);
     }
 

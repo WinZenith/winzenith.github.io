@@ -4,6 +4,7 @@ import com.sbtools.netoptimizer.NetworkAdapterRow;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
 import com.sbtools.netoptimizer.PingResult;
 import com.sbtools.netoptimizer.TracerouteHop;
+import com.sbtools.util.AppExecutors;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.geometry.Insets;
@@ -20,11 +21,14 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
 import java.util.List;
+import java.util.concurrent.Future;
+import java.util.function.BooleanSupplier;
 
 class DnsCachePanel extends VBox {
 
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
+    private final BooleanSupplier adminCheck;
     private final Label statusLabel;
     private final ComboBox<String> adapterCombo = new ComboBox<>();
     private final TextField primaryDnsField = new TextField();
@@ -33,27 +37,54 @@ class DnsCachePanel extends VBox {
     private final TextField pingHostField = new TextField();
     private final TextField pingCountField = new TextField("4");
     private final TextArea diagnosticOutput = new TextArea();
+    private volatile Future<?> currentTask;
+    private volatile Future<?> dnsQueryTask;
 
-    DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel) {
+    DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel, BooleanSupplier adminCheck) {
         this.service = service;
         this.busy = busy;
+        this.adminCheck = adminCheck != null ? adminCheck : () -> false;
         this.statusLabel = statusLabel;
         getChildren().addAll(buildContent());
     }
 
+    DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel) {
+        this(service, busy, statusLabel, () -> false);
+    }
+
     void refreshAdapters() {
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             List<NetworkAdapterRow> adapters = service.listAdapters();
             Platform.runLater(() -> {
+                String selected = adapterCombo.getSelectionModel().getSelectedItem();
                 adapterCombo.getItems().clear();
                 for (NetworkAdapterRow a : adapters) {
                     adapterCombo.getItems().add(a.getName());
                 }
                 if (!adapterCombo.getItems().isEmpty()) {
-                    adapterCombo.getSelectionModel().selectFirst();
+                    if (selected != null && adapterCombo.getItems().contains(selected)) {
+                        adapterCombo.getSelectionModel().select(selected);
+                    } else {
+                        adapterCombo.getSelectionModel().selectFirst();
+                    }
                 }
             });
-        }, "net-dns-load-adapters").start();
+        });
+    }
+
+    private boolean requireAdmin() {
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING, "Administrator privileges required.\n\nRight-click WinZenith.exe → Run as administrator.").showAndWait();
+            return false;
+        }
+        return true;
+    }
+
+    void dispose() {
+        Future<?> t = currentTask;
+        if (t != null) t.cancel(true);
+        Future<?> d = dnsQueryTask;
+        if (d != null) d.cancel(true);
     }
 
     private VBox buildContent() {
@@ -165,15 +196,16 @@ class DnsCachePanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
+        if (!requireAdmin()) return;
         busy.set(true);
         statusLabel.setText("Flushing DNS...");
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.flushDnsCache();
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "DNS cache flushed." : "Flush failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -183,7 +215,7 @@ class DnsCachePanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-flush-dns").start();
+        });
     }
 
     private void resetNetworkStack() {
@@ -191,21 +223,24 @@ class DnsCachePanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
-        statusLabel.setText("Resetting network stack...");
+        if (!requireAdmin()) return;
         Alert warn = new Alert(Alert.AlertType.WARNING,
                 "Resetting the network stack requires a system reboot. Continue?");
+        warn.setTitle("Confirm Reset");
+        warn.setHeaderText("Reset Network Stack");
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             statusLabel.setText("Ready.");
             return;
         }
         busy.set(true);
-        new Thread(() -> {
+        statusLabel.setText("Resetting network stack...");
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.resetNetworkStack();
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "Network stack reset. Reboot required." : "Reset failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -215,7 +250,7 @@ class DnsCachePanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-reset-stack").start();
+        });
     }
 
     private void resetWinsock() {
@@ -223,21 +258,24 @@ class DnsCachePanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
-        statusLabel.setText("Resetting Winsock...");
+        if (!requireAdmin()) return;
         Alert warn = new Alert(Alert.AlertType.WARNING,
                 "Resetting Winsock may require a reboot. Continue?");
+        warn.setTitle("Confirm Reset");
+        warn.setHeaderText("Reset Winsock");
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             statusLabel.setText("Ready.");
             return;
         }
         busy.set(true);
-        new Thread(() -> {
+        statusLabel.setText("Resetting Winsock...");
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.resetWinsock();
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "Winsock reset. Reboot recommended." : "Reset failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -247,22 +285,29 @@ class DnsCachePanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-reset-winsock").start();
+        });
     }
 
     private void loadCurrentDns() {
         String adapter = adapterCombo.getSelectionModel().getSelectedItem();
         if (adapter == null) return;
-        new Thread(() -> {
-            List<String> dns = service.getCurrentDnsServers(adapter);
+        final String requestedAdapter = adapter;
+        currentDnsLabel.setText("Current DNS: loading...");
+        Future<?> prev = dnsQueryTask;
+        if (prev != null) prev.cancel(true);
+        dnsQueryTask = AppExecutors.ioPool().submit(() -> {
+            List<String> dns = service.getCurrentDnsServers(requestedAdapter);
             Platform.runLater(() -> {
+                // Avoid race: only update if selection hasn't changed since request
+                String current = adapterCombo.getSelectionModel().getSelectedItem();
+                if (!requestedAdapter.equals(current)) return;
                 if (dns.isEmpty()) {
                     currentDnsLabel.setText("Current DNS: None (DHCP)");
                 } else {
                     currentDnsLabel.setText("Current DNS: " + String.join(", ", dns));
                 }
             });
-        }, "net-dns-load").start();
+        });
     }
 
     private void applyDns() {
@@ -275,29 +320,38 @@ class DnsCachePanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
+        if (!requireAdmin()) return;
 
         String primary = primaryDnsField.getText().trim();
         String secondary = secondaryDnsField.getText().trim();
 
-        if (!primary.isEmpty() && !isValidIpAddress(primary)) {
-            new Alert(Alert.AlertType.WARNING, "Invalid primary DNS IP address format.").showAndWait();
+        if (!primary.isEmpty() && !NetworkOptimizerService.isValidIpAddress(primary)) {
+            new Alert(Alert.AlertType.WARNING, "Invalid primary DNS address. Must be valid IPv4 or IPv6.").showAndWait();
             return;
         }
-        if (!secondary.isEmpty() && !isValidIpAddress(secondary)) {
-            new Alert(Alert.AlertType.WARNING, "Invalid secondary DNS IP address format.").showAndWait();
+        if (!secondary.isEmpty() && !NetworkOptimizerService.isValidIpAddress(secondary)) {
+            new Alert(Alert.AlertType.WARNING, "Invalid secondary DNS address. Must be valid IPv4 or IPv6.").showAndWait();
+            return;
+        }
+        if (primary.isEmpty() && !secondary.isEmpty()) {
+            new Alert(Alert.AlertType.WARNING, "Primary DNS must be set if secondary is set.").showAndWait();
+            return;
+        }
+        if (primary.isEmpty() && secondary.isEmpty()) {
+            new Alert(Alert.AlertType.WARNING, "Enter at least one DNS server or use 'Reset to DHCP'.").showAndWait();
             return;
         }
 
         busy.set(true);
         statusLabel.setText("Setting DNS servers...");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.setDnsServers(adapter, primary, secondary);
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "DNS updated." : "DNS update failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                     if (result.success()) loadCurrentDns();
                 });
             } catch (Exception e) {
@@ -308,7 +362,7 @@ class DnsCachePanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-dns-set").start();
+        });
     }
 
     private void resetDns() {
@@ -321,16 +375,17 @@ class DnsCachePanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
+        if (!requireAdmin()) return;
         busy.set(true);
         statusLabel.setText("Resetting DNS to DHCP...");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.setDnsServers(adapter, null, null);
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "DNS reset to DHCP." : "DNS reset failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                     if (result.success()) {
                         primaryDnsField.clear();
                         secondaryDnsField.clear();
@@ -345,22 +400,11 @@ class DnsCachePanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-dns-reset").start();
+        });
     }
 
     private boolean isValidIpAddress(String ip) {
-        if (ip == null || ip.isEmpty()) return false;
-        String[] parts = ip.split("\\.");
-        if (parts.length != 4) return false;
-        for (String part : parts) {
-            try {
-                int num = Integer.parseInt(part);
-                if (num < 0 || num > 255) return false;
-            } catch (NumberFormatException e) {
-                return false;
-            }
-        }
-        return true;
+        return NetworkOptimizerService.isValidIpAddress(ip);
     }
 
     private void runPing() {
@@ -389,7 +433,7 @@ class DnsCachePanel extends VBox {
         statusLabel.setText("Pinging " + host + "...");
         diagnosticOutput.setText("Pinging " + host + " (" + count + " packets)...\n");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 PingResult result = service.ping(host, count);
                 Platform.runLater(() -> {
@@ -404,11 +448,16 @@ class DnsCachePanel extends VBox {
                         sb.append("  Avg Latency:      ").append(String.format("%.1f", result.avgMs())).append(" ms\n");
                     }
                     sb.append("\n--- Raw Output ---\n");
-                    sb.append(result.rawOutput());
+                    sb.append(result.rawOutput() != null ? result.rawOutput() : "");
                     diagnosticOutput.setText(sb.toString());
-                    statusLabel.setText(result.packetsReceived() > 0
-                            ? "Ping complete: " + result.avgMs() + "ms avg"
-                            : "Ping failed: no reply from " + host);
+                    // detect error string in raw for user hint
+                    if (result.rawOutput() != null && result.rawOutput().toLowerCase().contains("error")) {
+                        statusLabel.setText("Ping failed: " + result.rawOutput().substring(0, Math.min(80, result.rawOutput().length())));
+                    } else {
+                        statusLabel.setText(result.packetsReceived() > 0
+                                ? "Ping complete: " + result.avgMs() + "ms avg"
+                                : "Ping failed: no reply from " + host);
+                    }
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -418,13 +467,17 @@ class DnsCachePanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-ping").start();
+        });
     }
 
     private void runTraceroute() {
         String host = pingHostField.getText().trim();
         if (host.isEmpty()) {
             new Alert(Alert.AlertType.WARNING, "Please enter a host for traceroute.").showAndWait();
+            return;
+        }
+        if (!NetworkOptimizerService.isValidHost(host)) {
+            new Alert(Alert.AlertType.WARNING, "Invalid host: " + host + "\nAllowed: letters, digits, dot, hyphen, underscore, colon (IPv6).").showAndWait();
             return;
         }
 
@@ -436,12 +489,12 @@ class DnsCachePanel extends VBox {
         statusLabel.setText("Traceroute to " + host + "...");
         diagnosticOutput.setText("Traceroute to " + host + " (max 30 hops)...\n");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 List<TracerouteHop> hops = service.traceroute(host, 30);
                 Platform.runLater(() -> {
                     if (hops.isEmpty()) {
-                        diagnosticOutput.setText("Traceroute failed. No hops returned for " + host + ".");
+                        diagnosticOutput.setText("Traceroute failed. No hops returned for " + host + ".\nCheck host name and network connectivity.");
                         statusLabel.setText("Traceroute failed.");
                     } else {
                         StringBuilder sb = new StringBuilder();
@@ -455,6 +508,11 @@ class DnsCachePanel extends VBox {
                         statusLabel.setText("Traceroute complete: " + hops.size() + " hops.");
                     }
                 });
+            } catch (IllegalArgumentException iae) {
+                Platform.runLater(() -> {
+                    diagnosticOutput.setText("Traceroute validation failed: " + iae.getMessage());
+                    statusLabel.setText("Traceroute failed: invalid host.");
+                });
             } catch (Exception e) {
                 Platform.runLater(() -> {
                     diagnosticOutput.setText("Traceroute error: " + e.getMessage());
@@ -463,6 +521,6 @@ class DnsCachePanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-traceroute").start();
+        });
     }
 }

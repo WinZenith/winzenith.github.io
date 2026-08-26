@@ -1,4 +1,4 @@
-# Restore driver from backup folder. Removes the current driver first to allow downgrade.
+# Restore driver from backup folder. Safer order: install first, then remove old only if needed.
 # Args: BackupFolder DeviceId
 param(
     [Parameter(Mandatory = $true)][string]$BackupFolder,
@@ -11,33 +11,47 @@ if (-not $infs) {
     exit 1
 }
 
-# Phase 1: Find and remove the currently active driver for this device (enables downgrade)
+# Phase 1: Install backed-up drivers first (never delete current driver automatically - destructive)
+$failed = 0
+$installed = 0
+$installOutputs = @()
+foreach ($inf in $infs) {
+    $out = & pnputil.exe /add-driver $inf.FullName /install 2>&1 | Out-String
+    $installOutputs += "$($inf.Name): exit=$LASTEXITCODE $out"
+    if ($LASTEXITCODE -ne 0) { $failed++ } else { $installed++ }
+}
+# Downgrade path is intentionally NOT automatic. Deleting the current driver with
+# /delete-driver /uninstall /force is destructive and can leave the device driverless
+# if the backup INF is incompatible. Instead we report failure and let the UI suggest
+# manual Device Manager -> Rollback or reboot.
 $removedCurrent = $false
-if ($DeviceId) {
+$retryFailed = $failed
+# NOTE: Previous versions attempted to delete current OEM INF and retry. That is disabled
+# for safety. If $installed -eq 0, the caller should surface installOutputs to the user
+# and suggest: reboot, Device Manager -> Update driver -> Browse -> Let me pick -> Have Disk.
+if ($installed -eq 0) {
+    # Capture diagnostic info about current driver without deleting
     $currentInf = ''
     try {
         $prop = Get-PnpDeviceProperty -InstanceId $DeviceId -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue
         if ($prop -and $prop.Data) { $currentInf = [string]$prop.Data }
     } catch {}
-
-    # Extract filename if a full path was returned
     if ($currentInf -match '[\\/]([^\\/]+\.inf)$') { $currentInf = $Matches[1] }
-
-    if ($currentInf -and $currentInf -match '^oem\d+\.inf$') {
-        & pnputil.exe /delete-driver $currentInf /uninstall /force 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { $removedCurrent = $true }
+    # Do not delete - only log
+    if ($currentInf) {
+        $installOutputs += "Current driver INF: $currentInf (not removed for safety)"
     }
 }
+# Trigger device rescan so driver becomes active without reboot if possible
+try { & pnputil.exe /scan-devices 2>&1 | Out-Null } catch {}
 
-# Phase 2: Install backed-up drivers
-$failed = 0
-$installed = 0
-foreach ($inf in $infs) {
-    & pnputil.exe /add-driver $inf.FullName /install
-    if ($LASTEXITCODE -ne 0) { $failed++ } else { $installed++ }
+if ($failed -eq $infs.Count) {
+    $details = ($installOutputs -join " | ").Trim()
+    @{ success = $false; installed = $installed; failed = $failed; removedCurrent = $removedCurrent; details = $details } | ConvertTo-Json -Compress
+    exit 1
 }
-if ($failed -eq $infs.Count) { exit 1 }
 
-@{ success = ($failed -eq 0); installed = $installed; failed = $failed; removedCurrent = $removedCurrent } | ConvertTo-Json -Compress
+$details = ($installOutputs -join " | ").Trim()
+@{ success = ($failed -eq 0); installed = $installed; failed = $failed; removedCurrent = $removedCurrent; details = $details } | ConvertTo-Json -Compress
 if ($failed -gt 0) { exit 1 }
 exit 0

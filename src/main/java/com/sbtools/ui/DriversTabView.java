@@ -5,6 +5,7 @@ import com.sbtools.drivers.catalog.DriverCatalogAggregator;
 import com.sbtools.drivers.DriverHealthService;
 import com.sbtools.drivers.DriverInstallService;
 import com.sbtools.drivers.DriverScanService;
+import com.sbtools.drivers.RebootPendingStore;
 import com.sbtools.drivers.UpdateHistoryStore;
 import com.sbtools.drivers.model.DriverRow;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
@@ -26,7 +27,6 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
-import javafx.scene.control.cell.CheckBoxTableCell;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
@@ -68,6 +68,7 @@ public class DriversTabView extends BorderPane {
     private final DriverBackupService backupService = new DriverBackupService();
     private final SettingsStore settingsStore = new SettingsStore();
     private final UpdateHistoryStore historyStore = new UpdateHistoryStore();
+    private final RebootPendingStore rebootStore = new RebootPendingStore();
     // Scans are I/O-bound; one virtual thread per task scales nicely with provider fan-out.
     private final ExecutorService scanExecutor = Executors.newSingleThreadExecutor(
             r -> { Thread t = new Thread(r, "driver-scan"); t.setDaemon(true); return t; });
@@ -81,7 +82,12 @@ public class DriversTabView extends BorderPane {
     private final ObservableList<DriverRow> upToDateRows = FXCollections.observableArrayList();
     // Per-row install cell tracking — supports concurrent visual state per row
     // (current execution is still serialized by installExecutor, but the UI is decoupled).
-    private final Map<DriverRow, DriverActionCell> installCells = new IdentityHashMap<>();
+    // Uses ConcurrentHashMap for thread-safe access from FX thread and installExecutor callbacks.
+    // Identity semantics preserved via IdentityHashMap wrapper is unnecessary; ConcurrentHashMap
+    // keyed by deviceId via row identity is safe because DriverRow instances are unique per scan.
+    private final Map<DriverRow, DriverActionCell> installCells = new java.util.concurrent.ConcurrentHashMap<>();
+    // Retain identity semantics fallback via wrapper if needed – use synchronized view instead:
+    // (ConcurrentHashMap does not support null keys, which we never store)
     private final Label statusLabel = new Label("Click Scan to check for outdated drivers.");
     private final ProgressBar progressBar = new ProgressBar(0);
     private final Label progressLabel = new Label("0%");
@@ -217,31 +223,41 @@ public class DriversTabView extends BorderPane {
 
         TableColumn<DriverRow, Boolean> selectCol = new TableColumn<>("Select");
         selectCol.setCellValueFactory(c -> c.getValue().selectedProperty());
-        selectCol.setCellFactory(col -> new CheckBoxTableCell<DriverRow, Boolean>() {
+        selectCol.setCellFactory(col -> new TableCell<DriverRow, Boolean>() {
             private final CheckBox cb = new CheckBox();
             {
-                cb.selectedProperty().addListener((obs, old, val) -> {
-                    int idx = getIndex();
-                    if (idx >= 0 && idx < getTableView().getItems().size()) {
-                        getTableView().getItems().get(idx).setSelected(val);
+                cb.setOnAction(e -> {
+                    DriverRow row = getTableRow() != null ? getTableRow().getItem() : null;
+                    if (row != null) {
+                        row.setSelected(cb.isSelected());
                     }
                     updateButtonStates();
                 });
             }
 
             @Override
-            public void updateItem(Boolean item, boolean empty) {
+            protected void updateItem(Boolean item, boolean empty) {
                 super.updateItem(item, empty);
-                if (empty || item == null) {
+                if (empty || getTableRow() == null || getTableRow().getItem() == null) {
                     setGraphic(null);
                 } else {
-                    cb.setSelected(item);
+                    DriverRow row = getTableRow().getItem();
+                    // Avoid firing action while programmatically updating
+                    cb.setOnAction(null);
+                    cb.setSelected(row.isSelected());
+                    cb.setOnAction(e2 -> {
+                        DriverRow r2 = getTableRow() != null ? getTableRow().getItem() : null;
+                        if (r2 != null) {
+                            r2.setSelected(cb.isSelected());
+                        }
+                        updateButtonStates();
+                    });
                     setGraphic(cb);
                 }
             }
         });
         selectCol.setPrefWidth(50);
-        selectCol.setEditable(true);
+        selectCol.setEditable(false);
         selectCol.setSortable(false);
 
         TableColumn<DriverRow, String> deviceCol = new TableColumn<>("Device");
@@ -268,6 +284,13 @@ public class DriversTabView extends BorderPane {
                     return;
                 }
                 DriverRow row = getTableRow() != null ? getTableRow().getItem() : null;
+                if (row != null && row.isRebootPending()) {
+                    Label badge = new Label("REBOOT");
+                    badge.setStyle("-fx-background-color: #bd93f9; -fx-text-fill: white; -fx-padding: 2 6; -fx-background-radius: 4; -fx-font-weight: bold;");
+                    badge.setTooltip(new Tooltip("Driver installed — restart required to complete"));
+                    setGraphic(badge);
+                    return;
+                }
                 if (row != null && row.isProblematic()) {
                     Label badge = new Label("ISSUE");
                     badge.setStyle("-fx-background-color: #ff5555; -fx-text-fill: white; -fx-padding: 2 6; -fx-background-radius: 4; -fx-font-weight: bold;");
@@ -628,17 +651,54 @@ public class DriversTabView extends BorderPane {
                                 if (token.isCancelled()) return;
                                 applyCandidates(rowByDevice, candidates);
                                 int done = providersDone.incrementAndGet();
-                                double progress = 0.2 + (0.8 * done / providerCount);
+                                double progress = 0.2 + (0.8 * done / Math.max(1, providerCount));
                                 progressBar.setProgress(progress);
                                 progressLabel.setText((int)(progress * 100) + "%");
                                 reconcileRows(rowByDevice, excludedIdSet);
+                                // B3: reconcile reboot-pending state so Dashboard/Drivers stay in sync
+                                try {
+                                    Set<String> pendingIds = rebootStore.loadPendingIds();
+                                    for (DriverRow r : rowByDevice.values()) {
+                                        String did = r.installed().deviceId();
+                                        if (pendingIds.contains(did)) {
+                                            r.setRebootPending(true);
+                                            // Keep reboot-pending drivers visibly in Outdated until reboot completes
+                                            if (outdatedRows.contains(r)) {
+                                                // already there with REBOOT badge
+                                            } else if (r.hasUpdate()) {
+                                                // has update but was in upToDate due to prior clear — move to outdated
+                                                upToDateRows.remove(r);
+                                                if (!outdatedRows.contains(r)) outdatedRows.add(r);
+                                            } else {
+                                                // No candidate anymore but still pending — keep as reboot badge in outdated
+                                                // (provider may still report candidate; if not, treat as pending completion)
+                                                upToDateRows.remove(r);
+                                                if (!outdatedRows.contains(r)) outdatedRows.add(r);
+                                            }
+                                        } else if (r.isRebootPending()) {
+                                            // Was pending but store cleared externally or version now matches — clear badge
+                                            if (!r.hasUpdate()) {
+                                                r.setRebootPending(false);
+                                            }
+                                        }
+                                    }
+                                    if (!pendingIds.isEmpty()) {
+                                        outdatedTable.refresh();
+                                        upToDateTable.refresh();
+                                    }
+                                } catch (Exception ex) {
+                                    AppLogger.warning("Failed to reconcile reboot pending: " + ex.getMessage());
+                                }
                                 int outdated = outdatedRows.size();
+                                long rebootPendingCount = outdatedRows.stream().filter(DriverRow::isRebootPending).count();
                                 if (done < providerCount) {
                                     setStatus("Checked " + done + "/" + providerCount + " sources — "
-                                            + outdated + " update(s) found so far…");
+                                            + outdated + " update(s) found so far…"
+                                            + (rebootPendingCount > 0 ? " (" + rebootPendingCount + " reboot pending)" : ""));
                                 } else {
+                                    String suffix = rebootPendingCount > 0 ? " (" + rebootPendingCount + " reboot pending)" : "";
                                     setStatus("Found " + outdated + " outdated driver(s) out of "
-                                            + installed.size() + " device(s).");
+                                            + installed.size() + " device(s)." + suffix);
                                 }
                             });
                         }
@@ -822,6 +882,12 @@ public class DriversTabView extends BorderPane {
             return;
         }
         DriverUpdateCandidate c = row.candidate();
+        if (c == null) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "No update available for " + row.installed().friendlyName()
+                    + " — the available update was cleared by a concurrent scan. Please scan again.").showAndWait();
+            return;
+        }
 
         boolean isWuInstall = "WindowsUpdate".equals(c.source())
                 && c.packageId() != null && !c.packageId().isBlank();
@@ -859,18 +925,46 @@ public class DriversTabView extends BorderPane {
         installExecutor.submit(() -> {
             try {
                 DriverInstallService.InstallResult result = installService.install(c, settings);
+                // Invalidate provider caches so Dashboard next scan reflects current WU/state
+                try {
+                    catalog.clearWindowsUpdateCache();
+                    if (c.source() != null && !c.source().isBlank()) {
+                        catalog.clearCacheForProvider(c.source());
+                    }
+                } catch (Exception ex) {
+                    AppLogger.warning("Failed to clear provider cache: " + ex.getMessage());
+                }
                 Platform.runLater(() -> {
                     if (result.installed()) {
-                        statusLabel.setText("Update installed for " + row.installed().friendlyName());
-                        row.setCandidate(null);
-                        outdatedRows.remove(row);
-                        if (!upToDateRows.contains(row)) {
-                            upToDateRows.add(row);
-                        }
                         recordHistory(row, c, true);
                         if (result.rebootRequired()) {
-                            new Alert(Alert.AlertType.INFORMATION,
-                                    "Restart required to finish installation.").showAndWait();
+                            rebootStore.addPending(row.installed().deviceId(), row.installed().friendlyName());
+                            row.setRebootPending(true);
+                            statusLabel.setText("Update installed for " + row.installed().friendlyName()
+                                    + " — restart pending. Driver remains in Outdated until reboot.");
+                            // Keep row in outdated list to avoid Dashboard flip-flop; do not clear candidate
+                            if (!outdatedRows.contains(row)) {
+                                outdatedRows.add(row);
+                            }
+                            upToDateRows.remove(row);
+                            outdatedTable.refresh();
+                            upToDateTable.refresh();
+                            Alert rebootAlert = new Alert(Alert.AlertType.INFORMATION,
+                                    "Driver installed but a restart is required to complete the installation.\n\n"
+                                    + "The driver will stay in Outdated Drivers with a REBOOT badge until you restart.\n"
+                                    + "Dashboard will also show it as outdated until reboot.");
+                            rebootAlert.setTitle("Restart Required");
+                            rebootAlert.setHeaderText("Restart required");
+                            rebootAlert.showAndWait();
+                        } else {
+                            statusLabel.setText("Update installed for " + row.installed().friendlyName());
+                            rebootStore.clearPending(row.installed().deviceId());
+                            row.setRebootPending(false);
+                            row.setCandidate(null);
+                            outdatedRows.remove(row);
+                            if (!upToDateRows.contains(row)) {
+                                upToDateRows.add(row);
+                            }
                         }
                     } else {
                         recordHistory(row, c, false);
@@ -880,8 +974,9 @@ public class DriversTabView extends BorderPane {
                     if (live != null) {
                         live.setIdle();
                     }
+                    updateButtonStates();
                 });
-                if (result.installed()) {
+                if (result.installed() && !result.rebootRequired()) {
                     verifyInstalledVersion(row, c);
                 }
             } catch (Exception ex) {
@@ -982,17 +1077,23 @@ public class DriversTabView extends BorderPane {
     }
 
     /**
-     * Looks up the {@link DriverActionCell} for a given row by walking the table's visible cells.
-     * Returns {@code null} if the row is not currently visible in the viewport.
+     * Looks up the {@link DriverActionCell} for a given row.
+     * Primary source is the {@link #installCells} map (populated on FX thread when a row enters installing state).
+     * Falls back to walking the table's live cell map only if the row is currently visible.
+     * Returns {@code null} if the row is not currently tracked or not visible in the viewport.
      */
     private DriverActionCell lookupActionCell(DriverRow row) {
+        // Fast path: map tracks the live cell registered during installUpdate/installBatchUpdates
+        DriverActionCell tracked = installCells.get(row);
+        if (tracked != null) {
+            return tracked;
+        }
         if (outdatedTable == null) return null;
-        for (var node : outdatedTable.lookupAll(".table-cell")) {
-            if (node instanceof DriverActionCell cell) {
-                DriverRow cellRow = cell.getTableRow() != null ? cell.getTableRow().getItem() : null;
-                if (cellRow == row) {
-                    return cell;
-                }
+        // Fallback: scan installed cells via map entries – avoid lookupAll(".table-cell") which
+        // does not reliably return custom cell instances post-virtualization.
+        for (Map.Entry<DriverRow, DriverActionCell> e : installCells.entrySet()) {
+            if (e.getKey() == row) {
+                return e.getValue();
             }
         }
         return null;
@@ -1000,7 +1101,7 @@ public class DriversTabView extends BorderPane {
 
     /**
      * Re-scans a single driver after update to verify the new version was actually installed.
-     * Updates the row's current version if the installed version changed.
+     * Updates the row's current version and health score via FX thread.
      */
     private void verifyInstalledVersion(DriverRow row, DriverUpdateCandidate oldCandidate) {
         try {
@@ -1011,6 +1112,20 @@ public class DriversTabView extends BorderPane {
                     AppLogger.info("Version verified: " + row.installed().friendlyName()
                             + " updated to " + newVersion);
                 }
+                javafx.application.Platform.runLater(() -> {
+                    row.refreshFrom(updated);
+                    // If we previously marked reboot pending and version now matches expected, clear pending
+                    if (row.isRebootPending() && oldCandidate != null
+                            && newVersion.equals(oldCandidate.availableVersion())) {
+                        row.setRebootPending(false);
+                        row.setCandidate(null);
+                        outdatedRows.remove(row);
+                        if (!upToDateRows.contains(row)) upToDateRows.add(row);
+                        rebootStore.clearPending(row.installed().deviceId());
+                        outdatedTable.refresh();
+                        upToDateTable.refresh();
+                    }
+                });
             }
         } catch (Exception e) {
             AppLogger.debug("Post-update re-scan failed: " + e.getMessage());
@@ -1362,6 +1477,8 @@ public class DriversTabView extends BorderPane {
             int succeeded = 0;
             int failed = 0;
             int skipped = 0;
+            int rebootNeeded = 0;
+            List<String> failureDetails = new ArrayList<>();
             try {
                 int total = rows.size();
                 AppSettings settings = settingsStore.load();
@@ -1377,6 +1494,7 @@ public class DriversTabView extends BorderPane {
                             && c.packageId() != null && !c.packageId().isBlank();
                     if (!isWuInstall && (c.downloadUrl() == null || c.downloadUrl().isBlank())) {
                         skipped++;
+                        failureDetails.add(row.installed().friendlyName() + ": manual download required (" + c.source() + ")");
                         continue;
                     }
 
@@ -1421,15 +1539,37 @@ public class DriversTabView extends BorderPane {
                         });
                         Thread.sleep(50);
                         DriverInstallService.InstallResult result = installService.install(c, settings);
+                        // Invalidate caches per-install so next Dashboard scan is fresh
+                        try {
+                            catalog.clearWindowsUpdateCache();
+                            if (c.source() != null && !c.source().isBlank()) catalog.clearCacheForProvider(c.source());
+                        } catch (Exception ex) { AppLogger.warning("Cache clear failed: " + ex.getMessage()); }
                         if (result.installed()) {
                             succeeded++;
+                            boolean needsReboot = result.rebootRequired();
+                            if (needsReboot) {
+                                rebootNeeded++;
+                                rebootStore.addPending(row.installed().deviceId(), row.installed().friendlyName());
+                            } else {
+                                rebootStore.clearPending(row.installed().deviceId());
+                            }
                             Platform.runLater(() -> {
-                                row.setCandidate(null);
                                 row.setSelected(false);
-                                outdatedRows.remove(row);
-                                if (!upToDateRows.contains(row)) {
-                                    upToDateRows.add(row);
+                                if (needsReboot) {
+                                    row.setRebootPending(true);
+                                    // Keep in outdated with REBOOT badge; do not clear candidate
+                                    if (!outdatedRows.contains(row)) outdatedRows.add(row);
+                                    upToDateRows.remove(row);
+                                } else {
+                                    row.setRebootPending(false);
+                                    row.setCandidate(null);
+                                    outdatedRows.remove(row);
+                                    if (!upToDateRows.contains(row)) {
+                                        upToDateRows.add(row);
+                                    }
                                 }
+                                outdatedTable.refresh();
+                                upToDateTable.refresh();
                                 DriverActionCell cell = installCells.remove(row);
                                 if (cell != null) {
                                     cell.setIdle();
@@ -1438,6 +1578,7 @@ public class DriversTabView extends BorderPane {
                             recordHistory(row, c, true);
                         } else {
                             failed++;
+                            failureDetails.add(row.installed().friendlyName() + ": " + result.message());
                             recordHistory(row, c, false);
                             Platform.runLater(() -> {
                                 DriverActionCell cell = installCells.remove(row);
@@ -1448,6 +1589,7 @@ public class DriversTabView extends BorderPane {
                         }
                     } catch (Exception ex) {
                         failed++;
+                        failureDetails.add(row.installed().friendlyName() + ": exception " + ex.getMessage());
                         AppLogger.warning("Batch install failed for " + row.installed().friendlyName() + ": " + ex.getMessage());
                         Platform.runLater(() -> {
                             DriverActionCell cell = installCells.remove(row);
@@ -1472,13 +1614,36 @@ public class DriversTabView extends BorderPane {
                     for (InstalledDriver d : freshScan) {
                         freshByDevice.put(d.deviceId(), d);
                     }
-                    for (DriverRow row : rows) {
-                        InstalledDriver fresh = freshByDevice.get(row.installed().deviceId());
-                        if (fresh != null) {
-                            String newVersion = fresh.driverVersion() != null ? fresh.driverVersion() : "\u2014";
-                            row.currentVersionProperty().set(newVersion);
+                    // B5 fix: all JavaFX property mutations must run on FX thread
+                    Map<String, String> toClear = new HashMap<>();
+                    Platform.runLater(() -> {
+                        for (DriverRow row : rows) {
+                            InstalledDriver fresh = freshByDevice.get(row.installed().deviceId());
+                            if (fresh != null) {
+                                row.refreshFrom(fresh);
+                                // If pending reboot and version now matches available, clear pending
+                                if (row.isRebootPending()) {
+                                    String freshVer = fresh.driverVersion();
+                                    String avail = row.candidate() != null ? row.candidate().availableVersion() : null;
+                                    if (avail != null && avail.equals(freshVer)) {
+                                        row.setRebootPending(false);
+                                        row.setCandidate(null);
+                                        outdatedRows.remove(row);
+                                        if (!upToDateRows.contains(row)) upToDateRows.add(row);
+                                        toClear.put(row.installed().deviceId(), row.installed().friendlyName());
+                                    }
+                                }
+                            }
                         }
-                    }
+                        outdatedTable.refresh();
+                        upToDateTable.refresh();
+                        // clear pending files off FX thread after UI update
+                        if (!toClear.isEmpty()) {
+                            new Thread(() -> {
+                                for (String did : toClear.keySet()) rebootStore.clearPending(did);
+                            }, "reboot-clear").start();
+                        }
+                    });
                 } catch (Exception e) {
                     AppLogger.debug("Post-batch re-scan failed: " + e.getMessage());
                 }
@@ -1486,6 +1651,8 @@ public class DriversTabView extends BorderPane {
             final int s = succeeded;
             final int f = failed;
             final int k = skipped;
+            final int r = rebootNeeded;
+            final List<String> failures = new ArrayList<>(failureDetails);
             Platform.runLater(() -> {
                 busy.set(false);
                 scanButton.setDisable(false);
@@ -1496,18 +1663,45 @@ public class DriversTabView extends BorderPane {
                 progressBar.setVisible(false);
                 progressLabel.setVisible(false);
                 String summary = "Batch update complete: " + s + " succeeded, " + f + " failed";
-                if (k > 0) {
-                    summary += ", " + k + " skipped (manual download required)";
-                }
+                if (k > 0) summary += ", " + k + " skipped";
+                if (r > 0) summary += ", " + r + " reboot pending";
                 statusLabel.setText(summary + ".");
-                StringBuilder msg = new StringBuilder();
-                msg.append("Batch update complete.\n\n");
-                msg.append(s).append(" driver(s) updated successfully.\n");
-                msg.append(f).append(" driver(s) failed.\n");
-                if (k > 0) {
-                    msg.append(k).append(" driver(s) skipped (no automatic download available).");
+                if (r > 0) {
+                    statusLabel.setText(summary + ". RESTART REQUIRED to finish " + r + " update(s) — Dashboard will show pending until reboot.");
                 }
-                new Alert(Alert.AlertType.INFORMATION, msg.toString()).showAndWait();
+                // Ensure caches are cleared for next Dashboard scan even if all failed
+                try { catalog.clearWindowsUpdateCache(); } catch (Exception ex) { AppLogger.warning("Cache clear failed: " + ex.getMessage()); }
+                // Detailed dialog with per-driver failures
+                Dialog<ButtonType> dlg = new Dialog<>();
+                dlg.setTitle("Batch Update Result");
+                dlg.setHeaderText("Batch update complete");
+                VBox box = new VBox(8);
+                box.setPadding(new Insets(12));
+                Label summaryLabel = new Label(s + " succeeded, " + f + " failed, " + k + " skipped" + (r > 0 ? ", " + r + " reboot pending" : ""));
+                summaryLabel.setWrapText(true);
+                box.getChildren().add(summaryLabel);
+                if (r > 0) {
+                    Label rebootLabel = new Label("⚠ " + r + " driver(s) require a restart to complete. Dashboard will continue to show them as outdated until you reboot. Windows applet may already show them as done.");
+                    rebootLabel.setWrapText(true);
+                    rebootLabel.setStyle("-fx-text-fill: #ffb86c; -fx-font-weight: bold;");
+                    box.getChildren().add(rebootLabel);
+                }
+                if (!failures.isEmpty()) {
+                    Label failHeader = new Label("Failures / skipped:");
+                    failHeader.setStyle("-fx-font-weight: bold;");
+                    box.getChildren().add(failHeader);
+                    ListView<String> lv = new ListView<>(FXCollections.observableArrayList(failures));
+                    lv.setPrefHeight(Math.min(200, failures.size() * 24 + 10));
+                    box.getChildren().add(lv);
+                }
+                Label hint = new Label("Tip: Dashboard next scan will refresh from Windows Update (cache cleared).");
+                hint.setWrapText(true);
+                hint.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11;");
+                box.getChildren().add(hint);
+                dlg.getDialogPane().setContent(box);
+                dlg.getDialogPane().getButtonTypes().add(ButtonType.OK);
+                dlg.getDialogPane().setPrefWidth(560);
+                dlg.showAndWait();
                 filterTables();
             });
         });

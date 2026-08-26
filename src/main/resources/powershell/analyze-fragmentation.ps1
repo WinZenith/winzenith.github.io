@@ -112,16 +112,8 @@ if ($fragmentationPercent -eq 0 -and $fragmentsFound -eq 0) {
     }
 }
 
-# ── Stage 3: Get-Volume fallback for fragmentation percentage ──
-if ($fragmentationPercent -eq 0) {
-    try {
-        $vol = Get-Volume -DriveLetter $drive -ErrorAction SilentlyContinue
-        if ($vol -and $vol.HealthStatus -ne 'Healthy') {
-            if ($vol.HealthStatus -eq 'Caution') { $fragmentationPercent = 5 }
-            elseif ($vol.HealthStatus -eq 'Critical') { $fragmentationPercent = 50 }
-        }
-    } catch {}
-}
+# ── Stage 3: No fake fragmentation from HealthStatus - leave 0 if analysis produced no data ──
+# Previously this stage synthesized 5%/50% from HealthStatus which is not fragmentation. Removed to avoid misleading UI.
 
 # ── Stage 4: Estimate fragmented space from percentage ──
 if ($fragmentsFound -eq 0 -and $fragmentationPercent -gt 0) {

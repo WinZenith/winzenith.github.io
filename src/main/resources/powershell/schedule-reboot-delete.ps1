@@ -4,14 +4,30 @@ $result = [ordered]@{ success = $false; message = '' }
 try {
     $path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
     $name = "PendingFileRenameOperations"
-    $fullPath = (Resolve-Path -LiteralPath $FilePath -ErrorAction Stop).Path
-    $existing = @()
-    if (Test-Path "$path\$name") {
-        $existing = Get-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue
-        if ($existing -and $existing.$name) { $existing = $existing.$name } else { $existing = @() }
+    try {
+        $fullPath = (Resolve-Path -LiteralPath $FilePath -ErrorAction Stop).Path
+    } catch {
+        # Fallback for paths that are already partially deleted or use extended syntax
+        try { $fullPath = [System.IO.Path]::GetFullPath($FilePath) } catch { $fullPath = $FilePath }
     }
-    $entry = "\??\$fullPath"
-    $updated = @($existing) + @($entry)
+    $existing = @()
+    try {
+        $prop = Get-ItemProperty -Path $path -Name $name -ErrorAction Stop
+        if ($prop -and $null -ne $prop.$name) {
+            $existing = $prop.$name
+            if ($null -eq $existing) { $existing = @() }
+            elseif ($existing -isnot [Array]) { $existing = @($existing) }
+        }
+    } catch {
+        $existing = @()
+    }
+    # PendingFileRenameOperations requires pairs: source and destination (empty string for delete)
+    $entrySource = "\??\$fullPath"
+    $entryDest = ""
+    $updated = @()
+    if ($existing.Count -gt 0) { $updated += $existing }
+    $updated += $entrySource
+    $updated += $entryDest
     if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
     Set-ItemProperty -Path $path -Name $name -Value $updated -Type MultiString
     $result.success = $true

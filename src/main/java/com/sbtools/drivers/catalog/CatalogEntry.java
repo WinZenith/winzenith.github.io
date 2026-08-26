@@ -39,6 +39,7 @@ public final class CatalogEntry {
     private String packageId;
     private String hashAlgorithm;
     private boolean testOnly;
+    private String latestDriverVersion;
 
     public CatalogEntry() {
     }
@@ -134,4 +135,7 @@ public final class CatalogEntry {
 
     public boolean testOnly() { return testOnly; }
     public void setTestOnly(boolean testOnly) { this.testOnly = testOnly; }
+
+    public String latestDriverVersion() { return latestDriverVersion; }
+    public void setLatestDriverVersion(String latestDriverVersion) { this.latestDriverVersion = latestDriverVersion; }
 }

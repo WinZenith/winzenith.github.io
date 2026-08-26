@@ -26,8 +26,7 @@ public class DockerCacheCleaner implements CleanerExtension {
             if (Files.isDirectory(dockerDir)) {
                 Path images = dockerDir.resolve("images");
                 Path containers = dockerDir.resolve("containers");
-                Path volumes = dockerDir.resolve("volumes");
-                for (Path dir : new Path[]{images, containers, volumes}) {
+                for (Path dir : new Path[]{images, containers}) {
                     if (Files.isDirectory(dir)) {
                         try (Stream<Path> walk = Files.walk(dir, 4)) {
                             var stats = walk.filter(Files::isRegularFile)
@@ -46,13 +45,19 @@ public class DockerCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String progData = CleanerUtils.safeEnv("PROGRAMDATA");
         if (progData == null) return 0;
         Path dockerDir = Path.of(progData, "Docker");
         if (!Files.isDirectory(dockerDir)) return 0;
         try {
-            ProcessBuilder pb = new ProcessBuilder("docker", "system", "prune", "-af", "--volumes");
+            ProcessBuilder pb = new ProcessBuilder("docker", "system", "prune", "-af");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
             java.io.InputStream is = p.getInputStream();
@@ -68,7 +73,15 @@ public class DockerCacheCleaner implements CleanerExtension {
             }, "docker-prune-reader");
             readerThread.setDaemon(true);
             readerThread.start();
-            boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+            boolean finished = false;
+            long deadline = System.currentTimeMillis() + 120_000L;
+            while (System.currentTimeMillis() < deadline) {
+                if (token != null && token.isCancelled()) {
+                    p.destroyForcibly();
+                    throw new java.util.concurrent.CancellationException("Docker prune canceled");
+                }
+                if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+            }
             readerThread.join(2000);
             if (finished) {
                 String fullOutput = output.toString();
@@ -93,7 +106,9 @@ public class DockerCacheCleaner implements CleanerExtension {
                         break;
                     }
                 }
-            } else { p.destroyForcibly(); }
+            } else { p.destroyForcibly(); AppLogger.warning("Docker prune timed out after 120s"); }
+        } catch (java.util.concurrent.CancellationException ce) {
+            throw ce;
         } catch (Exception e) { AppLogger.warning("Docker prune failed: " + e.getMessage()); }
         return cleaned;
     }

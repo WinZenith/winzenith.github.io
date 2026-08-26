@@ -2,6 +2,7 @@ package com.sbtools.ui;
 
 import com.sbtools.netoptimizer.NetworkAdapterRow;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
+import com.sbtools.util.AppExecutors;
 import com.sbtools.util.AppLogger;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
@@ -20,32 +21,48 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
 import java.util.List;
+import java.util.concurrent.Future;
+import java.util.function.BooleanSupplier;
 
 class AdaptersPanel extends VBox {
 
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
+    private final BooleanSupplier adminCheck;
     private final ObservableList<NetworkAdapterRow> adapterRows = FXCollections.observableArrayList();
     private final TableView<NetworkAdapterRow> adapterTable = new TableView<>(adapterRows);
     private final Label statusLabel = new Label("Ready.");
+    private volatile Future<?> currentTask;
+    private final java.util.concurrent.atomic.AtomicBoolean isLoading = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    AdaptersPanel(NetworkOptimizerService service, BooleanProperty busy) {
+    AdaptersPanel(NetworkOptimizerService service, BooleanProperty busy, BooleanSupplier adminCheck) {
         this.service = service;
         this.busy = busy;
+        this.adminCheck = adminCheck != null ? adminCheck : () -> false;
         getChildren().addAll(buildToolbar(), buildTable());
         VBox.setVgrow(adapterTable, Priority.ALWAYS);
         setPadding(new Insets(12, 16, 12, 16));
     }
 
+    // Backward compatible
+    AdaptersPanel(NetworkOptimizerService service, BooleanProperty busy) {
+        this(service, busy, () -> false);
+    }
+
     void loadAdapters() {
+        if (!isLoading.compareAndSet(false, true)) {
+            statusLabel.setText("Please wait, loading...");
+            return;
+        }
         if (busy.get()) {
+            isLoading.set(false);
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
         busy.set(true);
         statusLabel.setText("Loading network adapters...");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 List<NetworkAdapterRow> adapters = service.listAdapters();
                 Platform.runLater(() -> {
@@ -59,9 +76,18 @@ class AdaptersPanel extends VBox {
                     new Alert(Alert.AlertType.ERROR, "Failed to load adapters:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                Platform.runLater(() -> {
+                    busy.set(false);
+                    isLoading.set(false);
+                });
             }
-        }, "net-load-adapters").start();
+        });
+    }
+
+    void dispose() {
+        Future<?> t = currentTask;
+        if (t != null) t.cancel(true);
+        isLoading.set(false);
     }
 
     private HBox buildToolbar() {
@@ -146,24 +172,32 @@ class AdaptersPanel extends VBox {
         return adapterTable;
     }
 
+    private boolean requireAdmin() {
+        if (!adminCheck.getAsBoolean()) {
+            new Alert(Alert.AlertType.WARNING, "Administrator privileges required.\n\nRight-click WinZenith.exe → Run as administrator.").showAndWait();
+            return false;
+        }
+        return true;
+    }
+
     private void setAdapterState(boolean enable) {
         NetworkAdapterRow selected = adapterTable.getSelectionModel().getSelectedItem();
         if (selected == null || busy.get()) return;
+        if (!requireAdmin()) return;
 
         busy.set(true);
         String action = enable ? "Enable" : "Disable";
         statusLabel.setText(action + " " + selected.getName() + "...");
 
-        new Thread(() -> {
+        AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.setAdapterState(selected.getName(), enable);
                 Platform.runLater(() -> {
                     if (result.success()) {
                         statusLabel.setText(result.message());
-                        loadAdapters();
                     } else {
                         statusLabel.setText("Failed to " + action.toLowerCase() + " adapter.");
-                        new Alert(Alert.AlertType.ERROR, result.message()).showAndWait();
+                        new Alert(Alert.AlertType.ERROR, result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                     }
                 });
             } catch (Exception e) {
@@ -172,25 +206,34 @@ class AdaptersPanel extends VBox {
                     new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                Platform.runLater(() -> {
+                    busy.set(false);
+                    // defer refresh after busy released
+                    Platform.runLater(this::loadAdapters);
+                });
             }
-        }, "net-set-adapter-state").start();
+        });
     }
 
     private void renewSelectedIp() {
         NetworkAdapterRow selected = adapterTable.getSelectionModel().getSelectedItem();
         if (selected == null || busy.get()) return;
+        if (!requireAdmin()) return;
 
         busy.set(true);
         statusLabel.setText("Renewing IP for " + selected.getName() + "...");
 
-        new Thread(() -> {
+        AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.renewIp(selected.getName());
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? result.message() : "IP renewal failed.");
-                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message()).showAndWait();
+                    Alert a = new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                            result.message() + (result.details() != null ? "\n\n" + result.details() : ""));
+                    a.showAndWait();
+                    if (result.success()) {
+                        Platform.runLater(this::loadAdapters);
+                    }
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -200,6 +243,6 @@ class AdaptersPanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-renew-ip").start();
+        });
     }
 }

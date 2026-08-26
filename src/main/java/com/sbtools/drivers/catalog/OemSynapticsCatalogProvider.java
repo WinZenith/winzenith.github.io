@@ -77,8 +77,26 @@ public class OemSynapticsCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
-        AppLogger.info("Synaptics: No direct download available for " + driver.friendlyName()
-                + " - user will be directed to vendor website");
+        AppLogger.info("Synaptics: Resolving direct download URL for " + driver.friendlyName());
+        String page = vendorPageUrl != null && !vendorPageUrl.isBlank() ? vendorPageUrl : getVendorPageUrl(driver);
+        String body = httpGet(page);
+        if (body != null) {
+            java.util.regex.Pattern linkPattern = java.util.regex.Pattern.compile(
+                    "href\\s*=\\s*\"([^\"]+\\.(?:exe|zip|msi|cab))\"", java.util.regex.Pattern.CASE_INSENSITIVE);
+            java.util.regex.Matcher m = linkPattern.matcher(body);
+            while (m.find()) {
+                String url = m.group(1);
+                if (url.startsWith("//")) url = "https:" + url;
+                else if (url.startsWith("/")) url = "https://www.synaptics.com" + url;
+                String lower = url.toLowerCase();
+                if ((lower.contains("synaptics") || lower.contains("softpaq") || lower.contains("hp.com") || lower.contains("lenovo.com")) && isLikelyStable(url)) {
+                    AppLogger.info("Synaptics: Found download URL: " + url);
+                    return decodeHtmlEntities(url);
+                }
+            }
+        }
+        // Synaptics drivers are often hosted on OEM (HP/Lenovo) – try OEM fallback via Microsoft Update Catalog pattern
+        AppLogger.info("Synaptics: No direct Synaptics-hosted download, will rely on Windows Update or OEM site");
         return null;
     }
 }

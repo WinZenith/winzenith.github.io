@@ -10,6 +10,11 @@ public interface CleanerExtension {
 
     long clean(Path backupRootOrNull) throws Exception;
 
+    default long clean(Path backupRootOrNull, com.sbtools.util.CancellationToken token) throws Exception {
+        if (token != null && token.isCancelled()) return 0L;
+        return clean(backupRootOrNull);
+    }
+
     default boolean requiresAdmin() {
         return false;
     }

@@ -144,13 +144,19 @@ import java.util.concurrent.atomic.AtomicInteger;
         return content;
     }
 
+    // Rescan state — wired to Cancel button (B5)
+    private CancelableCompletableFuture<java.util.List<CleanupRow>> activeRescanFuture;
+    private CancellationToken activeRescanToken;
+
     private void cancelActive() {
         cancelling.set(true);
         try {
             if (activeScanToken != null) activeScanToken.cancel();
             if (activeCleanToken != null) activeCleanToken.cancel();
+            if (activeRescanToken != null) activeRescanToken.cancel();
             if (activeScanFuture != null && !activeScanFuture.isDone()) activeScanFuture.cancel(true);
             if (activeCleanFuture != null && !activeCleanFuture.isDone()) activeCleanFuture.cancel(true);
+            if (activeRescanFuture != null && !activeRescanFuture.isDone()) activeRescanFuture.cancel(true);
         } catch (Exception ignored) {}
     }
 
@@ -170,13 +176,14 @@ import java.util.concurrent.atomic.AtomicInteger;
             private javafx.beans.value.ChangeListener<Boolean> selectionListener;
             {
                 checkBox.setStyle("-fx-text-fill: #f8f8f2;");
+                checkBox.setOnAction(e -> updateCleanButtonState());
             }
             @Override
             protected void updateItem(CleanupRow item, boolean empty) {
                 super.updateItem(item, empty);
                 if (empty || item == null) {
                     if (previousItem != null) {
-                        checkBox.selectedProperty().unbindBidirectional(previousItem.selectedProperty());
+                        try { checkBox.selectedProperty().unbindBidirectional(previousItem.selectedProperty()); } catch (Exception ignored) {}
                         if (selectionListener != null) {
                             previousItem.selectedProperty().removeListener(selectionListener);
                         }
@@ -187,13 +194,15 @@ import java.util.concurrent.atomic.AtomicInteger;
                     setText(null);
                 } else {
                     if (previousItem != null && previousItem != item) {
-                        checkBox.selectedProperty().unbindBidirectional(previousItem.selectedProperty());
+                        try { checkBox.selectedProperty().unbindBidirectional(previousItem.selectedProperty()); } catch (Exception ignored) {}
                         if (selectionListener != null) {
                             previousItem.selectedProperty().removeListener(selectionListener);
                         }
-                    }
-                    if (checkBox.selectedProperty().isBound()) {
-                        checkBox.selectedProperty().unbind();
+                        selectionListener = null;
+                    } else if (previousItem == item) {
+                        // Same item re-rendered (e.g., table refresh) — already bound, just ensure graphic
+                        setGraphic(checkBox);
+                        return;
                     }
                     checkBox.selectedProperty().bindBidirectional(item.selectedProperty());
                     selectionListener = (obs, oldVal, newVal) -> updateCleanButtonState();
@@ -257,7 +266,6 @@ import java.util.concurrent.atomic.AtomicInteger;
         long totalBytes = sessionRows.stream().mapToLong(CleanupRow::getTotalBytes).sum();
         int selectedCount = getSelectedCount();
         long selectedBytes = sessionRows.stream().filter(CleanupRow::isSelected).mapToLong(CleanupRow::getTotalBytes).sum();
-        long allTimeFreed = historyStore.getTotalBytesFreedAllTime();
 
         StringBuilder sb = new StringBuilder();
         if (hasScanned) {
@@ -267,11 +275,18 @@ import java.util.concurrent.atomic.AtomicInteger;
                 sb.append(" | Selected: ").append(selectedCount).append(" categories (")
                         .append(CleanupService.formatBytes(selectedBytes)).append(")");
             }
-            if (allTimeFreed > 0) {
-                sb.append(" | All-time freed: ").append(CleanupService.formatBytes(allTimeFreed));
-            }
+            // Show main summary immediately; append all-time async to avoid FX hitch
+            summaryLabel.setText(sb.toString());
+            summaryLabel.setVisible(hasScanned);
+            String prefix = sb.toString();
+            java.util.concurrent.CompletableFuture.supplyAsync(historyStore::getTotalBytesFreedAllTime, com.sbtools.util.AppExecutors.ioPool())
+                    .thenAccept(allTime -> Platform.runLater(() -> {
+                        if (allTime > 0 && hasScanned) {
+                            summaryLabel.setText(prefix + " | All-time freed: " + CleanupService.formatBytes(allTime));
+                        }
+                    }));
+            return;
         }
-
         summaryLabel.setText(sb.toString());
         summaryLabel.setVisible(hasScanned);
     }
@@ -355,16 +370,10 @@ import java.util.concurrent.atomic.AtomicInteger;
         busy.set(true);
         cancelling.set(false);
 
-        java.util.Set<CleanupCategory> adminRequired = java.util.Set.of(
-                CleanupCategory.REGISTRY,
-                CleanupCategory.WINDOWS_UPDATE_CLEANUP,
-                CleanupCategory.OLD_WINDOWS_INSTALL,
-                CleanupCategory.SOFTWARE_DISTRIBUTION_CACHE,
-                CleanupCategory.WINDOWS_DEFENDER_CACHE,
-                CleanupCategory.WINDOWS_LOG_FILES,
-                CleanupCategory.FONT_CACHE,
-                CleanupCategory.WINDOWS_SEARCH_CACHE
-        );
+        java.util.Set<CleanupCategory> adminRequired = new java.util.HashSet<>();
+        for (com.sbtools.cleaner.CleanerExtension ext : com.sbtools.cleaner.CleanerRegistry.all()) {
+            if (ext.requiresAdmin()) adminRequired.add(ext.getCategory());
+        }
 
         boolean isAdmin = adminCheck.getAsBoolean();
         java.util.List<CleanupRow> adminBlocked;
@@ -511,7 +520,14 @@ import java.util.concurrent.atomic.AtomicInteger;
                         busy.set(false);
                     });
                 } else {
-                    historyStore.append(summary);
+                    boolean wasCanceled = cancelling.get() || (activeCleanToken != null && activeCleanToken.isCancelled());
+                    // B4: Only append history for meaningful successful cleans (not canceled, not zero-byte without errors)
+                    if (!wasCanceled && summary.getTotalBytes() > 0) {
+                        try { historyStore.append(summary); } catch (Exception e) { AppLogger.warning("Failed to append history: " + e.getMessage()); }
+                    } else if (!wasCanceled && summary.hasErrors() && summary.getTotalBytes() == 0) {
+                        // Don't pollute history with failed zero-byte sessions
+                        AppLogger.info("Skipping history append for failed/zero-byte clean");
+                    }
 
                     Platform.runLater(() -> {
                         statusLabel.setText("Re-scanning cleaned categories...");
@@ -521,12 +537,12 @@ import java.util.concurrent.atomic.AtomicInteger;
                     java.util.List<CleanupCategory> cleanedCategories = selected.stream()
                             .map(CleanupRow::getCategory).toList();
 
-                    CancelableCompletableFuture<java.util.List<CleanupRow>> rescanFuture =
-                            service.scanCategoriesAsync(cleanedCategories, () -> {}, activeCleanToken);
+                    activeRescanToken = new CancellationToken();
+                    activeRescanFuture = service.scanCategoriesAsync(cleanedCategories, () -> {}, activeRescanToken);
 
-                    rescanFuture.whenComplete((rescanResults, rescanEx) -> {
+                    activeRescanFuture.whenComplete((rescanResults, rescanEx) -> {
                         Platform.runLater(() -> {
-                            if (rescanEx == null) {
+                            if (rescanEx == null && rescanResults != null) {
                                 java.util.Map<CleanupCategory, CleanupRow> rescanMap = new java.util.HashMap<>();
                                 for (CleanupRow rr : rescanResults) {
                                     rescanMap.put(rr.getCategory(), rr);
@@ -543,10 +559,20 @@ import java.util.concurrent.atomic.AtomicInteger;
                                         existing.setScanDurationMs(refreshed.getScanDurationMs());
                                     }
                                 }
+                            } else if (rescanEx != null) {
+                                if (activeRescanFuture != null && activeRescanFuture.isCancelled() || (activeRescanToken != null && activeRescanToken.isCancelled())) {
+                                    statusLabel.setText("Cleanup completed - rescan canceled");
+                                    AppLogger.info("Rescan canceled: " + rescanEx.getMessage());
+                                } else {
+                                    statusLabel.setText("Cleanup completed - rescan failed: " + rescanEx.getMessage());
+                                    AppLogger.warning("Rescan failed: " + rescanEx.getMessage());
+                                }
+                                // Don't update rows on rescan failure — keep previous scanned values
                             }
 
                             StringBuilder sb = new StringBuilder();
-                            sb.append("Cleanup completed.\n\n");
+                            if (wasCanceled) sb.append("Cleanup canceled.\n\n");
+                            else sb.append("Cleanup completed.\n\n");
                             sb.append("Total freed: ").append(CleanupService.formatBytes(summary.getTotalBytes()));
                             sb.append(" (").append(summary.getTotalItems()).append(" items)\n");
                             if (!summary.getPerCategory().isEmpty()) {
@@ -560,17 +586,23 @@ import java.util.concurrent.atomic.AtomicInteger;
                                 summary.getErrors().forEach(err ->
                                         sb.append("  - ").append(err).append("\n"));
                             }
-                            statusLabel.setText("Cleanup completed - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
+                            if (rescanEx != null && !(rescanEx instanceof java.util.concurrent.CancellationException)) {
+                                sb.append("\nNote: Post-clean rescan failed (").append(rescanEx.getMessage()).append(") — table may show stale sizes. Click Scan to refresh.\n");
+                            }
+                            if (!wasCanceled) statusLabel.setText("Cleanup completed - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
+                            else statusLabel.setText("Cleanup canceled - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed before cancel.");
                             progressBar.setVisible(false);
                             cancelButton.setDisable(true);
                             updateSummary();
 
-                            Alert resultAlert = new Alert(Alert.AlertType.INFORMATION, sb.toString());
-                            resultAlert.setHeaderText("Cleanup Results");
+                            Alert resultAlert = new Alert(wasCanceled ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, sb.toString());
+                            resultAlert.setHeaderText(wasCanceled ? "Cleanup Canceled" : "Cleanup Results");
                             resultAlert.showAndWait();
 
                             cancelling.set(false);
                             activeCleanToken = null;
+                            activeRescanToken = null;
+                            activeRescanFuture = null;
                             busy.set(false);
                         });
                     });
@@ -613,5 +645,9 @@ import java.util.concurrent.atomic.AtomicInteger;
         } else {
             doClean.run();
         }
+    }
+
+    public void dispose() {
+        cancelActive();
     }
 }

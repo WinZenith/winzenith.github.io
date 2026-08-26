@@ -75,6 +75,7 @@ public class SystemInfoTabView extends BorderPane {
     private final Label adminWarningLabel = new Label("Not running as admin. Some data (temperatures, NVMe) may be unavailable.");
     private final Button loadButton = new Button("Load System Info");
     private final Button refreshButton = new Button("Refresh");
+    private final Button cancelButton = new Button("Cancel");
     private final Button exportButton = new Button("Export...");
     private final Button copyButton = new Button("Copy All");
     private final ProgressIndicator spinner = new ProgressIndicator();
@@ -82,6 +83,9 @@ public class SystemInfoTabView extends BorderPane {
     private final TabPane tabPane = new TabPane();
 
     private SystemInfoData currentData;
+    private final java.util.concurrent.atomic.AtomicBoolean isLoading = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile java.util.concurrent.Future<?> currentTask;
+    private final java.util.concurrent.atomic.AtomicBoolean cancellationToken = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public SystemInfoTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -95,14 +99,16 @@ public class SystemInfoTabView extends BorderPane {
         progressBar.setVisible(false);
 
         loadButton.setOnAction(e -> loadInfo());
-        refreshButton.setOnAction(e -> { service.invalidateCache(); loadInfo(); });
+        refreshButton.setOnAction(e -> { service.invalidateCache(); loadInfo(false); });
         refreshButton.setDisable(true);
+        cancelButton.setDisable(true);
+        cancelButton.setOnAction(e -> cancelLoading());
         exportButton.setDisable(true);
         exportButton.setOnAction(e -> exportToFile());
         copyButton.setDisable(true);
         copyButton.setOnAction(e -> copyToClipboard());
 
-        HBox top = new HBox(12, loadButton, refreshButton, exportButton, copyButton, spinner, progressBar, statusLabel);
+        HBox top = new HBox(12, loadButton, refreshButton, cancelButton, exportButton, copyButton, spinner, progressBar, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -133,10 +139,18 @@ public class SystemInfoTabView extends BorderPane {
     }
 
     private void loadInfo() {
-        if (busy.get()) return;
+        loadInfo(false);
+    }
+
+    private void loadInfo(boolean forceRefresh) {
+        if (!isLoading.compareAndSet(false, true)) return;
+        // Decouple from global busy but also set it for outer UI dimming
         busy.set(true);
+        updateAdminWarning();
+        cancellationToken.set(false);
         loadButton.setDisable(true);
         refreshButton.setDisable(true);
+        cancelButton.setDisable(false);
         exportButton.setDisable(true);
         copyButton.setDisable(true);
         spinner.setVisible(true);
@@ -144,38 +158,91 @@ public class SystemInfoTabView extends BorderPane {
         progressBar.setVisible(true);
         statusLabel.setText("Querying system information\u2026");
 
-        executor.submit(() -> {
+        currentTask = executor.submit(() -> {
             try {
+                if (cancellationToken.get()) throw new InterruptedException("Cancelled");
                 SystemInfoData data = service.gatherSystemInfo(
                         (section, progress) -> Platform.runLater(() -> {
-                            statusLabel.setText("Loading " + section + "\u2026");
+                            if ("cached".equals(section)) {
+                                statusLabel.setText("Loaded from cache.");
+                            } else {
+                                statusLabel.setText("Loading " + section + "\u2026");
+                            }
                             progressBar.setProgress(progress);
-                        })
+                        }),
+                        forceRefresh,
+                        cancellationToken
                 );
+                if (cancellationToken.get()) throw new InterruptedException("Cancelled");
                 Platform.runLater(() -> {
                     currentData = data;
                     buildTabs(data);
-                    statusLabel.setText("System information loaded.");
+                    // B3 fix: surface empty-state clearly instead of silent blank
+                    // Note: buildTabs now inserts placeholder when data is empty, so tabPane is never empty after.
+                    // Check data content directly for correct status message.
+                    if (isDataMostlyEmpty(data)) {
+                        statusLabel.setText("No system information available. Check Warnings tab or try Refresh as Administrator.");
+                    } else if (tabPane.getTabs().isEmpty()) {
+                        statusLabel.setText("No system information available. Check Warnings tab or try Refresh as Administrator.");
+                    } else if (hasAnyWarningsOrPartial(data)) {
+                        statusLabel.setText("System information loaded (partial — some data unavailable).");
+                    } else {
+                        statusLabel.setText("System information loaded.");
+                    }
                     progressBar.setProgress(1);
                     refreshButton.setDisable(false);
                     exportButton.setDisable(false);
                     copyButton.setDisable(false);
                 });
+            } catch (InterruptedException ce) {
+                Thread.currentThread().interrupt();
+                Platform.runLater(() -> statusLabel.setText("Cancelled."));
             } catch (Exception ex) {
-                AppLogger.error("Failed to load system info", ex);
-                Platform.runLater(() -> {
-                    statusLabel.setText("Failed: " + ex.getMessage());
-                    new Alert(Alert.AlertType.ERROR, "Failed to load system information:\n" + ex.getMessage()).showAndWait();
-                });
+                if (cancellationToken.get()) {
+                    Platform.runLater(() -> statusLabel.setText("Cancelled."));
+                } else {
+                    AppLogger.error("Failed to load system info", ex);
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Failed: " + ex.getMessage());
+                        new Alert(Alert.AlertType.ERROR, "Failed to load system information:\n" + ex.getMessage()).showAndWait();
+                    });
+                }
             } finally {
+                // Ensure loading flag is cleared even if FX toolkit is shutting down and runLater never executes
+                isLoading.set(false);
+                try { busy.set(false); } catch (Exception ignored) {}
                 Platform.runLater(() -> {
-                    busy.set(false);
+                    try { busy.set(false); } catch (Exception ignored) {}
+                    isLoading.set(false);
                     loadButton.setDisable(false);
+                    cancelButton.setDisable(true);
                     spinner.setVisible(false);
                     progressBar.setVisible(false);
+                    if (currentData != null) {
+                        refreshButton.setDisable(false);
+                        exportButton.setDisable(false);
+                        copyButton.setDisable(false);
+                    }
                 });
             }
         });
+    }
+
+    private void cancelLoading() {
+        cancellationToken.set(true);
+        java.util.concurrent.Future<?> task = currentTask;
+        if (task != null) task.cancel(true);
+        statusLabel.setText("Cancelling\u2026");
+        cancelButton.setDisable(true);
+    }
+
+    private void updateAdminWarning() {
+        boolean isWin = AppPaths.isWindows();
+        boolean isAdmin = false;
+        try { isAdmin = adminCheck.getAsBoolean(); } catch (Exception ignored) {}
+        boolean show = isWin && !isAdmin;
+        adminWarningLabel.setVisible(show);
+        adminWarningLabel.setManaged(show);
     }
 
     private void buildTabs(SystemInfoData data) {
@@ -230,6 +297,79 @@ public class SystemInfoTabView extends BorderPane {
         if (data.warnings() != null && !data.warnings().isEmpty()) {
             tabPane.getTabs().add(buildWarningsTab(data.warnings()));
         }
+
+        // B3 fix: never leave tabPane empty — show placeholder so user understands failure vs. blank
+        if (tabPane.getTabs().isEmpty()) {
+            tabPane.getTabs().add(buildEmptyStateTab(data));
+        }
+    }
+
+    private boolean isDataMostlyEmpty(SystemInfoData data) {
+        if (data == null) return true;
+        boolean hasCpu = data.cpu() != null && !isBlank(data.cpu().name());
+        boolean hasOs = data.os() != null && !isBlank(data.os().name());
+        boolean hasRam = data.ram() != null && data.ram().totalBytes() > 0;
+        boolean hasStorage = data.storage() != null && data.storage().disks() != null && !data.storage().disks().isEmpty();
+        boolean hasGpu = data.gpu() != null && !data.gpu().isEmpty();
+        // If none of the primary sections have real data, consider mostly empty
+        return !hasCpu && !hasOs && !hasRam && !hasStorage && !hasGpu;
+    }
+
+    private boolean hasAnyWarningsOrPartial(SystemInfoData data) {
+        if (data == null) return true;
+        if (data.warnings() != null && !data.warnings().isEmpty()) return true;
+        // Partial if any primary section is missing while at least one exists
+        boolean hasCpu = data.cpu() != null && !isBlank(data.cpu().name());
+        boolean hasOs = data.os() != null && !isBlank(data.os().name());
+        boolean hasRam = data.ram() != null && data.ram().totalBytes() > 0;
+        boolean hasStorage = data.storage() != null && data.storage().disks() != null && !data.storage().disks().isEmpty();
+        // If we have OS but no CPU/RAM/Storage, or vice versa, consider partial
+        int present = 0;
+        if (hasCpu) present++;
+        if (hasOs) present++;
+        if (hasRam) present++;
+        if (hasStorage) present++;
+        return present > 0 && present < 4;
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    private Tab buildEmptyStateTab(SystemInfoData data) {
+        VBox box = new VBox(12);
+        box.setPadding(new Insets(24));
+        box.setAlignment(Pos.CENTER_LEFT);
+        Label title = new Label("No system information available");
+        title.getStyleClass().addAll("label", "large");
+        title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        Label msg = new Label(
+                "WinZenith queried WMI but received no usable data.\n" +
+                "• Try Refresh or restart as Administrator (some data requires elevation).\n" +
+                "• Check the Warnings tab for diagnostics.\n" +
+                "• See logs/system-info-last.json for raw output.");
+        msg.setWrapText(true);
+        msg.getStyleClass().addAll("label", "text-muted");
+        box.getChildren().addAll(title, msg);
+        if (data != null && data.warnings() != null && !data.warnings().isEmpty()) {
+            Label wTitle = UILabel.sectionTitle("Warnings");
+            box.getChildren().add(wTitle);
+            for (String w : data.warnings()) {
+                Label wl = new Label("• " + w);
+                wl.setWrapText(true);
+                wl.getStyleClass().addAll("label", "warning");
+                wl.setStyle("-fx-padding: 4 8; -fx-background-color: #3d2e1a; -fx-background-radius: 4; -fx-border-color: #ffb86c; -fx-border-radius: 4;");
+                wl.setMaxWidth(Double.MAX_VALUE);
+                box.getChildren().add(wl);
+            }
+        }
+        Button retry = new Button("Refresh as Administrator");
+        retry.setOnAction(e -> { service.invalidateCache(); loadInfo(true); });
+        box.getChildren().add(retry);
+        ScrollableContainer scroll = new ScrollableContainer(box);
+        Tab tab = new Tab("Overview");
+        tab.setContent(scroll);
+        return tab;
     }
 
     // ── CPU ──────────────────────────────────────────────────────────────────
@@ -250,6 +390,9 @@ public class SystemInfoTabView extends BorderPane {
         row = addRow(grid, row, "Voltage", cpu.voltage());
         row = addRow(grid, row, "Stepping", cpu.stepping());
         row = addRow(grid, row, "Revision", cpu.revision());
+        if (row == 0) {
+            return new Tab("CPU", placeholderCard("No CPU data available (WMI query returned empty). Try running as Administrator."));
+        }
         return new Tab("CPU", wrapGrid(grid));
     }
 
@@ -275,7 +418,11 @@ public class SystemInfoTabView extends BorderPane {
             row = addRow(grid, row, "Driver Date", gpu.driverDate());
             row = addRow(grid, row, "Resolution", gpu.resolution());
             row = addRow(grid, row, "Color Depth", gpu.colorDepth());
-            container.getChildren().add(wrapGrid(grid));
+            if (row == 0) {
+                container.getChildren().add(placeholderCard("No GPU data available for this device."));
+            } else {
+                container.getChildren().add(wrapGrid(grid));
+            }
         }
 
         ScrollableContainer scroll = new ScrollableContainer(container);
@@ -294,7 +441,7 @@ public class SystemInfoTabView extends BorderPane {
         int row = 0;
         row = addRow(summary, row, "Total Memory", ram.formatTotal());
         row = addRow(summary, row, "Channel", ram.channel());
-        container.getChildren().add(wrapGrid(summary));
+        container.getChildren().add(wrapGridOrPlaceholder(summary, row, "No RAM summary available."));
 
         if (ram.sticks() != null && !ram.sticks().isEmpty()) {
             for (int i = 0; i < ram.sticks().size(); i++) {
@@ -308,7 +455,7 @@ public class SystemInfoTabView extends BorderPane {
                 r = addRow(stickGrid, r, "Manufacturer", stick.manufacturer());
                 r = addRow(stickGrid, r, "Form Factor", stick.formFactor());
                 r = addRow(stickGrid, r, "Part Number", stick.partNumber());
-                container.getChildren().add(wrapGrid(stickGrid));
+                container.getChildren().add(wrapGridOrPlaceholder(stickGrid, r, "No data for this slot."));
             }
         }
 
@@ -331,7 +478,10 @@ public class SystemInfoTabView extends BorderPane {
         row = addRow(grid, row, "Install Date", os.installDate());
         row = addRow(grid, row, "Last Boot", os.lastBoot());
         row = addRow(grid, row, "Windows Directory", os.windowsDir());
-        row = addRow(grid, row, "Serial Number", os.serialNumber());
+        row = addRow(grid, row, "BIOS Serial Number", os.serialNumber());
+        if (row == 0) {
+            return new Tab("OS", placeholderCard("No OS data available."));
+        }
         return new Tab("OS", wrapGrid(grid));
     }
 
@@ -437,7 +587,7 @@ public class SystemInfoTabView extends BorderPane {
             row = addRow(grid, row, "Chipset", mb.chipset());
             row = addRow(grid, row, "Southbridge", mb.southbridge());
             row = addRow(grid, row, "Serial Number", mb.serialNumber());
-            container.getChildren().add(wrapGrid(grid));
+            container.getChildren().add(wrapGridOrPlaceholder(grid, row, "No motherboard data available."));
         }
 
         if (bios != null) {
@@ -448,7 +598,7 @@ public class SystemInfoTabView extends BorderPane {
             row = addRow(grid, row, "Version", bios.version());
             row = addRow(grid, row, "Release Date", bios.releaseDate());
             row = addRow(grid, row, "SMBIOS Version", bios.formatSmbios());
-            container.getChildren().add(wrapGrid(grid));
+            container.getChildren().add(wrapGridOrPlaceholder(grid, row, "No BIOS data available."));
         }
 
         ScrollableContainer scroll = new ScrollableContainer(container);
@@ -510,13 +660,17 @@ public class SystemInfoTabView extends BorderPane {
             }
         });
 
-        VBox rightPanel = new VBox(8);
-        rightPanel.setPadding(new Insets(0, 0, 0, 12));
-        rightPanel.getChildren().add(new Label("Select a category:"));
-        rightPanel.getChildren().add(categoryList);
+        VBox leftPanel = new VBox(8);
+        leftPanel.setPadding(new Insets(0, 0, 0, 0));
+        Label selectLabel = new Label("Select a category:");
+        selectLabel.getStyleClass().addAll("label", "text-muted");
+        leftPanel.getChildren().add(selectLabel);
+        leftPanel.getChildren().add(categoryList);
+        VBox.setVgrow(categoryList, Priority.ALWAYS);
+        categoryList.setPrefHeight(320);
 
         VBox deviceList = new VBox(8);
-        deviceList.setPadding(new Insets(0));
+        deviceList.setPadding(new Insets(0, 8, 0, 8));
 
         categoryList.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, cat) -> {
             deviceList.getChildren().clear();
@@ -536,20 +690,44 @@ public class SystemInfoTabView extends BorderPane {
             grid.getColumnConstraints().addAll(nameCol, mfrCol);
             int r = 0;
             for (OtherDevice dev : devs) {
-                r = addRow(grid, r, dev.name(),
-                        (dev.manufacturer() != null && !dev.manufacturer().isBlank())
-                                ? dev.manufacturer() : dev.status());
+                // B4 fix: ensure every device renders even when manufacturer/status blank
+                String devName = dev.name();
+                if (devName == null || devName.isBlank()) {
+                    devName = dev.deviceId() != null && !dev.deviceId().isBlank() ? dev.deviceId() : "Unknown Device";
+                }
+                String rawVal = (dev.manufacturer() != null && !dev.manufacturer().isBlank())
+                        ? dev.manufacturer()
+                        : (dev.status() != null && !dev.status().isBlank() ? dev.status() : "");
+                String val = rawVal.isBlank() ? "—" : rawVal;
+                r = addRow(grid, r, devName, val);
             }
-            deviceList.getChildren().add(wrapGrid(grid));
+            if (r == 0) {
+                Label empty = new Label("No details available");
+                empty.getStyleClass().addAll("label", "text-muted");
+                deviceList.getChildren().add(empty);
+            } else {
+                javafx.scene.control.ScrollPane inner = new javafx.scene.control.ScrollPane(wrapGrid(grid));
+                inner.setFitToWidth(true);
+                inner.setStyle("-fx-background-color: transparent; -fx-background: transparent;");
+                deviceList.getChildren().add(inner);
+                VBox.setVgrow(inner, Priority.ALWAYS);
+            }
         });
 
-        HBox splitPane = new HBox(0, rightPanel, deviceList);
-        HBox.setHgrow(deviceList, Priority.ALWAYS);
+        javafx.scene.control.SplitPane splitPane = new javafx.scene.control.SplitPane();
+        splitPane.getItems().addAll(leftPanel, deviceList);
+        splitPane.setDividerPositions(0.35);
+        VBox.setVgrow(splitPane, Priority.ALWAYS);
         container.getChildren().addAll(searchField, splitPane);
+        VBox.setVgrow(splitPane, Priority.ALWAYS);
 
         ScrollableContainer scroll = new ScrollableContainer(container);
         Tab tab = new Tab("Others");
         tab.setContent(scroll);
+        // auto-select first category if available
+        if (!filteredCategories.isEmpty()) {
+            categoryList.getSelectionModel().select(0);
+        }
         return tab;
     }
 
@@ -559,8 +737,10 @@ public class SystemInfoTabView extends BorderPane {
         VBox container = new VBox(16);
         container.setPadding(new Insets(12));
 
-        // Summary cards
-        HBox cards = new HBox(12);
+        // Summary cards - FlowPane wrapping for responsive layout
+        javafx.scene.layout.FlowPane cards = new javafx.scene.layout.FlowPane();
+        cards.setHgap(12);
+        cards.setVgap(12);
         cards.setAlignment(Pos.CENTER_LEFT);
         if (data.os() != null) {
             cards.getChildren().add(buildSmallInfoCard("OS",
@@ -759,6 +939,7 @@ public class SystemInfoTabView extends BorderPane {
             row = addRow(grid, row, "Screen Size", mon.screenSize());
             row = addRow(grid, row, "Resolution", mon.resolution());
             row = addRow(grid, row, "Status", mon.status());
+            row = addRow(grid, row, "PNP Device ID", mon.pnpDeviceId());
             container.getChildren().add(wrapGrid(grid));
         }
 
@@ -948,7 +1129,7 @@ public class SystemInfoTabView extends BorderPane {
     }
 
     private static int addUsageRow(GridPane grid, int row, double usagePercent) {
-        if (usagePercent <= 0) return row;
+        if (usagePercent < 0 || Double.isNaN(usagePercent)) return row;
 
         Label keyLabel = new Label("Usage");
         keyLabel.getStyleClass().addAll("label", "sysinfo-label");
@@ -985,6 +1166,24 @@ public class SystemInfoTabView extends BorderPane {
         VBox wrapper = new VBox(grid);
         wrapper.getStyleClass().add("sysinfo-card");
         return wrapper;
+    }
+
+    private static VBox placeholderCard(String message) {
+        Label label = new Label(message);
+        label.getStyleClass().addAll("label", "text-muted");
+        label.setWrapText(true);
+        label.setStyle("-fx-padding: 12; -fx-font-style: italic;");
+        VBox box = new VBox(label);
+        box.getStyleClass().add("sysinfo-card");
+        box.setPadding(new Insets(12));
+        return box;
+    }
+
+    private static VBox wrapGridOrPlaceholder(GridPane grid, int row, String placeholder) {
+        if (row == 0) {
+            return placeholderCard(placeholder);
+        }
+        return wrapGrid(grid);
     }
 
     private static class ScrollableContainer extends javafx.scene.control.ScrollPane {
@@ -1035,11 +1234,17 @@ public class SystemInfoTabView extends BorderPane {
                     ext = extensions.get(0).replace("*", "");
                 }
             }
-            if (ext.isEmpty()) {
-                String name = file.getName().toLowerCase();
-                if (name.endsWith(".json")) ext = ".json";
-                else if (name.endsWith(".html")) ext = ".html";
+            // Determine extension from selected filter first, but respect user's typed extension
+            String typedNameLower = file.getName().toLowerCase();
+            boolean typedHasExt = typedNameLower.endsWith(".json") || typedNameLower.endsWith(".html") || typedNameLower.endsWith(".txt");
+            if (!typedHasExt && ext.isEmpty()) {
+                ext = ".txt";
+            } else if (typedHasExt) {
+                if (typedNameLower.endsWith(".json")) ext = ".json";
+                else if (typedNameLower.endsWith(".html")) ext = ".html";
                 else ext = ".txt";
+            } else if (ext.isEmpty()) {
+                ext = ".txt";
             }
 
             if (".json".equals(ext)) {
@@ -1051,12 +1256,17 @@ public class SystemInfoTabView extends BorderPane {
                 ext = ".txt";
             }
 
+            // Correctly strip existing extension using lastIndexOf to handle .html (5 chars) and .json (5 chars)
             String fileName = file.getName();
             String baseName = fileName;
-            String lowerName = fileName.toLowerCase();
-            if (lowerName.endsWith(".txt") || lowerName.endsWith(".json") || lowerName.endsWith(".html")) {
-                baseName = fileName.substring(0, fileName.length() - 4);
+            int dotIdx = fileName.lastIndexOf('.');
+            if (dotIdx > 0) {
+                String existingExt = fileName.substring(dotIdx).toLowerCase();
+                if (existingExt.equals(".txt") || existingExt.equals(".json") || existingExt.equals(".html")) {
+                    baseName = fileName.substring(0, dotIdx);
+                }
             }
+            if (baseName.isBlank()) baseName = "system-info";
             file = new File(file.getParent(), baseName + ext);
 
             Files.writeString(file.toPath(), content, StandardCharsets.UTF_8);

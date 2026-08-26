@@ -60,13 +60,19 @@ public final class DriverCatalogDatabase {
     }
 
     /**
-     * Loads the catalog from the bundled resource file and any supplemental
-     * user catalog in the app data directory.
+     * Loads the catalog from the bundled resource file.
+     * User-supplemental catalog is intentionally disabled for security – untrusted
+     * URLs/hashes must not be injectable via the app data directory.
+     * See decision for portable build: no user override.
      */
     public static DriverCatalogDatabase load() {
         List<CatalogEntry> all = new ArrayList<>();
         all.addAll(loadBundled());
-        all.addAll(loadUserSupplemental());
+        // Intentionally NOT loading user-supplemental catalog (security, requirement #4)
+        Path userCatalog = AppPaths.localAppData().resolve("user-catalog.json");
+        if (Files.exists(userCatalog)) {
+            AppLogger.info("DriverCatalogDatabase: Ignoring user-catalog.json (user override disabled)");
+        }
         AppLogger.info("DriverCatalogDatabase: Loaded " + all.size() + " catalog entries");
         return new DriverCatalogDatabase(all);
     }
@@ -143,8 +149,14 @@ public final class DriverCatalogDatabase {
                     || (e.certThumbprint() != null && !e.certThumbprint().isBlank());
             if (metadataFactor) factors++;
 
-            // Accept if at least two independent factors match, or very high confidence
-            if ((factors >= 2 || e.confidence() >= 0.95) && isVersionNewer(e.latestVersion(), driver.driverVersion())) {
+            // Fixed gate: single hardware-ID factor with confidence >=0.8 is sufficient.
+            // Previous gate (factors>=2 || confidence>=0.95) excluded all AMD entries (0.9) even with exact HW match.
+            String catalogVersionForCompare = e.latestDriverVersion() != null && !e.latestDriverVersion().isBlank()
+                    ? e.latestDriverVersion() : e.latestVersion();
+            boolean strongSingleFactor = hwMatches.contains(e) && e.confidence() >= 0.8;
+            boolean twoFactor = factors >= 2;
+            boolean veryHighConfidence = e.confidence() >= 0.95;
+            if ((strongSingleFactor || twoFactor || veryHighConfidence) && isVersionNewer(catalogVersionForCompare, driver.driverVersion())) {
                 filtered.add(e);
             }
         }
@@ -182,9 +194,11 @@ public final class DriverCatalogDatabase {
      */
     public static DriverUpdateCandidate toCandidate(CatalogEntry entry, InstalledDriver driver) {
         String pkg = entry.packageId() != null && !entry.packageId().isBlank() ? entry.packageId() : entry.id();
+        String effectiveVersion = entry.latestDriverVersion() != null && !entry.latestDriverVersion().isBlank()
+                ? entry.latestDriverVersion() : entry.latestVersion();
         return new DriverUpdateCandidate(
                 driver,
-                entry.latestVersion(),
+                effectiveVersion,
                 entry.provider(),
                 pkg,
                 entry.provider() + " driver update available",
@@ -201,16 +215,24 @@ public final class DriverCatalogDatabase {
         if (hwId == null || hwId.isBlank()) {
             return List.of();
         }
-        String normalized = normalizeHardwareId(hwId);
+        // hardwareIds may be ';'-separated list (multi-string from enumerate-devices.ps1)
+        String[] parts = hwId.split(";");
         List<CatalogEntry> matches = new ArrayList<>();
-        for (Map.Entry<String, List<CatalogEntry>> entry : byHardwareId.entrySet()) {
-            if (matchesHardwareId(normalized, entry.getKey())) {
-                for (CatalogEntry ce : entry.getValue()) {
-                    if (ce.hardwareIds() != null) {
-                        for (String entryHwId : ce.hardwareIds()) {
-                            if (matchesHardwareId(normalized, normalizeHardwareId(entryHwId))) {
-                                matches.add(ce);
-                                break;
+        for (String part : parts) {
+            if (part == null || part.isBlank()) continue;
+            String normalized = normalizeHardwareId(part);
+            if (normalized.isEmpty()) continue;
+            for (Map.Entry<String, List<CatalogEntry>> entry : byHardwareId.entrySet()) {
+                if (matchesHardwareId(normalized, entry.getKey())) {
+                    for (CatalogEntry ce : entry.getValue()) {
+                        if (ce.hardwareIds() != null) {
+                            for (String entryHwId : ce.hardwareIds()) {
+                                if (matchesHardwareId(normalized, normalizeHardwareId(entryHwId))) {
+                                    if (!matches.contains(ce)) {
+                                        matches.add(ce);
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }

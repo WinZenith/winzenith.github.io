@@ -1,0 +1,4 @@
+Aug 22, 2026 6:49:38 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Aug 22, 2026 6:49:38 PM com.sbtools.util.AppLogger warning
+WARNING: Blocked protected delete (safety gate): C:\Windows\System32\evil.dll

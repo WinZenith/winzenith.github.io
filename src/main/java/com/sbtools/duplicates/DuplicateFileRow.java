@@ -58,6 +58,8 @@ public class DuplicateFileRow {
 
     public IntegerProperty totalDuplicatesProperty() { return totalDuplicates; }
     public int getTotalDuplicates() { return totalDuplicates.get(); }
+    public void setTotalDuplicates(int v) { this.totalDuplicates.set(v); }
 
     public List<String> getDeletablePaths() { return deletablePaths; }
+    public void setDeletablePaths(List<String> deletablePaths) { this.deletablePaths = deletablePaths; }
 }

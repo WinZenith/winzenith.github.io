@@ -5,8 +5,8 @@ import com.sbtools.software.SoftwareUpdateHistoryStore;
 import com.sbtools.util.AppInfo;
 import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
+import javafx.beans.property.SimpleStringProperty;
 import javafx.scene.control.*;
-import javafx.scene.control.cell.PropertyValueFactory;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -36,18 +36,22 @@ public class SoftwareUpdateHistoryDialog {
         dateCol.setPrefWidth(130);
 
         TableColumn<SoftwareUpdateHistoryEntry, String> nameCol = new TableColumn<>("Program");
-        nameCol.setCellValueFactory(new PropertyValueFactory<>("packageName"));
+        nameCol.setCellValueFactory(c -> new SimpleStringProperty(
+                c.getValue().packageName() == null ? "" : c.getValue().packageName()));
 
         TableColumn<SoftwareUpdateHistoryEntry, String> oldVerCol = new TableColumn<>("Old Version");
-        oldVerCol.setCellValueFactory(new PropertyValueFactory<>("oldVersion"));
+        oldVerCol.setCellValueFactory(c -> new SimpleStringProperty(
+                c.getValue().oldVersion() == null ? "" : c.getValue().oldVersion()));
         oldVerCol.setPrefWidth(100);
 
         TableColumn<SoftwareUpdateHistoryEntry, String> newVerCol = new TableColumn<>("New Version");
-        newVerCol.setCellValueFactory(new PropertyValueFactory<>("newVersion"));
+        newVerCol.setCellValueFactory(c -> new SimpleStringProperty(
+                c.getValue().newVersion() == null ? "" : c.getValue().newVersion()));
         newVerCol.setPrefWidth(100);
 
         TableColumn<SoftwareUpdateHistoryEntry, String> sourceCol = new TableColumn<>("Source");
-        sourceCol.setCellValueFactory(new PropertyValueFactory<>("source"));
+        sourceCol.setCellValueFactory(c -> new SimpleStringProperty(
+                c.getValue().source() == null ? "" : c.getValue().source()));
         sourceCol.setPrefWidth(100);
 
         TableColumn<SoftwareUpdateHistoryEntry, Boolean> statusCol = new TableColumn<>("Status");
@@ -71,7 +75,8 @@ public class SoftwareUpdateHistoryDialog {
         });
 
         TableColumn<SoftwareUpdateHistoryEntry, String> errorCol = new TableColumn<>("Error");
-        errorCol.setCellValueFactory(new PropertyValueFactory<>("errorMessage"));
+        errorCol.setCellValueFactory(c -> new SimpleStringProperty(
+                c.getValue().errorMessage() == null ? "" : c.getValue().errorMessage()));
         errorCol.setPrefWidth(200);
 
         table.getColumns().addAll(dateCol, nameCol, oldVerCol, newVerCol, sourceCol, statusCol, errorCol);

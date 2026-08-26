@@ -113,7 +113,7 @@ public class DriverInstallService {
             try {
                 Path script = PowerShellScripts.resolve("wu-install.ps1");
                 ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
-                        script.toString(), candidate.packageId()));
+                        script.toString(), candidate.packageId()), cancellationFlag);
                 if (!result.success()) {
                     removeBackupIfPresent(backupEntry);
                     removeRestorePointIfPresent(restorePointSeq);
@@ -263,26 +263,41 @@ public class DriverInstallService {
 
             reportStatus("Verifying driver signature…");
 
-            DriverVerificationService.VerificationResult sigResult = verificationService.verifyAuthenticode(driverFile);
-            if (!sigResult.verified()) {
-                AppLogger.warning("Authenticode verification failed: " + sigResult.message());
-                cleanupTempFiles(driverFile);
-                return new InstallResult(InstallStatus.VERIFICATION_FAILED, false,
-                        "Signature verification failed: " + sigResult.message());
+            String lowerForVerify = driverFile.getFileName().toString().toLowerCase();
+            boolean isArchive = lowerForVerify.endsWith(".zip") || lowerForVerify.endsWith(".cab")
+                    || lowerForVerify.endsWith(".7z") || lowerForVerify.endsWith(".zip.exe");
+            // Also detect archives disguised as .exe (self-extracting, actually zip)
+            if (!isArchive) {
+                String magic = detectExtensionByMagicBytes(driverFile);
+                if (".zip".equals(magic) || ".cab".equals(magic) || ".7z".equals(magic)) {
+                    isArchive = true;
+                }
             }
-
-            // If the catalog provides an expected signer thumbprint, verify it matches.
-            if (catalogEntry.isPresent() && catalogEntry.get().certThumbprint() != null
-                    && !catalogEntry.get().certThumbprint().isBlank()) {
-                String expectedThumb = catalogEntry.get().certThumbprint();
-                DriverVerificationService.VerificationResult thumbResult = verificationService.verifyAuthenticodeThumbprint(driverFile, expectedThumb);
-                if (!thumbResult.verified()) {
-                    AppLogger.warning("Authenticode thumbprint verification failed: " + thumbResult.message());
+            if (isArchive) {
+                AppLogger.info("Skipping outer Authenticode check for archive " + driverFile.getFileName()
+                        + " — inner INF/CAT will be verified after extraction");
+            } else {
+                DriverVerificationService.VerificationResult sigResult = verificationService.verifyAuthenticode(driverFile);
+                if (!sigResult.verified()) {
+                    AppLogger.warning("Authenticode verification failed: " + sigResult.message());
                     cleanupTempFiles(driverFile);
                     return new InstallResult(InstallStatus.VERIFICATION_FAILED, false,
-                            "Signature thumbprint verification failed: " + thumbResult.message());
+                            "Signature verification failed: " + sigResult.message());
                 }
-                AppLogger.info("Authenticode thumbprint verified for " + driverFile.getFileName());
+
+                // If the catalog provides an expected signer thumbprint, verify it matches.
+                if (catalogEntry.isPresent() && catalogEntry.get().certThumbprint() != null
+                        && !catalogEntry.get().certThumbprint().isBlank()) {
+                    String expectedThumb = catalogEntry.get().certThumbprint();
+                    DriverVerificationService.VerificationResult thumbResult = verificationService.verifyAuthenticodeThumbprint(driverFile, expectedThumb);
+                    if (!thumbResult.verified()) {
+                        AppLogger.warning("Authenticode thumbprint verification failed: " + thumbResult.message());
+                        cleanupTempFiles(driverFile);
+                        return new InstallResult(InstallStatus.VERIFICATION_FAILED, false,
+                                "Signature thumbprint verification failed: " + thumbResult.message());
+                    }
+                    AppLogger.info("Authenticode thumbprint verified for " + driverFile.getFileName());
+                }
             }
 
             reportStatus("Installing driver. Please wait…");
@@ -309,10 +324,14 @@ public class DriverInstallService {
 
                 Path msiFile = extractMsiFromExe(driverFile);
                 if (msiFile != null) {
+                    if (cancellationFlag.get()) {
+                        cleanupTempFiles(driverFile);
+                        return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                    }
                     AppLogger.info("Extracted MSI: " + msiFile);
                     ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
                             "msiexec.exe", "/i", msiFile.toString(), "/qn"
-                    ).command().toArray(new String[0])));
+                    ).command().toArray(new String[0])), cancellationFlag);
                     boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
                     if (result.success() || msiReboot) {
                         cleanupTempFiles(driverFile);
@@ -320,12 +339,33 @@ public class DriverInstallService {
                                 msiReboot ? "Driver installed silently via MSI. A restart is required."
                                         : "Driver installed silently via MSI.");
                     }
+                    if (cancellationFlag.get()) {
+                        cleanupTempFiles(driverFile);
+                        return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                    }
                     AppLogger.warning("MSI install failed, falling back to EXE: " + result.combinedOutput());
                 }
 
-                ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
-                        driverFile.toString(), "/quiet"
-                ).command().toArray(new String[0])));
+                // AMD Adrenalin and chipset installers use /S (silent) whereas Intel/Nvidia use /quiet.
+                // Try vendor-specific order to reduce failed attempts and timeout.
+                boolean isAmd = "AMD".equals(candidate.source());
+                String[] primaryArgs = isAmd ? new String[]{"/S"} : new String[]{"/quiet"};
+                String[] secondaryArgs = isAmd ? new String[]{"/quiet"} : new String[]{"/S"};
+                String[] tertiaryArgs = isAmd ? new String[]{"/INSTALL"} : new String[]{"/passive", "/silent"};
+
+                if (cancellationFlag.get()) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                }
+                ProcessResult result;
+                try {
+                    result = processRunner.run(java.util.List.of(new ProcessBuilder(
+                            driverFile.toString(), primaryArgs[0]
+                    ).command().toArray(new String[0])), cancellationFlag);
+                } catch (java.util.concurrent.CancellationException ce) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                }
                 boolean exeReboot = isRebootRequiredExitCode(result.exitCode());
                 if (result.success() || exeReboot) {
                     cleanupTempFiles(driverFile);
@@ -334,10 +374,20 @@ public class DriverInstallService {
                                     : "Driver installed silently.");
                 }
 
-                AppLogger.warning("EXE /quiet failed, trying /S: " + result.combinedOutput());
-                ProcessResult fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
-                        driverFile.toString(), "/S"
-                ).command().toArray(new String[0])));
+                if (cancellationFlag.get()) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                }
+                AppLogger.warning("EXE " + primaryArgs[0] + " failed (" + result.exitCode() + "), trying " + secondaryArgs[0] + ": " + result.combinedOutput());
+                ProcessResult fallbackResult;
+                try {
+                    fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
+                            driverFile.toString(), secondaryArgs[0]
+                    ).command().toArray(new String[0])), cancellationFlag);
+                } catch (java.util.concurrent.CancellationException ce) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                }
                 boolean fallbackReboot = isRebootRequiredExitCode(fallbackResult.exitCode());
                 if (fallbackResult.success() || fallbackReboot) {
                     cleanupTempFiles(driverFile);
@@ -345,7 +395,28 @@ public class DriverInstallService {
                             fallbackReboot ? "Driver installed silently via fallback installer. A restart is required."
                                     : "Driver installed silently via fallback installer.");
                 }
-                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Silent installation failed: " + fallbackResult.combinedOutput());
+                if (cancellationFlag.get()) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                }
+                AppLogger.warning("EXE " + secondaryArgs[0] + " failed, trying " + tertiaryArgs[0] + ": " + fallbackResult.combinedOutput());
+                ProcessResult thirdResult;
+                try {
+                    thirdResult = processRunner.run(java.util.List.of(new ProcessBuilder(
+                            driverFile.toString(), tertiaryArgs[0]
+                    ).command().toArray(new String[0])), cancellationFlag);
+                } catch (java.util.concurrent.CancellationException ce) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                }
+                boolean thirdReboot = isRebootRequiredExitCode(thirdResult.exitCode());
+                if (thirdResult.success() || thirdReboot) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.SUCCESS, thirdReboot,
+                            thirdReboot ? "Driver installed silently via tertiary installer. A restart is required."
+                                    : "Driver installed silently via tertiary installer.");
+                }
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Silent installation failed: " + thirdResult.combinedOutput());
             }
 
             if (cancellationFlag.get()) {
@@ -369,14 +440,26 @@ public class DriverInstallService {
 
     private String scrapeDownloadUrlFromPage(String pageUrl) {
         try {
-            HttpRequest req = HttpRequest.newBuilder()
+            HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(URI.create(pageUrl))
                     .timeout(Duration.ofSeconds(30))
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
                     .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .header("Accept-Language", "en-US,en;q=0.9")
-                    .GET()
-                    .build();
+                    .header("Accept-Language", "en-US,en;q=0.9");
+            if (pageUrl.contains("amd.com")) {
+                builder.header("Referer", "https://www.amd.com/en/support");
+            } else if (pageUrl.contains("intel.com")) {
+                builder.header("Referer", "https://www.intel.com/");
+            } else if (pageUrl.contains("realtek.com")) {
+                builder.header("Referer", "https://www.realtek.com/en/downloads");
+            } else if (pageUrl.contains("broadcom.com")) {
+                builder.header("Referer", "https://www.broadcom.com/support/download-search");
+            } else if (pageUrl.contains("synaptics.com")) {
+                builder.header("Referer", "https://www.synaptics.com/support");
+            } else if (pageUrl.contains("qualcomm.com")) {
+                builder.header("Referer", "https://www.qualcomm.com/support");
+            }
+            HttpRequest req = builder.GET().build();
 
             HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
@@ -388,20 +471,35 @@ public class DriverInstallService {
                     "href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"",
                     java.util.regex.Pattern.CASE_INSENSITIVE);
             java.util.regex.Matcher m = p.matcher(html);
+            String firstFallback = null;
             while (m.find()) {
-                String url = m.group(1);
-                if (url.contains("downloadmirror.intel.com") || url.contains("download.intel.com")) {
+                String url = decodeHtmlEntities(m.group(1));
+                // Prefer vendor-specific CDN hosts
+                String lower = url.toLowerCase();
+                if (lower.contains("drivers.amd.com") || lower.contains("download.amd.com")
+                        || lower.contains("downloadmirror.intel.com") || lower.contains("download.intel.com")
+                        || lower.contains("realtek.com") || lower.contains("broadcom.com")
+                        || lower.contains("synaptics.com") || lower.contains("qualcomm.com")
+                        || lower.contains("hp.com") || lower.contains("lenovo.com")) {
                     return url;
                 }
+                if (firstFallback == null) {
+                    firstFallback = url;
+                }
             }
-            m = p.matcher(html);
-            if (m.find()) {
-                return m.group(1);
+            if (firstFallback != null) {
+                return firstFallback;
             }
         } catch (Exception e) {
             AppLogger.warning("Error scraping download page: " + e.getMessage());
         }
         return null;
+    }
+
+    private static String decodeHtmlEntities(String s) {
+        if (s == null) return null;
+        return s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'");
     }
 
     private void cleanupTempFiles(Path driverFile) {
@@ -449,9 +547,23 @@ public class DriverInstallService {
                 .uri(URI.create(url))
                 .timeout(Duration.ofMinutes(10))
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-                .header("Accept", "application/octet-stream, */*");
-        if (url.contains("intel.com")) {
+                .header("Accept", "application/octet-stream, */*")
+                .header("Accept-Language", "en-US,en;q=0.9");
+        if (url.contains("amd.com")) {
+            reqBuilder.header("Referer", "https://www.amd.com/en/support");
+        } else if (url.contains("intel.com")) {
             reqBuilder.header("Referer", "https://www.intel.com/");
+        } else if (url.contains("realtek.com")) {
+            reqBuilder.header("Referer", "https://www.realtek.com/en/downloads");
+        } else if (url.contains("broadcom.com")) {
+            reqBuilder.header("Referer", "https://www.broadcom.com/support/download-search");
+        } else if (url.contains("synaptics.com")) {
+            reqBuilder.header("Referer", "https://www.synaptics.com/support");
+        } else if (url.contains("qualcomm.com")) {
+            reqBuilder.header("Referer", "https://www.qualcomm.com/support");
+        }
+        if (url.contains("nvidia.com") || url.contains("nvdlcdn.com")) {
+            reqBuilder.header("Referer", "https://www.nvidia.com/");
         }
         HttpRequest req = reqBuilder.GET().build();
 
@@ -462,11 +574,40 @@ public class DriverInstallService {
         }
 
         String contentType = response.headers().firstValue("Content-Type").orElse("");
+        String contentDisposition = response.headers().firstValue("Content-Disposition").orElse("");
         if (contentType.toLowerCase().contains("text/html")) {
             throw new IOException("Download URL returned an HTML page instead of a file. The download link may be invalid or require a browser.");
         }
 
         String destName = destination.getFileName().toString();
+        // Honor Content-Disposition filename if present (e.g. attachment; filename="...")
+        if (!contentDisposition.isBlank()) {
+            java.util.regex.Matcher cdMatcher = java.util.regex.Pattern.compile("filename\\s*=\\s*\"?([^\";]+)\"?", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(contentDisposition);
+            if (cdMatcher.find()) {
+                String cdName = cdMatcher.group(1).trim();
+                if (!cdName.isBlank()) {
+                    cdName = sanitizeFilename(cdName);
+                    if (!cdName.isBlank()) {
+                        destName = cdName;
+                        destination = destination.getParent().resolve(cdName);
+                        // Defend against path traversal – ensure still inside parent dir
+                        Path parent = destination.getParent().toAbsolutePath().normalize();
+                        Path normalized = destination.toAbsolutePath().normalize();
+                        if (!normalized.startsWith(parent)) {
+                            AppLogger.warning("Content-Disposition filename traverses outside downloads dir, ignoring: " + cdName);
+                            destName = sanitizeFilename(destination.getFileName().toString());
+                            destination = parent.resolve(destName);
+                        }
+                    }
+                }
+            }
+        }
+        // Sanitize destination filename from URL as well
+        destName = sanitizeFilename(destName);
+        if (destName.isBlank()) {
+            destName = "driver_" + System.currentTimeMillis() + ".exe";
+        }
+        destination = destination.getParent().resolve(destName);
         Path finalDest = destination;
         int lastDot = destName.lastIndexOf('.');
         if (lastDot < 1) {
@@ -550,11 +691,14 @@ public class DriverInstallService {
     }
 
     private ProcessResult installDriverFile(Path driverFile, DriverUpdateCandidate candidate) throws IOException, InterruptedException {
+        if (cancellationFlag.get()) {
+            throw new java.util.concurrent.CancellationException("Installation cancelled");
+        }
         String filename = driverFile.getFileName().toString().toLowerCase();
 
         if (filename.endsWith(".inf")) {
             return processRunner.run(java.util.List.of(new ProcessBuilder(
-                    "pnputil.exe", "/add-driver", driverFile.toString(), "/install").command().toArray(new String[0])));
+                    "pnputil.exe", "/add-driver", driverFile.toString(), "/install").command().toArray(new String[0])), cancellationFlag);
         } else if (filename.endsWith(".zip") || filename.endsWith(".zip.exe")) {
             Path extractDir = driverFile.getParent().resolve(
                     driverFile.getFileName().toString().replaceFirst("\\.zip(?:\\.exe)?$", "_extracted"));
@@ -564,7 +708,7 @@ public class DriverInstallService {
                     "powershell", "-NoProfile", "-Command",
                     "Expand-Archive -Path " + ProcessRunner.psQuote(driverFile.toString())
                             + " -DestinationPath " + ProcessRunner.psQuote(extractDir.toString()) + " -Force"
-            ).command().toArray(new String[0])));
+            ).command().toArray(new String[0])), cancellationFlag);
 
             if (!extractResult.success()) {
                 return new ProcessResult(1, "", "Failed to extract zip: " + extractResult.combinedOutput());
@@ -572,15 +716,37 @@ public class DriverInstallService {
 
             Path setupExe = findFile(extractDir, "setup.exe");
             if (setupExe != null) {
+                if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
+                // B4: verify inner setup.exe signature (archive outer skip)
+                DriverVerificationService.VerificationResult innerSig = verificationService.verifyAuthenticode(setupExe);
+                if (!innerSig.verified()) {
+                    AppLogger.warning("Inner setup.exe signature check failed: " + innerSig.message() + " — proceeding with warning (archive inner)");
+                    // Only block on HashMismatch; NotTrusted already allowed, NotSigned for setup.exe is fatal
+                    if (innerSig.message() != null && innerSig.message().contains("not signed")) {
+                        return new ProcessResult(1, "", "Inner setup.exe is not signed: " + innerSig.message());
+                    }
+                }
                 String[] cmd = new String[]{setupExe.toString(), "/S"};
-                return processRunner.run(java.util.List.of(new ProcessBuilder(cmd).command().toArray(new String[0])));
+                return processRunner.run(java.util.List.of(new ProcessBuilder(cmd).command().toArray(new String[0])), cancellationFlag);
             }
 
             Path infFile = findFile(extractDir, ".inf");
             if (infFile != null) {
+                if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
+                // B4: verify accompanying .cat if present; INF itself is not Authenticode signed
+                Path catFile = findFile(infFile.getParent(), ".cat");
+                if (catFile != null) {
+                    DriverVerificationService.VerificationResult catSig = verificationService.verifyAuthenticode(catFile);
+                    if (!catSig.verified()) {
+                        AppLogger.warning("Inner .cat signature check failed: " + catSig.message() + " — proceeding (INF install will be validated by pnputil)");
+                        if (catSig.message() != null && catSig.message().toLowerCase().contains("hash mismatch")) {
+                            return new ProcessResult(1, "", "Inner .cat hash mismatch - file may be corrupted: " + catSig.message());
+                        }
+                    }
+                }
                 return processRunner.run(java.util.List.of(new ProcessBuilder(
                         "pnputil.exe", "/add-driver", infFile.toString(), "/install"
-                ).command().toArray(new String[0])));
+                ).command().toArray(new String[0])), cancellationFlag);
             }
 
             return new ProcessResult(1, "", "No setup.exe or .inf found in extracted archive: " + extractDir);
@@ -593,12 +759,13 @@ public class DriverInstallService {
                     "powershell", "-NoProfile", "-Command",
                     "Expand-Archive -Path " + ProcessRunner.psQuote(driverFile.toString())
                             + " -DestinationPath " + ProcessRunner.psQuote(extractDir.toString()) + " -Force"
-            ).command().toArray(new String[0])));
+            ).command().toArray(new String[0])), cancellationFlag);
 
             if (!extractResult.success()) {
+                if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
                 ProcessResult expandResult = processRunner.run(java.util.List.of(new ProcessBuilder(
                         "expand.exe", driverFile.toString(), "-F:*", extractDir.toString()
-                ).command().toArray(new String[0])));
+                ).command().toArray(new String[0])), cancellationFlag);
                 if (!expandResult.success()) {
                     return new ProcessResult(1, "", "Failed to extract cab: " + expandResult.combinedOutput());
                 }
@@ -606,35 +773,56 @@ public class DriverInstallService {
 
             Path setupExe = findFile(extractDir, "setup.exe");
             if (setupExe != null) {
+                if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
+                DriverVerificationService.VerificationResult innerSig = verificationService.verifyAuthenticode(setupExe);
+                if (!innerSig.verified()) {
+                    AppLogger.warning("Inner setup.exe (CAB) signature check failed: " + innerSig.message() + " — proceeding with warning");
+                    if (innerSig.message() != null && innerSig.message().contains("not signed")) {
+                        return new ProcessResult(1, "", "Inner setup.exe is not signed: " + innerSig.message());
+                    }
+                }
                 String[] cmd = new String[]{setupExe.toString(), "/S"};
-                return processRunner.run(java.util.List.of(new ProcessBuilder(cmd).command().toArray(new String[0])));
+                return processRunner.run(java.util.List.of(new ProcessBuilder(cmd).command().toArray(new String[0])), cancellationFlag);
             }
 
             Path infFile = findFile(extractDir, ".inf");
             if (infFile != null) {
+                if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
+                Path catFile = findFile(infFile.getParent(), ".cat");
+                if (catFile != null) {
+                    DriverVerificationService.VerificationResult catSig = verificationService.verifyAuthenticode(catFile);
+                    if (!catSig.verified()) {
+                        AppLogger.warning("Inner .cat (CAB) signature check failed: " + catSig.message() + " — proceeding");
+                        if (catSig.message() != null && catSig.message().toLowerCase().contains("hash mismatch")) {
+                            return new ProcessResult(1, "", "Inner .cat hash mismatch: " + catSig.message());
+                        }
+                    }
+                }
                 return processRunner.run(java.util.List.of(new ProcessBuilder(
                         "pnputil.exe", "/add-driver", infFile.toString(), "/install"
-                ).command().toArray(new String[0])));
+                ).command().toArray(new String[0])), cancellationFlag);
             }
 
             return new ProcessResult(1, "", "No setup.exe or .inf found in extracted cab: " + extractDir);
         } else if (filename.endsWith(".rar")) {
             return new ProcessResult(1, "", "RAR archives require manual extraction. Download: " + driverFile);
         } else if (filename.endsWith(".msi")) {
+            if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.info("Installing MSI driver package: " + driverFile);
             ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
                     "msiexec.exe", "/i", driverFile.toString(), "/qn"
-            ).command().toArray(new String[0])));
+            ).command().toArray(new String[0])), cancellationFlag);
             boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
             if (result.success() || msiReboot) {
                 return new ProcessResult(0, "", msiReboot
                         ? "Driver installed silently via MSI. A restart is required."
                         : "Driver installed silently via MSI.");
             }
+            if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.warning("MSI /qn failed, trying /quiet: " + result.combinedOutput());
             ProcessResult fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
                     "msiexec.exe", "/i", driverFile.toString(), "/quiet"
-            ).command().toArray(new String[0])));
+            ).command().toArray(new String[0])), cancellationFlag);
             boolean fallbackReboot = isRebootRequiredExitCode(fallbackResult.exitCode());
             if (fallbackResult.success() || fallbackReboot) {
                 return new ProcessResult(0, "", fallbackReboot
@@ -708,10 +896,50 @@ public class DriverInstallService {
                 return "driver_" + System.currentTimeMillis() + ".exe";
             }
             String decoded = java.net.URLDecoder.decode(name, java.nio.charset.StandardCharsets.UTF_8);
-            return decoded.isEmpty() ? "driver_" + System.currentTimeMillis() + ".exe" : decoded;
+            String sanitized = sanitizeFilename(decoded);
+            if (sanitized.isEmpty()) {
+                return "driver_" + System.currentTimeMillis() + ".exe";
+            }
+            return sanitized;
         } catch (Exception e) {
             return "driver_" + System.currentTimeMillis() + ".exe";
         }
+    }
+
+    /**
+     * Sanitizes a filename to prevent path traversal and illegal characters.
+     * Strips directory components, null bytes, and replaces unsafe chars.
+     */
+    static String sanitizeFilename(String name) {
+        if (name == null || name.isBlank()) return "";
+        // Strip null bytes
+        name = name.replace("\0", "");
+        // Take only basename (handles both / and \ separators)
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        if (slash >= 0) {
+            name = name.substring(slash + 1);
+        }
+        // Remove leading dots and handle traversal attempts
+        name = name.replaceAll("^[.]+", "");
+        // Reject if still contains parent traversal or separators after extraction
+        if (name.contains("..") || name.contains("/") || name.contains("\\") || name.contains(":")) {
+            name = name.replaceAll("[./\\\\:]+", "_");
+        }
+        // Replace control chars and unsafe filesystem chars (<>\"|?* plus control)
+        name = name.replaceAll("[\\x00-\\x1F\\x7F<>\"|?*]", "_");
+        // Limit length to 128 to avoid path-length issues
+        if (name.length() > 128) {
+            int dot = name.lastIndexOf('.');
+            if (dot > 0 && dot < name.length() - 1 && name.length() - dot <= 10) {
+                String ext = name.substring(dot);
+                name = name.substring(0, 128 - ext.length()) + ext;
+            } else {
+                name = name.substring(0, 128);
+            }
+        }
+        name = name.trim();
+        if (name.isEmpty() || name.equals(".") || name.equals("..")) return "";
+        return name;
     }
 
     private boolean isTrustedSource(String url, String source) {
@@ -726,11 +954,14 @@ public class DriverInstallService {
                         || host.equals("geforce.com") || host.endsWith(".geforce.com")
                         || host.endsWith(".nvdlcdn.com");
                 case "AMD" -> host.equals("amd.com") || host.endsWith(".amd.com")
-                        || host.endsWith(".amd.com.co");
-                case "Realtek" -> host.equals("realtek.com") || host.endsWith(".realtek.com");
+                        || host.equals("drivers.amd.com") || host.endsWith(".drivers.amd.com");
+                case "Realtek" -> host.equals("realtek.com") || host.endsWith(".realtek.com")
+                        || host.equals("realtek.com.tw") || host.endsWith(".realtek.com.tw");
                 case "Broadcom" -> host.equals("broadcom.com") || host.endsWith(".broadcom.com");
                 case "Qualcomm" -> host.equals("qualcomm.com") || host.endsWith(".qualcomm.com");
-                case "Synaptics" -> host.equals("synaptics.com") || host.endsWith(".synaptics.com");
+                case "Synaptics" -> host.equals("synaptics.com") || host.endsWith(".synaptics.com")
+                        || host.endsWith(".hp.com") || host.equals("hp.com") || host.endsWith("ftp.hp.com")
+                        || host.endsWith(".lenovo.com") || host.equals("lenovo.com");
                 case "Lenovo" -> host.equals("lenovo.com") || host.endsWith(".lenovo.com")
                         || host.equals("lenovo-images.com") || host.endsWith(".lenovo-images.com")
                         || host.endsWith(".lenovo.net");

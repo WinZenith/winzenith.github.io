@@ -38,8 +38,7 @@ public class ShredderService {
             throw new UnsupportedOperationException("Secure erase is only available on Windows.");
         }
         Path script = PowerShellScripts.resolve("secure-delete.ps1");
-        ProcessResult result = processRunner.run(
-                ProcessRunner.powershellScript(script.toString(), filePath, String.valueOf(passCount)));
+        ProcessResult result = runWithFallback(script.toString(), filePath, String.valueOf(passCount));
         return parseResult(result, filePath);
     }
 
@@ -48,8 +47,7 @@ public class ShredderService {
             throw new UnsupportedOperationException("Secure erase is only available on Windows.");
         }
         Path script = PowerShellScripts.resolve("secure-delete-folder.ps1");
-        ProcessResult result = processRunner.run(
-                ProcessRunner.powershellScript(script.toString(), folderPath, String.valueOf(passCount)));
+        ProcessResult result = runWithFallback(script.toString(), folderPath, String.valueOf(passCount));
         if (!result.success()) {
             return new FolderDeleteResult(false, "Process failed: " + result.combinedOutput(), 0, 0, List.of());
         }
@@ -67,9 +65,28 @@ public class ShredderService {
             throw new UnsupportedOperationException("Reboot scheduling is only available on Windows.");
         }
         Path script = PowerShellScripts.resolve("schedule-reboot-delete.ps1");
-        ProcessResult result = processRunner.run(
-                ProcessRunner.powershellScript(script.toString(), filePath));
+        ProcessResult result = runWithFallback(script.toString(), filePath);
         return parseResult(result, filePath);
+    }
+
+    private ProcessResult runWithFallback(String scriptPath, String... args) throws IOException, InterruptedException {
+        IOException pending = null;
+        for (List<String> cmd : List.of(ProcessRunner.powershellScript(scriptPath, args), ProcessRunner.pwshScript(scriptPath, args))) {
+            try {
+                return processRunner.run(cmd);
+            } catch (IOException e) {
+                String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                boolean missing = msg.contains("cannot run program") || msg.contains("no such file") || msg.contains("error=2");
+                if (missing && cmd.get(0).equals("powershell.exe")) {
+                    AppLogger.warning("Shredder: powershell.exe not found, trying pwsh.exe");
+                    pending = e;
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (pending != null) throw pending;
+        throw new IOException("No PowerShell executable available");
     }
 
     public record RecycleBinResult(List<RecycleBinEntry> entries, long totalSizeBytes, int fileCount) {}
@@ -79,8 +96,7 @@ public class ShredderService {
             throw new UnsupportedOperationException("Recycle Bin is only available on Windows.");
         }
         Path script = PowerShellScripts.resolve("list-recyclebin.ps1");
-        ProcessResult result = processRunner.run(
-                ProcessRunner.powershellScript(script.toString()));
+        ProcessResult result = runWithFallback(script.toString());
         if (!result.success()) {
             throw new IOException("Failed to list Recycle Bin: " + result.combinedOutput());
         }
@@ -132,12 +148,34 @@ public class ShredderService {
                 if (result.isDeleted()) {
                     filesDeleted++;
                 } else if (result.isScheduledForReboot()) {
-                    scheduledForReboot.add(path);
+                    try {
+                        ShredderResult sched = scheduleForReboot(path);
+                        if (sched.isSuccess()) {
+                            scheduledForReboot.add(path);
+                        } else {
+                            AppLogger.warning("Failed to schedule recycle bin entry for reboot: " + path + " - " + sched.getMessage());
+                            // still track as scheduled attempt so UI can inform user
+                            scheduledForReboot.add(path);
+                        }
+                    } catch (Exception se) {
+                        AppLogger.error("Failed to schedule reboot delete for: " + path, se);
+                        scheduledForReboot.add(path);
+                    }
                 }
             } catch (Exception e) {
                 String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
                 if (msg.contains("in use") || msg.contains("access denied") || msg.contains("unauthorized")) {
-                    scheduledForReboot.add(path);
+                    try {
+                        ShredderResult sched = scheduleForReboot(path);
+                        if (sched.isSuccess() || msg.contains("in use")) {
+                            scheduledForReboot.add(path);
+                        } else {
+                            scheduledForReboot.add(path);
+                        }
+                    } catch (Exception se) {
+                        AppLogger.error("Failed to schedule reboot delete for: " + path, se);
+                        scheduledForReboot.add(path);
+                    }
                 } else {
                     AppLogger.error("Failed to securely delete recycle bin entry: " + path, e);
                 }
@@ -169,28 +207,79 @@ public class ShredderService {
             for (String driveLetter : driveLetters) {
                 if (cancelled != null && cancelled.get()) break;
 
-                List<String> cmd = new ArrayList<>(ProcessRunner.powershellScript(script.toString()));
-                cmd.add(driveLetter);
-                cmd.add("-StopFlagPath");
-                cmd.add(stopFlag.getAbsolutePath());
-                cmd.add("-PassCount");
-                cmd.add(String.valueOf(passCount));
-
-                ProcessBuilder pb = new ProcessBuilder(cmd);
-                pb.redirectErrorStream(true);
-                Process process = ProcessManager.start(pb);
+                List<List<String>> candidates = List.of(
+                        new ArrayList<>(ProcessRunner.powershellScript(script.toString())),
+                        new ArrayList<>(ProcessRunner.pwshScript(script.toString()))
+                );
+                // Append args to each candidate
+                for (List<String> c : candidates) {
+                    c.add(driveLetter);
+                    c.add("-StopFlagPath");
+                    c.add(stopFlag.getAbsolutePath());
+                    c.add("-PassCount");
+                    c.add(String.valueOf(passCount));
+                }
+                Process process = null;
+                IOException lastIo = null;
+                for (List<String> cmd : candidates) {
+                    try {
+                        ProcessBuilder pb = new ProcessBuilder(cmd);
+                        pb.redirectErrorStream(true);
+                        process = ProcessManager.start(pb);
+                        lastIo = null;
+                        break;
+                    } catch (IOException e) {
+                        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                        boolean missing = msg.contains("cannot run program") || msg.contains("no such file") || msg.contains("error=2");
+                        if (missing && cmd.get(0).equals("powershell.exe")) {
+                            AppLogger.warning("Wipe: powershell.exe not found, trying pwsh.exe for " + driveLetter);
+                            lastIo = e;
+                            continue;
+                        }
+                        throw e;
+                    }
+                }
+                if (process == null) {
+                    if (lastIo != null) throw lastIo;
+                    throw new IOException("No PowerShell executable available for wipe");
+                }
 
                 ProcessWatcher watcher = new ProcessWatcher(process, progressCallback, cancelled, stopFlag);
                 watcher.watch();
 
+                // Cancellation poller: ensures stopFlag is created and process killed even if no output
+                final Process procForPoller = process;
+                Thread cancelPoller = new Thread(() -> {
+                    try {
+                        while (procForPoller.isAlive()) {
+                            if (cancelled != null && cancelled.get()) {
+                                try {
+                                    if (!stopFlag.exists()) stopFlag.createNewFile();
+                                } catch (Exception ignored) {}
+                                // Give PowerShell a moment to observe stopFlag, then force kill
+                                try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                                if (procForPoller.isAlive()) {
+                                    try { procForPoller.destroyForcibly(); } catch (Exception ignored) {}
+                                }
+                                break;
+                            }
+                            try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                        }
+                    } catch (Exception ignored) {}
+                }, "wipe-cancel-poller-" + driveLetter.replace(":", ""));
+                cancelPoller.setDaemon(true);
+                cancelPoller.start();
+
                 try {
                     boolean finished = process.waitFor(3600, TimeUnit.SECONDS);
+                    try { cancelPoller.interrupt(); } catch (Exception ignored) {}
                     if (!finished) {
                         process.destroyForcibly();
                         throw new IOException("Free space wipe timed out for drive " + driveLetter + ".");
                     }
                 } catch (InterruptedException e) {
                     process.destroyForcibly();
+                    try { cancelPoller.interrupt(); } catch (Exception ignored) {}
                     Thread.currentThread().interrupt();
                     throw new IOException("Free space wipe interrupted.", e);
                 }
@@ -263,9 +352,9 @@ public class ShredderService {
                         new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        if (cancelled.get()) {
-                            try { stopFlag.createNewFile(); } catch (Exception ignored) {}
-                            process.destroyForcibly();
+                        if (cancelled != null && cancelled.get()) {
+                            try { if (!stopFlag.exists()) stopFlag.createNewFile(); } catch (Exception ignored) {}
+                            try { process.destroyForcibly(); } catch (Exception ignored) {}
                             break;
                         }
                         line = line.trim();

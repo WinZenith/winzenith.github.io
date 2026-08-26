@@ -5,7 +5,7 @@ public enum CleanupCategory {
     EMPTY_RECYCLE_BIN("Empty Recycle Bin", "Files in the Recycle Bin", RiskLevel.LOW),
     JUNK_FILES("Junk files", "Temporary files from applications", RiskLevel.LOW),
     PRIVACY_TRACES("Privacy traces", "Recent documents, run history, and usage traces", RiskLevel.LOW),
-    WEB_BROWSING_TRACES("Web browsing traces", "Browser cache, cookies, history, and saved passwords (WARNING: saves passwords, cookies, and history will be deleted)", RiskLevel.MEDIUM),
+    WEB_BROWSING_TRACES("Web browsing traces", "Browser cache, cookies, history, and saved passwords (WARNING: saves passwords, cookies, and history will be deleted)", RiskLevel.HIGH),
     CACHE("Cache", "System and application cache data (including INetCache; INetCookies not cleaned for safety)", RiskLevel.LOW),
     INSTALLER_FILES("Installer Files", "Cached installer packages and downloaded setup files (TEMP only)", RiskLevel.MEDIUM),
     TEMPORARY_SYSTEM_FILES("Temporary System Files", "Prefetch cache only (system upgrade directories excluded for safety)", RiskLevel.LOW),
@@ -26,14 +26,14 @@ public enum CleanupCategory {
     SOFTWARE_DISTRIBUTION_CACHE("Software Distribution Cache", "Windows Update download cache in SoftwareDistribution\\Download (skipped during active updates or pending restart)", RiskLevel.HIGH),
     WINDOWS_DIAGNOSTICS_CACHE("Diagnostics Cache", "Windows diagnostic and error reporting data files", RiskLevel.LOW),
     OLD_WINDOWS_INSTALL("Previous Windows Installation", "Windows.old folder from a previous OS upgrade (large)", RiskLevel.HIGH),
-    DOCKER_CACHE("Docker Cache", "Docker images, containers, volumes at %PROGRAMDATA%\\Docker", RiskLevel.HIGH),
+    DOCKER_CACHE("Docker Cache", "Docker builder & image cache via 'docker system prune' (volumes preserved for safety)", RiskLevel.HIGH),
     NPM_CACHE("NPM Cache", "Node.js package manager cache", RiskLevel.LOW),
     YARN_CACHE("Yarn Cache", "Yarn package manager cache", RiskLevel.LOW),
     MAVEN_CACHE("Maven Cache", "Old snapshot artifacts in .m2\\repository", RiskLevel.LOW),
     GRADLE_CACHE("Gradle Cache", "Gradle build tool caches", RiskLevel.LOW),
     PIP_CACHE("PIP Cache", "Python package installer cache", RiskLevel.LOW),
     JETBRAINS_CACHE("JetBrains Cache", "JetBrains IDE cache files (IntelliJ, PyCharm, etc.)", RiskLevel.LOW),
-    ITUNES_BACKUPS("iTunes Backups", "iOS backups at %APPDATA%\\Apple Computer\\MobileSync\\Backup", RiskLevel.MEDIUM),
+    ITUNES_BACKUPS("iTunes Backups", "iOS backups at %APPDATA%\\Apple Computer\\MobileSync\\Backup (WARNING: irreversible user data, not cache)", RiskLevel.HIGH),
     WINDOWS_SEARCH_CACHE("Windows Search Cache", "Search cache data (service-safe cleanup, index database preserved)", RiskLevel.MEDIUM);
 
     public enum RiskLevel {

@@ -65,6 +65,10 @@ public class StartupItem {
         return registryValueName;
     }
 
+    public String getFilePath() {
+        return filePath;
+    }
+
     public String getTaskPath() {
         return taskPath;
     }

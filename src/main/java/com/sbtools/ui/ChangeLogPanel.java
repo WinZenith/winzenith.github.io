@@ -2,6 +2,8 @@ package com.sbtools.ui;
 
 import com.sbtools.netoptimizer.NetworkChangeEntry;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
+import com.sbtools.util.AppExecutors;
+import com.sbtools.util.AppLogger;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -21,17 +23,20 @@ import javafx.scene.layout.VBox;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.concurrent.Future;
 
 class ChangeLogPanel extends VBox {
 
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter
             .ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
+    private static final int DISPLAY_LIMIT = 100;
 
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
     private final ObservableList<NetworkChangeEntry> entries = FXCollections.observableArrayList();
     private final TableView<NetworkChangeEntry> table = new TableView<>(entries);
+    private volatile Future<?> currentTask;
 
     ChangeLogPanel(NetworkOptimizerService service, BooleanProperty busy) {
         this.service = service;
@@ -44,18 +49,21 @@ class ChangeLogPanel extends VBox {
     void loadEntries() {
         if (busy.get()) return;
         busy.set(true);
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.getChangeLog();
-                javafx.application.Platform.runLater(() -> {
-                    entries.setAll(result);
-                });
+                javafx.application.Platform.runLater(() -> entries.setAll(result));
             } catch (Exception e) {
-                // logged silently
+                AppLogger.warning("Failed to load changelog: " + e.getMessage());
             } finally {
                 javafx.application.Platform.runLater(() -> busy.set(false));
             }
-        }, "net-load-changelog").start();
+        });
+    }
+
+    void dispose() {
+        Future<?> t = currentTask;
+        if (t != null) t.cancel(true);
     }
 
     private VBox buildContent() {
@@ -65,7 +73,7 @@ class ChangeLogPanel extends VBox {
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
 
-        Label sub = new Label("Shows the last 3 network operations.");
+        Label sub = new Label("Shows the last " + DISPLAY_LIMIT + " network operations.");
         sub.setStyle("-fx-text-fill: #6272a4;");
         content.getChildren().add(sub);
 
@@ -81,10 +89,10 @@ class ChangeLogPanel extends VBox {
             confirm.setTitle("Clear History");
             confirm.setHeaderText(null);
             if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
-                new Thread(() -> {
+                AppExecutors.ioPool().submit(() -> {
                     service.clearChangeLog();
                     javafx.application.Platform.runLater(() -> entries.clear());
-                }, "net-clear-changelog").start();
+                });
             }
         });
 
@@ -100,8 +108,16 @@ class ChangeLogPanel extends VBox {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
         TableColumn<NetworkChangeEntry, String> timeCol = new TableColumn<>("Time");
-        timeCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
-                FORMATTER.format(Instant.parse(c.getValue().timestamp()))));
+        timeCol.setCellValueFactory(c -> {
+            String raw = c.getValue().timestamp();
+            String formatted;
+            try {
+                formatted = FORMATTER.format(Instant.parse(raw));
+            } catch (Exception ex) {
+                formatted = raw != null ? raw : "";
+            }
+            return new javafx.beans.property.SimpleStringProperty(formatted);
+        });
         timeCol.setPrefWidth(150);
 
         TableColumn<NetworkChangeEntry, String> opCol = new TableColumn<>("Operation");

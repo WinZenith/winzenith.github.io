@@ -42,6 +42,16 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private final Button historyButton = new Button("History");
     private final Label statusLabel = new Label();
 
+    // For leak-free dispose
+    private javafx.collections.ListChangeListener<SoftwareUpdateEntry> rowsListener;
+    private java.util.Map<SoftwareUpdateEntry, javafx.beans.value.ChangeListener<Boolean>> selectedListeners;
+    private javafx.beans.value.ChangeListener<Boolean> refreshListener;
+    private TableView<SoftwareUpdateEntry> tableRef;
+    private javafx.collections.ListChangeListener<SoftwareUpdateEntry> refreshRowsListener;
+    private javafx.beans.value.ChangeListener<Boolean> busyListener;
+    private javafx.beans.value.ChangeListener<Boolean> batchProgressListener;
+    private javafx.beans.value.ChangeListener<Boolean> retryFailedListener;
+
     public SoftwareUpdatesTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
         this.viewModel = new SoftwareUpdateViewModel(busy, adminCheck::getAsBoolean);
@@ -69,18 +79,47 @@ public class SoftwareUpdatesTabView extends BorderPane {
         setTop(top);
         setCenter(table);
 
-        viewModel.getRows().addListener((ListChangeListener<SoftwareUpdateEntry>) c -> {
+        // Track per-entry selected listeners so we can remove on dispose / removal (fix leak B7)
+        java.util.Map<SoftwareUpdateEntry, javafx.beans.value.ChangeListener<Boolean>> selectedListeners = new java.util.HashMap<>();
+        javafx.collections.ListChangeListener<SoftwareUpdateEntry> rowsListener = c -> {
             while (c.next()) {
                 if (c.wasAdded()) {
                     for (SoftwareUpdateEntry entry : c.getAddedSubList()) {
-                        entry.selectedProperty().addListener((obs, oldVal, newVal) -> updateInstallButtonState());
+                        javafx.beans.value.ChangeListener<Boolean> l = (obs, oldVal, newVal) -> updateInstallButtonState();
+                        entry.selectedProperty().addListener(l);
+                        selectedListeners.put(entry, l);
+                    }
+                }
+                if (c.wasRemoved()) {
+                    for (SoftwareUpdateEntry entry : c.getRemoved()) {
+                        javafx.beans.value.ChangeListener<Boolean> l = selectedListeners.remove(entry);
+                        if (l != null) try { entry.selectedProperty().removeListener(l); } catch (Exception ignored) {}
                     }
                 }
             }
             updateInstallButtonState();
-        });
+        };
+        viewModel.getRows().addListener(rowsListener);
+        // Attach for existing rows (if any)
+        for (SoftwareUpdateEntry e : viewModel.getRows()) {
+            javafx.beans.value.ChangeListener<Boolean> l = (obs, o, n) -> updateInstallButtonState();
+            e.selectedProperty().addListener(l);
+            selectedListeners.put(e, l);
+        }
+        // Store for dispose cleanup
+        this.rowsListener = rowsListener;
+        this.selectedListeners = selectedListeners;
 
-        busy.addListener((obs, oldVal, newVal) -> table.refresh());
+        // Refresh table when either global or local busy changes (progress/status bindings)
+        javafx.beans.value.ChangeListener<Boolean> refreshListener = (obs, oldVal, newVal) -> table.refresh();
+        busy.addListener(refreshListener);
+        viewModel.busyProperty().addListener(refreshListener);
+        this.refreshListener = refreshListener;
+        this.tableRef = table;
+        // Single listener for row changes to refresh (merged to avoid duplicate)
+        javafx.collections.ListChangeListener<SoftwareUpdateEntry> refreshRowsListener = ch -> table.refresh();
+        viewModel.getRows().addListener(refreshRowsListener);
+        this.refreshRowsListener = refreshRowsListener;
 
         if (!AppPaths.isWindows()) {
             scanButton.setDisable(true);
@@ -94,15 +133,20 @@ public class SoftwareUpdatesTabView extends BorderPane {
         batchProgressBar.progressProperty().bind(viewModel.batchProgressProperty());
         batchProgressLabel.textProperty().bind(viewModel.batchProgressTextProperty());
 
-        viewModel.showBatchProgressProperty().addListener((obs, oldVal, newVal) -> {
-            batchProgressBar.setVisible(newVal);
-            batchProgressLabel.setVisible(newVal);
-        });
+        batchProgressListener = (obs, oldVal, newVal) -> {
+            batchProgressBar.setVisible(Boolean.TRUE.equals(newVal));
+            batchProgressLabel.setVisible(Boolean.TRUE.equals(newVal));
+        };
+        viewModel.showBatchProgressProperty().addListener(batchProgressListener);
+        // Sync initial
+        batchProgressListener.changed(null, null, viewModel.showBatchProgressProperty().get());
 
-        viewModel.showRetryFailedProperty().addListener((obs, oldVal, newVal) -> {
-            retryFailedButton.setVisible(newVal);
-            retryFailedButton.setDisable(!newVal);
-        });
+        retryFailedListener = (obs, oldVal, newVal) -> {
+            retryFailedButton.setVisible(Boolean.TRUE.equals(newVal));
+            retryFailedButton.setDisable(!Boolean.TRUE.equals(newVal));
+        };
+        viewModel.showRetryFailedProperty().addListener(retryFailedListener);
+        retryFailedListener.changed(null, null, viewModel.showRetryFailedProperty().get());
 
         viewModel.setOnWingetNotAvailable(this::showWingetNotAvailableDialog);
     }
@@ -132,11 +176,21 @@ public class SoftwareUpdatesTabView extends BorderPane {
         ignoredListButton.setOnAction(e -> showIgnoredListDialog());
         historyButton.setOnAction(e -> showHistoryDialog());
 
-        busy.addListener((obs, oldVal, newVal) -> {
-            scanButton.setDisable(newVal);
-            stopScanButton.setDisable(!newVal);
-            updateSelectedButton.setDisable(newVal || viewModel.getRows().stream().noneMatch(r -> r.selectedProperty().get()));
-        });
+        // Handle both global and local busy – disable scan when either is busy; enable stop when local busy
+        busyListener = (obs, o, n) -> {
+            boolean isBusy = viewModel.busyProperty().get() || busy.get();
+            boolean localBusy = viewModel.busyProperty().get();
+            scanButton.setDisable(isBusy);
+            // Stop enabled only when local software tab is busy (scan or install)
+            stopScanButton.setDisable(!localBusy);
+            updateSelectedButton.setDisable(isBusy || viewModel.getRows().stream().noneMatch(r -> r.selectedProperty().get()));
+            selectAllButton.setDisable(isBusy || viewModel.getRows().isEmpty());
+            deselectAllButton.setDisable(isBusy || viewModel.getRows().isEmpty());
+        };
+        busy.addListener(busyListener);
+        viewModel.busyProperty().addListener(busyListener);
+        // Initial sync
+        busyListener.changed(null, false, busy.get());
     }
 
     private TableView<SoftwareUpdateEntry> buildTable() {
@@ -227,14 +281,25 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 sizeLabel.setVisible(false);
 
                 updateBtn.setOnAction(e -> {
-                    SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
+                    SoftwareUpdateEntry entry = getEntrySafely();
                     if (entry != null) viewModel.updateSingle(entry);
                 });
 
                 ignoreBtn.setOnAction(e -> {
-                    SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
+                    SoftwareUpdateEntry entry = getEntrySafely();
                     if (entry != null) viewModel.skipEntry(entry);
                 });
+            }
+
+            private SoftwareUpdateEntry getEntrySafely() {
+                // Use TableRow item when available; fallback to index bounds-checked access
+                TableRow<SoftwareUpdateEntry> row = getTableRow();
+                if (row != null && row.getItem() != null) return row.getItem();
+                int idx = getIndex();
+                TableView<SoftwareUpdateEntry> tv = getTableView();
+                if (tv == null || tv.getItems() == null) return null;
+                if (idx < 0 || idx >= tv.getItems().size()) return null;
+                try { return tv.getItems().get(idx); } catch (IndexOutOfBoundsException ex) { return null; }
             }
 
             @Override
@@ -246,35 +311,36 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     return;
                 }
 
-                SoftwareUpdateEntry entry = getTableView().getItems().get(getIndex());
-                boolean disabled = entry == null || busy.get();
+                SoftwareUpdateEntry entry = getEntrySafely();
+                // Guard against virtual flow recycling where getIndex() may be stale
+                if (entry == null) {
+                    unbindEntry();
+                    setGraphic(null);
+                    return;
+                }
+                boolean isBusy = viewModel.busyProperty().get() || busy.get();
+                boolean disabled = isBusy;
                 updateBtn.setDisable(disabled);
                 ignoreBtn.setDisable(disabled);
 
                 unbindEntry();
 
                 boundEntry = entry;
-                if (entry != null) {
-                    try {
-                        downloadProgress.progressProperty().bind(entry.progressProperty());
-                    } catch (Exception ignored) {}
-                    installingLabel.textProperty().bind(entry.statusProperty());
-                    statusListener = (obs, oldVal, newVal) -> Platform.runLater(() -> {
-                        boolean show = newVal != null && !newVal.isBlank();
-                        downloadProgress.setVisible(show);
-                        installingLabel.setVisible(show);
-                        sizeLabel.setVisible(show);
-                    });
-                    entry.statusProperty().addListener(statusListener);
-                    boolean showNow = entry.getStatus() != null && !entry.getStatus().isBlank();
-                    downloadProgress.setVisible(showNow);
-                    installingLabel.setVisible(showNow);
-                    sizeLabel.setVisible(showNow);
-                } else {
-                    downloadProgress.setVisible(false);
-                    installingLabel.setVisible(false);
-                    sizeLabel.setVisible(false);
-                }
+                try {
+                    downloadProgress.progressProperty().bind(entry.progressProperty());
+                } catch (Exception ignored) {}
+                installingLabel.textProperty().bind(entry.statusProperty());
+                statusListener = (obs, oldVal, newVal) -> Platform.runLater(() -> {
+                    boolean show = newVal != null && !newVal.isBlank();
+                    downloadProgress.setVisible(show);
+                    installingLabel.setVisible(show);
+                    sizeLabel.setVisible(show);
+                });
+                entry.statusProperty().addListener(statusListener);
+                boolean showNow = entry.getStatus() != null && !entry.getStatus().isBlank();
+                downloadProgress.setVisible(showNow);
+                installingLabel.setVisible(showNow);
+                sizeLabel.setVisible(showNow);
 
                 HBox container = new HBox(6, updateBtn, ignoreBtn, sizeLabel, downloadProgress, installingLabel, spinner);
                 container.setAlignment(Pos.CENTER_LEFT);
@@ -299,9 +365,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
         table.setRowFactory(tv -> {
             TableRow<SoftwareUpdateEntry> row = new TableRow<>();
             row.setOnMouseClicked(event -> {
-                if (!row.isEmpty()) {
+                if (!row.isEmpty() && !viewModel.busyProperty().get() && !busy.get()) {
                     SoftwareUpdateEntry entry = row.getItem();
-                    entry.selectedProperty().set(!entry.selectedProperty().get());
+                    if (entry != null) entry.selectedProperty().set(!entry.selectedProperty().get());
                 }
             });
             return row;
@@ -313,9 +379,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private void updateInstallButtonState() {
         boolean any = viewModel.getRows().stream().anyMatch(r -> r.selectedProperty().get());
         boolean hasRows = !viewModel.getRows().isEmpty();
-        updateSelectedButton.setDisable(!any || busy.get());
-        selectAllButton.setDisable(!hasRows || busy.get());
-        deselectAllButton.setDisable(!hasRows || busy.get());
+        boolean isBusy = viewModel.busyProperty().get() || busy.get();
+        updateSelectedButton.setDisable(!any || isBusy);
+        selectAllButton.setDisable(!hasRows || isBusy);
+        deselectAllButton.setDisable(!hasRows || isBusy);
     }
 
     private void updateSelected() {
@@ -386,6 +453,36 @@ public class SoftwareUpdatesTabView extends BorderPane {
     }
 
     public void dispose() {
+        // Unbind and remove listeners to prevent leak and phantom updates (B7)
+        try { statusLabel.textProperty().unbind(); } catch (Exception ignored) {}
+        try { batchProgressBar.progressProperty().unbind(); } catch (Exception ignored) {}
+        try { batchProgressLabel.textProperty().unbind(); } catch (Exception ignored) {}
+        if (batchProgressListener != null) {
+            try { viewModel.showBatchProgressProperty().removeListener(batchProgressListener); } catch (Exception ignored) {}
+        }
+        if (retryFailedListener != null) {
+            try { viewModel.showRetryFailedProperty().removeListener(retryFailedListener); } catch (Exception ignored) {}
+        }
+        if (busyListener != null) {
+            try { busy.removeListener(busyListener); } catch (Exception ignored) {}
+            try { viewModel.busyProperty().removeListener(busyListener); } catch (Exception ignored) {}
+        }
+        if (refreshListener != null && tableRef != null) {
+            try { busy.removeListener(refreshListener); } catch (Exception ignored) {}
+            try { viewModel.busyProperty().removeListener(refreshListener); } catch (Exception ignored) {}
+        }
+        if (rowsListener != null) {
+            try { viewModel.getRows().removeListener(rowsListener); } catch (Exception ignored) {}
+        }
+        if (refreshRowsListener != null) {
+            try { viewModel.getRows().removeListener(refreshRowsListener); } catch (Exception ignored) {}
+        }
+        if (selectedListeners != null) {
+            for (var e : new java.util.ArrayList<>(selectedListeners.entrySet())) {
+                try { e.getKey().selectedProperty().removeListener(e.getValue()); } catch (Exception ignored) {}
+            }
+            selectedListeners.clear();
+        }
         viewModel.dispose();
     }
 

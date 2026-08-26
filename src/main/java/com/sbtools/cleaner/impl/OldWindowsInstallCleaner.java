@@ -75,13 +75,13 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
         AppLogger.warning("rd /s /q failed for Windows.old, attempting takeown/icacls");
         try {
-            ProcessBuilder takeown = new ProcessBuilder("cmd", "/c", "takeown", "/F", "\"" + windowsOld + "\"", "/R", "/D", "Y");
+            ProcessBuilder takeown = new ProcessBuilder("takeown", "/F", windowsOld.toString(), "/R", "/D", "Y");
             takeown.redirectErrorStream(true);
             Process takeownP = ProcessManager.start(takeown);
             boolean takeownDone = takeownP.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
             if (!takeownDone) takeownP.destroyForcibly();
 
-            ProcessBuilder icacls = new ProcessBuilder("cmd", "/c", "icacls", "\"" + windowsOld + "\"", "/grant", "administrators:F", "/T", "/L");
+            ProcessBuilder icacls = new ProcessBuilder("icacls", windowsOld.toString(), "/grant", "administrators:F", "/T");
             icacls.redirectErrorStream(true);
             Process icaclsP = ProcessManager.start(icacls);
             boolean icaclsDone = icaclsP.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
@@ -123,7 +123,7 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
     private boolean removeWithRd(Path target) {
         try {
-            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "rd", "/s", "/q", "\"" + target + "\"");
+            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "rd /s /q \"" + target + "\"");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
             boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);

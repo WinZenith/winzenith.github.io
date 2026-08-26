@@ -37,6 +37,48 @@ public final class AppExecutors {
         return CLEAN_POOL;
     }
 
+    private static final javafx.beans.property.BooleanProperty GLOBAL_BUSY = new javafx.beans.property.SimpleBooleanProperty(false);
+
+    public static javafx.beans.property.BooleanProperty globalBusyProperty() {
+        return GLOBAL_BUSY;
+    }
+
+    private static void setBusySync(javafx.beans.property.BooleanProperty target, boolean value) {
+        if (javafx.application.Platform.isFxApplicationThread()) {
+            target.set(value);
+        } else {
+            javafx.application.Platform.runLater(() -> target.set(value));
+        }
+        // Keep global mirror in sync (legacy callers may check it)
+        if (target != GLOBAL_BUSY) {
+            if (javafx.application.Platform.isFxApplicationThread()) {
+                GLOBAL_BUSY.set(value);
+            } else {
+                javafx.application.Platform.runLater(() -> GLOBAL_BUSY.set(value));
+            }
+        }
+    }
+
+    /** Legacy helper — now delegates to BusyProperty's own counting via set(). */
+    public static void acquireBusy(javafx.beans.property.BooleanProperty target) {
+        setBusySync(target, true);
+    }
+
+    /** Legacy helper — now delegates to BusyProperty's own counting via set(). */
+    public static void releaseBusy(javafx.beans.property.BooleanProperty target) {
+        setBusySync(target, false);
+    }
+
+    public static void forceClearBusy(javafx.beans.property.BooleanProperty target) {
+        if (target instanceof BusyProperty bp) {
+            if (javafx.application.Platform.isFxApplicationThread()) bp.forceClear();
+            else javafx.application.Platform.runLater(bp::forceClear);
+        } else {
+            setBusySync(target, false);
+        }
+        setBusySync(GLOBAL_BUSY, false);
+    }
+
     public static void shutdown() {
         UI_POOL.shutdownNow();
         IO_POOL.shutdownNow();

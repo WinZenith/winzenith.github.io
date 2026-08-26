@@ -3,17 +3,21 @@ package com.sbtools.ui;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
+import com.sbtools.util.AppPaths;
+import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
+import javafx.scene.control.Label;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
-import javafx.scene.control.Label;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.VBox;
 
 import java.util.function.BooleanSupplier;
 
 public class NetworkOptimizerTabView extends BorderPane {
 
     private final NetworkOptimizerService service = new NetworkOptimizerService();
+    private final BooleanSupplier adminCheck;
     private final AdaptersPanel adaptersPanel;
     private final OptimizationPanel optimizationPanel;
     private final DnsCachePanel dnsCachePanel;
@@ -21,6 +25,7 @@ public class NetworkOptimizerTabView extends BorderPane {
     private final WiFiPanel wiFiPanel;
     private final ConnectionOverviewPanel connectionOverviewPanel;
     private final ChangeLogPanel changeLogPanel;
+    private final Label adminWarningLabel = new Label("Not running as Administrator — network changes (optimize, DNS, adapter enable/disable, reset, WoWlan forget) will fail. Right-click WinZenith.exe → Run as administrator.");
 
     public NetworkOptimizerTabView(BooleanProperty busy, BooleanSupplier adminCheck,
                                    SettingsStore settingsStore, AppSettings currentSettings) {
@@ -30,16 +35,23 @@ public class NetworkOptimizerTabView extends BorderPane {
     public NetworkOptimizerTabView(BooleanProperty busy, BooleanSupplier adminCheck,
                                    SettingsStore settingsStore, AppSettings currentSettings,
                                    java.util.function.Consumer<AppSettings> onSettingsSaved) {
+        this.adminCheck = adminCheck != null ? adminCheck : () -> false;
         Label statusLabel = new Label("Ready.");
+
+        adminWarningLabel.setWrapText(true);
+        adminWarningLabel.setMaxWidth(Double.MAX_VALUE);
+        adminWarningLabel.setStyle("-fx-padding: 6 16; -fx-background-color: #3d2e1a; -fx-text-fill: #ffb86c; -fx-font-size: 11px;");
+        adminWarningLabel.getStyleClass().addAll("label", "text-muted");
+        updateAdminWarning();
 
         TabPane tabPane = new TabPane();
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
-        adaptersPanel = new AdaptersPanel(service, busy);
-        optimizationPanel = new OptimizationPanel(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved);
-        dnsCachePanel = new DnsCachePanel(service, busy, statusLabel);
+        adaptersPanel = new AdaptersPanel(service, busy, this.adminCheck);
+        optimizationPanel = new OptimizationPanel(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved, this.adminCheck);
+        dnsCachePanel = new DnsCachePanel(service, busy, statusLabel, this.adminCheck);
         adapterSettingsPanel = new AdapterSettingsPanel(service, busy);
-        wiFiPanel = new WiFiPanel(service, busy);
+        wiFiPanel = new WiFiPanel(service, busy, this.adminCheck);
         connectionOverviewPanel = new ConnectionOverviewPanel(service, busy);
         changeLogPanel = new ChangeLogPanel(service, busy);
 
@@ -58,17 +70,20 @@ public class NetworkOptimizerTabView extends BorderPane {
 
         tabPane.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             if (sel == null) return;
-            if (sel == adaptersTab && adaptersPanel.lookup(".table-view") != null) {
+            if (sel == adaptersTab) {
                 adaptersPanel.loadAdapters();
             } else if (sel == optimizationTab) {
                 optimizationPanel.refreshPresetSelection();
+                updateAdminWarning();
             } else if (sel == dnsTab) {
                 dnsCachePanel.refreshAdapters();
+                updateAdminWarning();
             } else if (sel == adapterSettingsTab) {
                 adapterSettingsPanel.refreshAdapters();
             } else if (sel == wifiTab) {
                 wiFiPanel.loadCurrentInfo();
-                wiFiPanel.loadProfiles();
+                // loadProfiles() previously collided with busy flag; now safe with separate busy
+                Platform.runLater(wiFiPanel::loadProfiles);
             } else if (sel == connectionOverviewTab) {
                 connectionOverviewPanel.loadOverview();
             } else if (sel == changeHistoryTab) {
@@ -76,9 +91,30 @@ public class NetworkOptimizerTabView extends BorderPane {
             }
         });
 
-        setCenter(tabPane);
+        VBox topContainer = new VBox(adminWarningLabel, tabPane);
+        VBox.setVgrow(tabPane, javafx.scene.layout.Priority.ALWAYS);
+        setCenter(topContainer);
+
+        // Initial load after scene is ready
+        Platform.runLater(adaptersPanel::loadAdapters);
+    }
+
+    private void updateAdminWarning() {
+        boolean isWin = AppPaths.isWindows();
+        boolean isAdmin = false;
+        try { isAdmin = adminCheck.getAsBoolean(); } catch (Exception ignored) {}
+        boolean show = isWin && !isAdmin;
+        adminWarningLabel.setVisible(show);
+        adminWarningLabel.setManaged(show);
     }
 
     public void dispose() {
+        if (adaptersPanel != null) adaptersPanel.dispose();
+        if (optimizationPanel != null) optimizationPanel.dispose();
+        if (dnsCachePanel != null) dnsCachePanel.dispose();
+        if (adapterSettingsPanel != null) adapterSettingsPanel.dispose();
+        if (wiFiPanel != null) wiFiPanel.dispose();
+        if (connectionOverviewPanel != null) connectionOverviewPanel.dispose();
+        if (changeLogPanel != null) changeLogPanel.dispose();
     }
 }

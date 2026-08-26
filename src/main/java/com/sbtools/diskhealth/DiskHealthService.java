@@ -25,8 +25,29 @@ public class DiskHealthService {
             throw new UnsupportedOperationException("Disk health is only available on Windows.");
         }
         Path script = PowerShellScripts.resolve("disk-health.ps1");
-        ProcessResult result = processRunner.run(ProcessRunner.powershellScript(script.toString()));
+        ProcessResult result = null;
+        IOException lastIo = null;
+        for (List<String> cmd : List.of(ProcessRunner.powershellScript(script.toString()), ProcessRunner.pwshScript(script.toString()))) {
+            try {
+                result = processRunner.run(cmd);
+                break;
+            } catch (IOException e) {
+                String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                boolean missing = msg.contains("cannot run program") || msg.contains("no such file") || msg.contains("error=2");
+                if (missing && !cmd.get(0).equals("pwsh.exe")) {
+                    AppLogger.warning("DiskHealth: powershell.exe not found, trying pwsh.exe");
+                    lastIo = e;
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (result == null) {
+            if (lastIo != null) throw lastIo;
+            throw new IOException("Failed to get disk health: no PowerShell executable");
+        }
         if (!result.success()) {
+            AppLogger.error("disk-health.ps1 failed: " + result.combinedOutput());
             throw new IOException("Failed to get disk health: " + result.combinedOutput());
         }
         String json = result.stdout().trim();

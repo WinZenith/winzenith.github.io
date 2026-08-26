@@ -59,6 +59,8 @@ public class BackupRestoreTabView extends BorderPane {
     private DriverBackupService rollbackBackupService;
     private ObservableList<RestoreRow> rollbackRows;
     private Label rollbackStatusLabel;
+    private ProgressIndicator rollbackSpinner;
+    private TableView<RestoreRow> rollbackTable;
 
     public BackupRestoreTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -84,9 +86,9 @@ public class BackupRestoreTabView extends BorderPane {
         Button deleteAllButton = UIButton.danger("Delete All");
         TextField searchField = new TextField();
         searchField.setPromptText("Search backups...");
-        ProgressIndicator spinner = new ProgressIndicator();
-        spinner.setVisible(false);
-        spinner.setMaxSize(20, 20);
+        rollbackSpinner = new ProgressIndicator();
+        rollbackSpinner.setVisible(false);
+        rollbackSpinner.setMaxSize(20, 20);
 
         Tooltip.install(refreshButton, new Tooltip("Reload the backup list from disk"));
         Tooltip.install(deleteAllButton, new Tooltip("Remove all driver backups permanently"));
@@ -94,7 +96,14 @@ public class BackupRestoreTabView extends BorderPane {
         refreshButton.setOnAction(e -> refreshRollback());
         deleteAllButton.setOnAction(e -> deleteAllBackups());
 
-        HBox top = new HBox(12, refreshButton, deleteAllButton, spinner, searchField, rollbackStatusLabel);
+        // Disable buttons while busy (revert/delete) and keep table cells in sync
+        refreshButton.disableProperty().bind(busy);
+        deleteAllButton.disableProperty().bind(busy);
+        busy.addListener((obs, oldVal, newVal) -> {
+            if (rollbackTable != null) rollbackTable.refresh();
+        });
+
+        HBox top = new HBox(12, refreshButton, deleteAllButton, rollbackSpinner, searchField, rollbackStatusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -105,18 +114,22 @@ public class BackupRestoreTabView extends BorderPane {
             filteredList.setPredicate(row -> newVal == null || newVal.isBlank() || matches(row, newVal));
         });
 
-        TableView<RestoreRow> table = buildRollbackTable(sortedList);
-        sortedList.comparatorProperty().bind(table.comparatorProperty());
+        rollbackTable = buildRollbackTable(sortedList);
+        sortedList.comparatorProperty().bind(rollbackTable.comparatorProperty());
 
         BorderPane pane = new BorderPane();
         pane.setTop(top);
-        pane.setCenter(table);
+        pane.setCenter(rollbackTable);
 
         if (AppPaths.isWindows()) {
             refreshRollback();
         } else {
+            // On non-Windows keep disabled regardless of busy
+            refreshButton.disableProperty().unbind();
+            deleteAllButton.disableProperty().unbind();
             refreshButton.setDisable(true);
             deleteAllButton.setDisable(true);
+            rollbackStatusLabel.setText("Driver backup is available on Windows only.");
         }
 
         Tab tab = new Tab("Rollback drivers");
@@ -182,8 +195,9 @@ public class BackupRestoreTabView extends BorderPane {
                     setGraphic(null);
                 } else {
                     boolean isBusy = busy.get();
-                    revertBtn.setDisable(isBusy);
-                    deleteBtn.setDisable(isBusy);
+                    boolean win = AppPaths.isWindows();
+                    revertBtn.setDisable(isBusy || !win);
+                    deleteBtn.setDisable(isBusy || !win);
                     setGraphic(box);
                 }
             }
@@ -194,25 +208,40 @@ public class BackupRestoreTabView extends BorderPane {
     }
 
     private void refreshRollback() {
+        Platform.runLater(() -> {
+            if (rollbackSpinner != null) rollbackSpinner.setVisible(true);
+            rollbackStatusLabel.setText("Loading backups...");
+        });
         AppExecutors.ioPool().execute(() -> {
             try {
                 var entries = rollbackBackupService.listAll();
                 long totalBytes = rollbackBackupService.getTotalSize(entries);
                 ObservableList<RestoreRow> newRows = FXCollections.observableArrayList();
                 for (var e : entries) {
+                    // Filter null/invalid entries already done in service, but double-check
+                    if (e == null || e.id() == null) continue;
                     RestoreRow row = new RestoreRow(e);
                     newRows.add(row);
                 }
                 RestoreRow.computeAllSizesAsync(newRows);
                 String sizeStr = RestoreRow.formatFileSize(totalBytes);
+                String dirTmp = "";
+                try { dirTmp = new com.sbtools.settings.SettingsStore().load().backupDirectory(); } catch (Exception ignored) {}
+                if (dirTmp == null || dirTmp.isBlank()) dirTmp = AppPaths.backupsRoot().toString();
+                final String dirInfo = dirTmp;
                 Platform.runLater(() -> {
                     rollbackRows.setAll(newRows);
                     rollbackStatusLabel.setText(entries.isEmpty()
-                            ? "No backups yet. Backups are created automatically before driver updates."
+                            ? "No backups yet. Backups are created automatically before driver updates. (" + dirInfo + ")"
                             : entries.size() + " backup(s) available \u2014 " + sizeStr + " total");
+                    if (rollbackSpinner != null) rollbackSpinner.setVisible(false);
                 });
             } catch (Exception ex) {
-                Platform.runLater(() -> rollbackStatusLabel.setText("Failed to load backups: " + ex.getMessage()));
+                AppLogger.error("Failed to load backups", ex);
+                Platform.runLater(() -> {
+                    rollbackStatusLabel.setText("Failed to load backups: " + ex.getMessage());
+                    if (rollbackSpinner != null) rollbackSpinner.setVisible(false);
+                });
             }
         });
     }
@@ -357,7 +386,14 @@ public class BackupRestoreTabView extends BorderPane {
             spinner.setVisible(newVal);
         });
 
-        scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
+        if (AppPaths.isWindows()) {
+            scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
+        } else {
+            statusLabel.setText("System Restore is available on Windows only.");
+            scanButton.setDisable(true);
+            createButton.setDisable(true);
+            launchButton.setDisable(true);
+        }
 
         Tab tab = new Tab("System restore");
         tab.setContent(pane);
@@ -429,6 +465,8 @@ public class BackupRestoreTabView extends BorderPane {
         if (localBusy.get()) return;
         localBusy.set(true);
         statusLabel.setText("Scanning restore points...");
+        // Keep snapshot to restore on failure so UI doesn't lose previous data
+        List<SystemRestoreRow> snapshot = new ArrayList<>(rows);
         rows.clear();
 
         AppExecutors.ioPool().execute(() -> {
@@ -436,13 +474,26 @@ public class BackupRestoreTabView extends BorderPane {
                 List<SystemRestoreRow> results = service.listRestorePoints();
                 Platform.runLater(() -> {
                     rows.setAll(results);
-                    statusLabel.setText(results.size() + " restore point(s) found.");
+                    if (results.isEmpty()) {
+                        statusLabel.setText("No restore points found. Create one or ensure System Protection is enabled.");
+                    } else {
+                        statusLabel.setText(results.size() + " restore point(s) found.");
+                    }
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to scan restore points", e);
                 Platform.runLater(() -> {
-                    statusLabel.setText("Scan failed.");
-                    new Alert(Alert.AlertType.ERROR, "Failed to scan restore points:\n" + e.getMessage()).showAndWait();
+                    // Restore previous data on failure
+                    rows.setAll(snapshot);
+                    String msg = e.getMessage() != null ? e.getMessage() : "Unknown error";
+                    if (msg.toLowerCase().contains("access denied") || msg.toLowerCase().contains("administrator")) {
+                        statusLabel.setText("Scan failed: Access denied (run as Administrator).");
+                    } else if (msg.toLowerCase().contains("protection")) {
+                        statusLabel.setText("Scan failed: System Protection disabled.");
+                    } else {
+                        statusLabel.setText("Scan failed: " + msg);
+                    }
+                    new Alert(Alert.AlertType.ERROR, "Failed to scan restore points:\n" + msg).showAndWait();
                 });
             } finally {
                 Platform.runLater(() -> localBusy.set(false));
@@ -474,7 +525,9 @@ public class BackupRestoreTabView extends BorderPane {
 
         AppExecutors.ioPool().execute(() -> {
             try {
-                boolean ok = service.createRestorePoint(desc).success();
+                var result = service.createRestorePoint(desc);
+                boolean ok = result.success();
+                String err = result.error();
                 Platform.runLater(() -> {
                     if (ok) {
                         statusLabel.setText("Restore point created.");
@@ -482,9 +535,19 @@ public class BackupRestoreTabView extends BorderPane {
                                 "Restore point '" + desc + "' created successfully.").showAndWait();
                     } else {
                         statusLabel.setText("Failed to create restore point.");
-                        new Alert(Alert.AlertType.ERROR,
-                                "Failed to create restore point. Ensure System Protection is enabled for your system drive.")
-                                .showAndWait();
+                        String msg = "Failed to create restore point.";
+                        if (err != null && !err.isBlank()) {
+                            if (err.contains("FREQUENCY_LIMIT")) {
+                                msg = "A restore point was already created within the last 24 hours.\nWindows limits creation to once per 24 hours by default.\n\n" + err;
+                            } else if (err.contains("PROTECTION_DISABLED")) {
+                                msg = "System Protection is disabled for your system drive.\nEnable it in System Properties -> System Protection.\n\n" + err;
+                            } else {
+                                msg += "\n\n" + err;
+                            }
+                        } else {
+                            msg += "\nEnsure System Protection is enabled for your system drive.";
+                        }
+                        new Alert(Alert.AlertType.ERROR, msg).showAndWait();
                     }
                 });
             } catch (Exception e) {
@@ -527,6 +590,8 @@ public class BackupRestoreTabView extends BorderPane {
         ProgressIndicator spinner = new ProgressIndicator();
         spinner.setVisible(false);
         spinner.setMaxSize(20, 20);
+        // Bind spinner visibility to registryBusy
+        registryBusy.addListener((obs, oldV, newV) -> spinner.setVisible(Boolean.TRUE.equals(newV)));
         TableView<RegistryBackupRow> table = buildRegistryBackupTable(rows);
 
         UIButton backupNowBtn = UIButton.primary("Backup Now");
@@ -542,8 +607,17 @@ public class BackupRestoreTabView extends BorderPane {
 
         table.getSelectionModel().selectedItemProperty().addListener((obs, oldSel, newSel) -> {
             boolean hasSel = newSel != null;
-            restoreBtn.setDisable(!hasSel);
-            deleteBtn.setDisable(!hasSel);
+            // Keep disabled when busy
+            boolean busyNow = registryBusy.get();
+            restoreBtn.setDisable(!hasSel || busyNow);
+            deleteBtn.setDisable(!hasSel || busyNow);
+        });
+        registryBusy.addListener((obs, oldV, newV) -> {
+            boolean busyNow = Boolean.TRUE.equals(newV);
+            boolean hasSel = table.getSelectionModel().getSelectedItem() != null;
+            backupNowBtn.setDisable(busyNow);
+            restoreBtn.setDisable(!hasSel || busyNow);
+            deleteBtn.setDisable(!hasSel || busyNow);
         });
 
         backupNowBtn.setOnAction(e -> backupRegistry(rows, statusLabel));
@@ -558,6 +632,7 @@ public class BackupRestoreTabView extends BorderPane {
         FilteredList<RegistryBackupRow> filteredList = new FilteredList<>(rows);
         SortedList<RegistryBackupRow> sortedList = new SortedList<>(filteredList);
         sortedList.comparatorProperty().bind(table.comparatorProperty());
+        table.setItems(sortedList);
 
         VBox center = new VBox(8, table);
         center.setPadding(new Insets(12, 16, 12, 16));
@@ -648,6 +723,7 @@ public class BackupRestoreTabView extends BorderPane {
     }
 
     private void backupRegistry(ObservableList<RegistryBackupRow> rows, Label statusLabel) {
+        if (registryBusy.get()) return;
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING,
                     "Registry backup requires administrator rights.").showAndWait();
@@ -762,6 +838,7 @@ public class BackupRestoreTabView extends BorderPane {
 
     private void restoreRegistryBackup(TableView<RegistryBackupRow> table,
                                         ObservableList<RegistryBackupRow> rows, Label statusLabel) {
+        if (registryBusy.get()) return;
         RegistryBackupRow selected = table.getSelectionModel().getSelectedItem();
         if (selected == null) return;
 
@@ -843,6 +920,7 @@ public class BackupRestoreTabView extends BorderPane {
 
     private void deleteRegistryBackup(TableView<RegistryBackupRow> table,
                                        ObservableList<RegistryBackupRow> rows, Label statusLabel) {
+        if (registryBusy.get()) return;
         RegistryBackupRow selected = table.getSelectionModel().getSelectedItem();
         if (selected == null) return;
 
@@ -858,18 +936,26 @@ public class BackupRestoreTabView extends BorderPane {
         confirm.setContentText("This will permanently delete all registry backup files in this session.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
 
-        try {
-            Path dirPath = resolveRegistryBackupPath(selected.getFilename());
-            if (Files.isDirectory(dirPath)) {
-                deleteDirectoryRecursive(dirPath);
+        registryBusy.set(true);
+        statusLabel.setText("Deleting backup...");
+        AppExecutors.ioPool().execute(() -> {
+            try {
+                Path dirPath = resolveRegistryBackupPath(selected.getFilename());
+                if (Files.isDirectory(dirPath)) {
+                    deleteDirectoryRecursive(dirPath);
+                }
+                Platform.runLater(() -> {
+                    rows.remove(selected);
+                    statusLabel.setText("Backup session deleted.");
+                });
+            } catch (Exception e) {
+                AppLogger.error("Failed to delete registry backup", e);
+                Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
+                        "Failed to delete backup:\n" + e.getMessage()).showAndWait());
+            } finally {
+                Platform.runLater(() -> registryBusy.set(false));
             }
-            rows.remove(selected);
-            statusLabel.setText("Backup session deleted.");
-        } catch (Exception e) {
-            AppLogger.error("Failed to delete registry backup", e);
-            new Alert(Alert.AlertType.ERROR,
-                    "Failed to delete backup:\n" + e.getMessage()).showAndWait();
-        }
+        });
     }
 
     private static void deleteDirectoryRecursive(Path directory) throws IOException {

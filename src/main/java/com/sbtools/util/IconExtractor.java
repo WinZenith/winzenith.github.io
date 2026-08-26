@@ -58,6 +58,9 @@ public class IconExtractor {
         WinGDI.ICONINFO iconInfo = new WinGDI.ICONINFO();
         if (!User32.INSTANCE.GetIconInfo(hicon, iconInfo)) return null;
 
+        WinNT.HDC hdc = null;
+        WinNT.HDC memDC = null;
+        WinNT.HANDLE oldBitmap = null;
         try {
             if (iconInfo.hbmColor == null) return null;
 
@@ -80,15 +83,14 @@ public class IconExtractor {
             int imageSize = width * height * 4;
             Memory colorBuffer = new Memory(imageSize);
 
-            WinNT.HDC hdc = User32.INSTANCE.GetDC(null);
-            WinNT.HDC memDC = GDI32.INSTANCE.CreateCompatibleDC(hdc);
+            hdc = User32.INSTANCE.GetDC(null);
+            memDC = GDI32.INSTANCE.CreateCompatibleDC(hdc);
+            if (memDC == null) return null;
 
             WinNT.HANDLE hColorHandle = new WinNT.HANDLE(iconInfo.hbmColor.getPointer());
-            WinNT.HANDLE oldBitmap = GDI32.INSTANCE.SelectObject(memDC, hColorHandle);
-            GDI32.INSTANCE.GetDIBits(memDC, iconInfo.hbmColor, 0, height, colorBuffer, bi, WinGDI.DIB_RGB_COLORS);
-            GDI32.INSTANCE.SelectObject(memDC, oldBitmap);
-            GDI32.INSTANCE.DeleteDC(memDC);
-            User32.INSTANCE.ReleaseDC(null, hdc);
+            oldBitmap = GDI32.INSTANCE.SelectObject(memDC, hColorHandle);
+            int lines = GDI32.INSTANCE.GetDIBits(memDC, iconInfo.hbmColor, 0, height, colorBuffer, bi, WinGDI.DIB_RGB_COLORS);
+            if (lines == 0) return null;
 
             BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
 
@@ -107,8 +109,17 @@ public class IconExtractor {
 
             return image;
         } finally {
-            if (iconInfo.hbmColor != null) GDI32.INSTANCE.DeleteObject(iconInfo.hbmColor);
-            if (iconInfo.hbmMask != null) GDI32.INSTANCE.DeleteObject(iconInfo.hbmMask);
+            if (memDC != null) {
+                try {
+                    if (oldBitmap != null) GDI32.INSTANCE.SelectObject(memDC, oldBitmap);
+                } catch (Exception ignored) {}
+                try { GDI32.INSTANCE.DeleteDC(memDC); } catch (Exception ignored) {}
+            }
+            if (hdc != null) {
+                try { User32.INSTANCE.ReleaseDC(null, hdc); } catch (Exception ignored) {}
+            }
+            if (iconInfo.hbmColor != null) try { GDI32.INSTANCE.DeleteObject(iconInfo.hbmColor); } catch (Exception ignored) {}
+            if (iconInfo.hbmMask != null) try { GDI32.INSTANCE.DeleteObject(iconInfo.hbmMask); } catch (Exception ignored) {}
         }
     }
 

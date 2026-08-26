@@ -260,6 +260,63 @@ public class WingetRunner {
         return lastResult;
     }
 
+    public ProcessResult runWithFallback(long timeoutSeconds, java.util.concurrent.atomic.AtomicBoolean cancelled, String... args) throws java.io.IOException, InterruptedException {
+        if (cancelled != null && cancelled.get()) throw new java.util.concurrent.CancellationException("Cancelled");
+        List<List<String>> candidates = buildCandidates(args);
+        ProcessResult lastResult = null;
+        Exception lastEx = null;
+        int startIdx = workingCandidateIndex >= 0 && workingCandidateIndex < candidates.size() ? workingCandidateIndex : 0;
+        for (int attempt = 0; attempt < candidates.size(); attempt++) {
+            if (cancelled != null && cancelled.get()) throw new java.util.concurrent.CancellationException("Cancelled");
+            int idx = (startIdx + attempt) % candidates.size();
+            List<String> candidate = candidates.get(idx);
+            try {
+                ProcessResult r = runner.run(candidate, timeoutSeconds, cancelled);
+                if (r.success()) {
+                    workingCandidateIndex = idx;
+                    return r;
+                }
+                lastResult = r;
+            } catch (java.util.concurrent.CancellationException ce) {
+                throw ce;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw e;
+            } catch (Exception ex) {
+                lastEx = ex;
+                if (cancelled != null && cancelled.get()) throw new java.util.concurrent.CancellationException("Cancelled");
+            }
+        }
+        if (lastEx instanceof java.io.IOException) throw (java.io.IOException) lastEx;
+        if (lastEx instanceof InterruptedException) throw (InterruptedException) lastEx;
+        return lastResult;
+    }
+
+    public ProcessResult runWithFallback(long timeoutSeconds, java.util.function.BooleanSupplier cancelledSupplier, String... args) {
+        if (cancelledSupplier == null) {
+            try { return runWithFallback(timeoutSeconds, (java.util.concurrent.atomic.AtomicBoolean) null, args); } catch (Exception e) { throw new RuntimeException(e); }
+        }
+        if (cancelledSupplier instanceof java.util.concurrent.atomic.AtomicBoolean ab) {
+            try { return runWithFallback(timeoutSeconds, ab, args); } catch (Exception e) { throw new RuntimeException(e); }
+        }
+        java.util.concurrent.atomic.AtomicBoolean wrapper = new java.util.concurrent.atomic.AtomicBoolean(cancelledSupplier.getAsBoolean());
+        Thread monitor = new Thread(() -> {
+            while (!wrapper.get() && !Thread.currentThread().isInterrupted()) {
+                try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                try { if (cancelledSupplier.getAsBoolean()) wrapper.set(true); } catch (Exception ignored) {}
+            }
+        }, "winget-cancel-monitor");
+        monitor.setDaemon(true);
+        monitor.start();
+        try {
+            return runWithFallback(timeoutSeconds, wrapper, args);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            monitor.interrupt();
+        }
+    }
+
     /**
      * Runs a winget command in streaming mode with automatic fallback across candidates.
      * Calls lineCallback for each output line and progressCallback for progress updates.

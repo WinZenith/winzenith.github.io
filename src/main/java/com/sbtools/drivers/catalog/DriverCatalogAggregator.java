@@ -81,6 +81,20 @@ public class DriverCatalogAggregator {
         }
     }
 
+    public void clearCacheForProvider(String providerId) {
+        if (cache != null) {
+            cache.clear(providerId);
+        }
+    }
+
+    /**
+     * Clears the Windows Update cache specifically — used after install attempts
+     * so the next scan reflects the current WU state rather than stale 30m cache.
+     */
+    public void clearWindowsUpdateCache() {
+        clearCacheForProvider("WindowsUpdate");
+    }
+
     /**
      * Filters providers to only those relevant to the installed drivers.
      * OEM providers are skipped if no installed driver matches their vendor.

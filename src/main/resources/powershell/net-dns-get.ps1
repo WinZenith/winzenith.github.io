@@ -1,7 +1,9 @@
 param([string]$AdapterName)
 
 try {
-    $dnsServers = Get-DnsClientServerAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction Stop
+    # Escape wildcard chars in adapter name to prevent matching all adapters (e.g., "*" -> literal "*")
+    $escapedAlias = [WildcardPattern]::Escape($AdapterName)
+    $dnsServers = Get-DnsClientServerAddress -InterfaceAlias $escapedAlias -AddressFamily IPv4 -ErrorAction Stop
     $addresses = @()
     foreach ($entry in $dnsServers) {
         if ($entry.ServerAddresses) {

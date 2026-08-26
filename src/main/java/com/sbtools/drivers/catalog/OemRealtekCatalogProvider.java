@@ -98,27 +98,34 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
         AppLogger.info("Realtek: Resolving direct download URL for " + driver.friendlyName());
 
         String categoryUrl = detectCategoryUrl(driver);
-        String body = httpGet(categoryUrl);
-        if (body == null) {
-            AppLogger.warning("Realtek: Could not fetch download page");
-            return null;
+        // Try category-specific page first, then generic vendorPageUrl, then fallback to passed vendorPageUrl
+        String[] urlsToTry = new String[]{categoryUrl, getVendorPageUrl(driver), vendorPageUrl};
+        for (String tryUrl : urlsToTry) {
+            if (tryUrl == null || tryUrl.isBlank()) continue;
+            String body = httpGet(tryUrl);
+            if (body == null) continue;
+
+            java.util.regex.Pattern linkPattern = java.util.regex.Pattern.compile(
+                    "href\\s*=\\s*\"([^\"]+\\.(?:exe|zip|msi))\"", java.util.regex.Pattern.CASE_INSENSITIVE);
+            java.util.regex.Matcher m = linkPattern.matcher(body);
+            while (m.find()) {
+                String url = decodeHtmlEntities(m.group(1));
+                if (url.startsWith("//")) {
+                    url = "https:" + url;
+                } else if (url.startsWith("/")) {
+                    url = "https://www.realtek.com" + url;
+                }
+                if (url.toLowerCase().contains("realtek.com") && !url.contains("DownloadList") && isLikelyStable(url)) {
+                    AppLogger.info("Realtek: Found download URL: " + url);
+                    return url;
+                }
+            }
         }
 
-        java.util.regex.Pattern linkPattern = java.util.regex.Pattern.compile(
-                "href\\s*=\\s*\"([^\"]+\\.(?:exe|zip))\"", java.util.regex.Pattern.CASE_INSENSITIVE);
-        java.util.regex.Matcher m = linkPattern.matcher(body);
-        while (m.find()) {
-            String url = m.group(1);
-            if (url.startsWith("//")) {
-                url = "https:" + url;
-            } else if (url.startsWith("/")) {
-                url = "https://www.realtek.com" + url;
-            }
-            if (url.contains("realtek.com") && !url.contains("DownloadList")) {
-                AppLogger.info("Realtek: Found download URL: " + url);
-                return url;
-            }
-        }
+        AppLogger.info("Realtek: No direct download found via category pages, trying generic scrape fallback");
+        // Fallback to generic AbstractOemCatalogProvider logic (vendorPageUrl)
+        String fallback = super.resolveDirectDownloadUrl(driver, vendorPageUrl);
+        if (fallback != null) return fallback;
 
         AppLogger.info("Realtek: No direct download found, user will be directed to vendor website");
         return null;

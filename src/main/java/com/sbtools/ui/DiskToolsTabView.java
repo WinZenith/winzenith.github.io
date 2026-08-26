@@ -52,10 +52,7 @@ import javafx.stage.FileChooser;
 import java.io.File;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -95,6 +92,8 @@ public class DiskToolsTabView extends BorderPane {
     private final Button stopBtn = new Button("Stop");
     private final ProgressBar defragProgress = new ProgressBar(0);
     private final Label defragStatus = new Label("Select drives and click Analyze Selected.");
+    private final Button refreshDrivesBtn = new Button("Refresh");
+    private final Label emptyDrivesLabel = new Label("No drives detected. Click Refresh to retry.");
     private Thread currentDefragThread;
     private Thread currentAnalyzeThread;
     private final Canvas blockCanvas = new Canvas(400, 200);
@@ -150,6 +149,7 @@ public class DiskToolsTabView extends BorderPane {
     /* ───── Disk Health tab components ───── */
     private final ComboBox<String> healthDriveCombo = new ComboBox<>();
     private final ObservableList<DiskHealthInfo> healthDrives = FXCollections.observableArrayList();
+    private final Map<String, DiskHealthInfo> healthDriveMap = new HashMap<>();
     private final Button refreshHealthBtn = new Button("Refresh");
     private final ProgressBar healthProgress = new ProgressBar(0);
     private final Label healthStatus = new Label("Click Refresh to load disk health data.");
@@ -159,6 +159,7 @@ public class DiskToolsTabView extends BorderPane {
 
     /* ───── Benchmark tab components ───── */
     private final ComboBox<String> benchDriveCombo = new ComboBox<>();
+    private final Map<String, DriveInfo> benchDriveMap = new HashMap<>();
     private final ComboBox<String> benchSizeCombo = new ComboBox<>(
             FXCollections.observableArrayList("32 MB", "64 MB", "128 MB", "256 MB"));
     private final Button benchStartBtn = new Button("Start Benchmark");
@@ -224,11 +225,22 @@ public class DiskToolsTabView extends BorderPane {
         stopBtn.setVisible(false);
         stopBtn.setOnAction(e -> stopDefragOperation());
 
+        refreshDrivesBtn.getStyleClass().add("accent");
+        refreshDrivesBtn.setTooltip(new Tooltip("Refresh drive list"));
+        refreshDrivesBtn.setOnAction(e -> loadDrives());
+
         analyzeBtn.setOnAction(e -> startAnalyze());
         intelligentDefragBtn.setOnAction(e -> startIntelligentDefrag());
 
+        emptyDrivesLabel.getStyleClass().addAll("label", "text-muted");
+        emptyDrivesLabel.setWrapText(true);
+        emptyDrivesLabel.setVisible(false);
+        emptyDrivesLabel.setManaged(false);
+        emptyDrivesLabel.setPadding(new Insets(8, 0, 8, 0));
+        emptyDrivesLabel.setStyle("-fx-font-size: 12px;");
+
         HBox defragToolbar = new HBox(8,
-                selectAllCheck, new Label("Filter:"), filterCombo,
+                refreshDrivesBtn, selectAllCheck, new Label("Filter:"), filterCombo,
                 analyzeBtn, intelligentDefragBtn, defragModeCombo,
                 stopBtn, defragProgress, defragStatus);
         defragToolbar.setAlignment(Pos.CENTER_LEFT);
@@ -237,7 +249,7 @@ public class DiskToolsTabView extends BorderPane {
 
         buildDriveTable();
 
-        VBox center = new VBox(4, driveTable);
+        VBox center = new VBox(4, driveTable, emptyDrivesLabel);
         center.setPadding(new Insets(8, 16, 4, 16));
 
         visualizationPanel.setPadding(new Insets(4, 16, 12, 16));
@@ -257,6 +269,7 @@ public class DiskToolsTabView extends BorderPane {
 
         defragBusy.addListener((obs, oldVal, newVal) -> {
             stopBtn.setVisible(newVal);
+            refreshDrivesBtn.setDisable(newVal);
             if (newVal) {
                 stopBtn.setDisable(false);
                 analyzeBtn.setDisable(true);
@@ -392,6 +405,21 @@ public class DiskToolsTabView extends BorderPane {
         } else {
             filteredDrives.setPredicate(d -> filter.equalsIgnoreCase(d.getMediaType()));
         }
+        // If filter hides everything but drives exist, hint user
+        if (!allDrives.isEmpty() && filteredDrives.isEmpty()) {
+            emptyDrivesLabel.setText("No drives match filter '" + filter + "'. Switch filter to 'All' to see " + allDrives.size() + " drive(s).");
+            emptyDrivesLabel.setVisible(true);
+            emptyDrivesLabel.setManaged(true);
+        } else if (allDrives.isEmpty()) {
+            updateEmptyDrivesState();
+        } else {
+            // drives exist and filtered not empty -> hide filter-empty hint, but keep enumeration-empty logic
+            if (emptyDrivesLabel.getText() != null && emptyDrivesLabel.getText().contains("No drives match filter")) {
+                emptyDrivesLabel.setVisible(false);
+                emptyDrivesLabel.setManaged(false);
+            }
+        }
+        updateTableHeight();
     }
 
     private BooleanProperty createDriveSelectedProp(String driveLetter) {
@@ -411,9 +439,12 @@ public class DiskToolsTabView extends BorderPane {
     private void loadDrives() {
         analyzeBtn.setDisable(true);
         intelligentDefragBtn.setDisable(true);
+        refreshDrivesBtn.setDisable(true);
         defragProgress.setVisible(true);
         defragProgress.setProgress(-1);
         defragStatus.setText("Loading drives...");
+        emptyDrivesLabel.setVisible(false);
+        emptyDrivesLabel.setManaged(false);
 
         new Thread(() -> {
             try {
@@ -422,28 +453,67 @@ public class DiskToolsTabView extends BorderPane {
                     analyzedDrives.clear();
                     lastAnalyzed.clear();
                     lastDefragged.clear();
+                    // Prune selection maps of stale letters
+                    driveSelected.keySet().retainAll(drives.stream().map(DriveInfo::getDriveLetter).toList());
+                    wipeSelected.keySet().retainAll(drives.stream().map(DriveInfo::getDriveLetter).toList());
                     allDrives.setAll(drives);
                     wipeDrives.setAll(drives);
                     driveTable.refresh();
+                    wipeDriveTable.refresh();
                     benchDriveCombo.getItems().clear();
+                    benchDriveMap.clear();
                     for (DriveInfo d : drives) {
                         String display = d.getDriveLetter() + " - " + d.getVolumeLabel()
                                 + " (" + d.getMediaType() + ", " + d.getSizeFormatted() + ")";
-                        benchDriveCombo.getItems().add(display);
+                        // Ensure unique keys if two volumes share same label/size (unlikely but safe)
+                        String key = display;
+                        int dup = 1;
+                        while (benchDriveMap.containsKey(key)) key = display + " #" + (++dup);
+                        benchDriveMap.put(key, d);
+                        benchDriveCombo.getItems().add(key);
                     }
+                    if (!benchDriveCombo.getItems().isEmpty() && benchDriveCombo.getSelectionModel().getSelectedItem() == null) {
+                        benchDriveCombo.getSelectionModel().select(0);
+                    }
+                    updateBenchStartButton();
                     defragProgress.setVisible(false);
-                    defragStatus.setText("Found " + drives.size() + " drive(s). Select drives and click Analyze Selected.");
+                    refreshDrivesBtn.setDisable(false);
+                    if (drives.isEmpty()) {
+                        defragStatus.setText("No drives detected. Check connections or click Refresh. See logs/drive-enum-last.json for details.");
+                        emptyDrivesLabel.setText("No drives detected. This can happen if the Storage service is busy, drivers are missing, or all volumes are hidden. Click Refresh to retry. If the problem persists, check " + AppPaths.logsDir().resolve("drive-enum-last.json"));
+                        emptyDrivesLabel.setVisible(true);
+                        emptyDrivesLabel.setManaged(true);
+                        AppLogger.warning("loadDrives: enumeration returned 0 drives");
+                    } else {
+                        defragStatus.setText("Found " + drives.size() + " drive(s). Select drives and click Analyze Selected.");
+                        emptyDrivesLabel.setVisible(false);
+                        emptyDrivesLabel.setManaged(false);
+                    }
                     updateDefragButtons();
+                    updateWipeStartButton();
+                    updateTableHeight();
+                    applyFilter();
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to load drives", e);
                 Platform.runLater(() -> {
                     defragProgress.setVisible(false);
-                    defragStatus.setText("Failed to load drives.");
-                    new Alert(Alert.AlertType.ERROR, "Failed to load drives:\n" + e.getMessage()).showAndWait();
+                    refreshDrivesBtn.setDisable(false);
+                    defragStatus.setText("Failed to load drives — click Refresh to retry.");
+                    emptyDrivesLabel.setText("Failed to load drives: " + (e.getMessage() != null ? e.getMessage() : "Unknown error") + ". Click Refresh to retry. Details logged to app.log");
+                    emptyDrivesLabel.setVisible(true);
+                    emptyDrivesLabel.setManaged(true);
+                    updateDefragButtons();
+                    new Alert(Alert.AlertType.ERROR, "Failed to load drives:\n" + e.getMessage() + "\n\nClick Refresh to retry.").showAndWait();
                 });
             }
         }, "load-drives").start();
+    }
+
+    private void updateEmptyDrivesState() {
+        boolean isEmpty = filteredDrives.isEmpty() && allDrives.isEmpty();
+        emptyDrivesLabel.setVisible(isEmpty);
+        emptyDrivesLabel.setManaged(isEmpty);
     }
 
     private void stopDefragOperation() {
@@ -613,6 +683,7 @@ public class DiskToolsTabView extends BorderPane {
         Instant startTime = Instant.now();
 
         currentDefragThread = new Thread(() -> {
+            List<String> failedDrives = new ArrayList<>();
             try {
                 for (int i = 0; i < selected.size(); i++) {
                     DriveInfo driveCopy = selected.get(i);
@@ -623,48 +694,58 @@ public class DiskToolsTabView extends BorderPane {
                     int current = driveIndex + 1;
                     int total = selected.size();
 
-                    String modeLabel;
-                    String statusPrefix;
-                    if (driveCopy.isSsd()) {
-                        modeLabel = "Trim";
-                        statusPrefix = "Trim on " + letter;
-                        Platform.runLater(() -> defragStatus.setText(statusPrefix + "... (" + current + "/" + total + ")"));
-                        defragService.trim(driveCopy,
-                                msg -> Platform.runLater(() -> defragStatus.setText(msg)),
-                                pct -> Platform.runLater(() -> {
-                                    defragProgress.setProgress(pct);
-                                    defragStatus.setText("Trim " + letter + " " + Math.round(pct * 100) + "%");
-                                }),
-                                defragCancelled);
-                    } else {
-                        DefragService.DefragOption option = resolveDefragOption(defragMode, driveCopy);
-                        String hddModeLabel = switch (option) {
-                            case FAST -> "Quick Defrag";
-                            case FREE_SPACE -> "Free Space Consolidation";
-                            default -> "Full Defrag";
-                        };
-                        modeLabel = hddModeLabel;
-                        statusPrefix = hddModeLabel + " on " + letter;
-                        Platform.runLater(() -> defragStatus.setText(statusPrefix + "... (" + current + "/" + total + ")"));
-                        defragService.defrag(driveCopy, option,
-                                msg -> Platform.runLater(() -> defragStatus.setText(msg)),
-                                pct -> Platform.runLater(() -> {
-                                    defragProgress.setProgress(pct);
-                                    defragStatus.setText(hddModeLabel + " " + letter + " " + Math.round(pct * 100) + "%");
-                                }),
-                                defragCancelled);
+                    try {
+                        if (driveCopy.isSsd()) {
+                            String statusPrefix = "Trim on " + letter;
+                            Platform.runLater(() -> defragStatus.setText(statusPrefix + "... (" + current + "/" + total + ")"));
+                            defragService.trim(driveCopy,
+                                    msg -> Platform.runLater(() -> defragStatus.setText(msg)),
+                                    pct -> Platform.runLater(() -> {
+                                        defragProgress.setProgress(pct);
+                                        defragStatus.setText("Trim " + letter + " " + Math.round(pct * 100) + "%");
+                                    }),
+                                    defragCancelled);
+                        } else {
+                            DefragService.DefragOption option = resolveDefragOption(defragMode, driveCopy);
+                            String hddModeLabel = switch (option) {
+                                case FAST -> "Quick Defrag";
+                                case FREE_SPACE -> "Free Space Consolidation";
+                                default -> "Full Defrag";
+                            };
+                            String statusPrefix = hddModeLabel + " on " + letter;
+                            Platform.runLater(() -> defragStatus.setText(statusPrefix + "... (" + current + "/" + total + ")"));
+                            defragService.defrag(driveCopy, option,
+                                    msg -> Platform.runLater(() -> defragStatus.setText(msg)),
+                                    pct -> Platform.runLater(() -> {
+                                        defragProgress.setProgress(pct);
+                                        defragStatus.setText(hddModeLabel + " " + letter + " " + Math.round(pct * 100) + "%");
+                                    }),
+                                    defragCancelled);
+                        }
+                        lastDefragged.put(letter, Instant.now());
+                    } catch (Exception driveEx) {
+                        if (defragCancelled.get() || driveEx instanceof java.util.concurrent.CancellationException) throw driveEx;
+                        AppLogger.error("Defrag failed for " + letter, driveEx);
+                        failedDrives.add(letter + ": " + driveEx.getMessage());
+                        Platform.runLater(() -> defragStatus.setText("Failed on " + letter + ": " + driveEx.getMessage()));
+                        try { Thread.sleep(800); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw new java.util.concurrent.CancellationException(); }
+                        continue;
                     }
-
-                    lastDefragged.put(letter, Instant.now());
 
                     Platform.runLater(() -> driveTable.refresh());
                 }
                 Platform.runLater(() -> {
                     defragProgress.setProgress(1);
                     String elapsed = formatElapsed(Duration.between(startTime, Instant.now()));
-                    defragStatus.setText("Intelligent Defrag completed (" + elapsed + ").");
-                    new Alert(Alert.AlertType.INFORMATION,
-                            "Intelligent Defrag completed successfully.\nElapsed: " + elapsed).showAndWait();
+                    if (failedDrives.isEmpty()) {
+                        defragStatus.setText("Intelligent Defrag completed (" + elapsed + ").");
+                        new Alert(Alert.AlertType.INFORMATION,
+                                "Intelligent Defrag completed successfully.\nElapsed: " + elapsed).showAndWait();
+                    } else {
+                        defragStatus.setText("Intelligent Defrag completed with errors (" + elapsed + ").");
+                        new Alert(Alert.AlertType.WARNING,
+                                "Intelligent Defrag completed with errors:\n" + String.join("\n", failedDrives) + "\n\nElapsed: " + elapsed).showAndWait();
+                    }
                 });
             } catch (java.util.concurrent.CancellationException e) {
                 Platform.runLater(() -> defragStatus.setText("Intelligent Defrag cancelled."));
@@ -789,10 +870,18 @@ public class DiskToolsTabView extends BorderPane {
                     smartctlAvailable = result.smartctlAvailable();
                     healthDrives.setAll(result.drives());
                     healthDriveCombo.getItems().clear();
+                    healthDriveMap.clear();
                     for (DiskHealthInfo d : result.drives()) {
-                        String display = d.getDriveLetter().isEmpty()
+                        String base = d.getDriveLetter().isEmpty()
                                 ? d.getModel() + " (" + d.getMediaType() + ")"
                                 : d.getDriveLetter() + " - " + d.getModel();
+                        // Ensure unique display key even if models duplicate
+                        String display = base;
+                        int dup = 1;
+                        while (healthDriveMap.containsKey(display)) {
+                            display = base + " #" + (++dup);
+                        }
+                        healthDriveMap.put(display, d);
                         healthDriveCombo.getItems().add(display);
                     }
                     if (!healthDriveCombo.getItems().isEmpty()) {
@@ -816,6 +905,9 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private DiskHealthInfo findHealthInfo(String display) {
+        DiskHealthInfo mapped = healthDriveMap.get(display);
+        if (mapped != null) return mapped;
+        // Fallback legacy logic for robustness
         for (DiskHealthInfo d : healthDrives) {
             String letter = d.getDriveLetter();
             if (!letter.isEmpty() && display.startsWith(letter + " - ") && display.contains(d.getModel())) {
@@ -1062,17 +1154,25 @@ public class DiskToolsTabView extends BorderPane {
         String selected = benchDriveCombo.getSelectionModel().getSelectedItem();
         if (selected == null) return;
 
-        String rawSelection = selected.trim();
-        String extracted;
-        if (rawSelection.contains(" - ")) {
-            extracted = rawSelection.substring(0, rawSelection.indexOf(" - ")).trim();
+        // Prefer map lookup (volumeLabel may contain " - "); fallback to legacy parsing for compatibility
+        String driveLetter;
+        DriveInfo mapped = benchDriveMap.get(selected);
+        if (mapped != null) {
+            driveLetter = mapped.getDriveLetter();
         } else {
-            extracted = rawSelection;
+            String rawSelection = selected.trim();
+            String extracted;
+            if (rawSelection.contains(" - ")) {
+                extracted = rawSelection.substring(0, rawSelection.indexOf(" - ")).trim();
+            } else {
+                extracted = rawSelection;
+            }
+            if (!extracted.endsWith(":")) {
+                extracted = extracted.split("\\s+")[0].trim();
+            }
+            driveLetter = extracted;
         }
-        if (!extracted.endsWith(":")) {
-            extracted = extracted.split("\\s+")[0].trim();
-        }
-        final String driveLetter = extracted;
+        final String finalDriveLetter = driveLetter;
 
         benchCancelled.set(false);
         benchStartBtn.setDisable(true);
@@ -1095,7 +1195,7 @@ public class DiskToolsTabView extends BorderPane {
 
         currentBenchThread = new Thread(() -> {
             try {
-                BenchmarkResult result = benchmarkService.benchmark(driveLetter, testSizeMB,
+                BenchmarkResult result = benchmarkService.benchmark(finalDriveLetter, testSizeMB,
                         msg -> Platform.runLater(() -> benchStatus.setText(msg)),
                         benchCancelled);
                 Platform.runLater(() -> {
@@ -1104,7 +1204,7 @@ public class DiskToolsTabView extends BorderPane {
                         benchSeqWriteLabel.setText(String.format("%.1f MB/s", result.getSeqWriteMBps()));
                         benchSeqReadLabel.setText(String.format("%.1f MB/s", result.getSeqReadMBps()));
                         benchRandomReadLabel.setText(String.format("%.0f IOPS", result.getRandomReadIOPS()));
-                        benchStatus.setText("Benchmark completed for " + driveLetter + ".");
+                        benchStatus.setText("Benchmark completed for " + finalDriveLetter + ".");
                     } else {
                         benchStatus.setText("Benchmark failed: " + result.getMessage());
                     }
@@ -1628,28 +1728,55 @@ public class DiskToolsTabView extends BorderPane {
             return;
         }
 
-        int fileCount = 0;
-        try {
-            fileCount = (int) java.nio.file.Files.walk(f.toPath())
-                    .filter(java.nio.file.Files::isRegularFile).count();
-        } catch (Exception ignored) {
-            fileCount = countFilesRecursive(f);
-        }
-
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                "Are you sure you want to securely delete this folder?\n\n"
-                        + folderPath + "\n\n"
-                        + "Contains approximately " + fileCount + " file(s).\n"
-                        + "All files will be overwritten multiple times and cannot be recovered.\n"
-                        + "This action is irreversible.");
-        confirm.setHeaderText("Confirm Secure Folder Delete");
-        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
-
+        // Counting files can be slow for large folders - do it off FX thread to avoid UI freeze
         secureBusy.set(true);
         secureDeleteBtn.setDisable(true);
         secureDeleteProgress.setProgress(-1);
         secureDeleteProgress.setVisible(true);
-        secureDeleteStatus.setText("Securely deleting folder contents...");
+        secureDeleteStatus.setText("Counting files in folder...");
+
+        new Thread(() -> {
+            int fileCount = 0;
+            try {
+                fileCount = (int) java.nio.file.Files.walk(f.toPath())
+                        .filter(java.nio.file.Files::isRegularFile).count();
+            } catch (Exception ignored) {
+                fileCount = countFilesRecursive(f);
+            }
+            final int countedFiles = fileCount;
+            Platform.runLater(() -> {
+                secureBusy.set(false);
+                secureDeleteBtn.setDisable(false);
+                secureDeleteProgress.setVisible(false);
+                secureDeleteStatus.setText("");
+
+                Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                        "Are you sure you want to securely delete this folder?\n\n"
+                                + folderPath + "\n\n"
+                                + "Contains approximately " + countedFiles + " file(s).\n"
+                                + "All files will be overwritten multiple times and cannot be recovered.\n"
+                                + "This action is irreversible.");
+                confirm.setHeaderText("Confirm Secure Folder Delete");
+                if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                    filePathField.clear();
+                    filePathField.setUserData(null);
+                    secureDeleteBtn.setText("Secure Delete");
+                    updateDeleteButtons();
+                    return;
+                }
+
+                secureBusy.set(true);
+                secureDeleteBtn.setDisable(true);
+                secureDeleteProgress.setProgress(-1);
+                secureDeleteProgress.setVisible(true);
+                secureDeleteStatus.setText("Securely deleting folder contents...");
+                startSecureDeleteFolderInternal(folderPath);
+            });
+        }, "count-folder-files").start();
+        return;
+    }
+
+    private void startSecureDeleteFolderInternal(String folderPath) {
 
         new Thread(() -> {
             try {
@@ -1888,8 +2015,8 @@ public class DiskToolsTabView extends BorderPane {
         Label desc = new Label("Overwrite free space to remove remnants of deleted files.");
         desc.getStyleClass().add("text-muted");
 
-        Label capWarning = new Label("Note: Free space wiping is capped at ~512 MB per drive to prevent excessive wear. "
-                + "Only remnants within this range will be overwritten.");
+        Label capWarning = new Label("Note: Free space wiping will overwrite all free space (minus ~1 GB reserve) to securely remove remnants. "
+                + "This may take a long time and cause significant disk writes. Use Quick (1 pass) for fastest operation.");
         capWarning.getStyleClass().add("text-muted");
         capWarning.setWrapText(true);
         capWarning.setStyle("-fx-font-size: 11px;");
@@ -2025,9 +2152,16 @@ public class DiskToolsTabView extends BorderPane {
                         int totalPasses = prog.getTotalPasses();
                         int pass = prog.getPass();
                         int percent = prog.getPercent();
+                        // Guard against pass 0 or negative (legacy script) and clamp 0-100
+                        int safePass = Math.max(1, Math.min(pass, Math.max(1, totalPasses)));
                         int driveProgress = totalPasses > 0
-                                ? (pass - 1) * 100 / totalPasses + percent / totalPasses
+                                ? (safePass - 1) * 100 / totalPasses + Math.max(0, Math.min(percent, 100)) / totalPasses
                                 : 0;
+                        driveProgress = Math.max(0, Math.min(100, driveProgress));
+                        // If done with message indicating insufficient space, keep progress low
+                        if (prog.isDone() && prog.getMessage() != null && prog.getMessage().toLowerCase().contains("insufficient")) {
+                            driveProgress = 0;
+                        }
                         driveProgressMap.put(prog.getDrive(), driveProgress);
 
                         double overallProgress = driveProgressMap.values().stream()
@@ -2067,5 +2201,16 @@ public class DiskToolsTabView extends BorderPane {
                 });
             }
         }, "wipe-free-space").start();
+    }
+
+    public void dispose() {
+        wipeCancelled.set(true);
+        defragCancelled.set(true);
+        benchCancelled.set(true);
+        recycleBinCancelled.set(true);
+        if (currentDefragThread != null && currentDefragThread.isAlive()) currentDefragThread.interrupt();
+        if (currentAnalyzeThread != null && currentAnalyzeThread.isAlive()) currentAnalyzeThread.interrupt();
+        if (currentBenchThread != null && currentBenchThread.isAlive()) currentBenchThread.interrupt();
+        sharedExecutor.shutdownNow();
     }
 }

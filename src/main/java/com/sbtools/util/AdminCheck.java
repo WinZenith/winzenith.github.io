@@ -8,6 +8,11 @@ import java.util.concurrent.TimeUnit;
 
 public final class AdminCheck {
 
+    private static volatile Boolean cachedAdmin = null;
+    private static volatile long cacheTimestampMs = 0;
+    private static final long CACHE_TTL_MS = 15_000; // 15s TTL to allow elevation changes without full restart
+    private static final Object CACHE_LOCK = new Object();
+
     private AdminCheck() {
     }
 
@@ -15,6 +20,31 @@ public final class AdminCheck {
         if (!AppPaths.isWindows()) {
             return false;
         }
+        Boolean cached = cachedAdmin;
+        long now = System.currentTimeMillis();
+        if (cached != null && (now - cacheTimestampMs) < CACHE_TTL_MS) {
+            return cached;
+        }
+        synchronized (CACHE_LOCK) {
+            cached = cachedAdmin;
+            now = System.currentTimeMillis();
+            if (cached != null && (now - cacheTimestampMs) < CACHE_TTL_MS) {
+                return cached;
+            }
+            boolean result = computeIsAdmin();
+            cachedAdmin = result;
+            cacheTimestampMs = now;
+            return result;
+        }
+    }
+
+    /** Force a fresh check bypassing TTL (use before destructive operations). */
+    public static boolean isRunningAsAdminFresh() {
+        invalidateCache();
+        return isRunningAsAdmin();
+    }
+
+    private static boolean computeIsAdmin() {
         try {
             ProcessBuilder pb = new ProcessBuilder(
                     "powershell.exe", "-NoProfile", "-Command",
@@ -28,6 +58,33 @@ public final class AdminCheck {
             Thread.currentThread().interrupt();
             return false;
         }
+    }
+
+    public static void warmCacheAsync() {
+        try {
+            com.sbtools.util.AppExecutors.ioPool().submit(AdminCheck::isRunningAsAdmin);
+        } catch (Exception ignored) {
+            // Fallback thread if pool not ready yet
+            Thread t = new Thread(AdminCheck::isRunningAsAdmin, "admin-warmup");
+            t.setDaemon(true);
+            t.start();
+        }
+    }
+
+    public static void invalidateCache() {
+        synchronized (CACHE_LOCK) {
+            cachedAdmin = null;
+            cacheTimestampMs = 0;
+        }
+    }
+
+    public static java.util.concurrent.CompletableFuture<Boolean> isRunningAsAdminAsync() {
+        Boolean cached = cachedAdmin;
+        if (cached != null) {
+            return java.util.concurrent.CompletableFuture.completedFuture(cached);
+        }
+        return java.util.concurrent.CompletableFuture.supplyAsync(AdminCheck::isRunningAsAdmin,
+                com.sbtools.util.AppExecutors.ioPool());
     }
 
     public static boolean requestElevation() throws IOException {

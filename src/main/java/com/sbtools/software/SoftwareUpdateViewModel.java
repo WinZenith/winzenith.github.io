@@ -41,7 +41,8 @@ public class SoftwareUpdateViewModel {
     private final SystemRestoreService restoreService = new SystemRestoreService();
     private final SettingsStore settingsStore = new SettingsStore();
 
-    private final BooleanProperty busy;
+    private final BooleanProperty globalBusy;
+    private final BooleanProperty busy = new SimpleBooleanProperty(false);
     private final BooleanSupplier adminCheck;
 
     private final ObservableList<SoftwareUpdateEntry> rows = FXCollections.observableArrayList();
@@ -68,9 +69,19 @@ public class SoftwareUpdateViewModel {
         boolean getAsBoolean();
     }
 
-    public SoftwareUpdateViewModel(BooleanProperty busy, BooleanSupplier adminCheck) {
-        this.busy = busy;
+    public SoftwareUpdateViewModel(BooleanProperty globalBusy, BooleanSupplier adminCheck) {
+        this.globalBusy = globalBusy;
         this.adminCheck = adminCheck;
+        // Mirror local busy to global busy
+        this.busy.addListener((obs, oldVal, newVal) -> {
+            if (newVal) {
+                globalBusy.set(true);
+            } else {
+                if (!installRunning.get()) {
+                    globalBusy.set(false);
+                }
+            }
+        });
     }
 
     public ObservableList<SoftwareUpdateEntry> getRows() { return rows; }
@@ -124,17 +135,16 @@ public class SoftwareUpdateViewModel {
 
             final int[] counts = {0, 0};
             List<SoftwareUpdateEntry> allUpdates = service.scanAllConcurrent(
-                    scanCancelled::get,
+                    scanCancelled,
                     wc -> counts[0] = wc,
                     wuc -> counts[1] = wuc
             );
 
             if (scanCancelled.get() || disposed) return;
 
-            final int wc = counts[0];
-            final int wuc = counts[1];
             AppSettings settings = settingsStore.load();
             List<String> skippedIds = settings.skippedSoftwareIds();
+            if (skippedIds == null) skippedIds = List.of();
             Set<String> skippedIdSet = skippedIds.stream()
                     .map(s -> {
                         int t = s.lastIndexOf('\t');
@@ -142,21 +152,63 @@ public class SoftwareUpdateViewModel {
                     })
                     .collect(Collectors.toSet());
             List<SoftwareUpdateEntry> filteredUpdates = allUpdates.stream()
-                    .filter(e -> !skippedIdSet.contains(e.id()))
+                    .filter(e -> {
+                        // Entries with blank id were already filtered in SoftwareUpdateService, but guard here:
+                        // keep only if not in skipped list; blank-id entries are non-actionable and should be hidden.
+                        if (e.id() == null || e.id().isBlank()) {
+                            // For WindowsUpdate placeholder ids (WU-...), allow but ensure original updateId exists
+                            if ("WindowsUpdate".equals(e.source()) && e.updateId() != null && !e.updateId().isBlank()) return true;
+                            return false;
+                        }
+                        return !skippedIdSet.contains(e.id());
+                    })
                     .collect(Collectors.toList());
 
+            // Recompute counts after filtering for accurate UI message
+            long filteredWc = filteredUpdates.stream().filter(e -> !"WindowsUpdate".equals(e.source())).count();
+            long filteredWu = filteredUpdates.stream().filter(e -> "WindowsUpdate".equals(e.source())).count();
+            final int wc = counts[0];
+            final int wuc = counts[1];
+
             if (scanCancelled.get() || disposed) return;
+            String wuError = service.getLastWindowsUpdateError();
+            String wingetError = service.getLastWingetError();
+            boolean wuFailed = wuError != null && !wuError.isBlank();
+            boolean wingetFailed = wingetError != null && !wingetError.isBlank();
             Platform.runLater(() -> {
                 if (disposed) return;
                 rows.setAll(filteredUpdates);
-                if (wc > 0 && wuc > 0) {
-                    statusText.set(filteredUpdates.size() + " outdated item(s) found (" + wc + " app(s), " + wuc + " Windows Update(s)).");
-                } else if (wc > 0) {
-                    statusText.set(wc + " outdated app(s) found.");
-                } else if (wuc > 0) {
-                    statusText.set(wuc + " Windows Update(s) found.");
+                if (filteredWc > 0 && filteredWu > 0) {
+                    statusText.set(filteredUpdates.size() + " outdated item(s) found (" + filteredWc + " app(s), " + filteredWu + " Windows Update(s)).");
+                } else if (filteredWc > 0) {
+                    if (wuFailed) {
+                        statusText.set(filteredWc + " outdated app(s) found. (Windows Update check failed)");
+                        AppLogger.warning("WU error surfaced to UI: " + wuError);
+                    } else {
+                        statusText.set(filteredWc + " outdated app(s) found.");
+                    }
+                } else if (filteredWu > 0) {
+                    if (wingetFailed) {
+                        statusText.set(filteredWu + " Windows Update(s) found. (winget check had errors)");
+                    } else {
+                        statusText.set(filteredWu + " Windows Update(s) found.");
+                    }
+                } else if (wc > 0 || wuc > 0) {
+                    // All found were ignored
+                    statusText.set("Everything is up to date. (" + (wc + wuc - filteredUpdates.size()) + " ignored)");
                 } else {
-                    statusText.set("Everything is up to date.");
+                    if (wuFailed || wingetFailed) {
+                        String err = wuFailed ? wuError : wingetError;
+                        String shortErr = err.length() > 120 ? err.substring(0, 120) + "..." : err;
+                        statusText.set("Scan completed with warnings: " + shortErr);
+                        AppLogger.warning("Scan warning surfaced: " + err);
+                    } else {
+                        statusText.set("Everything is up to date.");
+                    }
+                }
+                // If WU failed but winget succeeded with 0 results, surface as warning not false "up to date"
+                if (wuFailed && filteredWu == 0 && filteredWc == 0 && (wc + wuc == 0)) {
+                    // Only if truly no updates but WU error occurred, keep warning already set
                 }
             });
         } catch (Exception ex) {
@@ -225,7 +277,7 @@ public class SoftwareUpdateViewModel {
         restorePointCreatedThisBatch.set(false);
         maybeCreateRestorePointAsync().thenRunAsync(() -> {
             synchronized (failedEntries) { failedEntries.clear(); }
-            if (!isRetry) retryCount = 0;
+            if (!isRetry) retryCount.set(0);
             installRunning.set(true);
             int total = selected.size();
             Platform.runLater(() -> {
@@ -249,23 +301,27 @@ public class SoftwareUpdateViewModel {
         List<SoftwareUpdateEntry> techMismatchEntries = new ArrayList<>();
         List<SoftwareUpdateEntry> successfulEntries = new ArrayList<>();
         Instant batchStartTime = Instant.now();
+        AtomicBoolean rebootRequiredAbort = new AtomicBoolean(false);
 
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        // Sequential install – MSI global mutex makes parallel unsafe and installExecutor=1 already serialized.
+        // Loop directly so cancellation between items is immediate and progress is deterministic.
         for (SoftwareUpdateEntry e : selected) {
-            if (installCancelled.get()) break;
-            CompletableFuture<Void> future = CompletableFuture.runAsync(
-                    () -> installOne(e, total, completed, failedPackages, techMismatchEntries,
-                            successfulEntries, batchStartTime),
-                    installExecutor);
-            futures.add(future);
-        }
-
-        for (CompletableFuture<Void> f : futures) {
-            try {
-                f.join();
-            } catch (Exception ex) {
-                AppLogger.warning("Batch install future completed exceptionally: " + ex.getMessage());
+            if (installCancelled.get() || disposed || rebootRequiredAbort.get()) {
+                if (rebootRequiredAbort.get()) AppLogger.info("Batch aborted after reboot-required: skipping " + e.id());
+                else AppLogger.info("Batch install cancelled before " + e.id());
+                break;
             }
+            try {
+                boolean needsReboot = installOne(e, total, completed, failedPackages, techMismatchEntries, successfulEntries, batchStartTime);
+                if (needsReboot) {
+                    rebootRequiredAbort.set(true);
+                    AppLogger.info("Reboot required after " + e.id() + " – aborting remaining batch items");
+                    // Show reboot prompt once (installOne already queued an alert); break after current
+                }
+            } catch (Exception ex) {
+                AppLogger.warning("Batch install step failed for " + e.id() + ": " + ex.getMessage());
+            }
+            if (installCancelled.get() || disposed || rebootRequiredAbort.get()) break;
         }
 
         final List<SoftwareUpdateEntry> finalSuccessful = new ArrayList<>(successfulEntries);
@@ -273,18 +329,52 @@ public class SoftwareUpdateViewModel {
         List<SoftwareUpdateEntry> finalFailed = new ArrayList<>(failedPackages);
         List<SoftwareUpdateEntry> finalTechMismatch = new ArrayList<>(techMismatchEntries);
 
+        final boolean rebootAbort = rebootRequiredAbort.get();
+        final int skippedDueToReboot = rebootAbort ? (selected.size() - finalCompleted) : 0;
         InstallerCleanupHelper.promptAndCleanupBatchAsync(service, finalSuccessful, batchStartTime)
                 .exceptionally(ex -> {
                     AppLogger.warning("Batch cleanup failed: " + ex.getMessage());
                     return false;
                 })
-                .thenRunAsync(() -> Platform.runLater(() -> {
-                    if (disposed) return;
-                    showBatchProgress.set(false);
+                .orTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+                .exceptionally(ex -> {
+                    AppLogger.warning("Batch cleanup timed out or failed: " + ex.getMessage());
+                    return false;
+                })
+                .whenComplete((v, ex) -> {
+                    // Always clear busy/progress even if disposed or timed out – prevents stuck globalBusy (B8)
                     installRunning.set(false);
-                    busy.set(false);
+                    Platform.runLater(() -> {
+                        showBatchProgress.set(false);
+                        busy.set(false);
+                    });
+                })
+                .thenRunAsync(() -> Platform.runLater(() -> {
+                    if (disposed) {
+                        // Ensure global busy cleared even after dispose
+                        busy.set(false);
+                        return;
+                    }
                     if (installCancelled.get()) {
                         statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
+                    } else if (rebootAbort) {
+                        statusText.set("Reboot required – " + finalCompleted + " installed, " + skippedDueToReboot + " skipped. Please reboot and re-scan.");
+                        if (!finalFailed.isEmpty()) {
+                            for (SoftwareUpdateEntry fe : finalFailed) {
+                                synchronized (failedEntries) { failedEntries.add(fe); }
+                                fe.setStatus("Failed");
+                                fe.setProgress(0.0);
+                                fe.setSelected(false);
+                                rows.remove(fe);
+                                rows.add(fe);
+                            }
+                            showRetryFailed.set(true);
+                        }
+                        if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
+                            showBatchResultDialog(finalFailed, finalTechMismatch);
+                        } else {
+                            new Alert(Alert.AlertType.INFORMATION, "A restart is required to finish installation. Remaining updates were skipped – please reboot first.").showAndWait();
+                        }
                     } else if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
                         statusText.set("Completed with " + finalFailed.size() + " failure(s). Use \"Retry Failed\" or re-scan.");
                         for (SoftwareUpdateEntry fe : finalFailed) {
@@ -296,7 +386,7 @@ public class SoftwareUpdateViewModel {
                             rows.add(fe);
                         }
                         showRetryFailed.set(true);
-                        showBatchResultDialog(failedPackages, finalTechMismatch);
+                        showBatchResultDialog(finalFailed, finalTechMismatch);
                     } else {
                         statusText.set("All selected updates installed successfully.");
                         showRetryFailed.set(false);
@@ -327,6 +417,26 @@ public class SoftwareUpdateViewModel {
     }
 
     private void runSingleInstall(SoftwareUpdateEntry entry) {
+        // Validate before touching UI to avoid NPE
+        if ("WindowsUpdate".equals(entry.source())) {
+            if (entry.updateId() == null || entry.updateId().isBlank()) {
+                Platform.runLater(() -> {
+                    new Alert(Alert.AlertType.ERROR, "Missing Windows Update identifier for " + entry.getName()).showAndWait();
+                    entry.setStatus("Failed");
+                    entry.setProgress(0.0);
+                });
+                return;
+            }
+        } else {
+            if (entry.id() == null || entry.id().isBlank()) {
+                Platform.runLater(() -> {
+                    new Alert(Alert.AlertType.ERROR, "Missing package identifier for " + entry.getName()).showAndWait();
+                    entry.setStatus("Failed");
+                    entry.setProgress(0.0);
+                });
+                return;
+            }
+        }
         Platform.runLater(() -> {
             entry.setStatus("Installing...");
             entry.setProgress(-1.0);
@@ -368,7 +478,9 @@ public class SoftwareUpdateViewModel {
                 }
             } else {
                 String errorMsg = res.combinedOutput();
-                entry.setLastError(errorMsg);
+                String safeError = errorMsg;
+                // Must set FX property on FX thread
+                Platform.runLater(() -> entry.setLastError(safeError));
                 synchronized (failedEntries) { failedEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, errorMsg);
                 if (isMsiCorruptionError(errorMsg)) {
@@ -391,7 +503,8 @@ public class SoftwareUpdateViewModel {
             }
         } catch (Exception ex) {
             String msg = ex.getMessage();
-            entry.setLastError(msg);
+            String safeMsg = msg;
+            Platform.runLater(() -> entry.setLastError(safeMsg));
             if (msg != null && msg.contains("INSTALL_TECHNOLOGY_MISMATCH")) {
                 synchronized (failedEntries) { failedEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, msg);
@@ -426,18 +539,19 @@ public class SoftwareUpdateViewModel {
         }
     }
 
-    private volatile int retryCount = 0;
+    private final AtomicInteger retryCount = new AtomicInteger(0);
 
     public void retryFailed() {
+        List<SoftwareUpdateEntry> toRetry;
         synchronized (failedEntries) {
             if (failedEntries.isEmpty()) return;
-            if (retryCount >= MAX_RETRY_ATTEMPTS) {
+            if (retryCount.get() >= MAX_RETRY_ATTEMPTS) {
                 Platform.runLater(() -> new Alert(Alert.AlertType.WARNING,
                         "Maximum retry attempts (" + MAX_RETRY_ATTEMPTS + ") reached. Please scan again.").showAndWait());
                 return;
             }
-            retryCount++;
-            List<SoftwareUpdateEntry> toRetry = new ArrayList<>(failedEntries);
+            retryCount.incrementAndGet();
+            toRetry = new ArrayList<>(failedEntries);
             failedEntries.clear();
             for (SoftwareUpdateEntry e : toRetry) {
                 e.setStatus("");
@@ -445,22 +559,25 @@ public class SoftwareUpdateViewModel {
                 e.setSelected(true);
             }
             showRetryFailed.set(false);
-            executor.submit(() -> {
-                try { Thread.sleep(2000); } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-                Platform.runLater(() -> updateSelected(toRetry, true));
-            }, "SoftwareUpdate-RetryDelay");
         }
+        executor.submit(() -> {
+            try { Thread.sleep(2000); } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            Platform.runLater(() -> updateSelected(toRetry, true));
+        });
     }
 
     public void skipEntry(SoftwareUpdateEntry entry) {
         try {
             AppSettings current = settingsStore.load();
-            List<String> skipped = new ArrayList<>(current.skippedSoftwareIds());
-            if (skipped.stream().noneMatch(s -> s.endsWith("\t" + entry.id()))) {
-                skipped.add(entry.getName() + "\t" + entry.id());
+            List<String> currentSkipped = current.skippedSoftwareIds();
+            List<String> skipped = currentSkipped == null ? new ArrayList<>() : new ArrayList<>(currentSkipped);
+            String id = entry.id() == null ? "" : entry.id();
+            if (skipped.stream().noneMatch(s -> s.endsWith("\t" + id))) {
+                String safeName = entry.getName() == null ? id : entry.getName().replace("\t", " ").replace("\n", " ").replace("\r", " ");
+                skipped.add(safeName + "\t" + id);
             }
             settingsStore.save(current.toBuilder().skippedSoftwareIds(skipped).build());
         } catch (Exception ex) {
@@ -480,6 +597,17 @@ public class SoftwareUpdateViewModel {
         scanCancelled.set(true);
         installCancelled.set(true);
         installRunning.set(false);
+        // Ensure UI busy flags are cleared immediately so globalBusy doesn't stick (B8/B9)
+        try {
+            Platform.runLater(() -> {
+                showBatchProgress.set(false);
+                busy.set(false);
+            });
+        } catch (Exception ignored) {
+            // Toolkit may be shutting down – set directly
+            try { busy.set(false); } catch (Exception ignored2) {}
+            try { showBatchProgress.set(false); } catch (Exception ignored2) {}
+        }
         if (scanFuture != null) {
             try { scanFuture.cancel(true); } catch (Exception ignored) {}
         }
@@ -504,12 +632,34 @@ public class SoftwareUpdateViewModel {
 
     // --- Internal helpers ---
 
-    private void installOne(SoftwareUpdateEntry entry, int total,
+    private boolean installOne(SoftwareUpdateEntry entry, int total,
                              AtomicInteger completed, List<SoftwareUpdateEntry> failedPackages,
                              List<SoftwareUpdateEntry> techMismatchEntries,
                              List<SoftwareUpdateEntry> successfulEntries, Instant batchStartTime) {
-        if (installCancelled.get()) return;
+        if (installCancelled.get()) return false;
+        AtomicBoolean rebootFlag = new AtomicBoolean(false);
         try {
+            // Validate identifiers before launching process (prevents List.of NPE)
+            if ("WindowsUpdate".equals(entry.source())) {
+                if (entry.updateId() == null || entry.updateId().isBlank()) {
+                    AppLogger.warning("Skipping WU install with missing updateId: " + entry.getName());
+                    Platform.runLater(() -> { entry.setStatus("Failed"); entry.setProgress(0.0); });
+                    synchronized (failedPackages) { failedPackages.add(entry); }
+                    Platform.runLater(() -> entry.setLastError("Missing Windows Update identifier"));
+                    recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, "Missing updateId");
+                    return false;
+                }
+            } else {
+                if (entry.id() == null || entry.id().isBlank()) {
+                    AppLogger.warning("Skipping winget install with missing id: " + entry.getName());
+                    Platform.runLater(() -> { entry.setStatus("Failed"); entry.setProgress(0.0); });
+                    synchronized (failedPackages) { failedPackages.add(entry); }
+                    Platform.runLater(() -> entry.setLastError("Missing package identifier"));
+                    recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, "Missing package id");
+                    return false;
+                }
+            }
+            
             Instant start = Instant.now();
             Platform.runLater(() -> {
                 if (disposed) return;
@@ -524,14 +674,14 @@ public class SoftwareUpdateViewModel {
                     res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS, installCancelled);
                 } catch (CancellationException cex) {
                     resetEntryUiState(entry);
-                    return;
+                    return false;
                 }
             } else {
                 try {
                     res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_SECONDS, entry, installCancelled);
                 } catch (CancellationException cex) {
                     resetEntryUiState(entry);
-                    return;
+                    return false;
                 }
             }
 
@@ -546,9 +696,10 @@ public class SoftwareUpdateViewModel {
                     entry.setProgress(0.0);
                 });
                 if (SoftwareUpdateService.isRebootRequired(res)) {
+                    rebootFlag.set(true);
                     Platform.runLater(() -> {
                         if (!disposed) {
-                            new Alert(Alert.AlertType.INFORMATION, "Restart required for " + entry.getName() + ".").showAndWait();
+                            new Alert(Alert.AlertType.INFORMATION, "Restart required for " + entry.getName() + ".\nRemaining updates will be skipped – please reboot first.").showAndWait();
                         }
                     });
                 }
@@ -565,7 +716,8 @@ public class SoftwareUpdateViewModel {
                             + "Alternatively, download and run the Microsoft Program Install troubleshooter:\n"
                             + "https://support.microsoft.com/en-us/topic/fix-problems-that-block-programs-from-being-installed-or-removed-cca7d1b6-65a9-3d98-426b-e9f927e1eb4d";
                 }
-                entry.setLastError(errorMsg);
+                String safeError = errorMsg;
+                Platform.runLater(() -> entry.setLastError(safeError));
                 synchronized (failedPackages) { failedPackages.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, errorMsg);
                 Platform.runLater(() -> {
@@ -575,11 +727,12 @@ public class SoftwareUpdateViewModel {
                 });
             }
         } catch (CancellationException cex) {
-            return;
+            return false;
         } catch (Exception ex) {
             String msg = ex.getMessage();
             AppLogger.warning("Exception during update: " + msg);
-            entry.setLastError(msg);
+            String safeMsg = msg;
+            Platform.runLater(() -> entry.setLastError(safeMsg));
             if (ex.getMessage() != null && ex.getMessage().contains("INSTALL_TECHNOLOGY_MISMATCH")) {
                 synchronized (techMismatchEntries) { techMismatchEntries.add(entry); }
             } else {
@@ -599,6 +752,7 @@ public class SoftwareUpdateViewModel {
                 batchProgress.set((double) current / total);
             });
         }
+        return rebootFlag.get();
     }
 
     private static void resetEntryUiState(SoftwareUpdateEntry entry) {
@@ -624,9 +778,29 @@ public class SoftwareUpdateViewModel {
             if (!trimmed.isEmpty()) { logPath = trimmed; break; }
         }
         if (logPath.isEmpty()) return false;
+        // Basic validation: must be absolute path under expected log locations and not too long
+        if (logPath.length() > 520 || logPath.contains("..")) return false;
+        java.nio.file.Path p;
+        try { p = java.nio.file.Paths.get(logPath); } catch (Exception e) { return false; }
+        if (!p.isAbsolute()) return false;
+        // Only allow files under %TEMP% or %LOCALAPPDATA% or Windows Logs to avoid arbitrary read
+        String lowerPath = p.toString().toLowerCase();
+        boolean allowed = lowerPath.contains("\\temp\\") || lowerPath.contains("\\tmp\\")
+                || lowerPath.contains("appdata\\local") || lowerPath.contains("windows\\logs")
+                || lowerPath.contains("installer");
+        if (!allowed) {
+            AppLogger.warning("MSI log path not in allowed location: " + p);
+            return false;
+        }
         try {
-            String logContent = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(logPath))).toLowerCase();
-            return logContent.contains("error 1714") || logContent.contains("cannot be removed");
+            // Cap read to 1 MB to avoid OOM
+            long size = java.nio.file.Files.size(p);
+            if (size > 1024 * 1024) size = 1024 * 1024;
+            try (java.io.InputStream in = java.nio.file.Files.newInputStream(p)) {
+                byte[] buf = in.readNBytes((int) size);
+                String logContent = new String(buf, java.nio.charset.StandardCharsets.UTF_8).toLowerCase();
+                return logContent.contains("error 1714") || logContent.contains("cannot be removed");
+            }
         } catch (Exception e) {
             return false;
         }

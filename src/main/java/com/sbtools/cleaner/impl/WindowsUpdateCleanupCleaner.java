@@ -69,6 +69,12 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
             AppLogger.info("Skipping DISM component cleanup on newer Windows version (Build "
                     + WindowsVersionUtil.getBuildNumber() + ")");
@@ -80,12 +86,26 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
             return 0;
         }
         long cleaned = 0;
+        Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image", "/StartComponentCleanup");
             pb.redirectErrorStream(true);
-            Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(900, java.util.concurrent.TimeUnit.SECONDS);
+            p = ProcessManager.start(pb);
+            boolean finished = false;
+            long deadline = System.currentTimeMillis() + 900_000L;
+            while (System.currentTimeMillis() < deadline) {
+                if (token != null && token.isCancelled()) {
+                    AppLogger.info("DISM component cleanup canceled by user");
+                    p.destroyForcibly();
+                    throw new java.util.concurrent.CancellationException("DISM cleanup canceled");
+                }
+                if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+            }
             if (finished) {
+                if (token != null && token.isCancelled()) {
+                    AppLogger.info("DISM cleanup canceled after process finished");
+                    return 0L;
+                }
                 int exitCode = p.exitValue();
                 AppLogger.info("DISM component cleanup completed with exit code " + exitCode);
                 if (exitCode == 0) {
@@ -99,7 +119,13 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 AppLogger.warning("DISM cleanup timed out after ~15 minutes");
                 p.destroyForcibly();
             }
-        } catch (Exception e) { AppLogger.warning("DISM cleanup failed: " + e.getMessage()); }
+        } catch (java.util.concurrent.CancellationException ce) {
+            if (p != null) try { p.destroyForcibly(); } catch (Exception ignored) {}
+            throw ce;
+        } catch (Exception e) {
+            if (e instanceof java.util.concurrent.CancellationException) throw (java.util.concurrent.CancellationException) e;
+            AppLogger.warning("DISM cleanup failed: " + e.getMessage());
+        }
         return cleaned;
     }
 

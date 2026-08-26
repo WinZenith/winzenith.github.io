@@ -274,9 +274,17 @@ public class StartupTabView extends BorderPane {
                 if (empty || item == null) {
                     setText(null);
                     setGraphic(null);
+                    setStyle("");
                 } else {
                     setText(item);
-                    StartupItem rowItem = getTableView().getItems().get(getIndex());
+                    StartupItem rowItem = getTableRow() != null ? getTableRow().getItem() : null;
+                    if (rowItem == null) {
+                        // Fallback safe guard for sorted list index
+                        int idx = getIndex();
+                        if (idx >= 0 && idx < getTableView().getItems().size()) {
+                            rowItem = getTableView().getItems().get(idx);
+                        }
+                    }
                     if (rowItem != null) {
                         double ms = rowItem.getEstimatedBootImpactMs();
                         if (ms < 100) {
@@ -286,10 +294,14 @@ public class StartupTabView extends BorderPane {
                         } else {
                             setStyle("-fx-text-fill: #ff5555; -fx-font-weight: bold;");
                         }
+                    } else {
+                        setStyle("");
                     }
                 }
             }
         });
+        // Default sort: High impact first (descending)
+        impactCol.setSortType(TableColumn.SortType.DESCENDING);
 
         table.getColumns().addAll(nameCol, publisherCol, locationCol, pathCol, statusCol, impactCol);
 
@@ -307,14 +319,36 @@ public class StartupTabView extends BorderPane {
             openLoc.setOnAction(evt -> {
                 StartupItem it = row.getItem();
                 if (it == null) return;
-                String exe = com.sbtools.startup.StartupService.extractExecutablePath(it.getPath());
                 try {
+                    // For startup folder items, open the actual file location
+                    String loc = it.getLocation();
+                    if (loc != null && loc.startsWith("Startup Folder") && it.getFilePath() != null && !it.getFilePath().isBlank()) {
+                        java.io.File f = new java.io.File(it.getFilePath());
+                        java.io.File disabled = new java.io.File(it.getFilePath() + ".disabled");
+                        java.io.File target = f.exists() ? f : (disabled.exists() ? disabled : f);
+                        if (target.exists()) {
+                            new ProcessBuilder("explorer.exe", "/select," + target.getAbsolutePath()).start();
+                        } else if (target.getParentFile() != null && target.getParentFile().exists()) {
+                            new ProcessBuilder("explorer.exe", target.getParentFile().getAbsolutePath()).start();
+                        } else {
+                            new Alert(Alert.AlertType.INFORMATION, "File not found: " + target.getAbsolutePath()).showAndWait();
+                        }
+                        return;
+                    }
+                    String exe = com.sbtools.startup.StartupService.extractExecutablePath(it.getPath());
+                    if (exe == null || exe.isBlank()) exe = it.getPath();
+                    exe = com.sbtools.startup.StartupService.expandEnvVars(exe);
                     java.io.File f = new java.io.File(exe);
                     if (f.exists()) {
-                        // select file in explorer
                         new ProcessBuilder("explorer.exe", "/select," + f.getAbsolutePath()).start();
                     } else {
-                        new Alert(Alert.AlertType.INFORMATION, "File not found: " + exe).showAndWait();
+                        // Try parent dir if file not found (e.g., quoted args)
+                        java.io.File parent = f.getParentFile();
+                        if (parent != null && parent.exists()) {
+                            new ProcessBuilder("explorer.exe", parent.getAbsolutePath()).start();
+                        } else {
+                            new Alert(Alert.AlertType.INFORMATION, "File not found: " + exe).showAndWait();
+                        }
                     }
                 } catch (Exception ex) {
                     AppLogger.error("Failed to open file location", ex);
@@ -405,6 +439,14 @@ public class StartupTabView extends BorderPane {
                item.getLocation().toLowerCase().contains(lower);
     }
 
+    private static boolean isSystemTask(StartupItem item) {
+        if (item == null || item.getType() != StartupItemType.TASK) return false;
+        String tp = item.getTaskPath();
+        if (tp == null) return false;
+        String lower = tp.toLowerCase();
+        return lower.startsWith("\\microsoft\\") || lower.startsWith("\\windows\\") || lower.contains("\\microsoft\\windows");
+    }
+
     private void scan() {
         if (busy.get()) return;
         busy.set(true);
@@ -469,16 +511,38 @@ public class StartupTabView extends BorderPane {
 
         List<StartupItem> serviceItems = selected.stream()
                 .filter(i -> i.getType() == StartupItemType.SERVICE).toList();
+        List<StartupItem> hklmItems = selected.stream()
+                .filter(i -> i.getType() == StartupItemType.REGISTRY && i.getLocation() != null && i.getLocation().contains("HKLM")).toList();
+        List<StartupItem> hkcuItems = selected.stream()
+                .filter(i -> i.getType() == StartupItemType.REGISTRY && i.getLocation() != null && i.getLocation().contains("HKCU")).toList();
+        List<StartupItem> commonFolderItems = selected.stream()
+                .filter(i -> i.getLocation() != null && i.getLocation().contains("Common")).toList();
+        List<StartupItem> systemTaskItems = selected.stream()
+                .filter(i -> i.getType() == StartupItemType.TASK && isSystemTask(i)).toList();
         List<StartupItem> nonServiceItems = selected.stream()
                 .filter(i -> i.getType() != StartupItemType.SERVICE).toList();
 
-        if (!serviceItems.isEmpty() && !adminCheck.getAsBoolean()) {
-            if (nonServiceItems.isEmpty()) {
+        boolean needsAdmin = (!serviceItems.isEmpty() || !hklmItems.isEmpty() || !commonFolderItems.isEmpty() || !systemTaskItems.isEmpty()) && !adminCheck.getAsBoolean();
+        if (needsAdmin) {
+            long totalAdmin = serviceItems.size() + hklmItems.size() + commonFolderItems.size() + systemTaskItems.size();
+            // Deduplicate overlapping (service is not HKLM, but count may double if same item matches multiple categories)
+            // Use set semantics: count distinct items requiring admin
+            java.util.Set<StartupItem> adminSet = new java.util.HashSet<>();
+            adminSet.addAll(serviceItems); adminSet.addAll(hklmItems); adminSet.addAll(commonFolderItems); adminSet.addAll(systemTaskItems);
+            totalAdmin = adminSet.size();
+            if (adminSet.size() == selected.size()) {
                 Alert alert = new Alert(Alert.AlertType.WARNING);
                 alert.setTitle("Administrator Required");
-                alert.setHeaderText("Service modification requires elevation");
-                alert.setContentText("Modifying Windows service start types requires administrator privileges.\n" +
-                        "Please run the application as administrator.");
+                alert.setHeaderText("Modification requires elevation");
+                String detail;
+                if (!serviceItems.isEmpty() && systemTaskItems.isEmpty() && hklmItems.isEmpty()) {
+                    detail = "Modifying Windows service start types requires administrator privileges.\n";
+                } else if (!systemTaskItems.isEmpty() && serviceItems.isEmpty() && hklmItems.isEmpty()) {
+                    detail = "Modifying system scheduled tasks (\\Microsoft\\Windows) requires administrator privileges.\n";
+                } else {
+                    detail = "Modifying HKLM / Common Startup items, services or system tasks requires administrator privileges.\n";
+                }
+                alert.setContentText(detail + "Please run the application as administrator.");
                 alert.initModality(Modality.APPLICATION_MODAL);
                 alert.showAndWait();
                 return;
@@ -486,11 +550,20 @@ public class StartupTabView extends BorderPane {
                 Alert alert = new Alert(Alert.AlertType.WARNING);
                 alert.setTitle("Administrator Required");
                 alert.setHeaderText("Some items require elevation");
-                alert.setContentText(serviceItems.size() + " service item(s) require administrator privileges and will be skipped.\n" +
-                        nonServiceItems.size() + " non-service item(s) will be toggled.");
+                alert.setContentText(totalAdmin + " item(s) require administrator privileges (HKLM/services/Common/system tasks) and will be skipped.\n"
+                        + "Only non-privileged items will be toggled. Run as administrator to modify all.");
                 alert.initModality(Modality.APPLICATION_MODAL);
                 alert.showAndWait();
-                selected = new ArrayList<>(nonServiceItems);
+                // Keep only items that don't need admin: HKCU registry + non-system tasks
+                List<StartupItem> allowed = new ArrayList<>();
+                for (StartupItem it : selected) {
+                    if (it.getType() == StartupItemType.SERVICE) continue;
+                    if (it.getLocation() != null && (it.getLocation().contains("HKLM") || it.getLocation().contains("Common"))) continue;
+                    if (isSystemTask(it)) continue;
+                    allowed.add(it);
+                }
+                if (allowed.isEmpty()) return;
+                selected = allowed;
             }
         }
 
@@ -551,6 +624,28 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> selected = new ArrayList<>(getSelectedTable().getSelectionModel().getSelectedItems());
         if (selected.isEmpty() || busy.get()) return;
 
+        // Admin check for HKLM / Common items deletion + system tasks
+        List<StartupItem> adminNeeded = selected.stream()
+                .filter(i -> (i.getLocation() != null && (i.getLocation().contains("HKLM") || i.getLocation().contains("Common"))) || isSystemTask(i))
+                .toList();
+        if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
+            Alert warn = new Alert(Alert.AlertType.WARNING);
+            warn.setTitle("Administrator Required");
+            warn.setHeaderText("Deletion requires elevation");
+            warn.setContentText(adminNeeded.size() + " selected item(s) are HKLM / Common / system tasks and require administrator privileges.\n"
+                    + "Only non-privileged items will be deleted. Run as administrator to delete all.");
+            warn.initModality(Modality.APPLICATION_MODAL);
+            warn.showAndWait();
+            List<StartupItem> allowed = new ArrayList<>();
+            for (StartupItem it : selected) {
+                if (it.getLocation() != null && (it.getLocation().contains("HKLM") || it.getLocation().contains("Common"))) continue;
+                if (isSystemTask(it)) continue;
+                allowed.add(it);
+            }
+            if (allowed.isEmpty()) return;
+            selected = allowed;
+        }
+
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Confirm Deletion");
         if (selected.size() == 1) {
@@ -563,22 +658,23 @@ public class StartupTabView extends BorderPane {
         confirm.initModality(Modality.APPLICATION_MODAL);
 
         if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
+            final List<StartupItem> toDelete = new ArrayList<>(selected);
             busy.set(true);
             progress.setVisible(true);
-            statusLabel.setText("Deleting " + selected.size() + " item(s)...");
+            statusLabel.setText("Deleting " + toDelete.size() + " item(s)...");
 
             executor.execute(() -> {
                 List<String> errors = new ArrayList<>();
-                for (StartupItem item : selected) {
+                List<StartupItem> toRemoveRegistry = new ArrayList<>();
+                List<StartupItem> toRemoveTask = new ArrayList<>();
+                for (StartupItem item : toDelete) {
                     try {
                         service.deleteItem(item);
-                        Platform.runLater(() -> {
-                            if (item.getType() == StartupItemType.REGISTRY) {
-                                registryItems.remove(item);
-                            } else if (item.getType() == StartupItemType.TASK) {
-                                taskItems.remove(item);
-                            }
-                        });
+                        if (item.getType() == StartupItemType.REGISTRY) {
+                            toRemoveRegistry.add(item);
+                        } else if (item.getType() == StartupItemType.TASK) {
+                            toRemoveTask.add(item);
+                        }
                     } catch (Exception e) {
                         AppLogger.error("Failed to delete startup item " + item.getName(), e);
                         errors.add(item.getName() + ": " + e.getMessage());
@@ -586,10 +682,13 @@ public class StartupTabView extends BorderPane {
                 }
 
                 Platform.runLater(() -> {
+                    registryItems.removeAll(toRemoveRegistry);
+                    taskItems.removeAll(toRemoveTask);
                     applyRegistryFilter();
                     applyTaskFilter();
                     if (errors.isEmpty()) {
-                        statusLabel.setText("Deleted " + selected.size() + " item(s) successfully.");
+                        int removed = toRemoveRegistry.size() + toRemoveTask.size();
+                        statusLabel.setText("Deleted " + removed + " item(s) successfully.");
                         new Alert(Alert.AlertType.INFORMATION, "The selected startup item(s) have been deleted. You can restore them from the Backups panel.").showAndWait();
                     } else {
                         statusLabel.setText("Deletion completed with errors.");

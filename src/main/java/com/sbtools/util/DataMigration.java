@@ -19,6 +19,62 @@ public final class DataMigration {
     public static void migrateIfNeeded() {
         migrateLocalAppData();
         migrateSettingsDir();
+        migrateBackupsToPortable();
+        migrateStartupBackupsToPortable();
+    }
+
+    private static void migrateStartupBackupsToPortable() {
+        try {
+            Path portable = AppPaths.portableBaseDir();
+            if (portable == null) return;
+            Path portableStartup = portable.resolve("startup-backups");
+            Path legacyStartup = AppPaths.localAppData().resolve("startup-backups");
+            if (!Files.isDirectory(legacyStartup)) return;
+            boolean portableEmpty = !Files.exists(portableStartup);
+            if (!portableEmpty) {
+                try (var stream = Files.list(portableStartup)) {
+                    if (stream.findFirst().isPresent()) return;
+                }
+            }
+            boolean hasData = false;
+            try (var stream = Files.list(legacyStartup)) {
+                if (stream.findFirst().isPresent()) hasData = true;
+            }
+            if (!hasData) return;
+            Files.createDirectories(portableStartup);
+            copyDirectory(legacyStartup, portableStartup);
+            AppLogger.info("Migrated startup-backups from " + legacyStartup + " to portable " + portableStartup);
+        } catch (IOException e) {
+            AppLogger.warning("Failed to migrate startup-backups to portable: " + e.getMessage());
+        }
+    }
+
+    private static void migrateBackupsToPortable() {
+        try {
+            Path portable = AppPaths.portableBaseDir();
+            if (portable == null) return;
+            Path portableBackups = portable.resolve("backups");
+            Path legacyBackups = AppPaths.legacyBackupsRoot();
+            if (!Files.isDirectory(legacyBackups)) return;
+            // Only migrate if portable backups does not yet exist or is empty and legacy has data
+            boolean portableEmpty = !Files.exists(portableBackups);
+            if (!portableEmpty) {
+                try (var stream = Files.list(portableBackups)) {
+                    if (stream.findFirst().isPresent()) return; // already has data
+                }
+            }
+            // Check legacy has index or any content
+            boolean hasData = false;
+            try (var stream = Files.list(legacyBackups)) {
+                if (stream.findFirst().isPresent()) hasData = true;
+            }
+            if (!hasData) return;
+            Files.createDirectories(portableBackups);
+            copyDirectory(legacyBackups, portableBackups);
+            AppLogger.info("Migrated backups from " + legacyBackups + " to portable " + portableBackups);
+        } catch (IOException e) {
+            AppLogger.warning("Failed to migrate backups to portable: " + e.getMessage());
+        }
     }
 
     private static void migrateLocalAppData() {

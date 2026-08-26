@@ -29,22 +29,9 @@ public class OemAmdCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String fetchLatestVersion(InstalledDriver driver) {
-        AppLogger.debug("AMD: Fetching latest version for " + driver.friendlyName());
-
-        String body = httpGet("https://www.amd.com/en/support");
-        if (body != null) {
-            String v = extractVersion(body, ADRENALIN_VERSION);
-            if (v == null) {
-                v = extractVersion(body, AMD_VERSION);
-            }
-            if (v == null) {
-                v = extractVersion(body, GENERIC_VERSION);
-            }
-            if (v != null) {
-                AppLogger.debug("AMD: Found version " + v + " for " + driver.friendlyName());
-                return v;
-            }
-        }
+        // Prefer catalog; web scraping of amd.com/en/support is Cloudflare-protected and unreliable.
+        // This fallback is only used when catalog had no match. Return catalog-agnostic version.
+        AppLogger.debug("AMD: Fetching latest version (fallback) for " + driver.friendlyName());
 
         String fallback = getFallbackVersion(driver);
         if (fallback != null) {
@@ -52,7 +39,7 @@ public class OemAmdCatalogProvider extends AbstractOemCatalogProvider {
             return fallback;
         }
 
-        AppLogger.debug("AMD: Could not find version for " + driver.friendlyName());
+        AppLogger.debug("AMD: Could not find version for " + driver.friendlyName() + " (catalog miss)");
         return null;
     }
 

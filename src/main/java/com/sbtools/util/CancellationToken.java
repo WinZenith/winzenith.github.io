@@ -9,17 +9,32 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class CancellationToken {
 
-    public static final CancellationToken NONE = new CancellationToken();
+    private static final CancellationToken SENTINEL = new CancellationToken(true);
+    public static final CancellationToken NONE = SENTINEL;
 
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
+    private final boolean sentinel;
+
+    public CancellationToken() {
+        this(false);
+    }
+
+    private CancellationToken(boolean sentinel) {
+        this.sentinel = sentinel;
+    }
 
     public void cancel() {
-        if (this != NONE) {
-            cancelled.set(true);
-        }
+        if (sentinel) return;
+        cancelled.set(true);
     }
 
     public boolean isCancelled() {
-        return cancelled.get() || (this != NONE && Thread.currentThread().isInterrupted());
+        if (sentinel) return false;
+        return cancelled.get();
+    }
+
+    public AtomicBoolean asAtomicBoolean() {
+        if (sentinel) return new AtomicBoolean(false);
+        return cancelled;
     }
 }

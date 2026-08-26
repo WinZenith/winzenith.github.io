@@ -16,11 +16,18 @@ public class BrowserExtensionRow {
     private final BooleanProperty enabled = new SimpleBooleanProperty();
     private final BooleanProperty ignored = new SimpleBooleanProperty(false);
     private final StringProperty path = new SimpleStringProperty();
+    private final StringProperty profilePath = new SimpleStringProperty();
     private final StringProperty installDate = new SimpleStringProperty();
     private final StringProperty permissions = new SimpleStringProperty();
 
     public BrowserExtensionRow(String browser, String extensionId, String name, String version,
                                 String description, boolean enabled, String path,
+                                String installDate, String permissions) {
+        this(browser, extensionId, name, version, description, enabled, path, "", installDate, permissions);
+    }
+
+    public BrowserExtensionRow(String browser, String extensionId, String name, String version,
+                                String description, boolean enabled, String path, String profilePath,
                                 String installDate, String permissions) {
         this.browser.set(browser);
         this.extensionId.set(extensionId);
@@ -29,6 +36,7 @@ public class BrowserExtensionRow {
         this.description.set(description);
         this.enabled.set(enabled);
         this.path.set(path);
+        this.profilePath.set(profilePath != null ? profilePath : "");
         this.installDate.set(installDate);
         this.permissions.set(permissions);
     }
@@ -62,6 +70,9 @@ public class BrowserExtensionRow {
 
     public StringProperty pathProperty() { return path; }
     public String getPath() { return path.get(); }
+
+    public StringProperty profilePathProperty() { return profilePath; }
+    public String getProfilePath() { return profilePath.get(); }
 
     public StringProperty installDateProperty() { return installDate; }
     public String getInstallDate() { return installDate.get(); }

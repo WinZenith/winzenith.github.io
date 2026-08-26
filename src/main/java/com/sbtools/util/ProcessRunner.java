@@ -32,6 +32,14 @@ public class ProcessRunner {
     }
 
     public ProcessResult run(List<String> command, long timeoutSeconds) throws IOException, InterruptedException {
+        return run(command, timeoutSeconds, null);
+    }
+
+    public ProcessResult run(List<String> command, AtomicBoolean cancelled) throws IOException, InterruptedException {
+        return run(command, defaultTimeoutSeconds, cancelled);
+    }
+
+    public ProcessResult run(List<String> command, long timeoutSeconds, AtomicBoolean cancelled) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(false);
         AppLogger.info("Running: " + String.join(" ", command));
@@ -46,17 +54,31 @@ public class ProcessRunner {
         Thread stdoutReader = startStreamReader(process.getInputStream(), stdoutBuf);
         Thread stderrReader = startStreamReader(process.getErrorStream(), stderrBuf);
         try {
-            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            if (!finished) {
-                killProcessTree(process);
-                joinReaders(stdoutReader, stderrReader);
-                throw new IOException("Process timed out after " + timeoutSeconds + "s");
+            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, timeoutSeconds));
+            while (true) {
+                if (cancelled != null && cancelled.get()) {
+                    killProcessTree(process);
+                    joinReaders(stdoutReader, stderrReader);
+                    throw new CancellationException("Operation cancelled by user");
+                }
+                long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+                if (remainingMs <= 0) {
+                    killProcessTree(process);
+                    joinReaders(stdoutReader, stderrReader);
+                    throw new IOException("Process timed out after " + timeoutSeconds + "s");
+                }
+                boolean finished = process.waitFor(Math.min(100, remainingMs), TimeUnit.MILLISECONDS);
+                if (finished) {
+                    break;
+                }
             }
             joinReaders(stdoutReader, stderrReader);
         } catch (InterruptedException e) {
             killProcessTree(process);
             joinReaders(stdoutReader, stderrReader);
             Thread.currentThread().interrupt();
+            throw e;
+        } catch (CancellationException e) {
             throw e;
         }
         String stdout = stdoutBuf.toString(StandardCharsets.UTF_8);
@@ -237,6 +259,29 @@ public class ProcessRunner {
             cmd.add(arg);
         }
         return cmd;
+    }
+
+    public static List<String> pwshScript(String scriptPath, String... args) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("pwsh.exe");
+        cmd.add("-NoProfile");
+        cmd.add("-ExecutionPolicy");
+        cmd.add("Bypass");
+        cmd.add("-File");
+        cmd.add(scriptPath);
+        for (String arg : args) {
+            cmd.add(arg);
+        }
+        return cmd;
+    }
+
+    /**
+     * Returns the best available PowerShell executable command for the given script.
+     * Tries powershell.exe first, then pwsh.exe if the former is not found.
+     */
+    public static List<String> bestPowerShellScript(String scriptPath, String... args) {
+        // Prefer powershell.exe for compatibility; caller may fallback to pwsh on IOException
+        return powershellScript(scriptPath, args);
     }
 
     /**

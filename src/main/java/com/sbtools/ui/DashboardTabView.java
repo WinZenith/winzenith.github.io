@@ -37,7 +37,9 @@ import javafx.scene.layout.VBox;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -54,6 +56,7 @@ public class DashboardTabView extends BorderPane {
     private final DriverScanService driverScanService = new DriverScanService();
     private final DriverCatalogAggregator catalog = DriverCatalogAggregator.createDefault();
     private final SoftwareUpdateService softwareUpdateService = new SoftwareUpdateService();
+    private final com.sbtools.settings.SettingsStore settingsStore = new com.sbtools.settings.SettingsStore();
     private final ExecutorService executor = AppExecutors.scanPool();
 
     private final ObservableList<IssueCategory> issues = FXCollections.observableArrayList();
@@ -134,26 +137,61 @@ public class DashboardTabView extends BorderPane {
 
     public void dispose() {
         disposed = true;
+        scanGeneration++;
         CancellationToken token = scanCancellationToken;
         if (token != null) token.cancel();
-        if (scanFuture != null) {
-            scanFuture.cancel(true);
+        Future<?> f = scanFuture;
+        if (f != null) {
+            f.cancel(true);
             scanFuture = null;
         }
+        // B2 fix: ensure global busy is cleared even when generation stale would skip finally's busy.set(false)
+        try {
+            if (busy.get()) {
+                if (Platform.isFxApplicationThread()) busy.set(false);
+                else Platform.runLater(() -> busy.set(false));
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (Platform.isFxApplicationThread()) {
+                progressBar.setVisible(false);
+                stopButton.setVisible(false);
+                stopButton.setDisable(true);
+                if (progressRow != null) {
+                    progressRow.setVisible(false);
+                    progressRow.setManaged(false);
+                }
+            } else {
+                Platform.runLater(() -> {
+                    progressBar.setVisible(false);
+                    stopButton.setVisible(false);
+                    stopButton.setDisable(true);
+                    if (progressRow != null) {
+                        progressRow.setVisible(false);
+                        progressRow.setManaged(false);
+                    }
+                });
+            }
+        } catch (Exception ignored) {}
     }
 
     // ── Welcome Screen ────────────────────────────────────────────────────
 
     private void buildWelcomeScreen() {
         javafx.scene.Node logoNode;
-        java.io.InputStream logoStream = getClass().getResourceAsStream("/logo-ico.png");
-        if (logoStream != null) {
-            ImageView logoView = new ImageView(new Image(logoStream));
-            logoView.setFitHeight(64);
-            logoView.setFitWidth(64);
-            logoView.setPreserveRatio(true);
-            logoNode = logoView;
-        } else {
+        try (java.io.InputStream logoStream = getClass().getResourceAsStream("/logo-ico.png")) {
+            if (logoStream != null) {
+                ImageView logoView = new ImageView(new Image(logoStream));
+                logoView.setFitHeight(64);
+                logoView.setFitWidth(64);
+                logoView.setPreserveRatio(true);
+                logoNode = logoView;
+            } else {
+                Label fallback = new Label("\u2699");
+                fallback.setStyle("-fx-font-size: 48px;");
+                logoNode = fallback;
+            }
+        } catch (java.io.IOException e) {
             Label fallback = new Label("\u2699");
             fallback.setStyle("-fx-font-size: 48px;");
             logoNode = fallback;
@@ -341,12 +379,19 @@ public class DashboardTabView extends BorderPane {
     }
 
     private void updateCategoryProgress(int categoryIndex, String state) {
+        // Legacy overload — no generation check (used from non-scan contexts)
+        updateCategoryProgress(categoryIndex, state, -1);
+    }
+
+    private void updateCategoryProgress(int categoryIndex, String state, int generation) {
         ProgressItem pi = switch (categoryIndex) {
             case 0 -> driverItem;
             case 1 -> softwareItem;
             default -> cleanupItem;
         };
+        if (pi == null) return;
         Platform.runLater(() -> {
+            if (generation >= 0 && isScanStale(generation)) return;
             pi.box().getStyleClass().removeAll("active", "done", "failed");
             pi.statusLabel().getStyleClass().removeAll("active", "done", "failed");
             switch (state) {
@@ -401,6 +446,10 @@ public class DashboardTabView extends BorderPane {
     }
 
     private void updateTimestamp() {
+        updateTimestamp(-1);
+    }
+
+    private void updateTimestamp(int generation) {
         if (lastScanTime != null) {
             Duration elapsed = Duration.between(lastScanTime, Instant.now());
             String text;
@@ -413,7 +462,10 @@ public class DashboardTabView extends BorderPane {
                 long hrs = elapsed.toHours();
                 text = "Last scanned: " + hrs + " hour" + (hrs == 1 ? "" : "s") + " ago";
             }
-            Platform.runLater(() -> timestampLabel.setText(text));
+            Platform.runLater(() -> {
+                if (generation >= 0 && isScanStale(generation)) return;
+                timestampLabel.setText(text);
+            });
         }
     }
 
@@ -486,9 +538,8 @@ public class DashboardTabView extends BorderPane {
     // ── Scan Logic ────────────────────────────────────────────────────────
 
     private void startScan() {
-        if (busy.get()) return;
-        if (!adminCheck.getAsBoolean()) {
-            statusLabel.setText("Run as Administrator to scan for issues.");
+        if (busy.get()) {
+            statusLabel.setText("Another operation is in progress — please wait.");
             return;
         }
         final int generation = ++scanGeneration;
@@ -500,7 +551,7 @@ public class DashboardTabView extends BorderPane {
         progressBar.setVisible(true);
         stopButton.setVisible(true);
         stopButton.setDisable(false);
-        statusLabel.setText("Scanning system for issues\u2026");
+        statusLabel.setText("Checking privileges\u2026");
 
         showResultsView();
         hideHealthyState();
@@ -512,16 +563,36 @@ public class DashboardTabView extends BorderPane {
 
         try {
             scanFuture = executor.submit(() -> {
+                if (!adminCheck.getAsBoolean()) {
+                    Platform.runLater(() -> {
+                        if (isScanStale(generation)) return;
+                        statusLabel.setText("Run as Administrator to scan for issues.");
+                        progressRow.setVisible(false);
+                        progressRow.setManaged(false);
+                        progressBar.setVisible(false);
+                        stopButton.setVisible(false);
+                        stopButton.setDisable(true);
+                        busy.set(false);
+                        showWelcomeView();
+                    });
+                    return;
+                }
+                Platform.runLater(() -> {
+                    if (isScanStale(generation)) return;
+                    statusLabel.setText("Scanning system for issues\u2026");
+                });
                 lastScanTime = Instant.now();
                 AtomicInteger scansComplete = new AtomicInteger();
                 int totalScans = 3;
                 try {
+                    // Use io/clean pools for sub-scans to avoid scanPool self-starvation (B2)
+                    java.util.concurrent.ExecutorService cleanupExec = com.sbtools.util.AppExecutors.cleanPool();
                     CompletableFuture<Void> driverScan = CompletableFuture.runAsync(
-                            () -> scanDrivers(generation, token, scansComplete, totalScans), executor);
+                            () -> scanDrivers(generation, token, scansComplete, totalScans), com.sbtools.util.AppExecutors.ioPool());
                     CompletableFuture<Void> softwareScan = CompletableFuture.runAsync(
-                            () -> scanSoftware(generation, token, scansComplete, totalScans), executor);
+                            () -> scanSoftware(generation, token, scansComplete, totalScans), com.sbtools.util.AppExecutors.ioPool());
                     CompletableFuture<Void> cleanupScan = CompletableFuture.runAsync(
-                            () -> scanCleanup(generation, token, scansComplete, totalScans), executor);
+                            () -> scanCleanup(generation, token, scansComplete, totalScans), cleanupExec);
 
                     CompletableFuture.allOf(driverScan, softwareScan, cleanupScan).join();
 
@@ -580,7 +651,7 @@ public class DashboardTabView extends BorderPane {
                             summaryLabel.setVisible(true);
                         }
                         updateSummaryCards();
-                        updateTimestamp();
+                        updateTimestamp(generation);
                     });
                 } catch (Exception ex) {
                     if (!isScanStale(generation)) {
@@ -621,67 +692,129 @@ public class DashboardTabView extends BorderPane {
 
     private void scanDrivers(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
         if (isScanStale(generation)) return;
-        updateCategoryProgress(0, "scanning");
-        Platform.runLater(() -> statusLabel.setText("Scanning for outdated drivers\u2026"));
+        updateCategoryProgress(0, "scanning", generation);
+        Platform.runLater(() -> {
+            if (isScanStale(generation)) return;
+            statusLabel.setText("Scanning for outdated drivers\u2026");
+        });
         try {
             List<InstalledDriver> installed = driverScanService.scanInstalled();
             if (isScanStale(generation)) return;
             List<DriverUpdateCandidate> candidates = catalog.findUpdates(installed, token);
             if (isScanStale(generation)) return;
+            // Filter ignored drivers so Dashboard count matches Drivers tab
+            try {
+                Set<String> excluded = loadExcludedDriverIdSet();
+                if (!excluded.isEmpty()) {
+                    candidates = candidates.stream()
+                            .filter(c -> c.installed() == null || !excluded.contains(c.installed().deviceId()))
+                            .collect(java.util.stream.Collectors.toList());
+                }
+            } catch (Exception ex) {
+                AppLogger.warning("Dashboard excluded filter failed: " + ex.getMessage());
+            }
+            if (isScanStale(generation)) return;
             if (!candidates.isEmpty()) {
+                final List<DriverUpdateCandidate> filtered = candidates;
                 Platform.runLater(() -> {
                     if (isScanStale(generation)) return;
-                    issues.add(new IssueCategory("Outdated Drivers", candidates.size(), 0, "Drivers"));
+                    issues.add(new IssueCategory("Outdated Drivers", filtered.size(), 0, "Drivers"));
                 });
             }
-            updateCategoryProgress(0, "done");
+            updateCategoryProgress(0, "done", generation);
         } catch (Exception ex) {
             AppLogger.warning("Dashboard driver scan failed: " + ex.getMessage());
-            updateCategoryProgress(0, "failed");
+            updateCategoryProgress(0, "failed", generation);
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
                 issues.add(IssueCategory.error("Outdated Drivers", "Error: " + ex.getMessage(), "", "Drivers", 0));
             });
         }
         int done = scansComplete.incrementAndGet();
-        Platform.runLater(() -> progressBar.setProgress((double) done / totalScans));
+        Platform.runLater(() -> {
+            if (isScanStale(generation)) return;
+            progressBar.setProgress((double) done / totalScans);
+        });
+    }
+
+    private Set<String> loadExcludedDriverIdSet() {
+        try {
+            com.sbtools.settings.AppSettings settings = settingsStore.load();
+            Set<String> ids = new HashSet<>();
+            for (String e : settings.excludedDriverIds()) {
+                int t = e.lastIndexOf('\t');
+                if (t < 0) t = e.lastIndexOf('\u001F');
+                ids.add(t >= 0 ? e.substring(t + 1) : e);
+            }
+            return ids;
+        } catch (Exception ex) {
+            AppLogger.warning("Failed to load excluded drivers: " + ex.getMessage());
+            return Set.of();
+        }
     }
 
     private void scanSoftware(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
         if (isScanStale(generation)) return;
-        updateCategoryProgress(1, "scanning");
-        Platform.runLater(() -> statusLabel.setText("Scanning for software updates\u2026"));
+        updateCategoryProgress(1, "scanning", generation);
+        Platform.runLater(() -> {
+            if (isScanStale(generation)) return;
+            statusLabel.setText("Scanning for software updates\u2026");
+        });
         try {
             List<SoftwareUpdateEntry> updates = softwareUpdateService.scanAllConcurrent(
                     () -> isScanStale(generation), w -> {}, wu -> {});
             if (isScanStale(generation)) return;
-            if (!updates.isEmpty()) {
-                long totalSize = updates.stream().mapToLong(SoftwareUpdateEntry::sizeBytes).sum();
+            // Filter ignored software ids (same logic as SoftwareUpdateViewModel) so dashboard count matches Software tab
+            List<SoftwareUpdateEntry> filteredUpdates = updates;
+            try {
+                com.sbtools.settings.AppSettings settings = new com.sbtools.settings.SettingsStore().load();
+                List<String> skipped = settings.skippedSoftwareIds();
+                if (skipped != null && !skipped.isEmpty()) {
+                    java.util.Set<String> skippedSet = skipped.stream()
+                            .map(s -> { int t = s.lastIndexOf('\t'); return t >= 0 ? s.substring(t + 1) : s; })
+                            .collect(java.util.stream.Collectors.toSet());
+                    filteredUpdates = updates.stream()
+                            .filter(e -> e.id() == null || !skippedSet.contains(e.id()))
+                            .collect(java.util.stream.Collectors.toList());
+                }
+            } catch (Exception ex) {
+                AppLogger.warning("Dashboard skipped filter failed: " + ex.getMessage());
+            }
+            if (isScanStale(generation)) return;
+            final List<SoftwareUpdateEntry> finalUpdates = filteredUpdates;
+            if (!finalUpdates.isEmpty()) {
+                long totalSize = finalUpdates.stream().mapToLong(SoftwareUpdateEntry::sizeBytes).sum();
                 Platform.runLater(() -> {
                     if (isScanStale(generation)) return;
-                    issues.add(new IssueCategory("Outdated Software", updates.size(), totalSize, "Software"));
+                    issues.add(new IssueCategory("Outdated Software", finalUpdates.size(), totalSize, "Software"));
                 });
             }
-            updateCategoryProgress(1, "done");
+            updateCategoryProgress(1, "done", generation);
         } catch (Exception ex) {
             AppLogger.warning("Dashboard software scan failed: " + ex.getMessage());
-            updateCategoryProgress(1, "failed");
+            updateCategoryProgress(1, "failed", generation);
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
                 issues.add(IssueCategory.error("Outdated Software", "Error: " + ex.getMessage(), "", "Software", 0));
             });
         }
         int done = scansComplete.incrementAndGet();
-        Platform.runLater(() -> progressBar.setProgress((double) done / totalScans));
+        Platform.runLater(() -> {
+            if (isScanStale(generation)) return;
+            progressBar.setProgress((double) done / totalScans);
+        });
     }
 
     private void scanCleanup(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
         if (isScanStale(generation)) return;
-        updateCategoryProgress(2, "scanning");
-        Platform.runLater(() -> statusLabel.setText("Scanning for system cleanup opportunities\u2026"));
-        try {
-            List<CleanupRow> results = cleanupService.scan(() -> {});
+        updateCategoryProgress(2, "scanning", generation);
+        Platform.runLater(() -> {
             if (isScanStale(generation)) return;
+            statusLabel.setText("Scanning for system cleanup opportunities\u2026");
+        });
+        try {
+            List<CleanupRow> results = cleanupService.scan(() -> {}, com.sbtools.util.AppExecutors.cleanPool(), token);
+            if (isScanStale(generation) || token.isCancelled()) return;
             for (CleanupRow row : results) {
                 if (isScanStale(generation)) return;
                 if (row.getScanStatus() == CleanupRow.ScanStatus.ERROR) {
@@ -713,17 +846,20 @@ public class DashboardTabView extends BorderPane {
                             sizeBytes));
                 });
             }
-            updateCategoryProgress(2, "done");
+            updateCategoryProgress(2, "done", generation);
         } catch (Exception ex) {
             AppLogger.warning("Dashboard cleanup scan failed: " + ex.getMessage());
-            updateCategoryProgress(2, "failed");
+            updateCategoryProgress(2, "failed", generation);
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
                 issues.add(IssueCategory.error("System Cleanup", "Error: " + ex.getMessage(), "", "Cleanup", 0));
             });
         }
         int done = scansComplete.incrementAndGet();
-        Platform.runLater(() -> progressBar.setProgress((double) done / totalScans));
+        Platform.runLater(() -> {
+            if (isScanStale(generation)) return;
+            progressBar.setProgress((double) done / totalScans);
+        });
     }
 
     private void stopScan() {

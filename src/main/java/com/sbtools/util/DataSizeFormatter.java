@@ -10,7 +10,8 @@ public final class DataSizeFormatter {
     }
 
     public static String formatBytes(long bytes, int decimals) {
-        if (bytes <= 0) return "";
+        if (bytes < 0) return "N/A";
+        if (bytes == 0) return "0 KB";
         double tb = bytes / (1024.0 * 1024 * 1024 * 1024);
         if (tb >= 1) return String.format("%." + decimals + "f TB", tb);
         double gb = bytes / (1024.0 * 1024 * 1024);
@@ -22,13 +23,17 @@ public final class DataSizeFormatter {
     }
 
     public static String formatBytesRounded(long bytes) {
-        if (bytes <= 0) return "";
+        if (bytes < 0) return "N/A";
+        if (bytes == 0) return "0 MB";
         double tb = bytes / (1024.0 * 1024 * 1024 * 1024);
         if (tb >= 1) return String.format("%.0f TB", tb);
         double gb = bytes / (1024.0 * 1024 * 1024);
         if (gb >= 1) return String.format("%.0f GB", gb);
         double mb = bytes / (1024.0 * 1024);
-        return String.format("%.0f MB", mb);
+        if (mb >= 1) return String.format("%.0f MB", mb);
+        double kb = bytes / 1024.0;
+        if (kb >= 1) return String.format("%.0f KB", kb);
+        return String.format("%.0f B", (double) bytes);
     }
 
     public static String formatMhz(int mhz) {

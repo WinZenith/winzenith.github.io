@@ -3,6 +3,7 @@ package com.sbtools.ui;
 import com.sbtools.netoptimizer.AdapterProperties;
 import com.sbtools.netoptimizer.NetworkAdapterRow;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
+import com.sbtools.util.AppExecutors;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleStringProperty;
@@ -20,8 +21,11 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
+import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Future;
 
 class AdapterSettingsPanel extends VBox {
 
@@ -31,6 +35,7 @@ class AdapterSettingsPanel extends VBox {
     private final ObservableList<Map.Entry<String, String>> propertyRows = FXCollections.observableArrayList();
     private final TableView<Map.Entry<String, String>> propTable = new TableView<>(propertyRows);
     private final Label statusLabel = new Label("Ready.");
+    private volatile Future<?> currentTask;
 
     AdapterSettingsPanel(NetworkOptimizerService service, BooleanProperty busy) {
         this.service = service;
@@ -41,18 +46,28 @@ class AdapterSettingsPanel extends VBox {
     }
 
     void refreshAdapters() {
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             List<NetworkAdapterRow> adapters = service.listAdapters();
             Platform.runLater(() -> {
+                String prev = adapterCombo.getSelectionModel().getSelectedItem();
                 adapterCombo.getItems().clear();
                 for (NetworkAdapterRow a : adapters) {
                     adapterCombo.getItems().add(a.getName());
                 }
                 if (!adapterCombo.getItems().isEmpty()) {
-                    adapterCombo.getSelectionModel().selectFirst();
+                    if (prev != null && adapterCombo.getItems().contains(prev)) {
+                        adapterCombo.getSelectionModel().select(prev);
+                    } else {
+                        adapterCombo.getSelectionModel().selectFirst();
+                    }
                 }
             });
-        }, "net-adapter-props-load-adapters").start();
+        });
+    }
+
+    void dispose() {
+        Future<?> t = currentTask;
+        if (t != null) t.cancel(true);
     }
 
     private VBox buildContent() {
@@ -103,19 +118,30 @@ class AdapterSettingsPanel extends VBox {
 
     private void loadProperties() {
         String adapter = adapterCombo.getSelectionModel().getSelectedItem();
-        if (adapter == null || busy.get()) return;
+        if (adapter == null) {
+            new Alert(Alert.AlertType.WARNING, "Please select an adapter.").showAndWait();
+            return;
+        }
+        if (busy.get()) return;
         busy.set(true);
-        statusLabel.setText("Loading properties...");
+        statusLabel.setText("Loading properties for " + adapter + "...");
 
-        new Thread(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 AdapterProperties props = service.getAdapterProperties(adapter);
                 Platform.runLater(() -> {
                     propertyRows.clear();
-                    if (props.properties() != null) {
-                        propertyRows.addAll(props.properties().entrySet());
+                    if (props.properties() != null && !props.properties().isEmpty()) {
+                        // Copy entries to avoid live view issues
+                        List<Map.Entry<String, String>> copy = new ArrayList<>();
+                        for (Map.Entry<String, String> e : props.properties().entrySet()) {
+                            copy.add(new AbstractMap.SimpleEntry<>(e.getKey(), e.getValue()));
+                        }
+                        propertyRows.addAll(copy);
+                        statusLabel.setText("Loaded " + propertyRows.size() + " properties.");
+                    } else {
+                        statusLabel.setText("No properties returned. Try 'Refresh Adapters' or run as Administrator.");
                     }
-                    statusLabel.setText("Loaded " + propertyRows.size() + " properties.");
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -125,6 +151,6 @@ class AdapterSettingsPanel extends VBox {
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }
-        }, "net-load-adapter-props").start();
+        });
     }
 }

@@ -74,11 +74,12 @@ public class HelpTabView extends VBox {
 
         getChildren().add(createFaqSection("Startup Items/Services",
                 "This tab manages programs and services that run automatically when Windows starts. " +
-                "Items are organized into three sub-tabs: Registry (Run/RunOnce keys), Scheduled Tasks, and Windows Services. " +
-                "Select an item and click \"Disable\" to prevent it from starting automatically, or \"Delete\" to remove it entirely. " +
+                "Items are organized into three sub-tabs: Startup apps (Registry Run/RunOnce keys + Startup Folder), Scheduled Tasks, and Windows Services. " +
+                "Startup Folder items (User and Common) are merged into the Startup apps tab and can be toggled by renaming the shortcut (.disabled). " +
+                "Select an item and click \"Enable/Disable\" to prevent it from starting automatically, or \"Delete\" to remove it entirely (a backup is created). " +
                 "Use the search bar to quickly find specific items. " +
-                "You can back up your current startup configuration and restore it later — useful before making bulk changes. " +
-                "Disabling unknown services can cause system instability, so only modify items you recognize."));
+                "You can back up your current startup configuration and restore it later via \"Backups & Restore\" — useful before making bulk changes. " +
+                "Disabling unknown services or HKLM entries requires administrator privileges and can cause system instability, so only modify items you recognize."));
 
         getChildren().add(createFaqSection("System Cleanup",
                 "The System Cleanup tab scans your computer for unnecessary files that consume disk space. " +
@@ -89,12 +90,15 @@ public class HelpTabView extends VBox {
                 "Always review scan results before cleaning to avoid removing files you still need."));
 
         getChildren().add(createFaqSection("Duplicate Files",
-                "This tab finds duplicate files across selected directories by comparing file contents using cryptographic hashes. " +
-                "Click \"Select Directory\" to choose which folders to scan, then click \"Scan.\" " +
-                "Results are grouped by content — each group shows all files with identical content, their sizes, and locations. " +
-                "Select the copies you want to remove and click \"Delete.\" The original (first found) file is typically kept. " +
-                "This tool helps reclaim disk space occupied by redundant copies. Always review results carefully before deleting, " +
-                "as some duplicates may be intentionally kept in different locations (e.g., configuration files in multiple folders)."));
+                "This tab finds duplicate files by comparing file contents with SHA-256 hashes. "
+                + "Click Add... to choose folder(s) on any drive (e.g., Documents, Downloads, Photos), then click Scan. "
+                + "Results are grouped by identical content: the safest keeper (newest on a non-system drive preferred) is shown as the keeper, "
+                + "and older copies are listed in the detail pane where you can uncheck individual files. "
+                + "System folders on any drive (C:\\Windows, WindowsApps, System Volume Information, $Recycle.Bin, Recovery, EFI, Boot) "
+                + "are automatically excluded and cannot be added. "
+                + "Select groups and per-file copies, then click Clean Selected. You can move files to the Recycle Bin (recommended, recoverable) "
+                + "or delete permanently (requires typing DELETE). A System Restore point can be created automatically if enabled in settings. "
+                + "Always review the deletable list in the bottom pane before confirming."));
 
         getChildren().add(createFaqSection("Disk Tools",
                 "The Disk Tools tab contains three utilities: Defragmentation, File Shredder, and Free Space Wipe. " +
@@ -106,11 +110,11 @@ public class HelpTabView extends VBox {
 
         getChildren().add(createFaqSection("Browser Extensions",
                 "This tab scans all major browsers installed on your system — Chrome, Edge, Firefox, Brave, Opera, and Vivaldi — for installed extensions. " +
-                "Use the browser filter buttons at the top to show extensions from specific browsers only. " +
+                "Use the browser filter dropdown at the top to show extensions from specific browsers only. " +
                 "Each extension shows its name, version, description, and current state (enabled or disabled). " +
                 "Select an extension and click \"Disable\" to turn it off without uninstalling, or \"Enable\" to reactivate it. " +
-                "Disabling extensions in this tool modifies the browser's extension settings directly. " +
-                "You may need to restart the browser for changes to take effect."));
+                "If a browser is running, a warning will be shown; changes take effect after restarting the browser. " +
+                "Ignored extensions are hidden from toggle operations but can be managed via the \"Manage Ignored\" button."));
 
         getChildren().add(createFaqSection("Network Optimizer",
                 "The Network Optimizer has seven sub-tabs. " +

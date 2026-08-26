@@ -40,7 +40,7 @@ public class DriverVerificationService {
             ProcessResult result = POWERSHELL_RUNNER.run(cmd);
             if (!result.success()) {
                 AppLogger.warning("Authenticode thumbprint check failed: " + result.combinedOutput());
-                return new VerificationResult(true, "Could not verify signature thumbprint - proceeding with caution");
+                return new VerificationResult(false, "Could not verify signature thumbprint: " + result.combinedOutput());
             }
 
             JsonNode root = JsonMapper.parseTree(result.stdout());
@@ -65,7 +65,7 @@ public class DriverVerificationService {
             }
         } catch (Exception e) {
             AppLogger.warning("Authenticode thumbprint verification error: " + e.getMessage());
-            return new VerificationResult(true, "Could not verify signature thumbprint - proceeding with caution");
+            return new VerificationResult(false, "Could not verify signature thumbprint: " + e.getMessage());
         }
     }
 
@@ -103,7 +103,7 @@ public class DriverVerificationService {
             ProcessResult result = POWERSHELL_RUNNER.run(cmd);
             if (!result.success()) {
                 AppLogger.warning("Authenticode check failed: " + result.combinedOutput());
-                return new VerificationResult(true, "Could not verify signature - proceeding with caution");
+                return new VerificationResult(false, "Could not verify signature: " + result.combinedOutput());
             }
 
             String status = extractJsonString(result.stdout(), "Status");
@@ -117,14 +117,27 @@ public class DriverVerificationService {
             } else if ("HashMismatch".equals(status)) {
                 AppLogger.warning("Authenticode hash mismatch for " + file.getFileName());
                 return new VerificationResult(false, "Authenticode hash mismatch - file may be corrupted");
+            } else if ("NotTrusted".equals(status)) {
+                // B4 fix: corporate PCs with missing intermediate/root or offline CRL often report NotTrusted
+                // even for WHQL-signed drivers. Treat as warning, not blocker, unless catalog expects a specific thumbprint.
+                AppLogger.warning("Authenticode NotTrusted for " + file.getFileName() + " — allowing install with warning (offline corporate root?)");
+                return new VerificationResult(true, "Authenticode signed but not trusted (allowed with warning): " + status);
+            } else if ("UnknownError".equals(status) || "Unknown".equals(status)) {
+                AppLogger.warning("Authenticode status '" + status + "' for " + file.getFileName() + " - treating as invalid");
+                return new VerificationResult(false,
+                        "Authenticode status invalid: " + status + " - file signature not trusted");
             } else {
-                AppLogger.warning("Authenticode status '" + status + "' for " + file.getFileName());
-                return new VerificationResult(true,
-                        "Authenticode status: " + status + " - proceeding with caution");
+                String safeStatus = status != null ? status : "null";
+                // Additional B4 permissiveness: HashMismatch is still fatal, but for WHQL .cat/.sys contexts
+                // an Unknown status is often transient (e.g. timestamp server offline); log warning and allow
+                // if the file at least has a signer. We keep strict for now except NotTrusted.
+                AppLogger.warning("Authenticode status '" + safeStatus + "' for " + file.getFileName() + " - treating as invalid");
+                return new VerificationResult(false,
+                        "Authenticode status invalid: " + safeStatus);
             }
         } catch (Exception e) {
             AppLogger.warning("Authenticode verification error: " + e.getMessage());
-            return new VerificationResult(true, "Could not verify signature - proceeding with caution");
+            return new VerificationResult(false, "Could not verify signature: " + e.getMessage());
         }
     }
 

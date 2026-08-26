@@ -28,12 +28,18 @@ public class RestoreRow {
 
     public RestoreRow(DriverBackupEntry entry) {
         this.entry = entry;
-        deviceName.set(entry.friendlyName() != null && !entry.friendlyName().isBlank()
-                ? entry.friendlyName() : entry.deviceId());
-        version.set(entry.version() != null ? entry.version() : "\u2014");
-        backedUpAt.set(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
-                .withZone(ZoneId.systemDefault())
-                .format(entry.createdAt()));
+        String name = entry.friendlyName();
+        if (name == null || name.isBlank()) name = entry.deviceId();
+        if (name == null || name.isBlank()) name = "Unknown device";
+        deviceName.set(name);
+        version.set(entry.version() != null && !entry.version().isBlank() ? entry.version() : "\u2014");
+        if (entry.createdAt() != null) {
+            backedUpAt.set(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                    .withZone(ZoneId.systemDefault())
+                    .format(entry.createdAt()));
+        } else {
+            backedUpAt.set("\u2014");
+        }
         size.set("Loading...");
     }
 
@@ -69,10 +75,22 @@ public class RestoreRow {
     public StringProperty sizeProperty() { return size; }
 
     private static String computeSize(String backupFolder) {
-        Path folder = Path.of(backupFolder);
+        if (backupFolder == null || backupFolder.isBlank()) return "\u2014";
+        Path folder;
+        try { folder = Path.of(backupFolder); } catch (Exception e) { return "\u2014"; }
+        // Safety: reject shallow / system locations to avoid walking C:\ on tampered index
+        try {
+            Path norm = folder.toAbsolutePath().normalize();
+            String s = norm.toString().toLowerCase().replace('/', '\\');
+            if (s.length() <= 3 || s.matches("^[a-z]:\\\\?$")) return "\u2014";
+            if (s.contains("\\windows\\") || s.endsWith("\\windows") || s.equals("c:\\windows")) return "\u2014";
+            if (s.contains("\\program files") || s.contains("\\programdata")) return "\u2014";
+            if (norm.getNameCount() < 2) return "\u2014";
+        } catch (Exception ignored) { return "\u2014"; }
         if (!Files.isDirectory(folder)) return "\u2014";
-        try (var stream = Files.walk(folder)) {
+        try (var stream = Files.walk(folder, 5)) {
             long bytes = stream.filter(Files::isRegularFile)
+                    .filter(p -> { try { return !Files.isSymbolicLink(p); } catch (Exception e) { return false; } })
                     .mapToLong(p -> { try { return Files.size(p); } catch (IOException e) { return 0; } })
                     .sum();
             return formatFileSize(bytes);
@@ -82,8 +100,10 @@ public class RestoreRow {
     }
 
     public static String formatFileSize(long bytes) {
+        if (bytes < 0) bytes = 0;
         if (bytes < 1024) return bytes + " B";
         if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
+        if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
+        return String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
     }
 }

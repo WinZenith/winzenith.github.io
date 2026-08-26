@@ -38,20 +38,34 @@ public final class InstallerCleanupHelper {
         }
 
         CompletableFuture<Boolean> result = new CompletableFuture<>();
-        Platform.runLater(() -> {
-            StringBuilder sb = new StringBuilder();
-            for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
-            Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                    "The following installer files were detected in your Downloads folder:\n\n"
-                            + sb + "\nDelete these files?");
-            del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
-            boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
-            if (confirmed) {
-                service.deleteInstallerFiles(candidates);
-            }
-            result.complete(confirmed);
-        });
-        return result;
+        try {
+            Platform.runLater(() -> {
+                try {
+                    StringBuilder sb = new StringBuilder();
+                    for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
+                    Alert del = new Alert(Alert.AlertType.CONFIRMATION,
+                            "The following installer files were detected in your Downloads folder:\n\n"
+                                    + sb + "\nDelete these files?");
+                    del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
+                    boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
+                    if (confirmed) {
+                        service.deleteInstallerFiles(candidates);
+                    }
+                    result.complete(confirmed);
+                } catch (Exception ex) {
+                    com.sbtools.util.AppLogger.warning("promptAndCleanupAsync failed: " + ex.getMessage());
+                    result.complete(false);
+                }
+            });
+        } catch (Exception ex) {
+            result.complete(false);
+        }
+        // Safety: timeout after 90s so callers don't hang forever; do NOT double-complete original future (B3 fix)
+        return result.orTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+                .exceptionally(ex -> {
+                    com.sbtools.util.AppLogger.warning("promptAndCleanupAsync timeout: " + ex.getMessage());
+                    return false;
+                });
     }
 
     /**
@@ -69,24 +83,57 @@ public final class InstallerCleanupHelper {
         List<Path> candidates = service.findCandidateInstallersForPackage(entry, since);
         if (candidates == null || candidates.isEmpty()) return false;
 
+        // Guard: never block FX thread
+        if (Platform.isFxApplicationThread()) {
+            com.sbtools.util.AppLogger.warning("promptAndCleanup called on FX thread – showing async only");
+            // Show async and return false (don't block FX)
+            Platform.runLater(() -> {
+                StringBuilder sb = new StringBuilder();
+                for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
+                Alert del = new Alert(Alert.AlertType.CONFIRMATION,
+                        "The following installer files were detected in your Downloads folder:\n\n"
+                                + sb + "\nDelete these files?");
+                del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
+                if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
+                    service.deleteInstallerFiles(candidates);
+                }
+            });
+            return false;
+        }
+
         AtomicBoolean userConfirmed = new AtomicBoolean(false);
         java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
 
-        Platform.runLater(() -> {
-            StringBuilder sb = new StringBuilder();
-            for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
-            Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                    "The following installer files were detected in your Downloads folder:\n\n"
-                            + sb + "\nDelete these files?");
-            del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
-            if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
-                userConfirmed.set(true);
-            }
-            latch.countDown();
-        });
+        try {
+            Platform.runLater(() -> {
+                try {
+                    StringBuilder sb = new StringBuilder();
+                    for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
+                    Alert del = new Alert(Alert.AlertType.CONFIRMATION,
+                            "The following installer files were detected in your Downloads folder:\n\n"
+                                    + sb + "\nDelete these files?");
+                    del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
+                    if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
+                        userConfirmed.set(true);
+                    }
+                } catch (Exception ex) {
+                    com.sbtools.util.AppLogger.warning("promptAndCleanup dialog failed: " + ex.getMessage());
+                } finally {
+                    latch.countDown();
+                }
+            });
+        } catch (Exception ex) {
+            // Platform.runLater failed (toolkit shutting down) – don't block forever
+            com.sbtools.util.AppLogger.warning("promptAndCleanup Platform.runLater failed: " + ex.getMessage());
+            return false;
+        }
 
         try {
-            latch.await();
+            boolean completed = latch.await(60, java.util.concurrent.TimeUnit.SECONDS);
+            if (!completed) {
+                com.sbtools.util.AppLogger.warning("promptAndCleanup timed out waiting for user response – skipping delete");
+                return false;
+            }
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             return false;
@@ -117,30 +164,43 @@ public final class InstallerCleanupHelper {
         }
 
         CompletableFuture<Boolean> result = new CompletableFuture<>();
-        Platform.runLater(() -> {
-            StringBuilder sb = new StringBuilder();
-            int totalFiles = 0;
-            for (Map.Entry<SoftwareUpdateEntry, List<Path>> entry : allCandidates.entrySet()) {
-                String name = entry.getKey().getName() != null ? entry.getKey().getName() : entry.getKey().id();
-                sb.append(name).append(":\n");
-                for (Path p : entry.getValue()) {
-                    sb.append("  ").append(p.getFileName().toString()).append("\n");
-                    totalFiles++;
+        try {
+            Platform.runLater(() -> {
+                try {
+                    StringBuilder sb = new StringBuilder();
+                    int totalFiles = 0;
+                    for (Map.Entry<SoftwareUpdateEntry, List<Path>> entry : allCandidates.entrySet()) {
+                        String name = entry.getKey().getName() != null ? entry.getKey().getName() : entry.getKey().id();
+                        sb.append(name).append(":\n");
+                        for (Path p : entry.getValue()) {
+                            sb.append("  ").append(p.getFileName().toString()).append("\n");
+                            totalFiles++;
+                        }
+                        sb.append("\n");
+                    }
+                    Alert del = new Alert(Alert.AlertType.CONFIRMATION,
+                            "The following installer files (" + totalFiles + " file(s)) were detected in your Downloads folder:\n\n"
+                                    + sb + "Delete these files?");
+                    del.setHeaderText("Clean up installer files");
+                    boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
+                    if (confirmed) {
+                        for (List<Path> files : allCandidates.values()) {
+                            service.deleteInstallerFiles(files);
+                        }
+                    }
+                    result.complete(confirmed);
+                } catch (Exception ex) {
+                    com.sbtools.util.AppLogger.warning("promptAndCleanupBatchAsync failed: " + ex.getMessage());
+                    result.complete(false);
                 }
-                sb.append("\n");
-            }
-            Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                    "The following installer files (" + totalFiles + " file(s)) were detected in your Downloads folder:\n\n"
-                            + sb + "Delete these files?");
-            del.setHeaderText("Clean up installer files");
-            boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
-            if (confirmed) {
-                for (List<Path> files : allCandidates.values()) {
-                    service.deleteInstallerFiles(files);
-                }
-            }
-            result.complete(confirmed);
-        });
-        return result;
+            });
+        } catch (Exception ex) {
+            result.complete(false);
+        }
+        return result.orTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+                .exceptionally(ex -> {
+                    com.sbtools.util.AppLogger.warning("promptAndCleanupBatchAsync timeout: " + ex.getMessage());
+                    return false;
+                });
     }
 }

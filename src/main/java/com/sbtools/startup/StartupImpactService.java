@@ -81,33 +81,56 @@ public class StartupImpactService {
     }
 
     private static double estimateServiceImpact(StartupItem item) {
-        double score = 50.0;
-
         String startType = item.getServiceStartType();
-        if ("Automatic".equalsIgnoreCase(startType)) {
-            score *= 2;
-        } else if ("Disabled".equalsIgnoreCase(startType)) {
+        if ("Disabled".equalsIgnoreCase(startType)) {
             return 0;
+        }
+        // Manual services do not start at boot unless triggered – minimal impact
+        if ("Manual".equalsIgnoreCase(startType)) {
+            return 15.0;
+        }
+        if ("Automatic (Delayed Start)".equalsIgnoreCase(startType)) {
+            // Delayed start has reduced boot impact
+            double score = 30.0;
+            String nameLower = lower(item.getName());
+            if (containsHeavy(nameLower, item.getName())) score += 120;
+            if (item.getDependencies() != null) score += Math.min(item.getDependencies().size() * 30, 150);
+            return Math.min(score, 800);
+        }
+        // Automatic
+        double score = 100.0;
+        if ("Automatic".equalsIgnoreCase(startType)) {
+            // keep 100 base for automatic
         }
 
         String nameLower = lower(item.getName());
-        if (HEAVY_SERVICE_NAMES.contains(item.getName())) {
+        if (containsHeavyExact(nameLower)) {
             score += 300;
-        } else {
-            for (String heavy : HEAVY_SERVICE_NAMES) {
-                if (nameLower.contains(heavy.toLowerCase())) {
-                    score += 200;
-                    break;
-                }
-            }
+        } else if (containsHeavy(nameLower, item.getName())) {
+            score += 200;
         }
 
-        // Dependency awareness: each dependency adds latency
+        // Dependency awareness: each dependency adds latency but capped
         if (item.getDependencies() != null) {
-            score += item.getDependencies().size() * 100;
+            score += Math.min(item.getDependencies().size() * 50, 300);
         }
 
         return Math.min(score, 3000);
+    }
+
+    private static boolean containsHeavyExact(String nameLower) {
+        for (String h : HEAVY_SERVICE_NAMES) {
+            if (h.equalsIgnoreCase(nameLower)) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsHeavy(String nameLower, String original) {
+        for (String heavy : HEAVY_SERVICE_NAMES) {
+            if (nameLower.contains(heavy.toLowerCase())) return true;
+            if (original != null && original.equalsIgnoreCase(heavy)) return true;
+        }
+        return false;
     }
 
     public static String formatImpact(double ms) {

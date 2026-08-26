@@ -21,29 +21,36 @@ import java.util.stream.Collectors;
 
 public class DriverBackupService {
 
-    private static final ReentrantReadWriteLock INDEX_LOCK = new ReentrantReadWriteLock();
+    private static final java.util.concurrent.ConcurrentHashMap<Path, ReentrantReadWriteLock> LOCKS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static ReentrantReadWriteLock lockFor(Path indexPath) {
+        return LOCKS.computeIfAbsent(indexPath.toAbsolutePath().normalize(), k -> new ReentrantReadWriteLock());
+    }
     private final ProcessRunner processRunner = new ProcessRunner(300);
 
     public List<DriverBackupEntry> listAll() throws IOException {
-        INDEX_LOCK.readLock().lock();
+        Path idx = indexPath();
+        ReentrantReadWriteLock lock = lockFor(idx);
+        lock.readLock().lock();
         try {
             return loadIndex().getEntries().stream()
                     .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
                     .collect(Collectors.toList());
         } finally {
-            INDEX_LOCK.readLock().unlock();
+            lock.readLock().unlock();
         }
     }
 
     public List<DriverBackupEntry> listBackups(String deviceId) throws IOException {
-        INDEX_LOCK.readLock().lock();
+        Path idx = indexPath();
+        ReentrantReadWriteLock lock = lockFor(idx);
+        lock.readLock().lock();
         try {
             return loadIndex().getEntries().stream()
                     .filter(e -> e.deviceId().equals(deviceId))
                     .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
                     .collect(Collectors.toList());
         } finally {
-            INDEX_LOCK.readLock().unlock();
+            lock.readLock().unlock();
         }
     }
 
@@ -55,48 +62,68 @@ public class DriverBackupService {
                     + driver.friendlyName() + " (" + driver.deviceId()
                     + "). Automatic backup is not supported for this device.");
         }
+        if (driver.deviceId() == null || driver.deviceId().isBlank()) {
+            throw new IOException("Cannot backup driver: device ID not available.");
+        }
         String safeId = driver.deviceId().replaceAll("[^a-zA-Z0-9_-]", "_");
-        Path root = (settings.backupDirectory() != null && !settings.backupDirectory().isBlank())
-                ? Path.of(settings.backupDirectory())
-                : AppPaths.backupsRoot();
+        if (safeId.isBlank()) safeId = "unknown";
+        Path root = AppPaths.backupsRoot(settings);
+        Instant now = Instant.now();
         Path folder = root
                 .resolve(safeId)
-                .resolve(Instant.now().toEpochMilli() + "_" + UUID.randomUUID().toString().substring(0, 8));
+                .resolve(now.toEpochMilli() + "_" + UUID.randomUUID().toString().substring(0, 8));
         Files.createDirectories(folder);
 
         Path script = PowerShellScripts.resolve("pnputil-backup.ps1");
         ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
                 script.toString(), inf, folder.toString()));
         if (!result.success()) {
+            // clean up empty folder on failure
+            try { deleteDirectory(folder); } catch (Exception ignored) {}
             throw new IOException("Driver backup failed: " + result.combinedOutput());
+        }
+        // Verify backup actually produced files - fail fast if no INF was exported
+        if (countInfFiles(folder) == 0) {
+            try { deleteDirectory(folder); } catch (Exception ignored) {}
+            throw new IOException("Driver backup produced no INF files in " + folder
+                    + ". The driver may not be exported via pnputil on this system or the INF name is incorrect.");
         }
 
         DriverBackupEntry entry = new DriverBackupEntry(
                 UUID.randomUUID().toString(),
                 driver.deviceId(),
                 driver.friendlyName(),
-                Instant.now(),
+                now,
                 folder.toString(),
                 driver.driverVersion(),
                 inf
         );
 
-        INDEX_LOCK.writeLock().lock();
+        // Use the same settings-aware index path as the backup folder to avoid split-brain
+        Path idx = indexPath(settings);
+        ReentrantReadWriteLock lock = lockFor(idx);
+        lock.writeLock().lock();
         try {
-            BackupIndex index = loadIndex();
+            BackupIndex index = loadIndex(settings);
             index.getEntries().add(entry);
-            saveIndex(index);
+            saveIndex(index, settings);
         } finally {
-            INDEX_LOCK.writeLock().unlock();
+            lock.writeLock().unlock();
         }
 
         AppLogger.info("Driver backup created: " + entry.friendlyName()
-                + " v" + entry.version() + " [" + entry.id() + "]");
+                + " v" + entry.version() + " [" + entry.id() + "] -> " + folder);
         return entry;
     }
 
     public void revert(DriverBackupEntry entry) throws IOException, InterruptedException {
+        if (entry == null || entry.backupFolder() == null || entry.backupFolder().isBlank()) {
+            throw new IOException("Invalid backup entry");
+        }
         Path folder = Path.of(entry.backupFolder());
+        if (!isSafeToDelete(folder)) {
+            throw new IOException("Refusing to revert from folder outside backups root: " + folder);
+        }
         if (!Files.isDirectory(folder)) {
             throw new IOException("Backup folder missing: " + folder);
         }
@@ -120,27 +147,16 @@ public class DriverBackupService {
     }
 
     public void removeBackupEntry(DriverBackupEntry entry) throws IOException {
-        INDEX_LOCK.writeLock().lock();
-        try {
-            BackupIndex index = loadIndex();
-            index.getEntries().removeIf(e -> e.id().equals(entry.id()));
-            saveIndex(index);
-        } finally {
-            INDEX_LOCK.writeLock().unlock();
-        }
+        if (entry == null || entry.id() == null) return;
+        // Remove from all index files (primary + fallbacks) to prevent ghost reappearance
+        java.util.Set<String> idsToRemove = java.util.Set.of(entry.id());
+        purgeFromAllIndexes(idsToRemove);
 
         try {
             Path folder = Path.of(entry.backupFolder());
-            if (Files.isDirectory(folder)) {
+            if (isSafeToDelete(folder)) {
                 deleteDirectory(folder);
-                Path parent = folder.getParent();
-                if (parent != null && Files.isDirectory(parent)) {
-                    try (var stream = Files.list(parent)) {
-                        if (stream.findFirst().isEmpty()) {
-                            Files.deleteIfExists(parent);
-                        }
-                    }
-                }
+                cleanupEmptyParent(folder.getParent());
             }
         } catch (IOException e) {
             AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
@@ -149,34 +165,147 @@ public class DriverBackupService {
 
     public void removeAll() throws IOException {
         List<DriverBackupEntry> entriesToDelete;
-        INDEX_LOCK.writeLock().lock();
+        Path idx = indexPath();
+        ReentrantReadWriteLock lock = lockFor(idx);
+        lock.writeLock().lock();
         try {
             BackupIndex index = loadIndex();
             entriesToDelete = new java.util.ArrayList<>(index.getEntries());
             index.getEntries().clear();
             saveIndex(index);
         } finally {
-            INDEX_LOCK.writeLock().unlock();
+            lock.writeLock().unlock();
         }
-        entriesToDelete.parallelStream().forEach(entry -> {
+        // Purge all fallback indexes as well so deleted entries don't resurrect
+        if (!entriesToDelete.isEmpty()) {
+            java.util.Set<String> allIds = new java.util.HashSet<>();
+            for (DriverBackupEntry e : entriesToDelete) if (e.id()!=null) allIds.add(e.id());
+            // Also include any entries that only lived in fallback files
+            for (Path fb : fallbackIndexPaths(indexPath())) {
+                try {
+                    BackupIndex fbIdx = loadSingleIndex(fb);
+                    for (DriverBackupEntry e : fbIdx.getEntries()) if (e.id()!=null) allIds.add(e.id());
+                } catch (Exception ignored) {}
+            }
+            purgeFromAllIndexes(allIds);
+            // Ensure fallback files are truncated
+            for (Path fb : fallbackIndexPaths(indexPath())) {
+                try {
+                    BackupIndex fbIdx = loadSingleIndex(fb);
+                    if (!fbIdx.getEntries().isEmpty()) {
+                        fbIdx.getEntries().clear();
+                        saveIndexToPath(fbIdx, fb);
+                    }
+                } catch (Exception ex) {
+                    AppLogger.warning("Failed to clear fallback index " + fb + ": " + ex.getMessage());
+                }
+            }
+        }
+        // Sequential to avoid race on shared parent (same safeId)
+        java.util.Set<Path> cleanedParents = new java.util.HashSet<>();
+        for (DriverBackupEntry entry : entriesToDelete) {
             try {
                 Path folder = Path.of(entry.backupFolder());
-                if (Files.isDirectory(folder)) {
+                if (isSafeToDelete(folder) && Files.isDirectory(folder)) {
                     deleteDirectory(folder);
                     Path parent = folder.getParent();
-                    if (parent != null && Files.isDirectory(parent)) {
-                        try (var stream = Files.list(parent)) {
-                            if (stream.findFirst().isEmpty()) {
-                                Files.deleteIfExists(parent);
-                            }
-                        }
+                    if (parent != null && cleanedParents.add(parent)) {
+                        cleanupEmptyParent(parent);
                     }
                 }
             } catch (IOException e) {
                 AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
             }
-        });
-        AppLogger.info("All driver backups removed");
+        }
+        AppLogger.info("All driver backups removed (" + entriesToDelete.size() + ")");
+    }
+
+    private void purgeFromAllIndexes(java.util.Set<String> idsToRemove) throws IOException {
+        if (idsToRemove == null || idsToRemove.isEmpty()) return;
+        java.util.List<Path> allPaths = allIndexPaths();
+        for (Path p : allPaths) {
+            ReentrantReadWriteLock lock = lockFor(p);
+            lock.writeLock().lock();
+            try {
+                if (!Files.exists(p) && !Files.exists(p.resolveSibling(p.getFileName().toString() + ".bak"))) continue;
+                BackupIndex idx = loadSingleIndex(p);
+                boolean changed = idx.getEntries().removeIf(e -> e != null && e.id() != null && idsToRemove.contains(e.id()));
+                if (changed) {
+                    saveIndexToPath(idx, p);
+                }
+            } catch (IOException ex) {
+                AppLogger.warning("Failed to purge index " + p + ": " + ex.getMessage());
+            } finally {
+                lock.writeLock().unlock();
+            }
+        }
+    }
+
+    private void cleanupEmptyParent(Path parent) {
+        if (parent == null || !Files.isDirectory(parent)) return;
+        // Only delete parent if it is directly under backupsRoot and empty
+        try {
+            Path backupsRoot = indexPath().getParent();
+            if (backupsRoot == null || !parent.startsWith(backupsRoot)) return;
+            try (var stream = Files.list(parent)) {
+                if (stream.findFirst().isEmpty()) {
+                    Files.deleteIfExists(parent);
+                }
+            }
+        } catch (IOException e) {
+            AppLogger.warning("Could not clean parent: " + parent, e);
+        }
+    }
+
+    private boolean isSafeToDelete(Path folder) {
+        if (folder == null) return false;
+        try {
+            Path normalized = folder.toAbsolutePath().normalize();
+            // Must be at least 2 levels deep under a backups root ( <root>/<safeId>/<timestamp> )
+            // Reject drive roots and system locations
+            if (normalized.getNameCount() < 2) {
+                AppLogger.warning("Refusing to delete shallow folder: " + folder);
+                return false;
+            }
+            java.util.List<Path> allowedRoots = new java.util.ArrayList<>();
+            Path primaryRoot = indexPath().getParent();
+            if (primaryRoot != null) allowedRoots.add(primaryRoot.toAbsolutePath().normalize());
+            // Also allow custom backupDirectory locations
+            try {
+                com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
+                if (s.backupDirectory() != null && !s.backupDirectory().isBlank()) {
+                    Path custom = Path.of(s.backupDirectory()).toAbsolutePath().normalize();
+                    if (isValidCustomRoot(custom)) allowedRoots.add(custom);
+                }
+            } catch (Exception ignored) {}
+            // Portable root fallback
+            try {
+                Path portable = AppPaths.backupsRoot().toAbsolutePath().normalize();
+                if (!allowedRoots.contains(portable)) allowedRoots.add(portable);
+            } catch (Exception ignored) {}
+            try {
+                Path legacy = AppPaths.legacyBackupsRoot().toAbsolutePath().normalize();
+                if (!allowedRoots.contains(legacy)) allowedRoots.add(legacy);
+            } catch (Exception ignored) {}
+            for (Path root : allowedRoots) {
+                if (normalized.startsWith(root)) {
+                    // Additional safety: folder must be inside root/safeId/... ensure not directly root
+                    Path rel = root.relativize(normalized);
+                    if (rel.getNameCount() >= 2) return true;
+                    AppLogger.warning("Refusing to delete folder directly under backups root: " + folder);
+                    return false;
+                }
+            }
+            // Do NOT trust index entry's own folder to validate itself (avoids tampered index bypass).
+            // Old custom location after settings change will be handled via allowedRoots if fallback
+            // migration is implemented; otherwise user should restore backupDirectory setting.
+        } catch (Exception ignored) {}
+        AppLogger.warning("Refusing to delete folder outside backups root: " + folder);
+        return false;
+    }
+
+    private static boolean isValidCustomRoot(Path custom) {
+        return AppPaths.isValidCustomBackupDir(custom);
     }
 
     public long getTotalSize() throws IOException {
@@ -186,10 +315,16 @@ public class DriverBackupService {
     public long getTotalSize(List<DriverBackupEntry> entries) throws IOException {
         long total = 0;
         for (DriverBackupEntry entry : entries) {
-            Path folder = Path.of(entry.backupFolder());
-            if (Files.isDirectory(folder)) {
-                total += directorySize(folder);
-            }
+            try {
+                Path folder = Path.of(entry.backupFolder());
+                if (!isSafeToDelete(folder)) {
+                    AppLogger.warning("Skipping size calculation for unsafe folder: " + folder);
+                    continue;
+                }
+                if (Files.isDirectory(folder)) {
+                    total += directorySize(folder);
+                }
+            } catch (Exception ignored) {}
         }
         return total;
     }
@@ -203,8 +338,12 @@ public class DriverBackupService {
     }
 
     private long directorySize(Path directory) throws IOException {
-        try (var stream = Files.walk(directory)) {
+        // Limit depth and avoid following links to prevent runaway scan if backupFolder is misconfigured
+        try (var stream = Files.walk(directory, 10)) {
             return stream.filter(Files::isRegularFile)
+                    .filter(p -> {
+                        try { return !Files.isSymbolicLink(p); } catch (Exception e) { return false; }
+                    })
                     .mapToLong(p -> {
                         try { return Files.size(p); } catch (IOException e) { return 0; }
                     })
@@ -223,17 +362,145 @@ public class DriverBackupService {
         }
     }
 
+    private Path indexPath() {
+        // Resolve settings-aware index path; fallback to portable/legacy with merge support
+        try {
+            com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
+            Path withSettings = indexPath(s);
+            // Validate custom path - if invalid, fallback to portable
+            if (withSettings != null) return withSettings;
+        } catch (Exception ignored) {}
+        return AppPaths.backupIndexNoCreate();
+    }
+
+    private Path indexPath(com.sbtools.settings.AppSettings settings) {
+        if (settings != null && settings.backupDirectory() != null && !settings.backupDirectory().isBlank()) {
+            String raw = settings.backupDirectory().trim();
+            if (!raw.isBlank()) {
+                Path custom = Path.of(raw);
+                if (isValidCustomRoot(custom.toAbsolutePath().normalize())) {
+                    return custom.resolve("index.json");
+                } else {
+                    AppLogger.warning("Ignoring invalid backupDirectory: " + raw);
+                }
+            }
+        }
+        return AppPaths.backupIndexNoCreate();
+    }
+
+    private java.util.List<Path> fallbackIndexPaths(Path primary) {
+        java.util.List<Path> fallbacks = new java.util.ArrayList<>();
+        Path portableIdx = AppPaths.backupIndexNoCreate();
+        Path legacyIdx = AppPaths.legacyBackupsRoot().resolve("index.json");
+        if (!portableIdx.equals(primary)) fallbacks.add(portableIdx);
+        if (!legacyIdx.equals(primary) && !legacyIdx.equals(portableIdx)) fallbacks.add(legacyIdx);
+        return fallbacks;
+    }
+
+    private java.util.List<Path> allIndexPaths() {
+        Path primary = indexPath();
+        java.util.List<Path> all = new java.util.ArrayList<>();
+        all.add(primary);
+        all.addAll(fallbackIndexPaths(primary));
+        return all.stream().distinct().collect(Collectors.toList());
+    }
+
     private BackupIndex loadIndex() throws IOException {
-        Path path = AppPaths.backupIndex();
+        return loadIndex(null);
+    }
+
+    private BackupIndex loadIndex(com.sbtools.settings.AppSettings settings) throws IOException {
+        Path primary = settings != null ? indexPath(settings) : indexPath();
+        BackupIndex merged = new BackupIndex();
+        java.util.Set<String> seenIds = new java.util.HashSet<>();
+
+        // Primary
+        BackupIndex primaryIdx = loadSingleIndex(primary);
+        for (DriverBackupEntry e : primaryIdx.getEntries()) {
+            if (e != null && e.id() != null && seenIds.add(e.id())) {
+                merged.getEntries().add(e);
+            }
+        }
+
+        // Fallback: also check portable and legacy if different from primary, to avoid hiding old backups
+        for (Path fb : fallbackIndexPaths(primary)) {
+            if (Files.exists(fb)) {
+                try {
+                    BackupIndex fbIdx = loadSingleIndex(fb);
+                    for (DriverBackupEntry e : fbIdx.getEntries()) {
+                        if (e != null && e.id() != null && seenIds.add(e.id())) {
+                            merged.getEntries().add(e);
+                        }
+                    }
+                    if (!fbIdx.getEntries().isEmpty()) {
+                        AppLogger.info("Loaded " + fbIdx.getEntries().size() + " entries from fallback index " + fb);
+                    }
+                } catch (Exception ex) {
+                    AppLogger.warning("Failed to load fallback index " + fb + ": " + ex.getMessage());
+                }
+            }
+        }
+
+        // Filter out entries with missing backup folder or null id to avoid NPE downstream
+        merged.getEntries().removeIf(e -> e == null || e.id() == null || e.backupFolder() == null || e.backupFolder().isBlank());
+        // Prune entries whose backup folder no longer exists on disk (stale index after manual delete)
+        // Keep them if folder missing but we have not yet cleaned? For now keep missing but mark - UI will show  — size.
+        return merged;
+    }
+
+    private BackupIndex loadSingleIndex(Path path) throws IOException {
         if (!Files.exists(path)) {
+            // Try .bak
+            Path bak = path.resolveSibling(path.getFileName().toString() + ".bak");
+            if (Files.exists(bak)) {
+                try {
+                    return JsonMapper.mapper().readValue(bak.toFile(), BackupIndex.class);
+                } catch (Exception ignored) {}
+            }
             return new BackupIndex();
         }
-        return JsonMapper.mapper().readValue(path.toFile(), BackupIndex.class);
+        try {
+            return JsonMapper.mapper().readValue(path.toFile(), BackupIndex.class);
+        } catch (IOException e) {
+            // Try .bak on corrupted primary
+            Path bak = path.resolveSibling(path.getFileName().toString() + ".bak");
+            if (Files.exists(bak)) {
+                try {
+                    AppLogger.warning("Primary index corrupted, loading backup: " + bak);
+                    return JsonMapper.mapper().readValue(bak.toFile(), BackupIndex.class);
+                } catch (Exception ignored) {}
+            }
+            throw e;
+        }
     }
 
     private void saveIndex(BackupIndex index) throws IOException {
-        Files.createDirectories(AppPaths.backupsRoot());
-        JsonMapper.mapper().writerWithDefaultPrettyPrinter()
-                .writeValue(AppPaths.backupIndex().toFile(), index);
+        saveIndex(index, null);
+    }
+
+    private void saveIndex(BackupIndex index, com.sbtools.settings.AppSettings settings) throws IOException {
+        Path path = settings != null ? indexPath(settings) : indexPath();
+        saveIndexToPath(index, path);
+    }
+
+    private void saveIndexToPath(BackupIndex index, Path path) throws IOException {
+        Files.createDirectories(path.getParent());
+        // Atomic write via temp file + backup
+        Path tmp = path.resolveSibling("." + path.getFileName().toString() + ".tmp");
+        Path bak = path.resolveSibling(path.getFileName().toString() + ".bak");
+        try {
+            JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), index);
+            // Keep backup of previous
+            if (Files.exists(path)) {
+                try { Files.copy(path, bak, java.nio.file.StandardCopyOption.REPLACE_EXISTING); } catch (IOException ignored) {}
+            }
+            try {
+                Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException ex) {
+                Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+        }
     }
 }

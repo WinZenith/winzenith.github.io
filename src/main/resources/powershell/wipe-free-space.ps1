@@ -33,8 +33,7 @@ function Cleanup-TempFiles {
 
 $bufferSize = 10 * 1024 * 1024
 $buffer = New-Object byte[] $bufferSize
-$maxWriteBytes = 512MB
-$reserveBytes = 500MB
+$reserveBytes = 1GB
 
 foreach ($driveLetter in $DriveLetters) {
     if (Test-ShouldStop) { break }
@@ -42,23 +41,27 @@ foreach ($driveLetter in $DriveLetters) {
 
     $volume = Get-PSDrive -Name $drive -ErrorAction SilentlyContinue
     if (-not $volume) {
-        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -message "Drive not found: $driveLetter"
+        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 1 -totalPasses $PassCount -done $true -message "Drive not found: $driveLetter"
         continue
     }
 
     $freeBytes = $volume.Free
-    $totalToWrite = [Math]::Max(0, [Math]::Min(($freeBytes - $reserveBytes), $maxWriteBytes))
+    if ($null -eq $freeBytes) { $freeBytes = 0 }
+    $totalToWrite = [Math]::Max(0, ($freeBytes - $reserveBytes))
 
     if ($totalToWrite -le 0) {
-        Write-ProgressJson -driveLetter $driveLetter -percent 100 -pass $PassCount -totalPasses $PassCount -done $true -message "Insufficient free space on $driveLetter"
+        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 1 -totalPasses $PassCount -done $true -message "Insufficient free space on $driveLetter (needs >1 GB free)"
         continue
     }
 
-    $tempFile = "$drive`:\\~winzenith-wipe-$([System.IO.Path]::GetRandomFileName()).tmp"
+    # Use GetRandomFileName without double extension and ensure uniqueness
+    $randName = [System.IO.Path]::GetRandomFileName()
+    if ($randName.EndsWith(".tmp")) { $randName = $randName.Substring(0, $randName.Length - 4) }
+    $tempFile = "$drive`:\~winzenith-wipe-$randName.tmp"
     $tempFiles += $tempFile
     $stream = $null
 
-    Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -tempFile $tempFile
+    Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 1 -totalPasses $PassCount -tempFile $tempFile
 
     try {
         $stream = [System.IO.File]::OpenWrite($tempFile)

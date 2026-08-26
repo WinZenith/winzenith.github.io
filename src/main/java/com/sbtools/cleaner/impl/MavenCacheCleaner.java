@@ -23,21 +23,24 @@ public class MavenCacheCleaner implements CleanerExtension {
         if (userHome != null) {
             Path repo = Paths.get(userHome, ".m2", "repository");
             if (Files.isDirectory(repo)) {
-                Path snapshots = repo.resolve("snapshots");
-                if (Files.isDirectory(snapshots)) {
-                    try (Stream<Path> walk = Files.walk(snapshots, 6)) {
-                        var stats = walk.filter(Files::isRegularFile)
-                                .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                        totalSize = stats.getSum();
-                        itemCount = (int) stats.getCount();
-                    } catch (Exception ignored) {}
-                }
+                try (Stream<Path> walk = Files.walk(repo)) {
+                    var stats = walk.filter(Files::isRegularFile)
+                            .filter(p -> {
+                                String n = p.getFileName().toString().toLowerCase();
+                                return n.endsWith("-snapshot.jar") || n.endsWith("-snapshot.pom");
+                            })
+                            .collect(java.util.stream.Collectors.summarizingLong(p -> {
+                                try { return Files.size(p); } catch (Exception e) { return p.toFile().length(); }
+                            }));
+                    totalSize = stats.getSum();
+                    itemCount = (int) stats.getCount();
+                } catch (Exception ignored) {}
             }
         }
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
         row.setSizeOrCountText(totalSize > 0
-                ? CleanerUtils.formatBytes(totalSize) + " (old snapshots)"
+                ? CleanerUtils.formatBytes(totalSize) + " (" + itemCount + " snapshot files)"
                 : "No snapshot artifacts found");
     }
 
@@ -46,17 +49,21 @@ public class MavenCacheCleaner implements CleanerExtension {
         long cleaned = 0;
         String userHome = CleanerUtils.safeEnv("USERPROFILE");
         if (userHome == null) return 0;
-        Path snapshots = Paths.get(userHome, ".m2", "repository", "snapshots");
-        if (!Files.isDirectory(snapshots)) return 0;
-        try (Stream<Path> walk = Files.walk(snapshots, 6)) {
+        Path repo = Paths.get(userHome, ".m2", "repository");
+        if (!Files.isDirectory(repo)) return 0;
+        try (Stream<Path> walk = Files.walk(repo)) {
             var matched = walk.filter(Files::isRegularFile)
-                    .filter(p -> p.toString().toLowerCase().endsWith("-snapshot.jar") ||
-                                 p.toString().toLowerCase().endsWith("-snapshot.pom"))
+                    .filter(p -> {
+                        String n = p.getFileName().toString().toLowerCase();
+                        return n.endsWith("-snapshot.jar") || n.endsWith("-snapshot.pom");
+                    })
                     .toList();
             for (Path f : matched) {
-                long size = f.toFile().length();
-                CleanerUtils.deletePermanently(f);
-                cleaned += size;
+                try {
+                    long size = Files.size(f);
+                    CleanerUtils.deletePermanently(f);
+                    if (!Files.exists(f)) cleaned += size;
+                } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
         return cleaned;

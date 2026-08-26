@@ -30,26 +30,43 @@ if ($wifi) {
 
 try {
     $wlanOutput = netsh wlan show interfaces 2>$null
-    if ($wlanOutput -and ($wlanOutput | Select-String 'Signal')) {
-        foreach ($line in $wlanOutput) {
-            $line = $line.Trim()
-            if ($line -match '^\s*SSID\s*:\s*(.+)$' -and $Matches[1].Trim() -ne "") {
-                $info.ssid = $Matches[1].Trim()
-            }
-            elseif ($line -match '^\s*Signal\s*:\s*(\d+)%') {
-                $info.signalPercent = [int]$Matches[1]
-            }
-            elseif ($line -match '^\s*Radio type\s*:\s*(.+)$') {
-                $info.radioType = $Matches[1].Trim()
-            }
-            elseif ($line -match '^\s*Channel\s*:\s*(.+)$') {
-                $info.channel = $Matches[1].Trim()
-            }
-            elseif ($line -match '^\s*Receive rate\s*:\s*(.+)$') {
-                $info.receiveRate = $Matches[1].Trim()
-            }
-            elseif ($line -match '^\s*Transmit rate\s*:\s*(.+)$') {
-                $info.transmitRate = $Matches[1].Trim()
+    if ($wlanOutput) {
+        foreach ($rawLine in $wlanOutput) {
+            $line = $rawLine.Trim()
+            if (-not $line -or $line -notmatch ':') { continue }
+            # Generic key : value split - locale independent
+            if ($line -match '^(.*?)\s*:\s*(.+)$') {
+                $key = $Matches[1].Trim().ToLower()
+                $val = $Matches[2].Trim()
+                if (-not $val) { continue }
+                # SSID - key is literally SSID in all locales (abbreviation) but also handle localized variants just in case
+                if ($key -match 'ssid' -and $val -ne "" -and $val -notmatch '^<.*>$') {
+                    $info.ssid = $val
+                }
+                elseif ($key -match 'signal|signalst.rke') {
+                    if ($val -match '(\d+)%') { $info.signalPercent = [int]$Matches[1] }
+                }
+                elseif ($key -match 'radio type|funktyp|type radio|radio-typ') {
+                    $info.radioType = $val
+                }
+                elseif ($key -match 'channel|kanal|canal') {
+                    $info.channel = $val
+                }
+                elseif ($key -match 'receive rate|empfangsrate|taux de r.ception|velocidad de recep|rx rate') {
+                    $info.receiveRate = $val
+                }
+                elseif ($key -match 'transmit rate|bertragungsrate|taux de transmission|velocidad de trans|tx rate') {
+                    $info.transmitRate = $val
+                }
+                elseif ($key -match 'state|status|zustand|tat') {
+                    # Normalize state from netsh if Get-NetAdapter didn't give it
+                    if ($info.state -eq "disconnected" -and $val) {
+                        $low = $val.ToLower()
+                        if ($low -match 'connected|verbunden|connect') { $info.state = "connected" }
+                        elseif ($low -match 'disconnected|getrennt|nicht verbunden') { $info.state = "disconnected" }
+                        else { $info.state = $val }
+                    }
+                }
             }
         }
     }

@@ -55,24 +55,44 @@ public class RecycleBinCleaner implements CleanerExtension {
         } catch (Exception ex) {
             AppLogger.warning("Failed to empty Recycle Bin via PowerShell: " + ex.getMessage());
         }
-        long cleaned = 0;
+        java.util.concurrent.atomic.AtomicLong fallbackCleaned = new java.util.concurrent.atomic.AtomicLong(0);
+        java.util.List<Path> failedDeletes = new java.util.ArrayList<>();
         try {
             for (java.io.File root : java.io.File.listRoots()) {
                 Path recycleBin = root.toPath().resolve("$Recycle.Bin");
                 if (Files.isDirectory(recycleBin)) {
+                    java.util.List<Path> toDelete;
                     try (Stream<Path> walk = Files.walk(recycleBin)) {
-                        walk.sorted(Comparator.reverseOrder()).forEach(f -> {
-                            if (!f.equals(recycleBin)) {
-                                try { CleanerUtils.deletePermanently(f); } catch (Exception ignored) {}
+                        toDelete = walk.sorted(Comparator.reverseOrder()).filter(f -> !f.equals(recycleBin)).toList();
+                    }
+                    for (Path f : toDelete) {
+                        try {
+                            long sz = Files.isRegularFile(f) ? Files.size(f) : 0L;
+                            CleanerUtils.deletePermanently(f);
+                            if (!Files.exists(f)) {
+                                if (sz > 0) fallbackCleaned.addAndGet(sz);
+                            } else {
+                                failedDeletes.add(f);
                             }
-                        });
+                        } catch (Exception ignored) {
+                            failedDeletes.add(f);
+                        }
                     }
                 }
             }
         } catch (Exception ex2) {
             AppLogger.warning("Failed to empty Recycle Bin: " + ex2.getMessage());
         }
-        return cleaned > 0 ? cleaned : size;
+        long fallback = fallbackCleaned.get();
+        if (!failedDeletes.isEmpty()) {
+            AppLogger.warning("Recycle Bin fallback incomplete, failed to delete " + failedDeletes.size() + " entries");
+            return fallback;
+        }
+        if (fallback > 0) return fallback;
+        // Verify PowerShell fallback actually emptied the bin before reporting pre-scan size
+        long remaining = getRecycleBinSize();
+        if (remaining == 0 && size > 0) return size;
+        return fallback;
     }
 
     private long getRecycleBinSize() {

@@ -20,16 +20,27 @@ function Invoke-Smartctl {
     param([string]$DriveLetter, [string[]]$ExtraArgs)
     if (-not $smartctlPath) { return $null }
     $drive = $DriveLetter.Replace(':', '')
+    $tempOut = Join-Path $env:TEMP ("smartctl_out_" + $drive + "_" + [Guid]::NewGuid().ToString("N") + ".json")
+    $tempErr = Join-Path $env:TEMP ("smartctl_err_" + $drive + "_" + [Guid]::NewGuid().ToString("N") + ".txt")
     try {
-        $allArgs = @($smartctlPath, "-a", "-j", "$($drive):") + $ExtraArgs
-        $proc = Start-Process -FilePath $smartctlPath -ArgumentList ("-a", "-j", "$($drive):") -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$env:TEMP\smartctl_out.json" -RedirectStandardError "$env:TEMP\smartctl_err.txt" -WindowStyle Hidden
-        if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 64 -or $proc.ExitCode -eq 68) {
-            $json = Get-Content "$env:TEMP\smartctl_out.json" -Raw -ErrorAction SilentlyContinue
-            if ($json -and $json.Trim().StartsWith('{')) {
-                return ($json | ConvertFrom-Json -ErrorAction SilentlyContinue)
-            }
+        $argList = @("-a", "-j", "$($drive):") + $ExtraArgs
+        $proc = Start-Process -FilePath $smartctlPath -ArgumentList $argList -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOut -RedirectStandardError $tempErr -WindowStyle Hidden
+        # smartctl uses bitmask exit codes: 0=OK, 4=SMART failure, 8=etc. We must parse JSON even when SMART indicates failure.
+        # Only treat 1 (syntax error) and 2 (open error) as hard failures without data. For all other codes, if JSON exists, return it.
+        $json = Get-Content $tempOut -Raw -ErrorAction SilentlyContinue
+        if ($json -and $json.Trim().StartsWith('{')) {
+            $parsed = $json | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($parsed) { return $parsed }
+        }
+        # Fallback: if JSON present but ConvertFrom-Json failed due to encoding, try raw return
+        if ($json -and $json.Trim().StartsWith('{')) {
+            try { return ($json | ConvertFrom-Json -ErrorAction Stop) } catch {}
         }
     } catch {}
+    finally {
+        try { Remove-Item $tempOut -Force -ErrorAction SilentlyContinue } catch {}
+        try { Remove-Item $tempErr -Force -ErrorAction SilentlyContinue } catch {}
+    }
     return $null
 }
 
@@ -244,11 +255,14 @@ foreach ($phys in $physicalDisks) {
                     $v = [uint64]$nvme.DataUnitsWritten * 512000
                     if ($v -gt 0) { $totalHostWrites = $v }
                 }
+                $nvmeIsCritical = $false
                 if ($nvme.PSObject.Properties['CriticalWarning']) {
-                    if ([int]$nvme.CriticalWarning -ne 0) { $healthStatus = 'Critical' }
+                    if ([int]$nvme.CriticalWarning -ne 0) { $nvmeIsCritical = $true; $healthStatus = 'Critical' }
                 }
                 if ($nvme.PSObject.Properties['MediaErrors']) {
-                    if ([long]$nvme.MediaErrors -gt 0) { $healthStatus = 'Caution' }
+                    if ([long]$nvme.MediaErrors -gt 0) {
+                        if (-not $nvmeIsCritical) { $healthStatus = 'Caution' }
+                    }
                 }
             }
         }
@@ -267,8 +281,8 @@ foreach ($phys in $physicalDisks) {
                             0x09 { if ($rawValue -gt 0 -and $powerOnHours -lt 0) { $powerOnHours = $rawValue } }
                             0x0C { if ($rawValue -gt 0 -and $powerCycleCount -lt 0) { $powerCycleCount = $rawValue } }
                             0xC0 { if ($rawValue -gt 0 -and $loadCycleCount -lt 0) { $loadCycleCount = $rawValue } }
-                            0xC4 { if ($rawValue -ge 0 -and $pendingSectors -lt 0) { $pendingSectors = $rawValue } }
-                            0xC5 { if ($rawValue -ge 0) { $reallocatedSectors = $rawValue } }
+                            0xC4 { if ($rawValue -ge 0 -and $pendingSectors -lt 0) { $pendingSectors = $rawValue } } # 0xC4 = Reallocation Event Count -> treat as pending indicator
+                            0xC5 { if ($rawValue -ge 0 -and $pendingSectors -lt 0) { $pendingSectors = $rawValue } } # 0xC5 = Current Pending Sector Count
                             0xC6 { if ($rawValue -ge 0 -and $uncorrectableSectors -lt 0) { $uncorrectableSectors = $rawValue } }
                             0xBE { if ($rawValue -gt 0 -and $rawValue -lt 200 -and $temperature -lt 0) { $temperature = $rawValue } }
                         }

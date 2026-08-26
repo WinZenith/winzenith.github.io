@@ -99,20 +99,26 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
 
     private static boolean matchesDriver(InstalledDriver driver, WuDriverOffer offer) {
         String title = offer.title.toLowerCase(Locale.ROOT);
-        String name = driver.friendlyName().toLowerCase(Locale.ROOT);
+        String nameRaw = driver.friendlyName() != null ? driver.friendlyName().toLowerCase(Locale.ROOT) : "";
+        String name = nameRaw.trim();
 
-        if (!name.isBlank() && title.contains(name)) {
+        // 1) Exact friendlyName substring — strongest signal, require at least 5 chars to avoid generic matches
+        if (name.length() >= 5 && title.contains(name)) {
             return true;
         }
 
+        // 2) INF base name match — must be meaningful (oem*.inf filtered out)
         String inf = driver.infName();
         if (inf != null && !inf.isBlank()) {
-            String infBase = inf.replace(".inf", "").toLowerCase(Locale.ROOT);
-            if (infBase.length() >= 4 && title.contains(infBase)) {
+            String infBase = inf.replace(".inf", "").toLowerCase(Locale.ROOT).trim();
+            boolean isGenericOem = infBase.matches("oem\\d+");
+            if (!isGenericOem && infBase.length() >= 5 && title.contains(infBase)) {
                 return true;
             }
         }
 
+        // 3) Full significant-token match — require at least 2 significant tokens from device name, all must appear in title
+        //    and offer must not introduce extra significant tokens (strict). This prevents single-token “Realtek” matching every Realtek offer.
         if (!name.isBlank()) {
             String[] tokens = name.split("[\\s,\\-()]+");
             int validTokensCount = 0;
@@ -125,7 +131,7 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                     }
                 }
             }
-            if (validTokensCount > 0 && matched == validTokensCount) {
+            if (validTokensCount >= 2 && matched == validTokensCount) {
                 String[] offerTokens = title.split("[\\s,\\-()]+");
                 int offerSignificantCount = 0;
                 for (String ot : offerTokens) {
@@ -139,10 +145,22 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
             }
         }
 
-        if (driver.provider() != null && !driver.provider().isBlank()) {
-            String prov = driver.provider().toLowerCase(Locale.ROOT);
-            if (!name.isBlank() && title.contains(prov) && title.contains(name)) {
-                return true;
+        // 4) Provider-anchored fallback: provider must appear in title plus at least two significant device tokens
+        //    (prevents single-token “Intel” matching every Intel offer)
+        if (driver.provider() != null && !driver.provider().isBlank() && !name.isBlank()) {
+            String prov = driver.provider().toLowerCase(Locale.ROOT).trim();
+            if (prov.length() >= 3 && title.contains(prov)) {
+                String[] tokens = name.split("[\\s,\\-()]+");
+                int providerMatched = 0;
+                int validCount = 0;
+                for (String token : tokens) {
+                    if (token.length() >= 3 && !GENERIC_WORDS.contains(token)) {
+                        validCount++;
+                        if (title.contains(token)) providerMatched++;
+                    }
+                }
+                if (validCount == 1 && providerMatched == 1) return true;
+                if (validCount >= 2 && providerMatched >= 2) return true;
             }
         }
 
