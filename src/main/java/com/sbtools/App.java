@@ -44,10 +44,6 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.Enumeration;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
-import java.util.zip.ZipInputStream;
 import com.sbtools.util.ProcessManager;
 
 public class App extends Application {
@@ -147,7 +143,7 @@ public class App extends Application {
                     confirm.setHeaderText("Update Available");
 
                     if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
-                        downloadAndExtract(result);
+                        downloadUpdate(result);
                     }
                 }
             });
@@ -210,7 +206,7 @@ public class App extends Application {
                         confirm.setHeaderText("Update Available");
 
                         if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
-                            downloadAndExtract(result);
+                            downloadUpdate(result);
                         }
                     } else if (result.isUnknown()) {
                         Alert warn = new Alert(Alert.AlertType.WARNING,
@@ -288,7 +284,7 @@ public class App extends Application {
         selected.setStyleType(UIButton.ButtonStyle.PRIMARY);
     }
 
-    private void downloadAndExtract(UpdateChecker.UpdateResult result) {
+    private void downloadUpdate(UpdateChecker.UpdateResult result) {
         Dialog<Void> progressDialog = new Dialog<>();
         progressDialog.setTitle("Downloading Update");
         progressDialog.setHeaderText("Downloading v" + result.latestVersion() + "...");
@@ -428,98 +424,14 @@ public class App extends Application {
                 }
                 Files.copy(zipPath, downloadsZip, StandardCopyOption.REPLACE_EXISTING);
 
-                Platform.runLater(() -> statusLabel.setText("Extracting..."));
-
-                Path appDir = getAppDirectory();
-                String folderName = "WinZenith-v" + result.latestVersion();
-                Path extractDir = appDir.resolve(folderName);
-                if (Files.exists(extractDir)) {
-                    String ts = java.time.LocalDateTime.now().format(
-                            java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-                    Path staleDir = extractDir.resolveSibling(folderName + ".incomplete." + ts);
-                    try {
-                        Files.move(extractDir, staleDir);
-                        Thread staleCleanup = new Thread(() -> {
-                            try { Thread.sleep(30_000); } catch (InterruptedException ignored) {
-                                Thread.currentThread().interrupt();
-                                return;
-                            }
-                            deleteRecursive(staleDir);
-                        }, "StaleExtractCleanup");
-                        staleCleanup.setDaemon(true);
-                        staleCleanup.start();
-                    } catch (Exception ignored) {}
-                }
-                Files.createDirectories(extractDir);
-
-                byte[] magicBytes = new byte[2];
-                try (java.io.InputStream fis = Files.newInputStream(downloadsZip)) {
-                    if (fis.read(magicBytes) < 2 || magicBytes[0] != (byte) 0x50 || magicBytes[1] != (byte) 0x4B) {
-                        throw new IOException("Downloaded file is not a valid zip archive.");
-                    }
-                }
-
-                boolean extracted = false;
-                IOException lastEx = null;
-                for (int attempt = 0; attempt < 2 && !extracted; attempt++) {
-                    if (attempt > 0) {
-                        Platform.runLater(() -> statusLabel.setText("Retrying extraction..."));
-                    }
-                    try {
-                        extractZip(downloadsZip, extractDir, cancelled);
-                        extracted = true;
-                    } catch (IOException ex) {
-                        lastEx = ex;
-                        AppLogger.warning("Zip extraction attempt " + (attempt + 1) + " failed: " + ex.getMessage());
-                    }
-                }
-
-                if (!extracted) {
-                    final IOException finalEx = lastEx;
-                    Platform.runLater(() -> {
-                        progressDialog.close();
-                        String msg = "The update (v" + result.latestVersion()
-                                + ") was downloaded but could not be extracted automatically.\n\n"
-                                + "The zip file is saved at:\n" + downloadsZip + "\n\n"
-                                + "Please manually extract the zip and replace the old version with the new one.";
-                        if (finalEx != null) {
-                            msg += "\n\nError: " + finalEx.getMessage();
-                        }
-                        Alert failAlert = new Alert(Alert.AlertType.WARNING, msg);
-                        failAlert.setTitle("Update Downloaded");
-                        failAlert.setHeaderText("Manual Extraction Required");
-                        ButtonType openFolderBtn = new ButtonType("Open Folder", ButtonBar.ButtonData.OTHER);
-                        failAlert.getDialogPane().getButtonTypes().add(openFolderBtn);
-                        failAlert.showAndWait().ifPresent(btn -> {
-                            if (btn == openFolderBtn) {
-                                try {
-                                    if (Desktop.isDesktopSupported()) {
-                                        Desktop.getDesktop().open(downloadsZip.getParent().toFile());
-                                    }
-                                } catch (Exception ignored) {}
-                            }
-                        });
-                    });
-                    tempDir = null;
-                    return;
-                }
-
-                boolean hasExe = false;
-                try (var walk = Files.walk(extractDir)) {
-                    hasExe = walk.filter(Files::isRegularFile)
-                            .anyMatch(p -> p.getFileName().toString().equalsIgnoreCase("WinZenith.exe"));
-                }
-                final boolean foundExe = hasExe;
-
                 cleanupTempDir(tempDir);
                 tempDir = null;
 
                 Platform.runLater(() -> {
                     progressDialog.close();
 
-                    String message = "Update downloaded and extracted to:\n" + extractDir + "\n\n"
-                            + "Please close WinZenith and run the new version."
-                            + (foundExe ? "\n\nWinZenith.exe is ready in that folder." : "");
+                    String message = "Update v" + result.latestVersion() + " downloaded to:\n" + downloadsZip + "\n\n"
+                            + "Please extract the zip to use the new version and close WinZenith when ready.";
 
                     Alert done = new Alert(Alert.AlertType.INFORMATION, message, ButtonType.OK);
                     done.setTitle("Update Ready");
@@ -532,7 +444,7 @@ public class App extends Application {
                         if (btn == openFolderBtn) {
                             try {
                                 if (Desktop.isDesktopSupported()) {
-                                    Desktop.getDesktop().open(extractDir.toFile());
+                                    Desktop.getDesktop().open(downloadsZip.getParent().toFile());
                                 }
                             } catch (Exception ignored) {}
                         }
@@ -557,6 +469,9 @@ public class App extends Application {
                 if (conn != null) {
                     try { conn.disconnect(); } catch (Exception ignored) {}
                 }
+                if (tempDir != null) {
+                    try { cleanupTempDir(tempDir); } catch (Exception ignored) {}
+                }
             }
         }, "UpdateDownloader");
         t.setDaemon(true);
@@ -578,31 +493,6 @@ public class App extends Application {
             int lastSlash = file.lastIndexOf('/');
             return lastSlash >= 0 ? file.substring(lastSlash + 1) : file;
         }
-    }
-
-    private Path getAppDirectory() {
-        try {
-            String command = ProcessHandle.current().info().command().orElse(null);
-            if (command != null) {
-                Path exePath = Path.of(command);
-                if (Files.exists(exePath)) {
-                    return exePath.getParent();
-                }
-            }
-        } catch (Exception ignored) {}
-
-        try {
-            java.security.CodeSource cs = App.class.getProtectionDomain().getCodeSource();
-            if (cs != null) {
-                Path codePath = Path.of(cs.getLocation().toURI());
-                if (Files.isDirectory(codePath)) {
-                    return codePath;
-                }
-                return codePath.getParent();
-            }
-        } catch (Exception ignored) {}
-
-        return Path.of(System.getProperty("user.home"));
     }
 
     private static void cleanupTempDir(Path tempDir) {
@@ -631,53 +521,6 @@ public class App extends Application {
         }, "TempDirCleanup");
         t.setDaemon(true);
         t.start();
-    }
-
-    private static void extractZip(Path zipPath, Path extractDir, AtomicBoolean cancelled) throws IOException {
-        try (ZipFile zipFile = new ZipFile(zipPath.toFile())) {
-            Enumeration<? extends ZipEntry> entries = zipFile.entries();
-            while (entries.hasMoreElements()) {
-                if (cancelled.get()) {
-                    throw new IOException("Extraction cancelled");
-                }
-                ZipEntry entry = entries.nextElement();
-                Path target = extractDir.resolve(entry.getName()).normalize();
-                if (!target.startsWith(extractDir)) {
-                    throw new IOException("Zip entry path outside target directory: " + entry.getName());
-                }
-                if (entry.isDirectory()) {
-                    Files.createDirectories(target);
-                } else {
-                    Files.createDirectories(target.getParent());
-                    try (InputStream in = zipFile.getInputStream(entry);
-                         java.io.OutputStream out = Files.newOutputStream(target, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-                        byte[] buf = new byte[8192];
-                        int n;
-                        while ((n = in.read(buf)) != -1) {
-                            out.write(buf, 0, n);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private static void deleteRecursive(Path dir) {
-        try {
-            Files.walkFileTree(dir, new java.nio.file.SimpleFileVisitor<>() {
-                @Override
-                public java.nio.file.FileVisitResult visitFile(Path file, java.nio.file.attribute.BasicFileAttributes attrs) {
-                    try { Files.deleteIfExists(file); } catch (Exception ignored) {}
-                    return java.nio.file.FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public java.nio.file.FileVisitResult postVisitDirectory(Path d, IOException exc) {
-                    try { Files.deleteIfExists(d); } catch (Exception ignored) {}
-                    return java.nio.file.FileVisitResult.CONTINUE;
-                }
-            });
-        } catch (Exception ignored) {}
     }
 
     private void showEula(AppSettings settings) {
