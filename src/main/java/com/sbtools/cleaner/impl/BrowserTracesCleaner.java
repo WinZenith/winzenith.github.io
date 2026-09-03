@@ -40,11 +40,15 @@ public class BrowserTracesCleaner implements CleanerExtension {
     public void scan(CleanupRow row) {
         long totalSize = 0;
         int itemCount = 0;
+        int skippedProfiles = 0;
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
         String appData = CleanerUtils.safeEnv("APPDATA");
-        // Snapshot of tasklist not needed for scan - we count everything that clean would delete (when browser not running)
-        // to keep scan/clean reporting consistent. Running-state filtering is only for clean-time safety.
+        // Consistent with clean(): running browsers are skipped (locked DBs),
+        // so scan only counts what clean can actually reclaim.
         for (BrowserProfile profile : getBrowserProfiles()) {
+            String browserKey = getBrowserProcessKey(profile.name());
+            boolean browserRunning = browserKey != null && isBrowserRunning(BROWSER_PROCESS_MAP.get(browserKey));
+            if (browserRunning) { skippedProfiles++; continue; }
             for (Path dir : profile.cacheDirs()) {
                 if (Files.isDirectory(dir)) {
                     try (Stream<Path> walk = Files.walk(dir)) {
@@ -67,32 +71,43 @@ public class BrowserTracesCleaner implements CleanerExtension {
         }
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
-        row.setSizeOrCountText(itemCount + " item" + (itemCount == 1 ? "" : "s") + " / " + CleanerUtils.formatBytes(totalSize));
+        String base = itemCount + " item" + (itemCount == 1 ? "" : "s") + " / " + CleanerUtils.formatBytes(totalSize);
+        if (skippedProfiles > 0) base += " (skipped " + skippedProfiles + " running browser profile" + (skippedProfiles == 1 ? "" : "s") + " — close browser to clean)";
+        row.setSizeOrCountText(base);
     }
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
         String appData = CleanerUtils.safeEnv("APPDATA");
 
         for (BrowserProfile profile : getBrowserProfiles()) {
+            if (token != null && token.isCancelled()) break;
             String browserKey = getBrowserProcessKey(profile.name());
             boolean browserRunning = browserKey != null && isBrowserRunning(BROWSER_PROCESS_MAP.get(browserKey));
 
             if (!browserRunning) {
                 for (Path dir : profile.cacheDirs()) {
-                    if (Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir);
+                    if (token != null && token.isCancelled()) break;
+                    if (Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
                 }
             }
 
             List<Path> extraFiles = collectExtraFilesForProfile(profile.name(), localAppData, appData);
             if (!browserRunning) {
                 for (Path f : extraFiles) {
+                    if (token != null && token.isCancelled()) break;
                     if (Files.isRegularFile(f)) {
                         try {
                             long size = Files.size(f);
-                            CleanerUtils.deletePermanently(f);
+                            CleanerUtils.deletePermanently(f, token);
                             if (!Files.exists(f)) cleaned += size;
                         } catch (Exception ignored) {}
                     }

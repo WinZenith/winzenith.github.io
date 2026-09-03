@@ -56,18 +56,27 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
 
     static List<DriverUpdateCandidate> matchUpdates(List<InstalledDriver> installed, String json)
             throws com.fasterxml.jackson.core.JsonProcessingException {
+        // Empty WU output (no offers) is normal — not an error. Guard here so
+        // callers never see a parse exception for the common no-update case.
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
         JsonNode root = JsonMapper.parseTree(json);
         List<WuDriverOffer> offers = new ArrayList<>();
         if (root.isArray()) {
             for (JsonNode n : root) {
-                offers.add(parseOffer(n));
+                WuDriverOffer o = parseOffer(n);
+                if (o != null && o.version() != null && !o.version().isBlank()) offers.add(o);
             }
         } else if (root.isObject()) {
-            offers.add(parseOffer(root));
+            WuDriverOffer o = parseOffer(root);
+            if (o != null && o.version() != null && !o.version().isBlank()) offers.add(o);
         }
 
         List<DriverUpdateCandidate> candidates = new ArrayList<>();
+        if (installed == null) return candidates;
         for (InstalledDriver driver : installed) {
+            if (driver == null) continue;
             WuDriverOffer best = null;
             for (WuDriverOffer offer : offers) {
                 if (matchesDriver(driver, offer)) {
@@ -98,6 +107,8 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
     );
 
     private static boolean matchesDriver(InstalledDriver driver, WuDriverOffer offer) {
+        if (driver == null || offer == null) return false;
+        if (offer.title == null || offer.title.isBlank()) return false;
         String title = offer.title.toLowerCase(Locale.ROOT);
         String nameRaw = driver.friendlyName() != null ? driver.friendlyName().toLowerCase(Locale.ROOT) : "";
         String name = nameRaw.trim();
@@ -145,8 +156,9 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
             }
         }
 
-        // 4) Provider-anchored fallback: provider must appear in title plus at least two significant device tokens
-        //    (prevents single-token “Intel” matching every Intel offer)
+        // 4) Provider-anchored fallback: provider must appear in title plus at least two significant device tokens.
+        //    Single-token matches (e.g. "HP" + "keyboard") are rejected: they
+        //    cross-match any same-vendor offer (wrong-device risk).
         if (driver.provider() != null && !driver.provider().isBlank() && !name.isBlank()) {
             String prov = driver.provider().toLowerCase(Locale.ROOT).trim();
             if (prov.length() >= 3 && title.contains(prov)) {
@@ -159,8 +171,7 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                         if (title.contains(token)) providerMatched++;
                     }
                 }
-                if (validCount == 1 && providerMatched == 1) return true;
-                if (validCount >= 2 && providerMatched >= 2) return true;
+                if (validCount >= 2 && providerMatched >= 2 && providerMatched == validCount) return true;
             }
         }
 

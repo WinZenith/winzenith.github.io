@@ -15,13 +15,22 @@ public class TempSystemFilesCleaner implements CleanerExtension {
     public CleanupCategory getCategory() { return CleanupCategory.TEMPORARY_SYSTEM_FILES; }
 
     @Override
+    public boolean requiresAdmin() { return true; }
+
+    @Override
     public void scan(CleanupRow row) {
         CleanerUtils.scanDirectorySizes(row, getTempSystemDirs());
     }
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
-        return CleanerUtils.cleanDirectoryPattern(getTempSystemDirs());
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
+        return CleanerUtils.cleanDirectoryPattern(getTempSystemDirs(), token);
     }
 
     private List<Path> getTempSystemDirs() {

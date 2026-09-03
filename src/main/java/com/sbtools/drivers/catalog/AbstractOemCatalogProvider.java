@@ -48,7 +48,11 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
     @Override
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed) {
         List<DriverUpdateCandidate> out = new ArrayList<>();
+        if (installed == null) return out;
         for (InstalledDriver driver : installed) {
+            try {
+                if (driver == null) continue;
+                if (driver.deviceId() == null || driver.deviceId().isBlank()) continue;
             if (OemVendorHelper.detect(driver) != vendor) {
                 continue;
             }
@@ -102,7 +106,12 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
 
             // Fall back to web scraping (legacy path)
             String latest = fetchLatestVersion(driver);
-            if (latest != null && VersionCompare.isOlder(driver.driverVersion(), latest)) {
+            if (!isPlausibleVersion(latest)) {
+                if (latest != null) {
+                    AppLogger.warning(vendor.label() + ": Rejecting implausible scraped version '" + latest
+                            + "' for " + driver.friendlyName());
+                }
+            } else if (VersionCompare.isOlder(driver.driverVersion(), latest)) {
                 AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName() + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
                 String vendorPageUrl = getVendorPageUrl(driver);
                 String downloadUrl = resolveDirectDownloadUrl(driver, vendorPageUrl);
@@ -125,6 +134,9 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                 ));
             } else if (latest != null) {
                 AppLogger.debug(vendor.label() + ": Driver " + driver.friendlyName() + " is up to date (current: " + driver.driverVersion() + ", latest: " + latest + ")");
+            }
+            } catch (Exception ex) {
+                AppLogger.warning(vendor.label() + ": Skipping driver due to error: " + ex.getMessage());
             }
         }
         return out;
@@ -313,7 +325,18 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
     }
 
     private static String deviceKey(InstalledDriver d) {
+        if (d == null || d.deviceId() == null) return "unknown";
         return d.deviceId().replaceAll("[^a-zA-Z0-9]", "_");
+    }
+
+    static boolean isPlausibleVersion(String v) {
+        if (v == null || v.isBlank()) return false;
+        String t = v.trim();
+        // Require at least major.minor numeric form; rejects page numbers,
+        // years, single integers and HTML artefacts.
+        if (!t.matches("(?i).*\\d+\\.\\d+.*")) return false;
+        if (t.length() > 64) return false;
+        return true;
     }
 
     private static String sanitize(String s) {

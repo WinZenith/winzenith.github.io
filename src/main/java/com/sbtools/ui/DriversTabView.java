@@ -75,6 +75,15 @@ public class DriversTabView extends BorderPane {
     // Installs are admin-bound and effectively serial; a dedicated single-thread pool is enough.
     private final ExecutorService installExecutor = Executors.newSingleThreadExecutor(
             r -> { Thread t = new Thread(r, "driver-install"); t.setDaemon(true); return t; });
+    // Backups run pnputil exports that can take minutes: isolate from installs
+    // so a backup never queues/block installs (and vice versa).
+    private final ExecutorService backupExecutor = Executors.newSingleThreadExecutor(
+            r -> { Thread t = new Thread(r, "driver-backup"); t.setDaemon(true); return t; });
+    private final java.util.concurrent.atomic.AtomicBoolean installCancelFlag = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean backupCancelFlag = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private enum BusyOwner { NONE, SCAN, INSTALL, BACKUP }
+    private volatile BusyOwner busyOwner = BusyOwner.NONE;
+    private final Object busyLock = new Object();
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
 
@@ -97,13 +106,55 @@ public class DriversTabView extends BorderPane {
     private final Button updateSelectedButton = new Button("Update Selected");
     private final Button backupButton = new Button("Backup");
     private final Button stopBackupButton = new Button("Stop Backup");
+    private final Button stopInstallButton = new Button("Stop Install");
     private final TextField searchField = new TextField();
     private TableView<DriverRow> outdatedTable;
     private TableView<DriverRow> upToDateTable;
     private javafx.collections.ListChangeListener<DriverRow> selectedListener;
     private volatile CancellationToken scanToken;
     private volatile Future<?> scanFuture;
+    private volatile Future<?> installFuture;
+    private volatile Future<?> backupFuture;
     private volatile CancellationToken backupToken;
+
+    private boolean acquireBusy(BusyOwner owner) {
+        synchronized (busyLock) {
+            if (busyOwner != BusyOwner.NONE) return false;
+            busyOwner = owner;
+            // Set FX property on FX thread to avoid threading warnings.
+            if (javafx.application.Platform.isFxApplicationThread()) busy.set(true);
+            else javafx.application.Platform.runLater(() -> busy.set(true));
+            return true;
+        }
+    }
+
+    private void releaseBusy(BusyOwner owner) {
+        synchronized (busyLock) {
+            if (busyOwner != owner) return;
+            busyOwner = BusyOwner.NONE;
+            if (javafx.application.Platform.isFxApplicationThread()) busy.set(false);
+            else javafx.application.Platform.runLater(() -> busy.set(false));
+        }
+    }
+
+    private boolean isBusyOwnedBy(BusyOwner owner) {
+        return busyOwner == owner;
+    }
+
+    private boolean requireAdminFresh() {
+        boolean admin;
+        try {
+            admin = com.sbtools.util.AdminCheck.isRunningAsAdminFresh();
+        } catch (Exception ex) {
+            admin = adminCheck.getAsBoolean();
+        }
+        if (!admin) {
+            new Alert(Alert.AlertType.WARNING,
+                    "This operation requires administrator rights. Please restart the app as administrator.").showAndWait();
+            return false;
+        }
+        return true;
+    }
 
     public DriversTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -114,6 +165,9 @@ public class DriversTabView extends BorderPane {
         stopBackupButton.setVisible(false);
         stopBackupButton.setManaged(false);
         stopBackupButton.setDisable(true);
+        stopInstallButton.setVisible(false);
+        stopInstallButton.setManaged(false);
+        stopInstallButton.setDisable(true);
 
         searchField.setPromptText("Search...");
         searchField.setPrefWidth(160);
@@ -129,6 +183,7 @@ public class DriversTabView extends BorderPane {
         updateSelectedButton.setOnAction(e -> startBatchUpdateSelected());
         backupButton.setOnAction(e -> startBackupAll());
         stopBackupButton.setOnAction(e -> stopBackup());
+        stopInstallButton.setOnAction(e -> stopInstall());
 
         Button ignoredListButton = new Button("Ignored");
         ignoredListButton.setOnAction(e -> showIgnoredListDialog());
@@ -149,12 +204,13 @@ public class DriversTabView extends BorderPane {
         updateSelectedButton.setTooltip(new Tooltip("Install updates for checked drivers only"));
         backupButton.setTooltip(new Tooltip("Back up all installed drivers"));
         stopBackupButton.setTooltip(new Tooltip("Cancel the backup operation"));
+        stopInstallButton.setTooltip(new Tooltip("Cancel the running install / batch update"));
         ignoredListButton.setTooltip(new Tooltip("Manage ignored/excluded drivers"));
         historyButton.setTooltip(new Tooltip("View past driver update history"));
         detailsButton.setTooltip(new Tooltip("View details of the selected driver"));
 
         HBox row1 = new HBox(8, scanButton, stopScanButton, updateAllButton, updateSelectedButton,
-                backupButton, stopBackupButton, ignoredListButton, historyButton, detailsButton);
+                stopInstallButton, backupButton, stopBackupButton, ignoredListButton, historyButton, detailsButton);
         row1.setAlignment(Pos.CENTER_LEFT);
         row1.setPadding(new Insets(8, 16, 0, 16));
         row1.getStyleClass().add("toolbar");
@@ -471,6 +527,7 @@ public class DriversTabView extends BorderPane {
             boolean idle = state == State.IDLE;
             boolean downloading = state == State.DOWNLOADING;
             boolean installing = state == State.INSTALLING;
+            boolean active = downloading || installing;
             updateBtn.setVisible(idle);
             updateBtn.setManaged(idle);
             ignoreBtn.setVisible(idle);
@@ -479,8 +536,11 @@ public class DriversTabView extends BorderPane {
             downloadProgress.setManaged(downloading);
             sizeLabel.setVisible(downloading);
             sizeLabel.setManaged(downloading);
-            stopBtn.setVisible(downloading);
-            stopBtn.setManaged(downloading);
+            // Stop must stay visible during INSTALLING: the 900s pnputil /
+            // installer phase is cancellable via ProcessRunner kill.
+            stopBtn.setVisible(active);
+            stopBtn.setManaged(active);
+            stopBtn.setDisable(false);
             installingLabel.setVisible(installing);
             installingLabel.setManaged(installing);
             spinner.setVisible(installing);
@@ -553,6 +613,9 @@ public class DriversTabView extends BorderPane {
     }
 
     private void stopScan() {
+        // Only touch scan state: never clear another operation's busy flag
+        // (stopScan previously set busy=false even mid-install).
+        if (!isBusyOwnedBy(BusyOwner.SCAN) && scanToken == null && scanFuture == null) return;
         CancellationToken token = scanToken;
         if (token != null) {
             token.cancel();
@@ -561,13 +624,23 @@ public class DriversTabView extends BorderPane {
             scanFuture.cancel(true);
             scanFuture = null;
         }
-        busy.set(false);
-        progressBar.setVisible(false);
-        progressLabel.setVisible(false);
-        scanButton.setDisable(false);
-        stopScanButton.setDisable(true);
-        updateButtonStates();
-        setStatus("Scan stopped.");
+        if (isBusyOwnedBy(BusyOwner.SCAN)) {
+            releaseBusy(BusyOwner.SCAN);
+            progressBar.setVisible(false);
+            progressLabel.setVisible(false);
+            scanButton.setDisable(false);
+            stopScanButton.setDisable(true);
+            updateButtonStates();
+            setStatus("Scan stopped.");
+        }
+    }
+
+    private void stopInstall() {
+        installCancelFlag.set(true);
+        installService.cancel();
+        if (installFuture != null) installFuture.cancel(true);
+        stopInstallButton.setDisable(true);
+        setStatus("Cancelling install…");
     }
 
     private void startScan() {
@@ -576,15 +649,16 @@ public class DriversTabView extends BorderPane {
 
     private void startScanInternal() {
         if (busy.get()) {
+            setStatus("Busy: finish the running operation before scanning.");
             return;
         }
+        if (!acquireBusy(BusyOwner.SCAN)) return;
         CancellationToken previousToken = scanToken;
         if (previousToken != null) {
             previousToken.cancel();
         }
         final CancellationToken token = new CancellationToken();
         scanToken = token;
-        busy.set(true);
         setStatus("Enumerating installed drivers…");
         scanButton.setDisable(true);
         stopScanButton.setDisable(false);
@@ -611,8 +685,11 @@ public class DriversTabView extends BorderPane {
                 List<InstalledDriver> installed = scanService.scanInstalled();
                 if (token.isCancelled()) return;
                 Map<String, DriverRow> rowByDevice = new HashMap<>();
-                for (InstalledDriver d : installed) {
-                    rowByDevice.put(d.deviceId(), new DriverRow(d));
+                if (installed != null) {
+                    for (InstalledDriver d : installed) {
+                        if (d == null || d.deviceId() == null || d.deviceId().isBlank()) continue;
+                        rowByDevice.put(d.deviceId(), new DriverRow(d));
+                    }
                 }
                 Set<String> excludedIdSet = loadExcludedIdSet();
                 Platform.runLater(() -> {
@@ -714,7 +791,7 @@ public class DriversTabView extends BorderPane {
                 scanFuture = null;
                 scanToken = null;
                 Platform.runLater(() -> {
-                    busy.set(false);
+                    releaseBusy(BusyOwner.SCAN);
                     progressBar.setVisible(false);
                     progressLabel.setVisible(false);
                     scanButton.setDisable(false);
@@ -753,9 +830,14 @@ public class DriversTabView extends BorderPane {
     }
 
     private static void applyCandidates(Map<String, DriverRow> rowByDevice, List<DriverUpdateCandidate> candidates) {
+        if (rowByDevice == null || candidates == null) return;
         Map<String, DriverUpdateCandidate> candidateMap = new HashMap<>();
         for (DriverUpdateCandidate c : candidates) {
-            candidateMap.put(c.installed().deviceId(), c);
+            if (c == null || c.installed() == null) continue;
+            String did = c.installed().deviceId();
+            if (did == null || did.isBlank()) continue;
+            if (c.availableVersion() == null || c.availableVersion().isBlank()) continue;
+            candidateMap.put(did, c);
         }
         for (Map.Entry<String, DriverUpdateCandidate> entry : candidateMap.entrySet()) {
             DriverRow row = rowByDevice.get(entry.getKey());
@@ -783,12 +865,22 @@ public class DriversTabView extends BorderPane {
     private Set<String> loadExcludedIdSet() {
         AppSettings settings = settingsStore.load();
         Set<String> ids = new HashSet<>();
+        if (settings.excludedDriverIds() == null) return ids;
         for (String e : settings.excludedDriverIds()) {
+            if (e == null || e.isBlank()) continue;
             int t = e.lastIndexOf('\t');
             if (t < 0) t = e.lastIndexOf('\u001F');
-            ids.add(t >= 0 ? e.substring(t + 1) : e);
+            String id = t >= 0 ? e.substring(t + 1).trim() : e.trim();
+            if (!id.isBlank()) ids.add(id);
         }
         return ids;
+    }
+
+    static String extractExcludedId(String stored) {
+        if (stored == null) return "";
+        int t = stored.lastIndexOf('\t');
+        if (t < 0) t = stored.lastIndexOf('\u001F');
+        return t >= 0 ? stored.substring(t + 1).trim() : stored.trim();
     }
 
     /**
@@ -857,9 +949,15 @@ public class DriversTabView extends BorderPane {
         removeBtn.setOnAction(e -> {
             String selected = listView.getSelectionModel().getSelectedItem();
             if (selected != null) {
+                final String selId = extractExcludedId(selected);
                 excludedIds.remove(selected);
                 try {
-                    settingsStore.save(current.withExcludedDriverIds(new ArrayList<>(excludedIds)));
+                    settingsStore.update(cur -> cur.withExcludedDriverIds(new ArrayList<>(excludedIds)));
+                    AppSettings refreshed = settingsStore.load();
+                    if (refreshed.excludedDriverIds() != null && refreshed.excludedDriverIds().stream().anyMatch(s -> extractExcludedId(s).equals(selId))) {
+                        AppLogger.warning("Ignored entry still present after remove (legacy store); retrying purge");
+                        settingsStore.update(cur2 -> cur2.withExcludedDriverIds(cur2.excludedDriverIds() == null ? new ArrayList<>() : cur2.excludedDriverIds().stream().filter(s -> !extractExcludedId(s).equals(selId)).toList()));
+                    }
                 } catch (IOException ex) {
                     AppLogger.warning("Failed to update ignored list: " + ex.getMessage());
                 }
@@ -876,9 +974,17 @@ public class DriversTabView extends BorderPane {
     }
 
     private void installUpdate(DriverRow row, DriverActionCell cell) {
-        if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING,
-                    "Installing drivers requires administrator rights.").showAndWait();
+        if (row == null) return;
+        if (!requireAdminFresh()) return;
+        if (busy.get()) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "Another operation is running. Please wait for it to finish.").showAndWait();
+            return;
+        }
+        if (row.isRebootPending()) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "This driver is already installed and awaiting restart (REBOOT badge). "
+                    + "Restart Windows before reinstalling.").showAndWait();
             return;
         }
         DriverUpdateCandidate c = row.candidate();
@@ -896,7 +1002,8 @@ public class DriversTabView extends BorderPane {
             return;
         }
 
-        installCells.put(row, cell);
+        if (cell != null) installCells.put(row, cell);
+        installCancelFlag.set(false);
         installService.resetCancellation();
         installService.setProgressCallback((bytesReceived, totalBytes, fraction) -> {
             String sizeText = totalBytes > 0
@@ -915,16 +1022,31 @@ public class DriversTabView extends BorderPane {
                 live.setInstalling();
             }
         }));
-        busy.set(true);
+        if (!acquireBusy(BusyOwner.INSTALL)) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "Another operation is running. Please wait for it to finish.").showAndWait();
+            return;
+        }
+        scanButton.setDisable(true);
+        updateAllButton.setDisable(true);
+        updateSelectedButton.setDisable(true);
+        stopInstallButton.setVisible(true);
+        stopInstallButton.setManaged(true);
+        stopInstallButton.setDisable(false);
         statusLabel.setText("Installing update for " + row.installed().friendlyName() + "...");
         if (cell != null) {
             cell.setDownloading("Downloading...", 0.0);
         }
 
         AppSettings settings = settingsStore.load();
-        installExecutor.submit(() -> {
+        installFuture = installExecutor.submit(() -> {
             try {
                 DriverInstallService.InstallResult result = installService.install(c, settings);
+                final boolean wasCancelled = installCancelFlag.get() || installService.isCancelled();
+                if (wasCancelled && result.installed()) {
+                    // Treat post-cancel success as cancelled: keep row, keep rollback.
+                    AppLogger.warning("Install completed after cancel request for " + row.installed().friendlyName());
+                }
                 // Invalidate provider caches so Dashboard next scan reflects current WU/state
                 try {
                     catalog.clearWindowsUpdateCache();
@@ -935,7 +1057,10 @@ public class DriversTabView extends BorderPane {
                     AppLogger.warning("Failed to clear provider cache: " + ex.getMessage());
                 }
                 Platform.runLater(() -> {
-                    if (result.installed()) {
+                    if (wasCancelled) {
+                        statusLabel.setText("Install cancelled for " + row.installed().friendlyName() + ". No changes assumed — scan again to verify.");
+                        recordHistory(row, c, false);
+                    } else if (result.installed()) {
                         recordHistory(row, c, true);
                         if (result.rebootRequired()) {
                             rebootStore.addPending(row.installed().deviceId(), row.installed().friendlyName());
@@ -990,7 +1115,15 @@ public class DriversTabView extends BorderPane {
             } finally {
                 installService.setProgressCallback(null);
                 installService.setStatusCallback(null);
-                Platform.runLater(() -> busy.set(false));
+                installFuture = null;
+                Platform.runLater(() -> {
+                    releaseBusy(BusyOwner.INSTALL);
+                    scanButton.setDisable(false);
+                    stopInstallButton.setVisible(false);
+                    stopInstallButton.setManaged(false);
+                    stopInstallButton.setDisable(true);
+                    updateButtonStates();
+                });
             }
         });
     }
@@ -1010,11 +1143,12 @@ public class DriversTabView extends BorderPane {
     }
 
     private void showErrorWithFallback(String message, String vendorPageUrl) {
+        String safe = message == null ? "Install failed." : message;
         if (vendorPageUrl != null && !vendorPageUrl.isBlank()) {
-            Alert alert = new Alert(Alert.AlertType.INFORMATION, message + "\n\nYou can try downloading manually from the vendor website.",
+            Alert alert = new Alert(Alert.AlertType.ERROR, safe + "\n\nYou can try downloading manually from the vendor website.",
                     ButtonType.OK, ButtonType.CANCEL);
-            alert.setTitle("Download Failed");
-            alert.setHeaderText("Manual download available");
+            alert.setTitle("Driver Install Failed");
+            alert.setHeaderText("Install failed — manual download available");
 
             Button openWebsiteBtn = (Button) alert.getDialogPane().lookupButton(ButtonType.CANCEL);
             openWebsiteBtn.setText("Open Website");
@@ -1029,7 +1163,7 @@ public class DriversTabView extends BorderPane {
 
             alert.showAndWait();
         } else {
-            new Alert(Alert.AlertType.INFORMATION, message).showAndWait();
+            new Alert(Alert.AlertType.ERROR, safe).showAndWait();
         }
     }
 
@@ -1114,16 +1248,13 @@ public class DriversTabView extends BorderPane {
                 }
                 javafx.application.Platform.runLater(() -> {
                     row.refreshFrom(updated);
-                    // If we previously marked reboot pending and version now matches expected, clear pending
-                    if (row.isRebootPending() && oldCandidate != null
-                            && newVersion.equals(oldCandidate.availableVersion())) {
-                        row.setRebootPending(false);
-                        row.setCandidate(null);
-                        outdatedRows.remove(row);
-                        if (!upToDateRows.contains(row)) upToDateRows.add(row);
-                        rebootStore.clearPending(row.installed().deviceId());
-                        outdatedTable.refresh();
-                        upToDateTable.refresh();
+                    // Never auto-clear reboot-pending on version match: Windows
+                    // often reports the new version before the reboot that
+                    // actually binds it. Pending clears only on reboot /
+                    // explicit user action, never on a version string.
+                    if (row.isRebootPending()) {
+                        if (outdatedTable != null) outdatedTable.refresh();
+                        if (upToDateTable != null) upToDateTable.refresh();
                     }
                 });
             }
@@ -1133,25 +1264,24 @@ public class DriversTabView extends BorderPane {
     }
     
     private void excludeDriver(DriverRow row) {
-        AppSettings current = settingsStore.load();
-        List<String> excluded = new ArrayList<>(current.excludedDriverIds());
+        if (row == null || row.installed() == null) return;
         String deviceId = row.installed().deviceId();
-        boolean alreadyExcluded = excluded.stream().anyMatch(s -> {
-            int t = s.lastIndexOf('\t');
-            if (t < 0) t = s.lastIndexOf('\u001F');
-            return t >= 0 && s.substring(t + 1).equals(deviceId);
-        });
-        if (!alreadyExcluded) {
-            String stored = row.installed().friendlyName() + "\u001F" + deviceId;
-            excluded.add(stored);
-        }
+        if (deviceId == null || deviceId.isBlank()) return;
+        String friendly = row.installed().friendlyName() == null ? deviceId : row.installed().friendlyName();
         try {
-            settingsStore.save(current.withExcludedDriverIds(excluded));
+            settingsStore.update(current -> {
+                java.util.List<String> excluded = current.excludedDriverIds() == null
+                        ? new java.util.ArrayList<>() : new java.util.ArrayList<>(current.excludedDriverIds());
+                boolean alreadyExcluded = excluded.stream().anyMatch(s -> extractExcludedId(s).equals(deviceId));
+                if (!alreadyExcluded) {
+                    excluded.add(friendly + "\u001F" + deviceId);
+                }
+                return current.withExcludedDriverIds(excluded);
+            });
         } catch (IOException ex) {
             AppLogger.warning("Failed to save excluded driver: " + ex.getMessage());
         }
     }
-
     private final FilteredList<DriverRow> filteredOutdated = new FilteredList<>(outdatedRows);
     private final FilteredList<DriverRow> filteredUpToDate = new FilteredList<>(upToDateRows);
 
@@ -1425,11 +1555,16 @@ public class DriversTabView extends BorderPane {
     }
 
     private void startBatchUpdate() {
-        if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING, "Installing drivers requires administrator rights.").showAndWait();
+        if (!requireAdminFresh()) return;
+        if (busy.get()) {
+            new Alert(Alert.AlertType.INFORMATION, "Another operation is running. Please wait.").showAndWait();
             return;
         }
-        List<DriverRow> snapshot = new ArrayList<>(outdatedRows);
+        List<DriverRow> snapshot = new ArrayList<>(outdatedRows.stream().filter(r -> !r.isRebootPending()).toList());
+        if (snapshot.isEmpty() && !outdatedRows.isEmpty()) {
+            new Alert(Alert.AlertType.INFORMATION, "All outdated drivers are awaiting restart (REBOOT). Restart Windows first.").showAndWait();
+            return;
+        }
         int count = snapshot.size();
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Update all " + count + " outdated driver(s)? This may take several minutes.",
@@ -1443,11 +1578,12 @@ public class DriversTabView extends BorderPane {
     }
 
     private void startBatchUpdateSelected() {
-        if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING, "Installing drivers requires administrator rights.").showAndWait();
+        if (!requireAdminFresh()) return;
+        if (busy.get()) {
+            new Alert(Alert.AlertType.INFORMATION, "Another operation is running. Please wait.").showAndWait();
             return;
         }
-        List<DriverRow> selected = outdatedRows.stream().filter(DriverRow::isSelected).toList();
+        List<DriverRow> selected = outdatedRows.stream().filter(r -> r.isSelected() && !r.isRebootPending()).toList();
         if (selected.isEmpty()) {
             new Alert(Alert.AlertType.INFORMATION, "No drivers selected.").showAndWait();
             return;
@@ -1464,7 +1600,9 @@ public class DriversTabView extends BorderPane {
     }
 
     private void installBatchUpdates(List<DriverRow> rows) {
-        busy.set(true);
+        if (!acquireBusy(BusyOwner.INSTALL)) return;
+        installCancelFlag.set(false);
+        installService.resetCancellation();
         scanButton.setDisable(true);
         updateAllButton.setDisable(true);
         updateSelectedButton.setDisable(true);
@@ -1472,8 +1610,11 @@ public class DriversTabView extends BorderPane {
         progressLabel.setVisible(true);
         progressBar.setProgress(0);
         progressLabel.setText("0%");
+        stopInstallButton.setVisible(true);
+        stopInstallButton.setManaged(true);
+        stopInstallButton.setDisable(false);
 
-        installExecutor.submit(() -> {
+        installFuture = installExecutor.submit(() -> {
             int succeeded = 0;
             int failed = 0;
             int skipped = 0;
@@ -1483,6 +1624,11 @@ public class DriversTabView extends BorderPane {
                 int total = rows.size();
                 AppSettings settings = settingsStore.load();
                 for (int i = 0; i < total; i++) {
+                    if (installCancelFlag.get() || installService.isCancelled()) {
+                        skipped += (total - i);
+                        failureDetails.add("Cancelled by user.");
+                        break;
+                    }
                     DriverRow row = rows.get(i);
                     if (row.candidate() == null) {
                         skipped++;
@@ -1508,7 +1654,6 @@ public class DriversTabView extends BorderPane {
                     });
 
                     try {
-                        installService.resetCancellation();
                         installService.setProgressCallback((bytesReceived, totalBytes, fraction) -> {
                             String sizeText = totalBytes > 0
                                     ? formatBytes(bytesReceived) + " / " + formatBytes(totalBytes)
@@ -1534,10 +1679,8 @@ public class DriversTabView extends BorderPane {
                             DriverActionCell cell = lookupActionCell(row);
                             if (cell != null) {
                                 installCells.put(row, cell);
-                                cell.setDownloading("Starting\u2026", 0);
                             }
                         });
-                        Thread.sleep(50);
                         DriverInstallService.InstallResult result = installService.install(c, settings);
                         // Invalidate caches per-install so next Dashboard scan is fresh
                         try {
@@ -1587,7 +1730,24 @@ public class DriversTabView extends BorderPane {
                                 }
                             });
                         }
+                    } catch (java.util.concurrent.CancellationException cex) {
+                        installCancelFlag.set(true);
+                        skipped++;
+                        failureDetails.add(row.installed().friendlyName() + ": cancelled by user");
+                        AppLogger.warning("Batch install cancelled at " + row.installed().friendlyName());
+                        Platform.runLater(() -> {
+                            DriverActionCell cell = installCells.remove(row);
+                            if (cell != null) {
+                                cell.setIdle();
+                            }
+                        });
+                        break;
                     } catch (Exception ex) {
+                        if (installCancelFlag.get() || installService.isCancelled()) {
+                            skipped++;
+                            failureDetails.add(row.installed().friendlyName() + ": cancelled by user");
+                            break;
+                        }
                         failed++;
                         failureDetails.add(row.installed().friendlyName() + ": exception " + ex.getMessage());
                         AppLogger.warning("Batch install failed for " + row.installed().friendlyName() + ": " + ex.getMessage());
@@ -1615,34 +1775,18 @@ public class DriversTabView extends BorderPane {
                         freshByDevice.put(d.deviceId(), d);
                     }
                     // B5 fix: all JavaFX property mutations must run on FX thread
-                    Map<String, String> toClear = new HashMap<>();
                     Platform.runLater(() -> {
                         for (DriverRow row : rows) {
                             InstalledDriver fresh = freshByDevice.get(row.installed().deviceId());
                             if (fresh != null) {
                                 row.refreshFrom(fresh);
-                                // If pending reboot and version now matches available, clear pending
-                                if (row.isRebootPending()) {
-                                    String freshVer = fresh.driverVersion();
-                                    String avail = row.candidate() != null ? row.candidate().availableVersion() : null;
-                                    if (avail != null && avail.equals(freshVer)) {
-                                        row.setRebootPending(false);
-                                        row.setCandidate(null);
-                                        outdatedRows.remove(row);
-                                        if (!upToDateRows.contains(row)) upToDateRows.add(row);
-                                        toClear.put(row.installed().deviceId(), row.installed().friendlyName());
-                                    }
-                                }
+                                // Never auto-clear reboot-pending on version
+                                // match (pre-reboot Windows often reports the
+                                // new version). Pending persists until reboot.
                             }
                         }
                         outdatedTable.refresh();
                         upToDateTable.refresh();
-                        // clear pending files off FX thread after UI update
-                        if (!toClear.isEmpty()) {
-                            new Thread(() -> {
-                                for (String did : toClear.keySet()) rebootStore.clearPending(did);
-                            }, "reboot-clear").start();
-                        }
                     });
                 } catch (Exception e) {
                     AppLogger.debug("Post-batch re-scan failed: " + e.getMessage());
@@ -1654,8 +1798,12 @@ public class DriversTabView extends BorderPane {
             final int r = rebootNeeded;
             final List<String> failures = new ArrayList<>(failureDetails);
             Platform.runLater(() -> {
-                busy.set(false);
+                releaseBusy(BusyOwner.INSTALL);
+                installFuture = null;
                 scanButton.setDisable(false);
+                stopInstallButton.setVisible(false);
+                stopInstallButton.setManaged(false);
+                stopInstallButton.setDisable(true);
                 updateAllButton.setDisable(outdatedRows.isEmpty());
                 updateSelectedButton.setDisable(true);
                 progressBar.setProgress(1.0);
@@ -1708,10 +1856,7 @@ public class DriversTabView extends BorderPane {
     }
 
     private void startBackupAll() {
-        if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING, "Driver backup requires administrator rights.").showAndWait();
-            return;
-        }
+        if (!requireAdminFresh()) return;
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Back up all currently installed drivers? This may take a few minutes.",
                 ButtonType.OK, ButtonType.CANCEL);
@@ -1723,7 +1868,8 @@ public class DriversTabView extends BorderPane {
 
         final CancellationToken token = new CancellationToken();
         backupToken = token;
-        busy.set(true);
+        backupCancelFlag.set(false);
+        if (!acquireBusy(BusyOwner.BACKUP)) return;
         scanButton.setDisable(true);
         backupButton.setDisable(true);
         stopBackupButton.setVisible(true);
@@ -1735,16 +1881,16 @@ public class DriversTabView extends BorderPane {
         progressLabel.setText("0%");
         setStatus("Scanning installed drivers for backup\u2026");
 
-        installExecutor.submit(() -> {
+        backupFuture = backupExecutor.submit(() -> {
             int succeeded = 0;
             int failed = 0;
             int skipped = 0;
             try {
                 List<InstalledDriver> installed = scanService.scanInstalled();
-                int total = installed.size();
+                int total = installed == null ? 0 : installed.size();
                 AppSettings settings = settingsStore.load();
                 for (int i = 0; i < total; i++) {
-                    if (token.isCancelled()) {
+                    if (token.isCancelled() || backupCancelFlag.get()) {
                         skipped = total - i;
                         break;
                     }
@@ -1760,16 +1906,24 @@ public class DriversTabView extends BorderPane {
                         }
                     });
                     try {
-                        backupService.backupBeforeUpdate(driver, settings);
+                        backupService.backupBeforeUpdate(driver, settings, backupCancelFlag);
                         succeeded++;
+                    } catch (java.util.concurrent.CancellationException cex) {
+                        skipped = total - i;
+                        break;
                     } catch (Exception ex) {
+                        if (token.isCancelled() || backupCancelFlag.get()) {
+                            skipped = total - i;
+                            break;
+                        }
                         failed++;
                         AppLogger.warning("Backup failed for " + driver.friendlyName() + ": " + ex.getMessage());
                     }
                 }
             } catch (Exception ex) {
                 Platform.runLater(() -> {
-                    busy.set(false);
+                    releaseBusy(BusyOwner.BACKUP);
+                    backupFuture = null;
                     scanButton.setDisable(false);
                     backupButton.setDisable(false);
                     stopBackupButton.setVisible(false);
@@ -1785,7 +1939,8 @@ public class DriversTabView extends BorderPane {
             final int f = failed;
             final int k = skipped;
             Platform.runLater(() -> {
-                busy.set(false);
+                releaseBusy(BusyOwner.BACKUP);
+                backupFuture = null;
                 scanButton.setDisable(false);
                 backupButton.setDisable(false);
                 stopBackupButton.setVisible(false);
@@ -1814,6 +1969,8 @@ public class DriversTabView extends BorderPane {
         if (token != null) {
             token.cancel();
         }
+        backupCancelFlag.set(true);
+        try { if (backupFuture != null) backupFuture.cancel(true); } catch (Exception ignored) {}
         stopBackupButton.setDisable(true);
         setStatus("Cancelling backup\u2026");
     }
@@ -1828,8 +1985,14 @@ public class DriversTabView extends BorderPane {
         CancellationToken backup = backupToken;
         if (backup != null) backup.cancel();
         installService.cancel();
+        installCancelFlag.set(true);
+        backupCancelFlag.set(true);
+        try { if (scanFuture != null) scanFuture.cancel(true); } catch (Exception ignored) {}
+        try { if (installFuture != null) installFuture.cancel(true); } catch (Exception ignored) {}
+        try { if (backupFuture != null) backupFuture.cancel(true); } catch (Exception ignored) {}
         shutdownExecutor(scanExecutor);
         shutdownExecutor(installExecutor);
+        shutdownExecutor(backupExecutor);
     }
 
     private static void shutdownExecutor(ExecutorService executor) {

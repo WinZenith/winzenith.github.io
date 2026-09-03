@@ -30,6 +30,9 @@ public class RegistryCleaner implements CleanerExtension {
     public CleanupCategory getCategory() { return CleanupCategory.REGISTRY; }
 
     @Override
+    public boolean requiresAdmin() { return true; }
+
+    @Override
     public void scan(CleanupRow row) {
         int count = 0;
         for (String keyPath : SAFE_DELETE_HKCU_RUN_PATHS) {
@@ -45,13 +48,22 @@ public class RegistryCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         for (String keyPath : SAFE_DELETE_HKCU_RUN_PATHS) {
-            deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_CURRENT_USER, keyPath);
+            if (token != null && token.isCancelled()) break;
+            deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_CURRENT_USER, keyPath, token);
         }
         for (String keyPath : SAFE_DELETE_HKLM_RUN_PATHS) {
-            deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_LOCAL_MACHINE, keyPath);
+            if (token != null && token.isCancelled()) break;
+            deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_LOCAL_MACHINE, keyPath, token);
         }
-        cleanOrphanedSharedDLLs(backupRootOrNull);
+        if (token != null && token.isCancelled()) return 0L;
+        cleanOrphanedSharedDLLs(backupRootOrNull, token);
         return 0;
     }
 
@@ -73,19 +85,24 @@ public class RegistryCleaner implements CleanerExtension {
     }
 
     private long deleteInvalidRegistryValues(Path backupRootOrNull, WinReg.HKEY hive, String keyPath) {
+        return deleteInvalidRegistryValues(backupRootOrNull, hive, keyPath, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    private long deleteInvalidRegistryValues(Path backupRootOrNull, WinReg.HKEY hive, String keyPath, com.sbtools.util.CancellationToken token) {
         long count = 0;
         try {
             if (Advapi32Util.registryKeyExists(hive, keyPath)) {
                 Map<String, Object> values = Advapi32Util.registryGetValues(hive, keyPath);
                 List<String> toDelete = new ArrayList<>();
                 for (Map.Entry<String, Object> entry : values.entrySet()) {
+                    if (token != null && token.isCancelled()) break;
                     String value = entry.getValue().toString();
                     if (value.startsWith("\"") && value.endsWith("\""))
                         value = value.substring(1, value.length() - 1);
                     String cleanPath = CleanerUtils.extractPathFromRegistryValue(value);
                     if (cleanPath != null && !Files.exists(Paths.get(cleanPath))) toDelete.add(entry.getKey());
                 }
-                if (!toDelete.isEmpty()) {
+                if (!toDelete.isEmpty() && (token == null || !token.isCancelled())) {
                     if (backupRootOrNull != null) {
                         String hiveName = hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU";
                         Path regBackup = backupRootOrNull.resolve("registry-" + hiveName + "-" + keyPath.replace("\\", "_") + ".reg");
@@ -101,6 +118,7 @@ public class RegistryCleaner implements CleanerExtension {
                         } catch (Exception ignored) {}
                     }
                     for (String valName : toDelete) {
+                        if (token != null && token.isCancelled()) break;
                         try { Advapi32Util.registryDeleteValue(hive, keyPath, valName); count++; } catch (Exception ignored) {}
                     }
                 }
@@ -134,6 +152,10 @@ public class RegistryCleaner implements CleanerExtension {
     }
 
     private long cleanOrphanedSharedDLLs(Path backupRootOrNull) {
+        return cleanOrphanedSharedDLLs(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    private long cleanOrphanedSharedDLLs(Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         long count = 0;
         String keyPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs";
         try {
@@ -141,6 +163,7 @@ public class RegistryCleaner implements CleanerExtension {
                 Map<String, Object> values = Advapi32Util.registryGetValues(WinReg.HKEY_LOCAL_MACHINE, keyPath);
                 List<String> toDelete = new ArrayList<>();
                 for (Map.Entry<String, Object> entry : values.entrySet()) {
+                    if (token != null && token.isCancelled()) break;
                     String filePath = entry.getKey();
                     try {
                         Object valObj = entry.getValue();
@@ -153,8 +176,9 @@ public class RegistryCleaner implements CleanerExtension {
                         if (refCount <= 1 && !Files.exists(Paths.get(filePath))) toDelete.add(filePath);
                     } catch (Exception ignored) {}
                 }
-                if (!toDelete.isEmpty()) backupRegKey(backupRootOrNull, "shareddlls", "HKLM", keyPath);
+                if (!toDelete.isEmpty() && (token == null || !token.isCancelled())) backupRegKey(backupRootOrNull, "shareddlls", "HKLM", keyPath);
                 for (String valName : toDelete) {
+                    if (token != null && token.isCancelled()) break;
                     try { Advapi32Util.registryDeleteValue(WinReg.HKEY_LOCAL_MACHINE, keyPath, valName); count++; } catch (Exception ignored) {}
                 }
             }

@@ -47,6 +47,12 @@ public class OfficeDocumentCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
         if (localAppData != null) {
@@ -54,9 +60,10 @@ public class OfficeDocumentCacheCleaner implements CleanerExtension {
             if (Files.isDirectory(officeParent)) {
                 try (DirectoryStream<Path> ds = Files.newDirectoryStream(officeParent)) {
                     for (Path versionDir : ds) {
+                        if (token != null && token.isCancelled()) break;
                         if (Files.isDirectory(versionDir)) {
                             Path fileCache = versionDir.resolve("OfficeFileCache");
-                            if (Files.isDirectory(fileCache)) cleaned += CleanerUtils.deleteDirectoryContents(fileCache);
+                            if (Files.isDirectory(fileCache)) cleaned += CleanerUtils.deleteDirectoryContents(fileCache, token);
                         }
                     }
                 } catch (Exception ignored) {}

@@ -34,7 +34,14 @@ public class EmptyFoldersCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         for (Path root : getRoots()) {
+            if (token != null && token.isCancelled()) break;
             if (root != null && Files.isDirectory(root)) {
                 try (Stream<Path> walk = Files.walk(root, 3)) {
                     List<Path> emptyDirs = walk.filter(Files::isDirectory)
@@ -43,6 +50,7 @@ public class EmptyFoldersCleaner implements CleanerExtension {
                             .sorted(Comparator.reverseOrder())
                             .toList();
                     for (Path dir : emptyDirs) {
+                        if (token != null && token.isCancelled()) break;
                         try { Files.deleteIfExists(dir); } catch (Exception ignored) {}
                     }
                 } catch (Exception ignored) {}

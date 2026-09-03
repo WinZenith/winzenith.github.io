@@ -1174,14 +1174,6 @@ public class DiskToolsTabView extends BorderPane {
         }
         final String finalDriveLetter = driveLetter;
 
-        benchCancelled.set(false);
-        benchStartBtn.setDisable(true);
-        benchStopBtn.setVisible(true);
-        benchStopBtn.setDisable(false);
-        benchProgress.setProgress(0);
-        benchProgress.setVisible(true);
-        benchStatus.setText("Initializing benchmark...");
-
         String sizeStr = benchSizeCombo.getSelectionModel().getSelectedItem();
         int sizeMB = 64;
         if (sizeStr != null && !sizeStr.isBlank()) {
@@ -1192,6 +1184,29 @@ public class DiskToolsTabView extends BorderPane {
             }
         }
         final int testSizeMB = sizeMB;
+
+        // Critical fix: fail fast when free space is insufficient instead of filling
+        // the drive to 0 bytes. Service + script double-check as well.
+        DriveInfo benchInfo = benchDriveMap.get(selected);
+        if (benchInfo != null && benchInfo.getFreeBytes() > 0) {
+            long required = (long) testSizeMB * 1024 * 1024 + 100L * 1024 * 1024;
+            if (benchInfo.getFreeBytes() < required) {
+                new Alert(Alert.AlertType.WARNING,
+                        "Insufficient free space on " + finalDriveLetter + " for a " + testSizeMB
+                                + " MB benchmark (needs ~" + testSizeMB + " MB + 100 MB headroom, free "
+                                + benchInfo.getFreeFormatted() + "). Free up space or choose a smaller size.")
+                        .showAndWait();
+                return;
+            }
+        }
+
+        benchCancelled.set(false);
+        benchStartBtn.setDisable(true);
+        benchStopBtn.setVisible(true);
+        benchStopBtn.setDisable(false);
+        benchProgress.setProgress(0);
+        benchProgress.setVisible(true);
+        benchStatus.setText("Initializing benchmark...");
 
         currentBenchThread = new Thread(() -> {
             try {
@@ -1595,7 +1610,11 @@ public class DiskToolsTabView extends BorderPane {
                         msg -> Platform.runLater(() -> recycleBinStatus.setText(msg)),
                         recycleBinCancelled);
                 Platform.runLater(() -> {
-                    if (result.isSuccess()) {
+                    if (recycleBinCancelled.get()) {
+                        recycleBinStatus.setText("Recycle Bin wipe cancelled.");
+                        // Refresh to reflect partial progress instead of clearing.
+                        loadRecycleBin();
+                    } else if (result.isSuccess()) {
                         recycleBinEntries.clear();
                         recycleBinStatus.setText("Recycle Bin securely wiped: " + result.getFilesDeleted() + " item(s) removed.");
                         recycleBinSummary.setText("");
@@ -1606,8 +1625,11 @@ public class DiskToolsTabView extends BorderPane {
                         }
                         new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
                     } else {
-                        recycleBinStatus.setText("Recycle Bin wipe failed.");
-                        new Alert(Alert.AlertType.ERROR, "Recycle Bin wipe failed:\n" + result.getMessage()).showAndWait();
+                        recycleBinStatus.setText("Recycle Bin wipe failed: " + result.getMessage());
+                        new Alert(Alert.AlertType.ERROR, "Recycle Bin wipe failed:\n" + result.getMessage()
+                                + "\n\nThe list was NOT cleared. Click Refresh to reload actual contents.").showAndWait();
+                        // Re-query actual Recycle Bin contents; never clear on failure.
+                        loadRecycleBin();
                     }
                 });
             } catch (Exception e) {
@@ -2016,7 +2038,9 @@ public class DiskToolsTabView extends BorderPane {
         desc.getStyleClass().add("text-muted");
 
         Label capWarning = new Label("Note: Free space wiping will overwrite all free space (minus ~1 GB reserve) to securely remove remnants. "
-                + "This may take a long time and cause significant disk writes. Use Quick (1 pass) for fastest operation.");
+                + "This may take a long time and cause significant disk writes. Use Quick (1 pass) for fastest operation. "
+                + "Avoid wiping SSDs (causes wear and cannot guarantee erasure due to wear-leveling/over-provisioning — use the drive's Secure Erase instead) "
+                + "and avoid wiping the system drive while Windows is running (low free space can destabilize the OS).");
         capWarning.getStyleClass().add("text-muted");
         capWarning.setWrapText(true);
         capWarning.setStyle("-fx-font-size: 11px;");
@@ -2133,6 +2157,66 @@ public class DiskToolsTabView extends BorderPane {
         if (selected.isEmpty()) return;
 
         List<String> driveLetters = selected.stream().map(DriveInfo::getDriveLetter).toList();
+        int passCount = getSelectedWipePassCount();
+
+        // Critical fix: destructive operation previously started without any confirmation
+        // and without SSD / system-drive warnings. Build an explicit confirmation showing
+        // exactly what will be overwritten.
+        final long reserveBytes = 1024L * 1024L * 1024L;
+        String systemDrive = System.getenv("SystemDrive");
+        if (systemDrive == null || systemDrive.isBlank()) systemDrive = "C:";
+        systemDrive = systemDrive.replace("\\", "").trim();
+        if (!systemDrive.endsWith(":")) systemDrive = systemDrive + ":";
+
+        StringBuilder drivesInfo = new StringBuilder();
+        long totalToWipe = 0;
+        boolean anySsd = false;
+        boolean anySystem = false;
+        for (DriveInfo d : selected) {
+            long free = Math.max(0, d.getFreeBytes());
+            long toWipe = Math.max(0, free - reserveBytes);
+            totalToWipe += toWipe;
+            boolean isSsd = d.isSsd();
+            boolean isSystem = d.getDriveLetter().equalsIgnoreCase(systemDrive);
+            anySsd |= isSsd;
+            anySystem |= isSystem;
+            drivesInfo.append(d.getDriveLetter()).append(" (free ").append(d.getFreeFormatted())
+                    .append(", will overwrite ~").append(formatWipeBytes(toWipe))
+                    .append(", ").append(d.getMediaType());
+            if (isSystem) drivesInfo.append(", SYSTEM DRIVE");
+            if (isSsd) drivesInfo.append(", SSD");
+            drivesInfo.append(")\n");
+        }
+        String passLabel = passCount <= 1 ? "Quick (1 pass)" : passCount >= 7 ? "Deep (7 passes)" : "Standard (3 passes)";
+
+        StringBuilder confirmText = new StringBuilder("Securely wipe free space on the following drive(s)?\n\n")
+                .append(drivesInfo)
+                .append("\nTotal to overwrite: ~").append(formatWipeBytes(totalToWipe))
+                .append(" (1 GB reserve kept per drive)")
+                .append("\nOverwrite: ").append(passLabel)
+                .append("\n\nRecovery of wiped remnants will be impossible. This may take a very long time.");
+        if (anySsd) {
+            confirmText.append("\n\nWARNING: SSD selected. Free-space overwriting causes significant wear "
+                    + "and CANNOT guarantee erasure (wear-leveling / over-provisioning / TRIM). "
+                    + "Prefer the SSD vendor's Secure Erase.");
+        }
+        if (anySystem) {
+            confirmText.append("\n\nWARNING: System drive (").append(systemDrive).append(") selected. "
+                    + "Filling free space while Windows is running can destabilize the OS, "
+                    + "break updates/pagefile, and cause app crashes. Proceed only with ample free space.");
+        }
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, confirmText.toString());
+        confirm.setHeaderText("Confirm Free Space Wipe");
+        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+
+        if (totalToWipe <= 0) {
+            new Alert(Alert.AlertType.WARNING,
+                    "Not enough free space to wipe (needs >1 GB free per selected drive). Free up space and retry.")
+                    .showAndWait();
+            return;
+        }
+
+        final int finalPassCount = passCount;
 
         wipeBusy.set(true);
         wipeCancelled.set(false);
@@ -2146,7 +2230,6 @@ public class DiskToolsTabView extends BorderPane {
 
         new Thread(() -> {
             try {
-                int passCount = getSelectedWipePassCount();
                 shredderService.wipeFreeSpace(driveLetters, prog -> {
                     Platform.runLater(() -> {
                         int totalPasses = prog.getTotalPasses();
@@ -2175,21 +2258,24 @@ public class DiskToolsTabView extends BorderPane {
                         }
                         wipeStatus.setText(status);
                     });
-                }, wipeCancelled);
+                }, wipeCancelled, finalPassCount);
                 Platform.runLater(() -> {
                     if (wipeCancelled.get()) {
                         wipeStatus.setText("Wipe stopped by user.");
                     } else {
-                        wipeStatus.setText("Free space wipe completed.");
-                        new Alert(Alert.AlertType.INFORMATION, "Free space wiping completed successfully.").showAndWait();
+                        wipeStatus.setText("Free space wipe completed on " + driveLetters.size() + " drive(s).");
+                        new Alert(Alert.AlertType.INFORMATION,
+                                "Free space wiping completed successfully on: "
+                                        + String.join(", ", driveLetters)).showAndWait();
                     }
                 });
             } catch (Exception e) {
                 AppLogger.error("Free space wipe failed", e);
                 Platform.runLater(() -> {
-                    wipeStatus.setText("Wipe failed.");
+                    wipeStatus.setText("Wipe failed: " + e.getMessage());
                     if (!wipeCancelled.get()) {
-                        new Alert(Alert.AlertType.ERROR, "Free space wipe failed:\n" + e.getMessage()).showAndWait();
+                        new Alert(Alert.AlertType.ERROR, "Free space wipe failed:\n" + e.getMessage()
+                                + "\n\nNo success is reported when any drive fails. Check free space and try again.").showAndWait();
                     }
                 });
             } finally {
@@ -2201,6 +2287,14 @@ public class DiskToolsTabView extends BorderPane {
                 });
             }
         }, "wipe-free-space").start();
+    }
+
+    private static String formatWipeBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024L * 1024) return String.format("%.1f KB", bytes / 1024.0);
+        if (bytes < 1024L * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
+        if (bytes < 1024L * 1024 * 1024 * 1024) return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
+        return String.format("%.2f TB", bytes / (1024.0 * 1024 * 1024 * 1024));
     }
 
     public void dispose() {

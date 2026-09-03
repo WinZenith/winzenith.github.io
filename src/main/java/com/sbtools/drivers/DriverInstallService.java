@@ -70,28 +70,70 @@ public class DriverInstallService {
 
     public InstallResult install(DriverUpdateCandidate candidate, AppSettings settings)
             throws IOException, InterruptedException {
+        if (candidate == null || candidate.installed() == null) {
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Invalid driver candidate.");
+        }
+        // Fail fast without admin: pnputil/msiexec/setup would half-apply
+        // and surface cryptic errors. No destructive attempt without elevation.
+        if (!com.sbtools.util.AdminCheck.isRunningAsAdminFresh()) {
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                    "Administrator rights required. Please restart the app as administrator and retry.");
+        }
+        boolean restoreRequested = settings.createSystemRestorePoint();
+        boolean backupRequested = settings.autoBackupDrivers();
+        boolean restoreOk = false;
         int restorePointSeq = -1;
-        if (settings.createSystemRestorePoint()) {
+        if (restoreRequested) {
             reportStatus("Creating system restore point…");
             AppLogger.info("Creating system restore point before driver update");
             var rpResult = restoreService.createRestorePoint(
                     "WinZenith driver update: " + candidate.installed().friendlyName());
             if (rpResult.success()) {
                 restorePointSeq = rpResult.sequenceNumber();
+                restoreOk = true;
                 AppLogger.info("System restore point created successfully (seq=" + restorePointSeq + ")");
             } else {
-                AppLogger.warning("System restore point creation failed or was skipped");
+                String err = rpResult.error() == null ? "" : rpResult.error();
+                // Windows allows only one restore point per 24h by default.
+                // FREQUENCY_LIMIT means a recent point already exists, so the
+                // safety net is present even though creation was skipped.
+                if (err.contains("FREQUENCY_LIMIT")) {
+                    restoreOk = true;
+                    AppLogger.info("Restore point skipped (recent point exists, FREQUENCY_LIMIT); treating safety net as present.");
+                    reportStatus("Recent system restore point already exists — continuing.");
+                } else {
+                    AppLogger.warning("System restore point creation failed or was skipped: " + rpResult.error());
+                    reportStatus("Warning: restore point unavailable — " + rpResult.error());
+                }
             }
         }
 
         com.sbtools.backup.DriverBackupEntry backupEntry = null;
-        if (settings.autoBackupDrivers()) {
+        boolean backupOk = false;
+        if (backupRequested) {
             try {
                 backupEntry = backupService.backupBeforeUpdate(candidate.installed(), settings);
+                backupOk = backupEntry != null;
             } catch (Exception e) {
                 AppLogger.warning("Pre-install driver backup failed: " + e.getMessage());
-                reportStatus("Warning: Driver backup failed \u2014 " + e.getMessage());
+                reportStatus("Driver backup failed — " + e.getMessage());
             }
+            if (!backupOk) {
+                // Fail closed when the user asked for a safety net: never
+                // proceed to a destructive install with no backup. If restore
+                // also failed/unrequested, there is no rollback at all.
+                if (!restoreOk) {
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                            "Aborted: pre-install driver backup failed and no system restore point is available. "
+                            + "No changes were made. Free disk space / run as administrator and retry.");
+                }
+                AppLogger.warning("Proceeding without driver backup (restore point seq=" + restorePointSeq + " available)");
+            }
+        } else if (!restoreOk && restoreRequested) {
+            // Restore requested but failed, backup disabled: no safety net.
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                    "Aborted: system restore point could not be created and automatic driver backup is disabled. "
+                    + "Enable driver backup or fix System Protection, then retry. No changes were made.");
         }
 
         String availVer = candidate.availableVersion();
@@ -115,8 +157,8 @@ public class DriverInstallService {
                 ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
                         script.toString(), candidate.packageId()), cancellationFlag);
                 if (!result.success()) {
-                    removeBackupIfPresent(backupEntry);
-                    removeRestorePointIfPresent(restorePointSeq);
+                    // KEEP backup + restore point on failure: they are the
+                    // rollback for a partially-applied update.
                     return new InstallResult(InstallStatus.INSTALL_FAILED, false,
                             "Windows Update install failed: " + result.combinedOutput());
                 }
@@ -140,8 +182,7 @@ public class DriverInstallService {
                 }
                 return new InstallResult(InstallStatus.SUCCESS, reboot, message);
             } catch (Exception e) {
-                removeBackupIfPresent(backupEntry);
-                removeRestorePointIfPresent(restorePointSeq);
+                // KEEP rollback on exception (partial apply possible).
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
         }
@@ -156,14 +197,10 @@ public class DriverInstallService {
             }
             try {
                 InstallResult result = downloadAndInstallDriver(candidate, settings);
-                if (!result.installed()) {
-                    removeBackupIfPresent(backupEntry);
-                    removeRestorePointIfPresent(restorePointSeq);
-                }
+                // KEEP backup + restore point when the install did not
+                // succeed: the device may be partially updated.
                 return result;
             } catch (Exception e) {
-                removeBackupIfPresent(backupEntry);
-                removeRestorePointIfPresent(restorePointSeq);
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
             }
         }
@@ -215,6 +252,11 @@ public class DriverInstallService {
                     AppLogger.info("Download returned HTML, attempting to scrape actual download URL from: " + downloadUrl);
                     String scrapedUrl = scrapeDownloadUrlFromPage(downloadUrl);
                     if (scrapedUrl != null && !scrapedUrl.equals(downloadUrl)) {
+                        if (!isTrustedSource(scrapedUrl, candidate.source())) {
+                            cleanupTempFiles(driverFile);
+                            return new InstallResult(InstallStatus.BLOCKED_UNTRUSTED, false,
+                                    "Blocked: scraped download URL is not from a trusted vendor host. URL: " + scrapedUrl);
+                        }
                         AppLogger.info("Found alternative download URL: " + scrapedUrl);
                         filename = extractFilename(scrapedUrl);
                         driverFile = downloadsDir.resolve(filename);
@@ -330,7 +372,7 @@ public class DriverInstallService {
                     }
                     AppLogger.info("Extracted MSI: " + msiFile);
                     ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
-                            "msiexec.exe", "/i", msiFile.toString(), "/qn"
+                            "msiexec.exe", "/i", msiFile.toString(), "/qn", "/norestart"
                     ).command().toArray(new String[0])), cancellationFlag);
                     boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
                     if (result.success() || msiReboot) {
@@ -471,10 +513,11 @@ public class DriverInstallService {
                     "href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"",
                     java.util.regex.Pattern.CASE_INSENSITIVE);
             java.util.regex.Matcher m = p.matcher(html);
-            String firstFallback = null;
+            // Vendor-CDN matches only. No firstFallback: returning an
+            // arbitrary exe/zip link lets an attacker-controlled page pick
+            // the installed binary (untrusted-code risk).
             while (m.find()) {
                 String url = decodeHtmlEntities(m.group(1));
-                // Prefer vendor-specific CDN hosts
                 String lower = url.toLowerCase();
                 if (lower.contains("drivers.amd.com") || lower.contains("download.amd.com")
                         || lower.contains("downloadmirror.intel.com") || lower.contains("download.intel.com")
@@ -483,13 +526,8 @@ public class DriverInstallService {
                         || lower.contains("hp.com") || lower.contains("lenovo.com")) {
                     return url;
                 }
-                if (firstFallback == null) {
-                    firstFallback = url;
-                }
             }
-            if (firstFallback != null) {
-                return firstFallback;
-            }
+            return null;
         } catch (Exception e) {
             AppLogger.warning("Error scraping download page: " + e.getMessage());
         }
@@ -697,6 +735,12 @@ public class DriverInstallService {
         String filename = driverFile.getFileName().toString().toLowerCase();
 
         if (filename.endsWith(".inf")) {
+            // Fail closed: a directly-downloaded INF must reference the
+            // target device HW, otherwise refuse (wrong-device risk).
+            if (!isInfPlausibleForDevice(driverFile, candidate)) {
+                return new ProcessResult(1, "", "Downloaded INF does not match device "
+                        + candidate.installed().friendlyName() + " — refusing install.");
+            }
             return processRunner.run(java.util.List.of(new ProcessBuilder(
                     "pnputil.exe", "/add-driver", driverFile.toString(), "/install").command().toArray(new String[0])), cancellationFlag);
         } else if (filename.endsWith(".zip") || filename.endsWith(".zip.exe")) {
@@ -717,31 +761,27 @@ public class DriverInstallService {
             Path setupExe = findFile(extractDir, "setup.exe");
             if (setupExe != null) {
                 if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
-                // B4: verify inner setup.exe signature (archive outer skip)
+                // Fail closed: any inner signature failure blocks silent /S
+                // execution (untrusted-code risk). No substring allowlist.
                 DriverVerificationService.VerificationResult innerSig = verificationService.verifyAuthenticode(setupExe);
                 if (!innerSig.verified()) {
-                    AppLogger.warning("Inner setup.exe signature check failed: " + innerSig.message() + " — proceeding with warning (archive inner)");
-                    // Only block on HashMismatch; NotTrusted already allowed, NotSigned for setup.exe is fatal
-                    if (innerSig.message() != null && innerSig.message().contains("not signed")) {
-                        return new ProcessResult(1, "", "Inner setup.exe is not signed: " + innerSig.message());
-                    }
+                    AppLogger.warning("Inner setup.exe signature check failed: " + innerSig.message());
+                    return new ProcessResult(1, "", "Inner setup.exe signature check failed: " + innerSig.message());
                 }
                 String[] cmd = new String[]{setupExe.toString(), "/S"};
                 return processRunner.run(java.util.List.of(new ProcessBuilder(cmd).command().toArray(new String[0])), cancellationFlag);
             }
 
-            Path infFile = findFile(extractDir, ".inf");
+            Path infFile = findMatchingInf(extractDir, candidate);
             if (infFile != null) {
                 if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
-                // B4: verify accompanying .cat if present; INF itself is not Authenticode signed
+                // Fail closed: accompanying .cat must verify when present.
                 Path catFile = findFile(infFile.getParent(), ".cat");
                 if (catFile != null) {
                     DriverVerificationService.VerificationResult catSig = verificationService.verifyAuthenticode(catFile);
                     if (!catSig.verified()) {
-                        AppLogger.warning("Inner .cat signature check failed: " + catSig.message() + " — proceeding (INF install will be validated by pnputil)");
-                        if (catSig.message() != null && catSig.message().toLowerCase().contains("hash mismatch")) {
-                            return new ProcessResult(1, "", "Inner .cat hash mismatch - file may be corrupted: " + catSig.message());
-                        }
+                        AppLogger.warning("Inner .cat signature check failed: " + catSig.message());
+                        return new ProcessResult(1, "", "Inner .cat signature check failed: " + catSig.message());
                     }
                 }
                 return processRunner.run(java.util.List.of(new ProcessBuilder(
@@ -749,7 +789,8 @@ public class DriverInstallService {
                 ).command().toArray(new String[0])), cancellationFlag);
             }
 
-            return new ProcessResult(1, "", "No setup.exe or .inf found in extracted archive: " + extractDir);
+            return new ProcessResult(1, "", "No setup.exe or matching .inf found in extracted archive: " + extractDir
+                    + " (refusing to install an INF that does not match the device).");
         } else if (filename.endsWith(".cab")) {
             Path extractDir = driverFile.getParent().resolve(
                     driverFile.getFileName().toString().replace(".cab", "_extracted"));
@@ -776,26 +817,22 @@ public class DriverInstallService {
                 if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
                 DriverVerificationService.VerificationResult innerSig = verificationService.verifyAuthenticode(setupExe);
                 if (!innerSig.verified()) {
-                    AppLogger.warning("Inner setup.exe (CAB) signature check failed: " + innerSig.message() + " — proceeding with warning");
-                    if (innerSig.message() != null && innerSig.message().contains("not signed")) {
-                        return new ProcessResult(1, "", "Inner setup.exe is not signed: " + innerSig.message());
-                    }
+                    AppLogger.warning("Inner setup.exe (CAB) signature check failed: " + innerSig.message());
+                    return new ProcessResult(1, "", "Inner setup.exe signature check failed: " + innerSig.message());
                 }
                 String[] cmd = new String[]{setupExe.toString(), "/S"};
                 return processRunner.run(java.util.List.of(new ProcessBuilder(cmd).command().toArray(new String[0])), cancellationFlag);
             }
 
-            Path infFile = findFile(extractDir, ".inf");
+            Path infFile = findMatchingInf(extractDir, candidate);
             if (infFile != null) {
                 if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
                 Path catFile = findFile(infFile.getParent(), ".cat");
                 if (catFile != null) {
                     DriverVerificationService.VerificationResult catSig = verificationService.verifyAuthenticode(catFile);
                     if (!catSig.verified()) {
-                        AppLogger.warning("Inner .cat (CAB) signature check failed: " + catSig.message() + " — proceeding");
-                        if (catSig.message() != null && catSig.message().toLowerCase().contains("hash mismatch")) {
-                            return new ProcessResult(1, "", "Inner .cat hash mismatch: " + catSig.message());
-                        }
+                        AppLogger.warning("Inner .cat (CAB) signature check failed: " + catSig.message());
+                        return new ProcessResult(1, "", "Inner .cat signature check failed: " + catSig.message());
                     }
                 }
                 return processRunner.run(java.util.List.of(new ProcessBuilder(
@@ -803,14 +840,18 @@ public class DriverInstallService {
                 ).command().toArray(new String[0])), cancellationFlag);
             }
 
-            return new ProcessResult(1, "", "No setup.exe or .inf found in extracted cab: " + extractDir);
+            return new ProcessResult(1, "", "No setup.exe or matching .inf found in extracted cab: " + extractDir
+                    + " (refusing to install an INF that does not match the device).");
         } else if (filename.endsWith(".rar")) {
             return new ProcessResult(1, "", "RAR archives require manual extraction. Download: " + driverFile);
         } else if (filename.endsWith(".msi")) {
             if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.info("Installing MSI driver package: " + driverFile);
+            // /norestart: exit 1641 means the installer already forced a
+            // reboot (data loss). Never allow a silent driver install to
+            // reboot the machine out from under the user.
             ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
-                    "msiexec.exe", "/i", driverFile.toString(), "/qn"
+                    "msiexec.exe", "/i", driverFile.toString(), "/qn", "/norestart"
             ).command().toArray(new String[0])), cancellationFlag);
             boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
             if (result.success() || msiReboot) {
@@ -821,7 +862,7 @@ public class DriverInstallService {
             if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.warning("MSI /qn failed, trying /quiet: " + result.combinedOutput());
             ProcessResult fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
-                    "msiexec.exe", "/i", driverFile.toString(), "/quiet"
+                    "msiexec.exe", "/i", driverFile.toString(), "/quiet", "/norestart"
             ).command().toArray(new String[0])), cancellationFlag);
             boolean fallbackReboot = isRebootRequiredExitCode(fallbackResult.exitCode());
             if (fallbackResult.success() || fallbackReboot) {
@@ -855,6 +896,64 @@ public class DriverInstallService {
                     })
                     .findFirst()
                     .orElse(null);
+        }
+    }
+
+    /**
+     * Picks the INF matching the target device's hardware IDs instead of the
+     * arbitrary first INF in the archive (wrong-device risk). Falls back to
+     * null — never to an unrelated INF — when no HW evidence matches.
+     */
+    private Path findMatchingInf(Path dir, DriverUpdateCandidate candidate) throws IOException {
+        java.util.List<Path> infs;
+        try (var walk = Files.walk(dir, 5)) {
+            infs = walk.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".inf"))
+                    .toList();
+        }
+        if (infs.isEmpty()) return null;
+        if (infs.size() == 1) {
+            return isInfPlausibleForDevice(infs.get(0), candidate) ? infs.get(0) : null;
+        }
+        for (Path inf : infs) {
+            if (isInfPlausibleForDevice(inf, candidate)) return inf;
+        }
+        AppLogger.warning("No INF in " + dir + " matches device "
+                + (candidate == null || candidate.installed() == null ? "?" : candidate.installed().friendlyName())
+                + " (" + infs.size() + " INF(s) found) — refusing arbitrary pick");
+        return null;
+    }
+
+    private boolean isInfPlausibleForDevice(Path inf, DriverUpdateCandidate candidate) {
+        try {
+            if (candidate == null || candidate.installed() == null) return false;
+            String hw = candidate.installed().hardwareIds() == null ? "" : candidate.installed().hardwareIds().toUpperCase();
+            String devId = candidate.installed().deviceId() == null ? "" : candidate.installed().deviceId().toUpperCase();
+            String content = Files.readString(inf).toUpperCase();
+            // HW evidence: VEN_/DEV_/SUBSYS_/ACPI_/USB VID/PID tokens
+            java.util.Set<String> tokens = new java.util.HashSet<>();
+            for (String src : new String[]{hw, devId}) {
+                for (String part : src.split("[;\\s,]+")) {
+                    if (part.length() >= 4) tokens.add(part);
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                            "(VEN_[0-9A-F]{4}|DEV_[0-9A-F]{4}|SUBSYS_[0-9A-F]+|VID_[0-9A-F]{4}|PID_[0-9A-F]{4}|ACPI\\\\[A-Z0-9]+)")
+                            .matcher(part);
+                    while (m.find()) tokens.add(m.group(1));
+                }
+            }
+            // Single-INF archives with no HW strings: allow (nothing to mismatch).
+            // Multi-INF archives require at least one HW token hit.
+            if (tokens.isEmpty()) return true;
+            for (String tok : tokens) {
+                if (tok.length() >= 8 && content.contains(tok)) return true;
+            }
+            // Fallback: INF filename hint matches device infName
+            String infName = candidate.installed().infName();
+            if (infName != null && !infName.isBlank()
+                    && inf.getFileName().toString().equalsIgnoreCase(infName)) return true;
+            return false;
+        } catch (Exception e) {
+            return false;
         }
     }
 

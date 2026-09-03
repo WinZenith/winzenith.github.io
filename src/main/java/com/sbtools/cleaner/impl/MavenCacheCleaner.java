@@ -46,6 +46,12 @@ public class MavenCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String userHome = CleanerUtils.safeEnv("USERPROFILE");
         if (userHome == null) return 0;
@@ -59,9 +65,10 @@ public class MavenCacheCleaner implements CleanerExtension {
                     })
                     .toList();
             for (Path f : matched) {
+                if (token != null && token.isCancelled()) break;
                 try {
                     long size = Files.size(f);
-                    CleanerUtils.deletePermanently(f);
+                    CleanerUtils.deletePermanently(f, token);
                     if (!Files.exists(f)) cleaned += size;
                 } catch (Exception ignored) {}
             }

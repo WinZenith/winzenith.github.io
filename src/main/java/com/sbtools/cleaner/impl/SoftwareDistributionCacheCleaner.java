@@ -20,6 +20,9 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
     public CleanupCategory getCategory() { return CleanupCategory.SOFTWARE_DISTRIBUTION_CACHE; }
 
     @Override
+    public boolean requiresAdmin() { return true; }
+
+    @Override
     public void scan(CleanupRow row) {
         if (WindowsServicingSafety.isServicingPending()) {
             String reasons = String.join("; ", WindowsServicingSafety.getPendingReasons());
@@ -58,6 +61,12 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         if (WindowsServicingSafety.isServicingPending()) {
             AppLogger.info("Skipping SoftwareDistribution cache: pending system restart ("
                     + String.join("; ", WindowsServicingSafety.getPendingReasons()) + ")");
@@ -67,13 +76,15 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
             AppLogger.info("Skipping SoftwareDistribution cache: Windows Update or DISM is running");
             return 0;
         }
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String windir = CleanerUtils.safeEnv("WINDIR");
         if (windir != null) {
             List<Path> dirs = new ArrayList<>();
             CleanerUtils.addPath(dirs, windir + "\\SoftwareDistribution\\Download");
             for (Path dir : dirs) {
-                if (dir != null && Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir);
+                if (token != null && token.isCancelled()) break;
+                if (dir != null && Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
             }
         }
         return cleaned;

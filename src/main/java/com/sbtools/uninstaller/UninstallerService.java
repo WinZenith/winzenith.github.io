@@ -64,8 +64,14 @@ public class UninstallerService {
     }
 
     private InstalledApp parseAppxNode(JsonNode node) {
+        // Name is the friendly manifest DisplayName when available (script falls back to package name)
         String name = node.path("Name").asText("");
+        String packageName = node.path("PackageName").asText("");
         String packageFullName = node.path("PackageFullName").asText("");
+        if (packageName.isBlank() && !packageFullName.isBlank()) {
+            int u = packageFullName.indexOf('_');
+            packageName = u > 0 ? packageFullName.substring(0, u) : "";
+        }
         String version = node.path("Version").asText("");
         String publisher = node.path("Publisher").asText("");
         String installLocation = node.path("InstallLocation").asText("");
@@ -74,7 +80,7 @@ public class UninstallerService {
 
         return new InstalledApp(
                 name, publisher, version, installLocation,
-                "", "", false, packageFullName, "",
+                "", "", "", false, packageFullName, packageName, "",
                 installDate, installedSize, "Store"
         );
     }
@@ -85,13 +91,21 @@ public class UninstallerService {
 
     /**
      * Triggers the uninstaller and monitors it until it completes.
+     * Uses the interactive UninstallString by default; quiet only on explicit request.
      */
     public ProcessResult runUninstaller(InstalledApp app) throws IOException, InterruptedException {
+        return runUninstaller(app, false);
+    }
+
+    public ProcessResult runUninstaller(InstalledApp app, boolean preferQuiet) throws IOException, InterruptedException {
         if (!app.isWin32()) {
+            if (app.getAppxPackageFullName() == null || app.getAppxPackageFullName().isBlank()) {
+                throw new IOException("No package identity available for " + app.getName());
+            }
             Path script = PowerShellScripts.resolve("appx-uninstall.ps1");
             return processRunner.run(ProcessRunner.powershellScript(script.toString(), "-PackageFullName", app.getAppxPackageFullName()));
         } else {
-            String uninstallCmd = app.getUninstallString();
+            String uninstallCmd = app.getEffectiveUninstallString(preferQuiet);
             if (uninstallCmd == null || uninstallCmd.isBlank()) {
                 throw new IOException("No uninstall command available for " + app.getName());
             }
@@ -105,11 +119,18 @@ public class UninstallerService {
      * This ensures file locks are released before scanning for leftovers.
      */
     public ProcessResult runUninstallerAndWait(InstalledApp app, long timeoutSeconds) throws IOException, InterruptedException {
+        return runUninstallerAndWait(app, timeoutSeconds, false);
+    }
+
+    public ProcessResult runUninstallerAndWait(InstalledApp app, long timeoutSeconds, boolean preferQuiet) throws IOException, InterruptedException {
         if (!app.isWin32()) {
+            if (app.getAppxPackageFullName() == null || app.getAppxPackageFullName().isBlank()) {
+                throw new IOException("No package identity available for " + app.getName());
+            }
             Path script = PowerShellScripts.resolve("appx-uninstall.ps1");
             return processRunner.run(ProcessRunner.powershellScript(script.toString(), "-PackageFullName", app.getAppxPackageFullName()), timeoutSeconds);
         } else {
-            String uninstallCmd = app.getUninstallString();
+            String uninstallCmd = app.getEffectiveUninstallString(preferQuiet);
             if (uninstallCmd == null || uninstallCmd.isBlank()) {
                 throw new IOException("No uninstall command available for " + app.getName());
             }
@@ -202,7 +223,8 @@ public class UninstallerService {
         String lowerLoc = installLoc != null ? installLoc.toLowerCase().trim() : "";
         String appName = app.getName() != null ? app.getName().toLowerCase().trim() : "";
         String lowerName = appName;
-        String uninstallStr = app.getUninstallString() != null ? app.getUninstallString().toLowerCase() : "";
+        String uninstallStr = ((app.getUninstallString() != null ? app.getUninstallString() : "") + " "
+                + (app.getQuietUninstallString() != null ? app.getQuietUninstallString() : "")).toLowerCase();
         // Extract GUIDs like {12345678-1234-...} from uninstall string for MSI tracking
         java.util.List<String> guids = new java.util.ArrayList<>();
         try {
@@ -212,7 +234,9 @@ public class UninstallerService {
         // Also extract uninstall exe base name (e.g. unins000) for Inno/NSIS tracking when installLocation is blank
         String tmpBase = "";
         try {
-            List<String> toks = parseUninstallCommand(app.getUninstallString() != null ? app.getUninstallString() : "");
+            String probeCmd = app.getUninstallString() != null && !app.getUninstallString().isBlank()
+                    ? app.getUninstallString() : (app.getQuietUninstallString() != null ? app.getQuietUninstallString() : "");
+            List<String> toks = parseUninstallCommand(probeCmd);
             if (!toks.isEmpty()) {
                 String exe = toks.get(0);
                 String leaf = new File(exe).getName().toLowerCase();
@@ -414,6 +438,48 @@ public class UninstallerService {
     }
 
     private List<String> parseUninstallCommand(String uninstallCmd) {
+        return normalizeMsiUninstallArgs(parseUninstallCommandRaw(uninstallCmd), uninstallCmd);
+    }
+
+    /**
+     * Some MSI-based entries store {@code MsiExec.exe /I{GUID}} (modify/repair entry point)
+     * instead of {@code /X{GUID}} (uninstall). Running {@code /I} from an "Uninstall" action
+     * opens a maintenance dialog instead of removing the product, confusing users and
+     * surfacing a false failure when they cancel. Rewrite to {@code /X} only when the flag
+     * carries a product GUID (attached {@code /I{GUID}} or bare {@code /I} followed by a GUID
+     * token) — never invent flags otherwise.
+     */
+    private static List<String> normalizeMsiUninstallArgs(List<String> tokens, String original) {
+        if (tokens.size() < 2) return tokens;
+        String leaf = new File(tokens.get(0)).getName();
+        int dot = leaf.lastIndexOf('.');
+        String base = (dot > 0 ? leaf.substring(0, dot) : leaf).toLowerCase();
+        if (!base.equals("msiexec")) return tokens;
+        List<String> out = new ArrayList<>(tokens);
+        boolean changed = false;
+        for (int i = 1; i < out.size(); i++) {
+            String t = out.get(i);
+            if (t.length() >= 2 && (t.charAt(0) == '/' || t.charAt(0) == '-')
+                    && (t.charAt(1) == 'I' || t.charAt(1) == 'i')) {
+                String rest = t.substring(2);
+                if (rest.isEmpty()) {
+                    if (i + 1 < out.size() && out.get(i + 1).matches("(?i)\\{[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\\}")) {
+                        out.set(i, t.charAt(0) + "X");
+                        changed = true;
+                    }
+                } else if (rest.matches("(?i)\\{[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\\}")) {
+                    out.set(i, t.charAt(0) + "X" + rest);
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            AppLogger.info("Rewrote msiexec /I to /X for uninstall (from: " + original + ")");
+        }
+        return out;
+    }
+
+    private List<String> parseUninstallCommandRaw(String uninstallCmd) {
         String trimmed = uninstallCmd.trim();
         // Expand %VAR% environment variables before tokenizing (many uninstallers store raw env paths)
         String expanded = expandEnvironmentVariables(trimmed);
@@ -627,14 +693,31 @@ public class UninstallerService {
      * PATH entries are NOT included here — use {@link #scanPathWarnings(InstalledApp)} for those.
      */
     public List<String> scanFilesystemLeftovers(InstalledApp app) {
+        return scanFilesystemLeftovers(app, true);
+    }
+
+    /**
+     * @param includePrimaryLocation when false, the app's own installLocation is excluded
+     *        from deletable results. Use this when the standard uninstaller FAILED —
+     *        the live install dir must not be offered for force-deletion as that would
+     *        bypass the vendor uninstaller and corrupt the install. Protected OS paths
+     *        (WindowsApps, Windows, System32) are always excluded regardless.
+     */
+    public List<String> scanFilesystemLeftovers(InstalledApp app, boolean includePrimaryLocation) {
         List<String> leftovers = new ArrayList<>();
 
-        // Add primary install location if it exists
-        if (app.getInstallLocation() != null && !app.getInstallLocation().isBlank()) {
+        // Add primary install location if it exists — unless excluded or OS-protected.
+        // Store (AppX) locations under WindowsApps are NEVER deletable directly;
+        // they must be removed via Remove-AppxPackage only.
+        if (includePrimaryLocation && app.getInstallLocation() != null && !app.getInstallLocation().isBlank()
+                && !isProtectedPath(app.getInstallLocation())) {
             File installDir = new File(app.getInstallLocation());
             if (installDir.exists()) {
                 leftovers.add(installDir.getAbsolutePath());
             }
+        } else if (app.getInstallLocation() != null && !app.getInstallLocation().isBlank()
+                && isProtectedPath(app.getInstallLocation())) {
+            AppLogger.info("Skipping protected install location from deletable leftovers: " + app.getInstallLocation());
         }
 
         List<String> roots = new ArrayList<>();
@@ -676,7 +759,7 @@ public class UninstallerService {
                 if (child.isDirectory()) {
                     if (isFolderMatch(child.getName(), app.getName(), app.getPublisher())) {
                         String absPath = child.getAbsolutePath();
-                        if (!leftovers.contains(absPath)) {
+                        if (!leftovers.contains(absPath) && !isProtectedPath(absPath)) {
                             leftovers.add(absPath);
                         }
                     } else if (isPublisherMatch(child.getName(), app.getPublisher())) {
@@ -686,7 +769,7 @@ public class UninstallerService {
                             for (File vendorChild : vendorChildren) {
                                 if (isFolderMatch(vendorChild.getName(), app.getName(), null)) {
                                     String absPath = vendorChild.getAbsolutePath();
-                                    if (!leftovers.contains(absPath)) {
+                                    if (!leftovers.contains(absPath) && !isProtectedPath(absPath)) {
                                         leftovers.add(absPath);
                                     }
                                 }
@@ -864,6 +947,43 @@ public class UninstallerService {
         }
     }
 
+    /**
+     * True for OS-protected locations that must never be deleted directly:
+     * WindowsApps (Store packages — remove via Remove-AppxPackage only),
+     * Windows / System32 / SysWOW64, and bare drive roots. Also guards
+     * against offering a scan root itself (e.g. Program Files) for deletion.
+     */
+    public static boolean isProtectedPath(String path) {
+        if (path == null || path.isBlank()) return true;
+        String p = path.trim().replace('/', '\\');
+        // Strip surrounding quotes
+        if (p.length() > 1 && ((p.startsWith("\"") && p.endsWith("\"")) || (p.startsWith("'") && p.endsWith("'")))) {
+            p = p.substring(1, p.length() - 1).trim();
+        }
+        // Strip trailing separators for comparison
+        while (p.endsWith("\\") && p.length() > 3) p = p.substring(0, p.length() - 1);
+        String lower = p.toLowerCase();
+        // Bare drive root (C:\, C:) — never deletable
+        if (lower.matches("^[a-z]:\\\\?$")) return true;
+        if (lower.contains("\\windowsapps\\") || lower.endsWith("\\windowsapps")) return true;
+        String windir = System.getenv("SystemRoot");
+        if (windir == null) windir = System.getenv("WINDIR");
+        if (windir == null) windir = "C:\\Windows";
+        String lowerWin = windir.toLowerCase().replace('/', '\\');
+        while (lowerWin.endsWith("\\")) lowerWin = lowerWin.substring(0, lowerWin.length() - 1);
+        if (lower.equals(lowerWin) || lower.startsWith(lowerWin + "\\")) return true;
+        // Never offer a known scan root itself
+        String[] roots = {System.getenv("ProgramFiles"), System.getenv("ProgramFiles(x86)"),
+                System.getenv("ProgramData"), System.getenv("AppData"), System.getenv("LocalAppData")};
+        for (String r : roots) {
+            if (r == null || r.isBlank()) continue;
+            String lr = r.trim().replace('/', '\\').toLowerCase();
+            while (lr.endsWith("\\")) lr = lr.substring(0, lr.length() - 1);
+            if (lower.equals(lr)) return true;
+        }
+        return false;
+    }
+
     private boolean isFolderMatch(String folderName, String appName, String publisher) {
         if (folderName == null || folderName.isBlank()) return false;
         String fName = folderName.toLowerCase().trim();
@@ -883,8 +1003,13 @@ public class UninstallerService {
             return true;
         }
 
-        // Substring match for Publisher — bidirectional, require >=5 and word boundary
-        if (pName.length() >= 5 && (containsWordBoundary(fName, pName) || containsWordBoundary(pName, fName))) {
+        // Substring match for Publisher — ONLY folder-contains-publisher (not reverse).
+        // Reverse matching (publisher contains folder, e.g. publisher "Mozilla Corporation"
+        // contains folder "Mozilla") would flag the shared vendor root itself as a leftover,
+        // risking deletion of sibling apps (Thunderbird when removing Firefox).
+        // Vendor roots are handled via isPublisherMatch() which only scans INSIDE
+        // for app-specific subfolders instead of flagging the vendor dir directly.
+        if (pName.length() >= 5 && containsWordBoundary(fName, pName)) {
             return true;
         }
 
@@ -923,7 +1048,7 @@ public class UninstallerService {
         return kName.equals(pName) || containsWordBoundary(kName, pName) || containsWordBoundary(pName, kName);
     }
 
-    private boolean isGenericName(String name) {
+    private static boolean isGenericName(String name) {
         if (name == null) return false;
         String n = name.toLowerCase().trim();
         String[] generic = {
@@ -1040,19 +1165,30 @@ public class UninstallerService {
         String appName = app.getName();
         String lowerAppName = appName.toLowerCase();
 
+        // Store (AppX) apps must be removed via Remove-AppxPackage — never by
+        // deleting the protected WindowsApps folder directly.
+        if (!app.isWin32()) {
+            return forceUninstallAppx(app, summary, errors);
+        }
+
         String installLoc = app.getInstallLocation();
 
         // Kill processes whose executable path matches the install location
         killProcessesByPath(installLoc, appName, summary, errors);
 
-        // Delete the install directory
+        // Delete the install directory — never touch OS-protected paths
         if (installLoc != null && !installLoc.isBlank()) {
-            File dir = new File(installLoc);
-            if (dir.exists()) {
-                if (NativeFileHelper.deleteOrQueue(dir)) {
-                    summary.add("Deleted directory: " + installLoc);
-                } else {
-                    errors.add("Scheduled for reboot deletion: " + installLoc);
+            if (isProtectedPath(installLoc)) {
+                errors.add("Skipped protected system directory (use standard uninstall): " + installLoc);
+                AppLogger.warning("Force uninstall refused to delete protected path: " + installLoc);
+            } else {
+                File dir = new File(installLoc);
+                if (dir.exists()) {
+                    if (NativeFileHelper.deleteOrQueue(dir)) {
+                        summary.add("Deleted directory: " + installLoc);
+                    } else {
+                        errors.add("Scheduled for reboot deletion: " + installLoc);
+                    }
                 }
             }
         }
@@ -1089,6 +1225,10 @@ public class UninstallerService {
                                 || (lowerAppName.length() >= 5 && containsWordBoundary(childName, lowerAppName));
                     }
                     if (nameMatch) {
+                        if (isProtectedPath(child.getAbsolutePath())) {
+                            AppLogger.warning("Force uninstall refused protected path: " + child.getAbsolutePath());
+                            continue;
+                        }
                         if (NativeFileHelper.deleteOrQueue(child)) {
                             summary.add("Deleted directory: " + child.getAbsolutePath());
                         } else {
@@ -1155,14 +1295,19 @@ public class UninstallerService {
                     ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
             try {
                 if (Advapi32Util.registryKeyExists(hive, app.getRegistryKeyPath())) {
+                    boolean deleted = false;
                     try {
                         Advapi32Util.registryDeleteKey(hive, app.getRegistryKeyPath());
+                        deleted = true;
                     } catch (Exception ex) {
-                        if (!deleteRegistryKeyRecursively(hive, app.getRegistryKeyPath())) {
+                        deleted = deleteRegistryKeyRecursively(hive, app.getRegistryKeyPath());
+                        if (!deleted) {
                             errors.add("Failed to delete registry key for " + appName + ": " + app.getRegistryKeyPath());
                         }
                     }
-                    summary.add("Deleted registry key: " + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
+                    if (deleted) {
+                        summary.add("Deleted registry key: " + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
+                    }
                 }
             } catch (Exception e) {
                 errors.add("Failed to delete registry key for " + appName + ": " + e.getMessage());
@@ -1227,6 +1372,53 @@ public class UninstallerService {
         }
 
         // Delete Start Menu shortcuts
+        cleanStartMenuShortcuts(lowerAppName, summary, errors);
+
+        return new ForceUninstallResult(summary, errors);
+    }
+
+    /**
+     * Force-removes a Store (AppX) package via Remove-AppxPackage. Never deletes
+     * the WindowsApps folder directly — it is OS-protected and shared.
+     */
+    private ForceUninstallResult forceUninstallAppx(InstalledApp app, List<String> summary, List<String> errors) {
+        String appName = app.getName();
+        String pkg = app.getAppxPackageFullName();
+        if (pkg == null || pkg.isBlank()) {
+            errors.add("Cannot force-remove " + appName + ": missing package identity.");
+            return new ForceUninstallResult(summary, errors);
+        }
+        // Stop related processes first (name-based, with safety guards)
+        killProcessesByPath(null, appName, summary, errors);
+        try {
+            Path script = PowerShellScripts.resolve("appx-uninstall.ps1");
+            ProcessResult r = processRunner.run(
+                    ProcessRunner.powershellScript(script.toString(), "-PackageFullName", pkg), 180);
+            if (r.succeeded()) {
+                summary.add("Removed Store package: " + pkg
+                        + (r.isRebootRequired() ? " (reboot required)" : ""));
+            } else {
+                errors.add("Failed to remove Store package " + pkg + ": " + truncate(r.combinedOutput(), 400));
+            }
+        } catch (Exception e) {
+            errors.add("Failed to remove Store package " + pkg + ": " + e.getMessage());
+        }
+        // Clean Start Menu shortcuts. Store shortcuts use the friendly display name
+        // (e.g. "Spotify.lnk") while the package name is dotted ("SpotifyAB.SpotifyMusic"),
+        // so match on significant tokens from both — confined to Start Menu shortcuts only.
+        java.util.Set<String> tokens = significantNameTokens(appName);
+        tokens.addAll(significantNameTokens(app.getAppxPackageName()));
+        cleanStartMenuShortcutsByTokens(tokens, summary, errors);
+        return new ForceUninstallResult(summary, errors);
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return "";
+        String t = s.trim();
+        return t.length() <= max ? t : t.substring(0, max) + "... (truncated)";
+    }
+
+    private void cleanStartMenuShortcuts(String lowerAppName, List<String> summary, List<String> errors) {
         List<String> startMenuRoots = new ArrayList<>();
         String programData = System.getenv("ProgramData");
         String appData = System.getenv("AppData");
@@ -1236,58 +1428,169 @@ public class UninstallerService {
         if (appData != null && !appData.isBlank()) {
             startMenuRoots.add(appData + "\\Microsoft\\Windows\\Start Menu");
         }
-
         for (String root : startMenuRoots) {
             File startMenuDir = new File(root);
             if (startMenuDir.exists() && startMenuDir.isDirectory()) {
                 deleteMatchingFiles(startMenuDir, lowerAppName, summary, errors);
             }
         }
+    }
 
-        return new ForceUninstallResult(summary, errors);
+    /**
+     * Splits display/package names into significant lowercase tokens for shortcut matching:
+     * alphanumerics only, length >= 5, non-generic, not pure digits. Short/generic fragments
+     * (e.g. "app", "pro", version numbers) are dropped to avoid touching unrelated shortcuts.
+     */
+    static java.util.Set<String> significantNameTokens(String name) {
+        java.util.Set<String> tokens = new java.util.LinkedHashSet<>();
+        if (name == null || name.isBlank()) return tokens;
+        for (String part : name.toLowerCase().split("[^a-z0-9]+")) {
+            String t = part.trim();
+            if (t.length() < 5) continue;
+            if (t.matches("\\d+")) continue;
+            if (isGenericName(t)) continue;
+            tokens.add(t);
+        }
+        return tokens;
+    }
+
+    private void cleanStartMenuShortcutsByTokens(java.util.Set<String> tokens, List<String> summary, List<String> errors) {
+        if (tokens == null || tokens.isEmpty()) return;
+        List<String> startMenuRoots = new ArrayList<>();
+        String programData = System.getenv("ProgramData");
+        String appData = System.getenv("AppData");
+        if (programData != null && !programData.isBlank()) {
+            startMenuRoots.add(programData + "\\Microsoft\\Windows\\Start Menu");
+        }
+        if (appData != null && !appData.isBlank()) {
+            startMenuRoots.add(appData + "\\Microsoft\\Windows\\Start Menu");
+        }
+        for (String root : startMenuRoots) {
+            File startMenuDir = new File(root);
+            if (startMenuDir.exists() && startMenuDir.isDirectory()) {
+                deleteMatchingFilesByTokens(startMenuDir, tokens, summary, errors);
+            }
+        }
+    }
+
+    /**
+     * Deletes Start Menu entries matching any significant token. Exact filename
+     * (sans extension) matches always count; substring matches require longer tokens
+     * (>= 6 chars) with word boundaries to avoid collateral like a "Music" shortcut
+     * when removing an app whose display name merely contains "music".
+     */
+    private void deleteMatchingFilesByTokens(File dir, java.util.Set<String> tokens, List<String> summary, List<String> errors) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File file : files) {
+            String lowerFile = file.getName().toLowerCase().trim();
+            if (isGenericName(lowerFile)) {
+                if (file.isDirectory()) deleteMatchingFilesByTokens(file, tokens, summary, errors);
+                continue;
+            }
+            String leafNoExt = lowerFile;
+            int dot = leafNoExt.lastIndexOf('.');
+            if (dot > 0) leafNoExt = leafNoExt.substring(0, dot);
+            boolean matches = false;
+            for (String tok : tokens) {
+                if (leafNoExt.equals(tok)
+                        || (tok.length() >= 6 && containsWordBoundary(lowerFile, tok))) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (matches) {
+                if (NativeFileHelper.deleteOrQueue(file)) {
+                    summary.add("Deleted: " + file.getAbsolutePath());
+                } else {
+                    errors.add("Scheduled for reboot deletion: " + file.getAbsolutePath());
+                }
+            } else if (file.isDirectory()) {
+                deleteMatchingFilesByTokens(file, tokens, summary, errors);
+            }
+        }
     }
 
     private void killProcessesByPath(String installLoc, String appName, List<String> summary, List<String> errors) {
         try {
             String psScript;
-            if (installLoc != null && !installLoc.isBlank()) {
+            boolean byPath = installLoc != null && !installLoc.isBlank();
+            if (byPath) {
                 // Use exact directory boundary comparison to avoid killing processes
                 // in sibling directories that share a prefix (e.g. C:\...\Google\ vs C:\...\Google Update\)
                 // NOTE: For -eq / StartsWith we must NOT escape wildcard chars with backticks — that's only for -like
                 String normalizedPath = installLoc.replace('\\', '/').replaceAll("/+$", "");
                 String escapedPath = normalizedPath.replace("'", "''");
+                // Count matches so the summary is accurate instead of claiming success unconditionally
                 psScript = "$target = '" + escapedPath + "'; " +
-                        "Get-Process | Where-Object { " +
+                        "$cands = Get-Process | Where-Object { " +
                         "  if (-not $_.Path) { return $false }; " +
                         "  $p = $_.Path.Replace('\\','/'); " +
                         "  $p -eq $target -or $p.StartsWith($target + '/', [System.StringComparison]::OrdinalIgnoreCase) " +
-                        "} | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
-                        "Write-Output 'done'";
+                        "}; " +
+                        "$n = @($cands).Count; " +
+                        "$cands | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
+                        "Write-Output (\"KILLED:\" + $n)";
             } else {
-                // Match by process name: -like needs wildcards and escaped wildcard chars; also handle space-less variant (e.g. "Google Chrome" -> chrome)
                 String raw = appName != null ? appName.trim() : "";
+                String alnum = raw.replaceAll("[^A-Za-z0-9]", "");
+                // Safety: short or generic names must not use substring wildcards —
+                // '*Go*' or '*Mail*' would kill unrelated processes. Fall back to exact match only.
+                boolean allowWildcard = alnum.length() >= 4 && !isGenericName(raw.toLowerCase().trim());
                 String escapedExact = raw.replace("'", "''");
-                String likeEscaped = raw.replace("`", "``").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?").replace("$", "`$").replace("'", "''");
-                String noSpace = raw.replaceAll("\\s+", "");
-                String likeNoSpace = noSpace.replace("`", "``").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?").replace("$", "`$").replace("'", "''");
-                // Use wildcards around the name; PowerShell -like is case-insensitive
-                psScript = "Get-Process | Where-Object { $_.ProcessName -like '*" + likeEscaped + "*' -or $_.ProcessName -like '*" + likeNoSpace + "*' -or $_.ProcessName -eq '" + escapedExact + "' } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
-                        "Write-Output 'done'";
+                if (!allowWildcard) {
+                    AppLogger.info("Process kill restricted to exact match for short/generic name: " + raw);
+                    psScript = "$cands = Get-Process | Where-Object { $_.ProcessName -eq '" + escapedExact + "' }; " +
+                            "$n = @($cands).Count; " +
+                            "$cands | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
+                            "Write-Output (\"KILLED:\" + $n)";
+                } else {
+                    // Match by process name: -like needs wildcards and escaped wildcard chars; also handle space-less variant (e.g. "Google Chrome" -> chrome)
+                    String likeEscaped = raw.replace("`", "``").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?").replace("$", "`$").replace("'", "''");
+                    String noSpace = raw.replaceAll("\\s+", "");
+                    String likeNoSpace = noSpace.replace("`", "``").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?").replace("$", "`$").replace("'", "''");
+                    // Use wildcards around the name; PowerShell -like is case-insensitive
+                    psScript = "$cands = Get-Process | Where-Object { $_.ProcessName -like '*" + likeEscaped + "*' -or $_.ProcessName -like '*" + likeNoSpace + "*' -or $_.ProcessName -eq '" + escapedExact + "' }; " +
+                            "$n = @($cands).Count; " +
+                            "$cands | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
+                            "Write-Output (\"KILLED:\" + $n)";
+                }
             }
             ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-Command", psScript);
             pb.redirectErrorStream(true);
             Process proc = pb.start();
+            StringBuilder out = new StringBuilder();
             Thread drainThread = new Thread(() -> {
-                try { proc.getInputStream().readAllBytes(); } catch (Exception ignored) {}
+                try {
+                    byte[] b = proc.getInputStream().readAllBytes();
+                    out.append(new String(b, java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception ignored) {}
             }, "ps-drain");
             drainThread.setDaemon(true);
             drainThread.start();
-            proc.waitFor(10, TimeUnit.SECONDS);
+            boolean exited = proc.waitFor(10, TimeUnit.SECONDS);
+            try { drainThread.join(2_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             proc.destroy();
-            summary.add("Killed processes matching " + (installLoc != null && !installLoc.isBlank() ? "install path" : "app name") + " for: " + appName);
+            int killed = parseKilledCount(out.toString());
+            if (!exited) {
+                errors.add("Timed out while stopping processes for: " + appName);
+            } else if (killed > 0) {
+                summary.add("Stopped " + killed + " running process(es) for: " + appName);
+            } else {
+                summary.add("No running processes found for: " + appName);
+            }
         } catch (Exception e) {
             errors.add("Failed to kill processes for " + appName + ": " + e.getMessage());
         }
+    }
+
+    private static int parseKilledCount(String output) {
+        if (output == null) return 0;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("KILLED:(\\d+)").matcher(output);
+        if (m.find()) {
+            try { return Integer.parseInt(m.group(1)); } catch (NumberFormatException ignored) {}
+        }
+        return 0;
     }
 
     private void deleteMatchingFiles(File dir, String lowerName, List<String> summary, List<String> errors) {

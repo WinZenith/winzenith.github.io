@@ -16,13 +16,22 @@ public class JunkFilesCleaner implements CleanerExtension {
     public CleanupCategory getCategory() { return CleanupCategory.JUNK_FILES; }
 
     @Override
+    public boolean requiresAdmin() { return true; }
+
+    @Override
     public void scan(CleanupRow row) {
         CleanerUtils.scanDirectorySizesOlderThan(row, getJunkDirs(), Duration.ofDays(1));
     }
 
     @Override
     public long clean(Path backupRootOrNull) {
-        return CleanerUtils.cleanDirectoryPatternOlderThan(getJunkDirs(), Duration.ofDays(1));
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
+        return CleanerUtils.cleanDirectoryPatternOlderThan(getJunkDirs(), Duration.ofDays(1), token);
     }
 
     private List<Path> getJunkDirs() {

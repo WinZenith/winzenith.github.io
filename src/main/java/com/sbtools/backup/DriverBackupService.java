@@ -56,6 +56,12 @@ public class DriverBackupService {
 
     public DriverBackupEntry backupBeforeUpdate(InstalledDriver driver, AppSettings settings)
             throws IOException, InterruptedException {
+        return backupBeforeUpdate(driver, settings, null);
+    }
+
+    public DriverBackupEntry backupBeforeUpdate(InstalledDriver driver, AppSettings settings,
+            java.util.concurrent.atomic.AtomicBoolean cancelled)
+            throws IOException, InterruptedException {
         String inf = driver.infName();
         if (inf == null || inf.isBlank()) {
             throw new IOException("Cannot backup driver: INF name not available for "
@@ -72,11 +78,31 @@ public class DriverBackupService {
         Path folder = root
                 .resolve(safeId)
                 .resolve(now.toEpochMilli() + "_" + UUID.randomUUID().toString().substring(0, 8));
-        Files.createDirectories(folder);
+        try {
+            Files.createDirectories(folder);
+        } catch (IOException dirEx) {
+            // Portable fallback: exe-dir installs (Program Files) are not
+            // writable. Fall back to LOCALAPPDATA instead of silently
+            // skipping the safety net.
+            Path fallbackRoot = AppPaths.legacyBackupsRoot();
+            Path fallback = fallbackRoot.resolve(safeId)
+                    .resolve(now.toEpochMilli() + "_" + UUID.randomUUID().toString().substring(0, 8));
+            try {
+                Files.createDirectories(fallback);
+                AppLogger.warning("Backups root not writable (" + root + "), using fallback " + fallbackRoot);
+                folder = fallback;
+            } catch (IOException fallbackEx) {
+                throw new IOException("Driver backup directory not writable: " + root
+                        + " (fallback " + fallbackRoot + " also failed: " + fallbackEx.getMessage() + ")", dirEx);
+            }
+        }
 
         Path script = PowerShellScripts.resolve("pnputil-backup.ps1");
-        ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
-                script.toString(), inf, folder.toString()));
+        ProcessResult result = cancelled == null
+                ? processRunner.run(ProcessRunner.powershellScript(
+                        script.toString(), inf, folder.toString()))
+                : processRunner.run(ProcessRunner.powershellScript(
+                        script.toString(), inf, folder.toString()), cancelled);
         if (!result.success()) {
             // clean up empty folder on failure
             try { deleteDirectory(folder); } catch (Exception ignored) {}
@@ -139,11 +165,48 @@ public class DriverBackupService {
         Path script = PowerShellScripts.resolve("pnputil-restore.ps1");
         ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
                 script.toString(), folder.toString(), entry.deviceId()));
+        RevertDetail detail = parseRevertOutput(result.stdout());
         if (!result.success()) {
-            throw new IOException("Driver revert failed: " + result.combinedOutput());
+            String msg = "Driver revert failed for " + entry.friendlyName()
+                    + " (installed " + detail.installed() + "/" + infCount
+                    + ", failed " + detail.failed() + ").\n";
+            if (detail.details() != null && !detail.details().isBlank()) {
+                String d = detail.details();
+                msg += d.length() > 1500 ? d.substring(0, 1500) + "…" : d;
+                msg += "\n";
+            } else if (!result.combinedOutput().isBlank()) {
+                String out = result.combinedOutput();
+                msg += out.length() > 1500 ? out.substring(0, 1500) + "…" : out;
+                msg += "\n";
+            }
+            msg += "The backup was staged but Windows did not switch the active driver.\n"
+                    + "Reboot, then use Device Manager → Update driver → Browse → Let me pick → Have Disk\n"
+                    + "and point at: " + folder;
+            throw new IOException(msg);
         }
 
-        AppLogger.info("Driver reverted successfully: " + entry.friendlyName());
+        AppLogger.info("Driver reverted successfully: " + entry.friendlyName()
+                + " (installed " + detail.installed() + "/" + infCount + ")");
+    }
+
+    private record RevertDetail(int installed, int failed, String details) {}
+
+    private static RevertDetail parseRevertOutput(String stdout) {
+        if (stdout == null || stdout.isBlank()) return new RevertDetail(-1, -1, "");
+        try {
+            // Script emits a single compressed JSON object; output may contain extra lines.
+            String json = stdout.trim();
+            int start = json.indexOf('{');
+            int end = json.lastIndexOf('}');
+            if (start >= 0 && end > start) json = json.substring(start, end + 1);
+            var tree = JsonMapper.mapper().readTree(json);
+            int installed = tree.path("installed").asInt(-1);
+            int failed = tree.path("failed").asInt(-1);
+            String details = tree.path("details").asText("");
+            return new RevertDetail(installed, failed, details);
+        } catch (Exception ignored) {
+            return new RevertDetail(-1, -1, "");
+        }
     }
 
     public void removeBackupEntry(DriverBackupEntry entry) throws IOException {
@@ -261,8 +324,7 @@ public class DriverBackupService {
         if (folder == null) return false;
         try {
             Path normalized = folder.toAbsolutePath().normalize();
-            // Must be at least 2 levels deep under a backups root ( <root>/<safeId>/<timestamp> )
-            // Reject drive roots and system locations
+            // Must be at least 2 levels deep ( <root>/<safeId>/<timestamp> ).
             if (normalized.getNameCount() < 2) {
                 AppLogger.warning("Refusing to delete shallow folder: " + folder);
                 return false;
@@ -296,9 +358,29 @@ public class DriverBackupService {
                     return false;
                 }
             }
-            // Do NOT trust index entry's own folder to validate itself (avoids tampered index bypass).
-            // Old custom location after settings change will be handled via allowedRoots if fallback
-            // migration is implemented; otherwise user should restore backupDirectory setting.
+            // Old custom location after a settings change: the folder is
+            // still legit if an index (primary or fallback) references it.
+            // Allow revert/size/delete for indexed folders even when they
+            // live outside the current roots (orphan-backup fix).
+            try {
+                for (Path idxPath : allIndexPaths()) {
+                    try {
+                        BackupIndex idx = loadSingleIndex(idxPath);
+                        for (DriverBackupEntry e : idx.getEntries()) {
+                            if (e == null || e.backupFolder() == null) continue;
+                            try {
+                                Path indexed = Path.of(e.backupFolder()).toAbsolutePath().normalize();
+                                if (indexed.equals(normalized)) {
+                                    Path rel = indexed.getFileName() != null ? indexed : null;
+                                    // Require timestamp-style leaf + safeId parent to
+                                    // avoid trusting a tampered drive-root entry.
+                                    if (indexed.getNameCount() >= 2 && rel != null) return true;
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                }
+            } catch (Exception ignored) {}
         } catch (Exception ignored) {}
         AppLogger.warning("Refusing to delete folder outside backups root: " + folder);
         return false;

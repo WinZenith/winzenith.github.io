@@ -37,7 +37,13 @@ public class NpmCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
-        return CleanerUtils.cleanDirectoryPattern(getCacheDirs());
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
+        return CleanerUtils.cleanDirectoryPattern(getCacheDirs(), token);
     }
 
     private List<Path> getCacheDirs() {

@@ -24,6 +24,9 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
     }
 
     @Override
+    public boolean requiresAdmin() { return true; }
+
+    @Override
     public void scan(CleanupRow row) {
         Path windowsOld = getValidWindowsOldPath();
         if (windowsOld == null) {
@@ -67,30 +70,38 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         Path windowsOld = getValidWindowsOldPath();
         if (windowsOld == null) return 0;
 
-        long size = getDirectorySize(windowsOld);
-        if (removeWithRd(windowsOld)) return size;
+        long size = getDirectorySize(windowsOld, token);
+        if (token != null && token.isCancelled()) return 0L;
+        if (removeWithRd(windowsOld, token)) return size;
 
+        if (token != null && token.isCancelled()) return 0L;
         AppLogger.warning("rd /s /q failed for Windows.old, attempting takeown/icacls");
         try {
             ProcessBuilder takeown = new ProcessBuilder("takeown", "/F", windowsOld.toString(), "/R", "/D", "Y");
             takeown.redirectErrorStream(true);
             Process takeownP = ProcessManager.start(takeown);
-            boolean takeownDone = takeownP.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
-            if (!takeownDone) takeownP.destroyForcibly();
+            if (!waitCancellable(takeownP, 60, token)) takeownP.destroyForcibly();
+            if (token != null && token.isCancelled()) return 0L;
 
             ProcessBuilder icacls = new ProcessBuilder("icacls", windowsOld.toString(), "/grant", "administrators:F", "/T");
             icacls.redirectErrorStream(true);
             Process icaclsP = ProcessManager.start(icacls);
-            boolean icaclsDone = icaclsP.waitFor(60, java.util.concurrent.TimeUnit.SECONDS);
-            if (!icaclsDone) icaclsP.destroyForcibly();
+            if (!waitCancellable(icaclsP, 60, token)) icaclsP.destroyForcibly();
         } catch (Exception e) {
             AppLogger.warning("Failed to take ownership of Windows.old: " + e.getMessage());
         }
 
-        if (removeWithRd(windowsOld)) return size;
+        if (token != null && token.isCancelled()) return 0L;
+        if (removeWithRd(windowsOld, token)) return size;
         AppLogger.warning("Failed to remove Windows.old");
         return 0;
     }
@@ -121,24 +132,39 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
         return windowsOld;
     }
 
-    private boolean removeWithRd(Path target) {
+    private boolean removeWithRd(Path target, com.sbtools.util.CancellationToken token) {
         try {
             ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "rd /s /q \"" + target + "\"");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+            boolean finished = waitCancellable(p, 120, token);
+            if (token != null && token.isCancelled()) { p.destroyForcibly(); return false; }
             if (finished && !Files.exists(target)) return true;
             if (!finished) p.destroyForcibly();
         } catch (Exception ignored) {}
         return false;
     }
 
+    private boolean waitCancellable(Process p, long timeoutSeconds, com.sbtools.util.CancellationToken token) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            if (token != null && token.isCancelled()) return false;
+            if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) return true;
+        }
+        return false;
+    }
+
     private long getDirectorySize(Path root) {
+        return getDirectorySize(root, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    private long getDirectorySize(Path root, com.sbtools.util.CancellationToken token) {
         AtomicLong totalBytes = new AtomicLong(0);
         try {
             Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
                     if (isSymlinkOrJunction(dir, attrs)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
@@ -147,6 +173,7 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
                     totalBytes.addAndGet(attrs.size());
                     return FileVisitResult.CONTINUE;
                 }

@@ -72,9 +72,9 @@ public class DuplicateFilesTabView extends BorderPane {
     private final Map<DuplicateFileRow, javafx.beans.value.ChangeListener<Boolean>> rowListenerMap = new HashMap<>();
     // Per-file selection: for each group, map deletable path -> selected property (true = will be deleted)
     private final Map<DuplicateFileRow, Map<String, BooleanProperty>> perFileSelection = new HashMap<>();
-    private final Label statusLabel = new Label("Add folder(s) to scan. System folders like C:\\Windows are blocked for safety.");
+    private final Label statusLabel = new Label("Add folder(s) to scan. System and app folders are blocked for safety.");
     private final Label progressLabel = new Label("");
-    private final Label safetyInfoLabel = new Label("System folders (Windows, WindowsApps, System Volume Information, $Recycle.Bin, Recovery) are automatically excluded on any drive.");
+    private final Label safetyInfoLabel = new Label("System and app folders (Windows, Program Files, ProgramData, AppData, WindowsApps, System Volume Information, $Recycle.Bin, Recovery) are automatically excluded on any drive.");
     private final ProgressBar progressBar = new ProgressBar(0);
     private final Button scanButton = new Button("Scan");
     private final Button stopButton = new Button("Stop");
@@ -89,6 +89,7 @@ public class DuplicateFilesTabView extends BorderPane {
     private final Label detailTitle = new Label("Select a group to see copies to delete");
 
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
+    private final AtomicBoolean cleanCancelled = new AtomicBoolean(false);
     private volatile Thread scanThread;
     private volatile Thread cleanThread;
 
@@ -140,9 +141,14 @@ public class DuplicateFilesTabView extends BorderPane {
 
         scanButton.setOnAction(e -> startScan());
         stopButton.setOnAction(e -> {
+            // Stop cancels whichever operation is running (scan and/or clean).
             cancelled.set(true);
+            cleanCancelled.set(true);
             Thread st = scanThread;
             if (st != null && st.isAlive()) st.interrupt();
+            Thread ct = cleanThread;
+            if (ct != null && ct.isAlive()) ct.interrupt();
+            statusLabel.setText("Cancelling...");
         });
         selectAllButton.setOnAction(e -> toggleSelectAll());
         deselectAllButton.setOnAction(e -> deselectAll());
@@ -199,11 +205,13 @@ public class DuplicateFilesTabView extends BorderPane {
                                 };
                         row.selectedProperty().addListener(listener);
                         rowListenerMap.put(row, listener);
-                        // Initialize per-file selection map for this group
+                        // Initialize per-file selection map for this group.
+                        // Safe default: NOT selected — user must explicitly tick
+                        // groups/copies to delete (prevents one-misclick mass delete).
                         Map<String, BooleanProperty> fileMap = new HashMap<>();
                         if (row.getDeletablePaths() != null) {
                             for (String p : row.getDeletablePaths()) {
-                                BooleanProperty prop = new SimpleBooleanProperty(true);
+                                BooleanProperty prop = new SimpleBooleanProperty(false);
                                 prop.addListener((o, ov, nv) -> updateCleanButtonState());
                                 fileMap.put(p, prop);
                             }
@@ -269,7 +277,7 @@ public class DuplicateFilesTabView extends BorderPane {
         if (selected != null) {
             scanRoots.remove(selected);
             if (scanRoots.isEmpty()) {
-                statusLabel.setText("Add folder(s) to scan. System folders are blocked.");
+                statusLabel.setText("Add folder(s) to scan. System and app folders are blocked.");
             }
         }
     }
@@ -303,11 +311,11 @@ public class DuplicateFilesTabView extends BorderPane {
             detailTitle.setText("No deletable copies");
             return;
         }
-        detailTitle.setText("Keeper (kept): " + row.getFullPath() + "  —  " + row.getDeletablePaths().size() + " copy(ies) selected for deletion:");
+        detailTitle.setText("Keeper (kept): " + row.getFullPath() + "  —  " + row.getDeletablePaths().size() + " copy(ies) (tick to select for deletion):");
         Map<String, BooleanProperty> fileMap = perFileSelection.computeIfAbsent(row, k -> {
             Map<String, BooleanProperty> m = new HashMap<>();
             for (String p : k.getDeletablePaths()) {
-                BooleanProperty prop = new SimpleBooleanProperty(true);
+                BooleanProperty prop = new SimpleBooleanProperty(false);
                 prop.addListener((o, ov, nv) -> updateCleanButtonState());
                 m.put(p, prop);
             }
@@ -316,7 +324,7 @@ public class DuplicateFilesTabView extends BorderPane {
         // Ensure missing entries are added (if row updated elsewhere)
         for (String p : row.getDeletablePaths()) {
             if (!fileMap.containsKey(p)) {
-                BooleanProperty prop = new SimpleBooleanProperty(true);
+                BooleanProperty prop = new SimpleBooleanProperty(false);
                 prop.addListener((o, ov, nv) -> updateCleanButtonState());
                 fileMap.put(p, prop);
             }
@@ -548,7 +556,7 @@ public class DuplicateFilesTabView extends BorderPane {
     private void startScan() {
         if (busy.get()) return;
         if (scanRoots.isEmpty()) {
-            new Alert(Alert.AlertType.WARNING, "Please add at least one directory to scan.\nSystem folders like C:\\Windows are blocked.").showAndWait();
+            new Alert(Alert.AlertType.WARNING, "Please add at least one directory to scan.\nSystem and app folders like C:\\Windows and C:\\Program Files are blocked.").showAndWait();
             return;
         }
         // Re-validate roots at scan time (in case env changed)
@@ -615,13 +623,15 @@ public class DuplicateFilesTabView extends BorderPane {
                                 .mapToLong(r -> (r.getTotalDuplicates() - 1) * r.getFileSize())
                                 .sum();
                         if (results.isEmpty()) {
-                            statusLabel.setText("No duplicates found in selected folders. System folders were excluded.");
+                            statusLabel.setText("No duplicates found in selected folders. System and app folders were excluded.");
                         } else {
                             statusLabel.setText("Found " + results.size() + " duplicate group(s) — "
                                     + DataSizeFormatter.formatBytes(totalBytes)
-                                    + " total, " + DataSizeFormatter.formatBytes(reclaimable) + " reclaimable (system folders excluded)");
+                                    + " total, " + DataSizeFormatter.formatBytes(reclaimable) + " reclaimable (system and app folders excluded). Tick groups to select for deletion.");
                         }
-                        cleanButton.setDisable(results.isEmpty());
+                        // Safe default: nothing selected after scan — Clean stays
+                        // disabled until the user explicitly ticks groups/copies.
+                        updateCleanButtonState();
                     }
                     progressBar.setVisible(false);
                     progressLabel.setVisible(false);
@@ -671,6 +681,7 @@ public class DuplicateFilesTabView extends BorderPane {
 
     public void dispose() {
         cancelled.set(true);
+        cleanCancelled.set(true);
         Thread st = scanThread;
         if (st != null && st.isAlive()) st.interrupt();
         Thread ct = cleanThread;
@@ -772,36 +783,68 @@ public class DuplicateFilesTabView extends BorderPane {
         } catch (Exception ignored) {}
 
         Runnable doClean = () -> {
+            cleanCancelled.set(false);
             busy.set(true);
             Platform.runLater(() -> {
-                statusLabel.setText(useRecycleBin ? "Moving to Recycle Bin..." : "Deleting duplicates...");
+                statusLabel.setText(useRecycleBin ? "Moving to Recycle Bin... (Stop to cancel)" : "Deleting duplicates... (Stop to cancel)");
                 cleanButton.setDisable(true);
+                stopButton.setDisable(false);
+                progressBar.setProgress(0);
+                progressBar.setVisible(true);
+                progressLabel.setVisible(true);
+                progressLabel.setText("Starting...");
             });
             String actionLabel = useRecycleBin ? "Moved" : "Deleted";
             cleanThread = new Thread(() -> {
                 try {
                     // filteredSelected already contains only selected deletables; ensure each is marked selected for service
                     for (DuplicateFileRow fr : filteredSelected) fr.setSelected(true);
-                    CleanResult result = service.clean(filteredSelected, useRecycleBin);
+                    long[] lastProgressUpdate = {0};
+                    CleanResult result = service.clean(filteredSelected, useRecycleBin,
+                            (processed, total) -> {
+                                long now = System.currentTimeMillis();
+                                boolean isFinal = total > 0 && processed >= total;
+                                if (!isFinal && now - lastProgressUpdate[0] < 100) return;
+                                lastProgressUpdate[0] = now;
+                                Platform.runLater(() -> {
+                                    if (total > 0) {
+                                        progressBar.setProgress((double) processed / total);
+                                        progressLabel.setText(processed + " / " + total + " files");
+                                    } else {
+                                        progressBar.setProgress(-1);
+                                        progressLabel.setText(processed + " files");
+                                    }
+                                    statusLabel.setText((useRecycleBin ? "Moving to Recycle Bin... " : "Deleting duplicates... ")
+                                            + processed + (total > 0 ? "/" + total : "") + " (Stop to cancel)");
+                                });
+                            },
+                            cleanCancelled);
                     int deleted = result.getDeleted();
                     int failed = result.getFailed();
+                    boolean wasCancelled = result.isCancelled() || cleanCancelled.get();
                     String msg;
-                    if (failed == 0) {
+                    if (wasCancelled) {
+                        msg = "Cleanup cancelled — " + actionLabel.toLowerCase() + " " + deleted + " file(s) before cancel."
+                                + (failed > 0 ? " " + failed + " file(s) skipped/failed." : "")
+                                + "\n\nRemaining files were left untouched.";
+                    } else if (failed == 0) {
                         msg = actionLabel + " " + deleted + " file(s).";
                     } else {
                         msg = actionLabel + " " + deleted + " file(s). "
-                                + failed + " file(s) could not be deleted or were blocked (protected/changed).";
+                                + failed + " file(s) could not be deleted or were blocked (protected/changed/missing keeper).";
                     }
-                    if (result.getDeleted() > 0 && failed > 0) {
-                        msg += "\n\nProtected system files were automatically skipped.";
+                    if (!wasCancelled && result.getDeleted() > 0 && failed > 0) {
+                        msg += "\n\nProtected, app, or changed files were automatically skipped.";
                     }
                     final String finalMsg = msg;
+                    final boolean finalCancelled = wasCancelled;
                     Platform.runLater(() -> {
-                        statusLabel.setText(finalMsg.split("\n")[0]);
-                        new Alert(failed > 0 ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, finalMsg).showAndWait();
-                        // Update UI to reflect actually deleted files (check existence) — handles per-file partial selection correctly
+                        statusLabel.setText((finalCancelled ? "Cleanup cancelled. " : "") + finalMsg.split("\n")[0]);
+                        new Alert(finalCancelled ? Alert.AlertType.WARNING : (failed > 0 ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION), finalMsg).showAndWait();
+                        // Update UI ONLY from verified filesystem state (Files.exists).
+                        // Never drop rows on service claim alone — a claimed success
+                        // with files still present means the delete did not happen.
                         List<DuplicateFileRow> toRemove = new ArrayList<>();
-                        boolean anyChange = false;
                         for (DuplicateFileRow filtered : filteredSelected) {
                             DuplicateFileRow orig = filteredToOriginal.get(filtered);
                             if (orig == null) {
@@ -823,7 +866,6 @@ public class DuplicateFilesTabView extends BorderPane {
                                 } catch (Exception ignored) {}
                             }
                             if (deletedForThisGroup.isEmpty()) continue;
-                            anyChange = true;
                             List<String> remaining = new ArrayList<>(orig.getDeletablePaths());
                             remaining.removeAll(deletedForThisGroup);
                             Map<String, BooleanProperty> fileMap = perFileSelection.get(orig);
@@ -848,46 +890,41 @@ public class DuplicateFilesTabView extends BorderPane {
                             }
                         }
                         if (!toRemove.isEmpty()) rows.removeAll(toRemove);
-                        if (anyChange || !toRemove.isEmpty()) {
+                        if (!toRemove.isEmpty()) {
                             groupColorMap.clear();
                             table.refresh();
-                            // Refresh detail pane for currently selected row if it still exists
-                            DuplicateFileRow sel = table.getSelectionModel().getSelectedItem();
-                            if (sel != null && rows.contains(sel)) updateDeletableDetail(sel);
-                            else {
-                                deletableListView.getItems().clear();
-                                detailTitle.setText("Select a group to see copies to delete");
-                            }
-                        } else {
-                            // No actual deletion detected but respect fullyCleaned fallback (e.g., recycle where existence check may lag)
-                            List<DuplicateFileRow> fallbackRemove = new ArrayList<>();
-                            for (DuplicateFileRow filtered : result.getFullyCleanedRows()) {
-                                DuplicateFileRow orig = filteredToOriginal.get(filtered);
-                                if (orig != null && rows.contains(orig) && !toRemove.contains(orig)) fallbackRemove.add(orig);
-                            }
-                            if (!fallbackRemove.isEmpty()) {
-                                rows.removeAll(fallbackRemove);
-                                groupColorMap.clear();
-                                table.refresh();
-                            }
+                        } else if (!filteredSelected.isEmpty()) {
+                            table.refresh();
+                        }
+                        // Refresh detail pane for currently selected row if it still exists
+                        DuplicateFileRow sel = table.getSelectionModel().getSelectedItem();
+                        if (sel != null && rows.contains(sel)) updateDeletableDetail(sel);
+                        else {
                             deletableListView.getItems().clear();
                             detailTitle.setText("Select a group to see copies to delete");
                         }
-                        cleanButton.setDisable(getSelectedDeletableCount() == 0);
+                        updateCleanButtonState();
                         // If table selection cleared, ensure detail pane cleared
                         if (table.getSelectionModel().getSelectedItem() == null) {
                             deletableListView.getItems().clear();
                             detailTitle.setText("Select a group to see copies to delete");
                         }
+                        progressBar.setVisible(false);
+                        progressLabel.setVisible(false);
                     });
                 } catch (Exception e) {
                     AppLogger.error("Duplicate clean failed", e);
                     Platform.runLater(() -> {
                         statusLabel.setText("Cleanup failed.");
+                        progressBar.setVisible(false);
+                        progressLabel.setVisible(false);
                         new Alert(Alert.AlertType.ERROR, "Cleanup failed:\n" + e.getMessage()).showAndWait();
                     });
                 } finally {
-                    Platform.runLater(() -> busy.set(false));
+                    Platform.runLater(() -> {
+                        busy.set(false);
+                        stopButton.setDisable(true);
+                    });
                 }
             }, "duplicate-clean");
             cleanThread.setDaemon(true);
@@ -895,15 +932,37 @@ public class DuplicateFilesTabView extends BorderPane {
         };
 
         if (createRestorePoint) {
-            statusLabel.setText("Creating System Restore point...");
+            cleanCancelled.set(false);
+            statusLabel.setText("Creating System Restore point... (Stop to skip)");
             busy.set(true);
+            stopButton.setDisable(false);
             CompletableFuture.runAsync(() -> {
+                Process p = null;
                 try {
                     ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
                             "Checkpoint-Computer -Description 'WinZenith Duplicate Cleanup' -RestorePointType MODIFY_SETTINGS");
                     pb.redirectErrorStream(true);
-                    Process p = pb.start();
-                    boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    p = pb.start();
+                    // Cancellable wait: 120s total, 200ms slices so Stop skips the wait.
+                    long deadline = System.currentTimeMillis() + 120_000;
+                    boolean finished = false;
+                    while (System.currentTimeMillis() < deadline) {
+                        if (cleanCancelled.get()) break;
+                        try {
+                            if (p.waitFor(200, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                                finished = true;
+                                break;
+                            }
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                    if (cleanCancelled.get() || Thread.currentThread().isInterrupted()) {
+                        if (p != null && p.isAlive()) p.destroyForcibly();
+                        AppLogger.info("Restore point creation cancelled by user — proceeding without it");
+                        return;
+                    }
                     if (!finished) {
                         p.destroyForcibly();
                         AppLogger.warning("Restore point creation timed out");
@@ -919,9 +978,17 @@ public class DuplicateFilesTabView extends BorderPane {
                     }
                 } catch (Exception e) {
                     AppLogger.warning("Failed to create restore point: " + e.getMessage());
+                } finally {
+                    if (p != null && p.isAlive()) p.destroyForcibly();
                 }
             }).whenComplete((v, ex) -> Platform.runLater(() -> {
                 busy.set(false);
+                if (cleanCancelled.get()) {
+                    statusLabel.setText("Cleanup cancelled before starting.");
+                    stopButton.setDisable(true);
+                    updateCleanButtonState();
+                    return;
+                }
                 doClean.run();
             }));
         } else {

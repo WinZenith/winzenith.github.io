@@ -24,6 +24,9 @@ public class StartupImpactService {
     };
 
     public static double estimateBootImpactMs(StartupItem item) {
+        if (item == null) return 0;
+        // Disabled items do not contribute to boot delay
+        if (!item.isEnabled()) return 0;
         return switch (item.getType()) {
             case REGISTRY -> estimateRegistryImpact(item);
             case TASK -> estimateTaskImpact(item);

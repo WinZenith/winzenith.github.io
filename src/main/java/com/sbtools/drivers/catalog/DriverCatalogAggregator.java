@@ -102,10 +102,15 @@ public class DriverCatalogAggregator {
      */
     private List<DriverCatalogProvider> relevantProviders(List<InstalledDriver> installed) {
         Set<OemVendorHelper> presentVendors = EnumSet.noneOf(OemVendorHelper.class);
-        for (InstalledDriver d : installed) {
-            OemVendorHelper v = OemVendorHelper.detect(d);
-            if (v != null) {
-                presentVendors.add(v);
+        if (installed != null) {
+            for (InstalledDriver d : installed) {
+                if (d == null) continue;
+                try {
+                    OemVendorHelper v = OemVendorHelper.detect(d);
+                    if (v != null) {
+                        presentVendors.add(v);
+                    }
+                } catch (Exception ignored) {}
             }
         }
         AppLogger.debug("CatalogAggregator: Detected vendors: " + presentVendors);
@@ -127,11 +132,20 @@ public class DriverCatalogAggregator {
         return findUpdates(installed, CancellationToken.NONE);
     }
 
+    private static boolean isUsableCandidate(DriverUpdateCandidate c) {
+        return c != null && c.installed() != null
+                && c.installed().deviceId() != null && !c.installed().deviceId().isBlank()
+                && c.availableVersion() != null && !c.availableVersion().isBlank();
+    }
+
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed, CancellationToken token) {
+        if (installed == null) return List.of();
         AppLogger.debug("CatalogAggregator: Scanning " + installed.size() + " installed drivers");
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
         runProviders(installed, token, null, providerResults -> {
+            if (providerResults == null) return;
             for (DriverUpdateCandidate c : providerResults) {
+                if (!isUsableCandidate(c)) continue;
                 byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
             }
         });
@@ -161,12 +175,15 @@ public class DriverCatalogAggregator {
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderFinished) {
         final CancellationToken effectiveToken = token != null ? token : CancellationToken.NONE;
+        if (installed == null) return;
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
         runProviders(installed, effectiveToken, onProviderStarted, providerResults -> {
             if (effectiveToken.isCancelled()) {
                 return;
             }
+            if (providerResults == null) return;
             for (DriverUpdateCandidate c : providerResults) {
+                if (!isUsableCandidate(c)) continue;
                 byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
             }
             if (onProviderFinished != null) {
@@ -180,6 +197,7 @@ public class DriverCatalogAggregator {
             CancellationToken token,
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderResult) {
+        if (installed == null) return;
         List<DriverCatalogProvider> activeProviders = relevantProviders(installed);
         if (activeProviders.isEmpty()) {
             return;
@@ -218,7 +236,10 @@ public class DriverCatalogAggregator {
                                 return null;
                             }
                             if (onProviderResult != null) {
-                                try { onProviderResult.accept(results); } catch (Exception ignored) { }
+                                try { onProviderResult.accept(results); } catch (Exception ex) {
+                                    AppLogger.warning("CatalogAggregator: Provider result handler failed for "
+                                            + provider.id() + ": " + ex.getMessage());
+                                }
                             }
                             return null;
                         } finally {
@@ -286,6 +307,8 @@ public class DriverCatalogAggregator {
     }
 
     private static DriverUpdateCandidate pickBetter(DriverUpdateCandidate existing, DriverUpdateCandidate incoming) {
+        if (existing == null) return incoming;
+        if (incoming == null) return existing;
         return isBetter(incoming, existing) ? incoming : existing;
     }
 

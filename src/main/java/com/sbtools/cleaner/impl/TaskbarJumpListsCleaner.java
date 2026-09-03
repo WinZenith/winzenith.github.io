@@ -24,9 +24,15 @@ public class TaskbarJumpListsCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         List<Path> dirs = new ArrayList<>();
         CleanerUtils.addEnvPath(dirs, "APPDATA", "Microsoft", "Windows", "Recent", "AutomaticDestinations");
         CleanerUtils.addEnvPath(dirs, "APPDATA", "Microsoft", "Windows", "Recent", "CustomDestinations");
-        return CleanerUtils.cleanDirectoryPattern(dirs);
+        return CleanerUtils.cleanDirectoryPattern(dirs, token);
     }
 }

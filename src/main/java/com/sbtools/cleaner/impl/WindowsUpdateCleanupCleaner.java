@@ -12,10 +12,11 @@ import com.sbtools.util.WindowsVersionUtil;
 
 public class WindowsUpdateCleanupCleaner implements CleanerExtension {
 
-    private volatile long lastScannedBytes;
-
     @Override
     public CleanupCategory getCategory() { return CleanupCategory.WINDOWS_UPDATE_CLEANUP; }
+
+    @Override
+    public boolean requiresAdmin() { return true; }
 
     @Override
     public void scan(CleanupRow row) {
@@ -56,7 +57,6 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 }
             } else { p.destroyForcibly(); }
         } catch (Exception ignored) {}
-        lastScannedBytes = totalSize;
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
         row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (superseded components)" : " (none found)"));
@@ -111,9 +111,7 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 if (exitCode == 0) {
                     String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
                     cleaned = parseCleanedBytes(output);
-                    if (cleaned == 0 && lastScannedBytes > 0) {
-                        cleaned = lastScannedBytes;
-                    }
+                    // No fallback to scan estimate: report only measured bytes.
                 }
             } else {
                 AppLogger.warning("DISM cleanup timed out after ~15 minutes");

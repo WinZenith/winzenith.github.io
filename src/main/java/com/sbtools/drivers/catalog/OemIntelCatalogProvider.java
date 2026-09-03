@@ -65,12 +65,8 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             return info[0];
         }
 
-        String fallback = getFallbackVersion(driver);
-        if (fallback != null) {
-            AppLogger.debug("Intel: Using fallback version " + fallback + " for " + driver.friendlyName());
-            return fallback;
-        }
-
+        // No hardcoded/category fallback: offering the first config in a
+        // category (or a stale hardcoded version) installs the wrong driver.
         AppLogger.warning("Intel: Could not determine latest version for " + driver.friendlyName());
         return null;
     }
@@ -266,20 +262,12 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
                     }
                 }
 
-                if (categoryFallback == null) {
-                    String downloadUrl = extractDownloadUrl(config);
-                    if (downloadUrl != null) {
-                        categoryFallback = new String[]{version, downloadUrl};
-                        AppLogger.info("Intel: Category fallback for " + targetCategory
-                                + ": version=" + version + ", url=" + downloadUrl);
-                    }
-                }
+                // No category fallback: only DetectionValues HW matches may
+                // produce a candidate (wrong-device risk otherwise).
             }
         }
 
-        if (categoryFallback != null) {
-            return categoryFallback;
-        }
+        // No fallback — require an exact DetectionValues match.
 
         AppLogger.debug("Intel: No DSA match found for " + driver.friendlyName());
         return null;
@@ -446,11 +434,8 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
     }
 
     private String getFallbackVersion(InstalledDriver driver) {
-        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
-
-        if (name.contains("bluetooth") && !name.contains("ac") && name.contains("wireless")) return "24.40.0";
-        if (name.contains("wireless-ac") && name.contains("9560")) return "24.40.0";
-        if (name.contains("uhd graphics") || name.contains("630")) return "31.0.101.5120";
+        // Disabled: substring hardcodes (e.g. "630") collide with unrelated
+        // devices and go stale. Catalog/DSA match only.
         return null;
     }
 

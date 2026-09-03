@@ -59,6 +59,13 @@ public final class StartupConstants {
     }
 
     public static boolean isEnabledByte(byte[] bytes) {
-        return bytes != null && bytes.length > 0 && bytes[0] == 0x02;
+        if (bytes == null || bytes.length == 0) return true;
+        // 0x03 = disabled (Task Manager convention); any other first byte (0x02 enabled,
+        // 0x00 unconfigured, etc.) is treated as enabled to avoid inverting unknown states
+        return (bytes[0] & 0xFF) != 0x03;
+    }
+
+    public static boolean isDisabledByte(byte[] bytes) {
+        return bytes != null && bytes.length > 0 && (bytes[0] & 0xFF) == 0x03;
     }
 }

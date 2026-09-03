@@ -36,6 +36,8 @@ import java.util.stream.Collectors;
 public class SoftwareUpdateViewModel {
 
     private static final long INSTALL_TIMEOUT_SECONDS = 1200;
+    private static final long INSTALL_TIMEOUT_WINGET_SECONDS = 1200;
+    private static final long INSTALL_TIMEOUT_WU_SECONDS = 3600;
 
     private final SoftwareUpdateService service = new SoftwareUpdateService();
     private final SystemRestoreService restoreService = new SystemRestoreService();
@@ -109,16 +111,35 @@ public class SoftwareUpdateViewModel {
     }
 
     public void scan() {
-        if (busy.get() || disposed) return;
+        if (disposed) return;
+        // Block concurrent scan/install: check both busy and installRunning synchronously on caller thread.
+        // busy/installRunning are set synchronously below, so rapid double-clicks cannot start overlapping scans.
+        if (busy.get() || installRunning.get()) return;
         scanCancelled.set(false);
         restorePointCreatedThisBatch.set(false);
-        Platform.runLater(() -> {
+        // Set busy synchronously when already on FX thread to close the race where a second
+        // Scan click arrives before the async runLater from the first click executes.
+        if (Platform.isFxApplicationThread()) {
             if (disposed) return;
             busy.set(true);
             showRetryFailed.set(false);
             statusText.set("Scanning for updates...");
-        });
-        scanFuture = executor.submit(this::scanInternal, "SoftwareUpdate-Scan");
+        } else {
+            Platform.runLater(() -> {
+                if (disposed) return;
+                busy.set(true);
+                showRetryFailed.set(false);
+                statusText.set("Scanning for updates...");
+            });
+        }
+        try {
+            scanFuture = executor.submit(this::scanInternal, "SoftwareUpdate-Scan");
+        } catch (Exception ex) {
+            AppLogger.warning("Failed to submit scan (shutting down?): " + ex.getMessage());
+            Platform.runLater(() -> {
+                if (!disposed) busy.set(false);
+            });
+        }
     }
 
     private void scanInternal() {
@@ -153,11 +174,18 @@ public class SoftwareUpdateViewModel {
                     .collect(Collectors.toSet());
             List<SoftwareUpdateEntry> filteredUpdates = allUpdates.stream()
                     .filter(e -> {
-                        // Entries with blank id were already filtered in SoftwareUpdateService, but guard here:
-                        // keep only if not in skipped list; blank-id entries are non-actionable and should be hidden.
+                        if (e == null) return false;
+                        // WindowsUpdate rows are only actionable when the WU updateId exists.
+                        // Reject synthetic/placeholder ids and blank identifiers outright so phantom
+                        // rows (which install validation would always fail) never reach the table.
+                        if ("WindowsUpdate".equals(e.source())) {
+                            if (e.updateId() == null || e.updateId().isBlank()) return false;
+                            if (e.id() == null || e.id().isBlank()) return false;
+                            return !skippedIdSet.contains(e.id());
+                        }
+                        // winget rows: entries with blank id were already filtered in
+                        // SoftwareUpdateService, but guard here as defense-in-depth.
                         if (e.id() == null || e.id().isBlank()) {
-                            // For WindowsUpdate placeholder ids (WU-...), allow but ensure original updateId exists
-                            if ("WindowsUpdate".equals(e.source()) && e.updateId() != null && !e.updateId().isBlank()) return true;
                             return false;
                         }
                         return !skippedIdSet.contains(e.id());
@@ -265,21 +293,59 @@ public class SoftwareUpdateViewModel {
     }
 
     private void updateSelected(List<SoftwareUpdateEntry> selected, boolean isRetry) {
+        if (disposed) return;
+        // Synchronous mutual exclusion: block overlapping batch/single installs and scans.
+        // Claim installRunning immediately (before the async restore-point dialog) so rapid
+        // double-clicks or Update-Selected + per-row Update cannot start parallel winget/MSI runs.
+        if (installRunning.get() || busy.get()) {
+            Platform.runLater(() -> {
+                if (!disposed) new Alert(Alert.AlertType.INFORMATION, "Another operation is already in progress. Please wait.").showAndWait();
+            });
+            return;
+        }
         if (!adminCheck.getAsBoolean()) {
             Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait());
             return;
         }
-        if (selected.isEmpty()) {
+        if (selected == null || selected.isEmpty()) {
             Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Select at least one program to update.").showAndWait());
             return;
         }
+        if (!installRunning.compareAndSet(false, true)) {
+            Platform.runLater(() -> {
+                if (!disposed) new Alert(Alert.AlertType.INFORMATION, "Another operation is already in progress. Please wait.").showAndWait();
+            });
+            return;
+        }
+        // Defensive snapshot: scan may replace rows while the restore-point dialog is open.
+        List<SoftwareUpdateEntry> snapshot = new ArrayList<>(selected);
+        // Disable UI immediately to close the race before the async chain sets busy.
+        if (Platform.isFxApplicationThread()) {
+            busy.set(true);
+            statusText.set("Preparing to install " + snapshot.size() + " update(s)...");
+        } else {
+            Platform.runLater(() -> {
+                if (!disposed) {
+                    busy.set(true);
+                    statusText.set("Preparing to install " + snapshot.size() + " update(s)...");
+                }
+            });
+        }
 
         restorePointCreatedThisBatch.set(false);
-        maybeCreateRestorePointAsync().thenRunAsync(() -> {
+        try {
+            maybeCreateRestorePointAsync().thenRunAsync(() -> {
+            if (disposed) {
+                installRunning.set(false);
+                Platform.runLater(() -> {
+                    showBatchProgress.set(false);
+                    busy.set(false);
+                });
+                return;
+            }
             synchronized (failedEntries) { failedEntries.clear(); }
             if (!isRetry) retryCount.set(0);
-            installRunning.set(true);
-            int total = selected.size();
+            int total = snapshot.size();
             Platform.runLater(() -> {
                 if (disposed) return;
                 busy.set(true);
@@ -291,8 +357,25 @@ public class SoftwareUpdateViewModel {
                 showRetryFailed.set(false);
             });
 
-            executor.submit(() -> runBatchInstall(selected, total), "SoftwareUpdate-BatchOrchestrator");
-        }, executor);
+            try {
+                executor.submit(() -> runBatchInstall(snapshot, total), "SoftwareUpdate-BatchOrchestrator");
+            } catch (Exception ex) {
+                AppLogger.warning("Failed to submit batch install: " + ex.getMessage());
+                installRunning.set(false);
+                Platform.runLater(() -> {
+                    showBatchProgress.set(false);
+                    if (!disposed) busy.set(false);
+                });
+            }
+            }, executor);
+        } catch (Exception ex) {
+            AppLogger.warning("Failed to start batch install (shutting down?): " + ex.getMessage());
+            installRunning.set(false);
+            Platform.runLater(() -> {
+                showBatchProgress.set(false);
+                if (!disposed) busy.set(false);
+            });
+        }
     }
 
     private void runBatchInstall(List<SoftwareUpdateEntry> selected, int total) {
@@ -396,15 +479,47 @@ public class SoftwareUpdateViewModel {
     }
 
     public void updateSingle(SoftwareUpdateEntry entry) {
+        if (disposed || entry == null) return;
+        if (installRunning.get() || busy.get()) {
+            Platform.runLater(() -> {
+                if (!disposed) new Alert(Alert.AlertType.INFORMATION, "Another operation is already in progress. Please wait.").showAndWait();
+            });
+            return;
+        }
         if (!adminCheck.getAsBoolean()) {
             Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait());
             return;
         }
+        if (!installRunning.compareAndSet(false, true)) {
+            Platform.runLater(() -> {
+                if (!disposed) new Alert(Alert.AlertType.INFORMATION, "Another operation is already in progress. Please wait.").showAndWait();
+            });
+            return;
+        }
+        if (Platform.isFxApplicationThread()) {
+            busy.set(true);
+            statusText.set("Preparing to install update for " + entry.getName() + "...");
+        } else {
+            Platform.runLater(() -> {
+                if (!disposed) {
+                    busy.set(true);
+                    statusText.set("Preparing to install update for " + entry.getName() + "...");
+                }
+            });
+        }
 
         restorePointCreatedThisBatch.set(false);
-        maybeCreateRestorePointAsync().thenRunAsync(() -> {
+        try {
+            maybeCreateRestorePointAsync().thenRunAsync(() -> {
+            if (disposed) {
+                installRunning.set(false);
+                Platform.runLater(() -> {
+                    if (!disposed) busy.set(false);
+                    else { try { busy.set(false); } catch (Exception ignored2) {} }
+                });
+                return;
+            }
             synchronized (failedEntries) { failedEntries.clear(); }
-            installRunning.set(true);
             Platform.runLater(() -> {
                 if (disposed) return;
                 busy.set(true);
@@ -412,18 +527,39 @@ public class SoftwareUpdateViewModel {
                 statusText.set("Installing update for " + entry.getName() + "...");
             });
 
-            installExecutor.submit(() -> runSingleInstall(entry), "SoftwareUpdate-SingleInstall-" + entry.id());
-        }, executor);
+            try {
+                installExecutor.submit(() -> runSingleInstall(entry), "SoftwareUpdate-SingleInstall-" + entry.id());
+            } catch (Exception ex) {
+                AppLogger.warning("Failed to submit single install: " + ex.getMessage());
+                installRunning.set(false);
+                Platform.runLater(() -> {
+                    if (!disposed) busy.set(false);
+                });
+            }
+            }, executor);
+        } catch (Exception ex) {
+            AppLogger.warning("Failed to start single install (shutting down?): " + ex.getMessage());
+            installRunning.set(false);
+            Platform.runLater(() -> {
+                if (!disposed) busy.set(false);
+            });
+        }
     }
 
     private void runSingleInstall(SoftwareUpdateEntry entry) {
-        // Validate before touching UI to avoid NPE
+        // Validate before touching UI to avoid NPE.
+        // installRunning was claimed by updateSingle(); validation failures must release it,
+        // otherwise all future installs stay blocked.
         if ("WindowsUpdate".equals(entry.source())) {
             if (entry.updateId() == null || entry.updateId().isBlank()) {
                 Platform.runLater(() -> {
                     new Alert(Alert.AlertType.ERROR, "Missing Windows Update identifier for " + entry.getName()).showAndWait();
                     entry.setStatus("Failed");
                     entry.setProgress(0.0);
+                });
+                installRunning.set(false);
+                Platform.runLater(() -> {
+                    if (!disposed) busy.set(false);
                 });
                 return;
             }
@@ -433,6 +569,10 @@ public class SoftwareUpdateViewModel {
                     new Alert(Alert.AlertType.ERROR, "Missing package identifier for " + entry.getName()).showAndWait();
                     entry.setStatus("Failed");
                     entry.setProgress(0.0);
+                });
+                installRunning.set(false);
+                Platform.runLater(() -> {
+                    if (!disposed) busy.set(false);
                 });
                 return;
             }
@@ -446,20 +586,22 @@ public class SoftwareUpdateViewModel {
             ProcessResult res;
             if ("WindowsUpdate".equals(entry.source()) && entry.updateId() != null) {
                 try {
-                    res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS, installCancelled);
+                    res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_WU_SECONDS, installCancelled, entry);
                 } catch (CancellationException cex) {
                     resetEntryUiState(entry);
                     return;
                 }
             } else {
                 try {
-                    res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_SECONDS, entry, installCancelled);
+                    res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_WINGET_SECONDS, entry, installCancelled);
                 } catch (CancellationException cex) {
                     resetEntryUiState(entry);
                     return;
                 }
             }
-            if (res.success()) {
+            // Exit 0 or reboot-required (3010/1641, reboot phrasing) counts as installed; a 3010 must
+            // not be reported as Failed.
+            if (SoftwareUpdateService.isSuccessOrRebootRequired(res)) {
                 InstallerCleanupHelper.promptAndCleanup(service, entry, start);
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), true, null);
                 Platform.runLater(() -> {
@@ -560,13 +702,22 @@ public class SoftwareUpdateViewModel {
             }
             showRetryFailed.set(false);
         }
-        executor.submit(() -> {
-            try { Thread.sleep(2000); } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-            Platform.runLater(() -> updateSelected(toRetry, true));
-        });
+        try {
+            executor.submit(() -> {
+                try { Thread.sleep(2000); } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                Platform.runLater(() -> updateSelected(toRetry, true));
+            });
+        } catch (Exception ex) {
+            AppLogger.warning("Failed to schedule retry (shutting down?): " + ex.getMessage());
+            // Restore entries so the retry is not silently lost.
+            synchronized (failedEntries) { failedEntries.addAll(toRetry); }
+            Platform.runLater(() -> {
+                if (!disposed) showRetryFailed.set(true);
+            });
+        }
     }
 
     public void skipEntry(SoftwareUpdateEntry entry) {
@@ -671,21 +822,24 @@ public class SoftwareUpdateViewModel {
             ProcessResult res;
             if ("WindowsUpdate".equals(entry.source()) && entry.updateId() != null) {
                 try {
-                    res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_SECONDS, installCancelled);
+                    res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_WU_SECONDS, installCancelled, entry);
                 } catch (CancellationException cex) {
                     resetEntryUiState(entry);
                     return false;
                 }
             } else {
                 try {
-                    res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_SECONDS, entry, installCancelled);
+                    res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_WINGET_SECONDS, entry, installCancelled);
                 } catch (CancellationException cex) {
                     resetEntryUiState(entry);
                     return false;
                 }
             }
 
-            if (res.success()) {
+            // Exit 0 or reboot-required (3010/1641, reboot phrasing) counts as installed; a 3010 must
+            // not be reported as Failed, and the batch must abort so later installs are not layered
+            // over a pending reboot.
+            if (SoftwareUpdateService.isSuccessOrRebootRequired(res)) {
                 synchronized (successfulEntries) { successfulEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), true, null);
                 Platform.runLater(() -> {
@@ -814,26 +968,53 @@ public class SoftwareUpdateViewModel {
         if (restorePointCreatedThisBatch.get()) {
             return CompletableFuture.completedFuture(null);
         }
-        CompletableFuture<Void> f = new CompletableFuture<>();
-        Platform.runLater(() -> {
-            try {
-                Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                        "Would you like to create a System Restore Point before proceeding with the updates?");
-                confirm.setHeaderText(AppInfo.DISPLAY_NAME);
-                confirm.showAndWait().ifPresent(result -> {
-                    if (result == ButtonType.OK) {
+        // Stage 1 (FX thread only): ask the user. Stage 2 (background): run the blocking
+        // restore-point creation. Never run ProcessRunner on the FX thread (UI freeze, #2).
+        CompletableFuture<Boolean> confirmed = new CompletableFuture<>();
+        try {
+            Platform.runLater(() -> {
+                try {
+                    if (disposed) {
+                        confirmed.complete(false);
+                        return;
+                    }
+                    Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                            "Would you like to create a System Restore Point before proceeding with the updates?");
+                    confirm.setHeaderText(AppInfo.DISPLAY_NAME);
+                    confirm.showAndWait().ifPresent(result -> {
+                        confirmed.complete(result == ButtonType.OK);
+                    });
+                    if (!confirmed.isDone()) {
+                        // Dialog closed without a button (window X): treat as decline, not hang.
+                        confirmed.complete(false);
+                    }
+                } catch (Exception ex) {
+                    AppLogger.warning("Restore point prompt failed: " + ex.getMessage());
+                    confirmed.complete(false);
+                }
+            });
+        } catch (Exception ex) {
+            AppLogger.warning("Restore point prompt scheduling failed: " + ex.getMessage());
+            return CompletableFuture.completedFuture(null);
+        }
+        try {
+            return confirmed.thenApplyAsync(wantsRestore -> {
+                if (Boolean.TRUE.equals(wantsRestore) && !disposed) {
+                    try {
                         boolean created = restoreService.createRestorePoint("WinZenith software update").success();
                         if (!created) AppLogger.warning("Restore point creation failed or skipped.");
-                        restorePointCreatedThisBatch.set(true);
+                        else restorePointCreatedThisBatch.set(true);
+                    } catch (Exception ex) {
+                        AppLogger.warning("Restore point creation failed: " + ex.getMessage());
                     }
-                });
-            } catch (Exception ex) {
-                AppLogger.warning("Restore point prompt failed: " + ex.getMessage());
-            } finally {
-                f.complete(null);
-            }
-        });
-        return f;
+                }
+                return null;
+            }, executor);
+        } catch (Exception ex) {
+            // Executor shutting down: skip the restore point rather than hanging the install chain.
+            AppLogger.warning("Restore point background stage rejected (shutting down?): " + ex.getMessage());
+            return CompletableFuture.completedFuture(null);
+        }
     }
 
     private void showBatchResultDialog(List<SoftwareUpdateEntry> failedEntries, List<SoftwareUpdateEntry> techMismatchEntries) {

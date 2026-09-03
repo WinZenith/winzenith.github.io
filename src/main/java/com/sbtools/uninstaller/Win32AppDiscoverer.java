@@ -57,16 +57,16 @@ public class Win32AppDiscoverer {
                         String installLocation = getStringValue(hive, fullPath, "InstallLocation");
                         String quietUninstallString = getStringValue(hive, fullPath, "QuietUninstallString");
                         String uninstallString = getStringValue(hive, fullPath, "UninstallString");
-                        // Prefer QuietUninstallString when available — allows silent uninstall without
-                        // hanging on interactive UI. This is the safe option; we never invent silent
-                        // flags for custom uninstallers, we only use the vendor-provided quiet command.
-                        String effectiveUninstall = !quietUninstallString.isBlank() ? quietUninstallString : uninstallString;
+                        // Store the interactive UninstallString as primary. QuietUninstallString
+                        // is kept separately and only used when the user explicitly chooses
+                        // silent mode — silent uninstall must never run without consent
+                        // (it skips vendor prompts such as "keep user data").
                         String installDate = getStringValue(hive, fullPath, "InstallDate");
                         int estimatedSize = getIntValue(hive, fullPath, "EstimatedSize", 0);
 
                         apps.add(new InstalledApp(
                                 name, publisher, version, installLocation,
-                                effectiveUninstall, fullPath, true,
+                                uninstallString, quietUninstallString, fullPath, true,
                                 "", hiveLabel, installDate, estimatedSize, archLabel
                         ));
                     }

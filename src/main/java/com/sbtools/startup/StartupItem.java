@@ -13,13 +13,20 @@ public class StartupItem {
     private final String taskPath;
     private final StartupItemType type;
     private String serviceStartType;
-    private final String originalServiceStartType;
+    private String originalServiceStartType;
     private double estimatedBootImpactMs;
     private List<String> dependencies;
 
     public StartupItem(String name, String publisher, String path, boolean enabled, String location,
                        String registryValueName, String filePath, String taskPath,
                        StartupItemType type, String serviceStartType) {
+        this(name, publisher, path, enabled, location, registryValueName, filePath, taskPath,
+                type, serviceStartType, serviceStartType);
+    }
+
+    public StartupItem(String name, String publisher, String path, boolean enabled, String location,
+                       String registryValueName, String filePath, String taskPath,
+                       StartupItemType type, String serviceStartType, String originalServiceStartType) {
         this.name = name;
         this.publisher = publisher;
         this.path = path;
@@ -30,7 +37,7 @@ public class StartupItem {
         this.taskPath = taskPath;
         this.type = type;
         this.serviceStartType = serviceStartType;
-        this.originalServiceStartType = serviceStartType;
+        this.originalServiceStartType = originalServiceStartType;
     }
 
     public String getName() {
@@ -87,6 +94,10 @@ public class StartupItem {
 
     public String getOriginalServiceStartType() {
         return originalServiceStartType;
+    }
+
+    public void setOriginalServiceStartType(String originalServiceStartType) {
+        this.originalServiceStartType = originalServiceStartType;
     }
 
     public double getEstimatedBootImpactMs() {

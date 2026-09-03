@@ -41,24 +41,46 @@ public class RecycleBinCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long size = getRecycleBinSize();
         try {
             ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
                     "Clear-RecycleBin -Force -ErrorAction SilentlyContinue");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+            boolean finished = false;
+            long deadline = System.currentTimeMillis() + 30_000L;
+            while (System.currentTimeMillis() < deadline) {
+                if (token != null && token.isCancelled()) {
+                    p.destroyForcibly();
+                    throw new java.util.concurrent.CancellationException("Recycle Bin cleanup canceled");
+                }
+                if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+            }
             if (finished && p.exitValue() == 0) {
-                return size;
+                if (token != null && token.isCancelled()) return 0L;
+                // Verify PowerShell actually emptied the bin before reporting pre-scan size.
+                long remaining = getRecycleBinSize();
+                if (remaining == 0) return size;
+                AppLogger.warning("Recycle Bin PowerShell exit 0 but " + remaining + " bytes remain; using fallback");
             }
             if (!finished) { p.destroyForcibly(); AppLogger.warning("Recycle Bin cleanup timed out"); }
+        } catch (java.util.concurrent.CancellationException ce) {
+            throw ce;
         } catch (Exception ex) {
             AppLogger.warning("Failed to empty Recycle Bin via PowerShell: " + ex.getMessage());
         }
+        if (token != null && token.isCancelled()) return 0L;
         java.util.concurrent.atomic.AtomicLong fallbackCleaned = new java.util.concurrent.atomic.AtomicLong(0);
         java.util.List<Path> failedDeletes = new java.util.ArrayList<>();
         try {
             for (java.io.File root : java.io.File.listRoots()) {
+                if (token != null && token.isCancelled()) break;
                 Path recycleBin = root.toPath().resolve("$Recycle.Bin");
                 if (Files.isDirectory(recycleBin)) {
                     java.util.List<Path> toDelete;
@@ -66,9 +88,10 @@ public class RecycleBinCleaner implements CleanerExtension {
                         toDelete = walk.sorted(Comparator.reverseOrder()).filter(f -> !f.equals(recycleBin)).toList();
                     }
                     for (Path f : toDelete) {
+                        if (token != null && token.isCancelled()) break;
                         try {
                             long sz = Files.isRegularFile(f) ? Files.size(f) : 0L;
-                            CleanerUtils.deletePermanently(f);
+                            CleanerUtils.deletePermanently(f, token);
                             if (!Files.exists(f)) {
                                 if (sz > 0) fallbackCleaned.addAndGet(sz);
                             } else {

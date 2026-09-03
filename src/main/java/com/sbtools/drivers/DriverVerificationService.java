@@ -118,10 +118,11 @@ public class DriverVerificationService {
                 AppLogger.warning("Authenticode hash mismatch for " + file.getFileName());
                 return new VerificationResult(false, "Authenticode hash mismatch - file may be corrupted");
             } else if ("NotTrusted".equals(status)) {
-                // B4 fix: corporate PCs with missing intermediate/root or offline CRL often report NotTrusted
-                // even for WHQL-signed drivers. Treat as warning, not blocker, unless catalog expects a specific thumbprint.
-                AppLogger.warning("Authenticode NotTrusted for " + file.getFileName() + " — allowing install with warning (offline corporate root?)");
-                return new VerificationResult(true, "Authenticode signed but not trusted (allowed with warning): " + status);
+                // Fail closed: self-signed / untrusted-chain / revoked must
+                // not install silently as admin. Caller surfaces the message
+                // and offers manual download instead.
+                AppLogger.warning("Authenticode NotTrusted for " + file.getFileName() + " — blocking install");
+                return new VerificationResult(false, "Authenticode signed but not trusted (NotTrusted) - file signature not trusted");
             } else if ("UnknownError".equals(status) || "Unknown".equals(status)) {
                 AppLogger.warning("Authenticode status '" + status + "' for " + file.getFileName() + " - treating as invalid");
                 return new VerificationResult(false,

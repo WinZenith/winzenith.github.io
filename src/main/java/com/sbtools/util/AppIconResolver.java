@@ -18,11 +18,12 @@ public class AppIconResolver {
             }
         }
         if (app.isWin32()) {
-            String uninstallStr = app.getUninstallString();
-            if (uninstallStr != null && !uninstallStr.isBlank()) {
-                String exePath = extractExeFromUninstallString(uninstallStr);
-                if (exePath != null) return exePath;
+            // Try the interactive uninstall string first, then the quiet variant
+            String exePath = extractExeFromUninstallString(app.getUninstallString());
+            if (exePath == null && app.hasQuietUninstallString()) {
+                exePath = extractExeFromUninstallString(app.getQuietUninstallString());
             }
+            if (exePath != null) return exePath;
         }
         return null;
     }
@@ -67,6 +68,7 @@ public class AppIconResolver {
     }
 
     private static String extractExeFromUninstallString(String uninstallStr) {
+        if (uninstallStr == null || uninstallStr.isBlank()) return null;
         String path = uninstallStr.trim();
         if (path.startsWith("\"")) {
             int end = path.indexOf("\"", 1);
@@ -74,9 +76,20 @@ public class AppIconResolver {
                 path = path.substring(1, end);
             }
         } else {
-            int space = path.indexOf(' ');
-            if (space > 0) {
-                path = path.substring(0, space);
+            // Unquoted commands often contain spaces in the exe path
+            // (e.g. C:/Program Files/Vendor/uninstall.exe /S). Look for the
+            // .exe boundary instead of naively cutting at the first space.
+            String lower = path.toLowerCase();
+            int exeIdx = lower.indexOf(".exe");
+            if (exeIdx >= 0) {
+                path = path.substring(0, exeIdx + 4).trim();
+                // Strip stray leading quote if present
+                if (path.startsWith("\"")) path = path.substring(1);
+            } else {
+                int space = path.indexOf(' ');
+                if (space > 0) {
+                    path = path.substring(0, space);
+                }
             }
         }
         if (path.toLowerCase().endsWith(".exe")) {

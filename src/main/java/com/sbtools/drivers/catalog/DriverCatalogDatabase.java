@@ -127,6 +127,11 @@ public final class DriverCatalogDatabase {
         for (CatalogEntry e : combined) {
             // Skip test entries in normal matching
             if (e.testOnly()) continue;
+            // Enforce version applicability range when the catalog specifies it
+            if (!isWithinVersionRange(driver.driverVersion(), e.versionMin(), e.versionMax())) continue;
+            // Enforce platform/arch when the catalog specifies them
+            if (!isPlatformCompatible(e.platform())) continue;
+            if (!isArchCompatible(e.arch())) continue;
 
             int factors = 0;
             if (hwMatches.contains(e)) factors++;
@@ -196,6 +201,8 @@ public final class DriverCatalogDatabase {
         String pkg = entry.packageId() != null && !entry.packageId().isBlank() ? entry.packageId() : entry.id();
         String effectiveVersion = entry.latestDriverVersion() != null && !entry.latestDriverVersion().isBlank()
                 ? entry.latestDriverVersion() : entry.latestVersion();
+        String sourceUrl = sanitizeSourceUrl(entry.sourceUrl());
+        String vendorPageUrl = sanitizeSourceUrl(entry.vendorPageUrl());
         return new DriverUpdateCandidate(
                 driver,
                 effectiveVersion,
@@ -204,10 +211,86 @@ public final class DriverCatalogDatabase {
                 entry.provider() + " driver update available",
                 "Certified " + entry.component() + " driver from " + entry.provider()
                         + " (confidence: " + String.format("%.0f", entry.confidence() * 100) + "%)",
-                UpdateSeverity.RECOMMENDED,
-                entry.sourceUrl(),
-                entry.vendorPageUrl()
+                severityFromTags(entry.tags()),
+                sourceUrl,
+                vendorPageUrl
         );
+    }
+
+    static UpdateSeverity severityFromTags(java.util.List<String> tags) {
+        if (tags != null) {
+            for (String t : tags) {
+                if (t == null) continue;
+                String l = t.toLowerCase();
+                if (l.contains("critical")) return UpdateSeverity.CRITICAL;
+            }
+            for (String t : tags) {
+                if (t == null) continue;
+                String l = t.toLowerCase();
+                if (l.contains("important") || l.contains("security")) return UpdateSeverity.IMPORTANT;
+            }
+            for (String t : tags) {
+                if (t == null) continue;
+                String l = t.toLowerCase();
+                if (l.contains("optional")) return UpdateSeverity.OPTIONAL;
+            }
+        }
+        return UpdateSeverity.RECOMMENDED;
+    }
+
+    static String sanitizeSourceUrl(String url) {
+        if (url == null || url.isBlank()) return "";
+        String trimmed = url.trim();
+        try {
+            java.net.URI uri = new java.net.URI(trimmed);
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase();
+            if (!"https".equals(scheme)) {
+                AppLogger.warning("DriverCatalogDatabase: Rejecting non-https catalog URL: " + trimmed);
+                return "";
+            }
+            if (uri.getHost() == null || uri.getHost().isBlank()) return "";
+            return trimmed;
+        } catch (Exception ex) {
+            AppLogger.warning("DriverCatalogDatabase: Rejecting malformed catalog URL: " + trimmed);
+            return "";
+        }
+    }
+
+    static boolean isWithinVersionRange(String installed, String min, String max) {
+        try {
+            if (min != null && !min.isBlank()) {
+                if (installed == null || installed.isBlank()) return true;
+                if (VersionCompare.compare(installed, min) < 0) return false;
+            }
+            if (max != null && !max.isBlank()) {
+                if (installed == null || installed.isBlank()) return true;
+                if (VersionCompare.compare(installed, max) > 0) return false;
+            }
+        } catch (Exception ignored) {
+            return true;
+        }
+        return true;
+    }
+
+    static boolean isPlatformCompatible(String platform) {
+        if (platform == null || platform.isBlank()) return true;
+        String p = platform.toLowerCase();
+        if (p.contains("win")) return AppPaths.isWindows() || p.contains("windows");
+        // Unknown platform tags: fail closed (do not offer).
+        AppLogger.warning("DriverCatalogDatabase: Skipping entry with incompatible platform: " + platform);
+        return false;
+    }
+
+    static boolean isArchCompatible(String arch) {
+        if (arch == null || arch.isBlank()) return true;
+        String a = arch.toLowerCase().replaceAll("[^a-z0-9]", "");
+        String osArch = System.getProperty("os.arch", "").toLowerCase();
+        boolean is64 = osArch.contains("64") || osArch.contains("amd64") || osArch.contains("x86_64");
+        if (a.contains("64") || a.contains("amd64") || a.contains("x64")) return is64;
+        if (a.equals("x86") || a.equals("32") || a.contains("386")) return !is64;
+        if (a.contains("arm64") || a.contains("aarch64")) return osArch.contains("aarch64") || osArch.contains("arm64");
+        if (a.contains("arm")) return osArch.contains("arm");
+        return true;
     }
 
     private List<CatalogEntry> findByHardwareId(InstalledDriver driver) {

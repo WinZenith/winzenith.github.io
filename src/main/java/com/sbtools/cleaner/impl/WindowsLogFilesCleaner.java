@@ -18,6 +18,9 @@ public class WindowsLogFilesCleaner implements CleanerExtension {
     public CleanupCategory getCategory() { return CleanupCategory.WINDOWS_LOG_FILES; }
 
     @Override
+    public boolean requiresAdmin() { return true; }
+
+    @Override
     public void scan(CleanupRow row) {
         long totalSize = 0;
         int itemCount = 0;
@@ -41,6 +44,12 @@ public class WindowsLogFilesCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String windir = CleanerUtils.safeEnv("WINDIR");
         if (windir != null) {
@@ -50,7 +59,7 @@ public class WindowsLogFilesCleaner implements CleanerExtension {
                     List<Path> toDelete = walk.filter(Files::isRegularFile)
                             .filter(p -> { String name = p.getFileName().toString().toLowerCase(); return name.endsWith(".log"); })
                             .toList();
-                    for (Path f : toDelete) { long size = Files.size(f); CleanerUtils.deletePermanently(f); if (!Files.exists(f)) cleaned += size; }
+                    for (Path f : toDelete) { if (token != null && token.isCancelled()) break; long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size; }
                 } catch (Exception ignored) {}
             }
         }

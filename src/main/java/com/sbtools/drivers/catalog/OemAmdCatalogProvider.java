@@ -29,35 +29,14 @@ public class OemAmdCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String fetchLatestVersion(InstalledDriver driver) {
-        // Prefer catalog; web scraping of amd.com/en/support is Cloudflare-protected and unreliable.
-        // This fallback is only used when catalog had no match. Return catalog-agnostic version.
-        AppLogger.debug("AMD: Fetching latest version (fallback) for " + driver.friendlyName());
-
-        String fallback = getFallbackVersion(driver);
-        if (fallback != null) {
-            AppLogger.debug("AMD: Using fallback version " + fallback + " for " + driver.friendlyName());
-            return fallback;
-        }
-
-        AppLogger.debug("AMD: Could not find version for " + driver.friendlyName() + " (catalog miss)");
+        // Catalog-only: hardcoded fallback versions go stale and cause
+        // downgrades or missed criticals. No device-specific web source.
+        AppLogger.debug("AMD: Legacy fallback disabled (use catalog database) for " + driver.friendlyName());
         return null;
     }
 
     private String getFallbackVersion(InstalledDriver driver) {
-        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
-        if (name.contains("radeon") && name.contains("rx")) {
-            return "24.12.1";
-        }
-        if (name.contains("radeon") && name.contains("vega")) {
-            return "24.12.1";
-        }
-        if (name.contains("radeon") && name.contains("pro")) {
-            return "24.12.1";
-        }
-        if (name.contains("chipset") || name.contains("b450") || name.contains("b550")
-                || name.contains("x470") || name.contains("x570")) {
-            return "6.03.19.217";
-        }
+        // Disabled: hardcoded versions go stale.
         return null;
     }
 

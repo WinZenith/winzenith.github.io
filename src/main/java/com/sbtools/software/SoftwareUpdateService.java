@@ -723,10 +723,13 @@ public class SoftwareUpdateService {
             JsonNode root = JsonMapper.parseTree(stdout);
             if (root.isArray()) {
                 for (JsonNode n : root) {
-                    results.add(parseWindowsUpdateEntry(n));
+                    SoftwareUpdateEntry parsed = parseWindowsUpdateEntry(n);
+                    // Missing updateId entries are non-installable phantom rows: drop at the source.
+                    if (parsed != null) results.add(parsed);
                 }
             } else if (root.isObject()) {
-                results.add(parseWindowsUpdateEntry(root));
+                SoftwareUpdateEntry parsed = parseWindowsUpdateEntry(root);
+                if (parsed != null) results.add(parsed);
             }
             AppLogger.info("Found " + results.size() + " Windows Update(s)");
         } catch (java.util.concurrent.CancellationException ce) {
@@ -781,15 +784,15 @@ public class SoftwareUpdateService {
                 : (version != null ? version : "");
         String name = title != null ? title : (description != null ? description : "Windows Update");
         if (name == null || name.isBlank()) name = "Windows Update";
-        // updateId may be null if WU COM returned malformed JSON; use title as fallback id for display but mark as non-installable
-        String effectiveId = (updateId == null || updateId.isBlank()) ? null : updateId;
-        if (effectiveId == null) {
-            AppLogger.warning("WU entry missing updateId: title=" + title + " kb=" + kbArticle);
-            // Still create entry but install will be blocked by validation; use title hash as placeholder to avoid NPE in table
-            effectiveId = "WU-" + Math.abs((title != null ? title : "unknown").hashCode());
+        // updateId is the only installable identifier for WU. Entries without it can never be
+        // installed (validation blocks them), so drop them here instead of surfacing phantom
+        // rows with synthetic placeholder ids.
+        if (updateId == null || updateId.isBlank()) {
+            AppLogger.warning("Skipping WU entry with missing updateId: title=" + title + " kb=" + kbArticle);
+            return null;
         }
         return new SoftwareUpdateEntry(
-                effectiveId, name, "", displayVersion,
+                updateId, name, "", displayVersion,
                 "WindowsUpdate", updateId, sizeBytes);
     }
 
@@ -799,17 +802,52 @@ public class SoftwareUpdateService {
 
     public ProcessResult installWindowsUpdate(String updateId, long timeoutSeconds, AtomicBoolean cancelled)
             throws IOException, InterruptedException, CancellationException {
+        return installWindowsUpdate(updateId, timeoutSeconds, cancelled, null);
+    }
+
+    /**
+     * Installs a Windows Update while streaming progress to the given entry (may be null).
+     * Unlike the previous fire-and-forget variant, output lines update {@code entry} status
+     * (throttled) and Downloading/Installing markers set indeterminate progress, so the row
+     * does not sit silent for the whole (potentially hour-long) install.
+     */
+    public ProcessResult installWindowsUpdate(String updateId, long timeoutSeconds, AtomicBoolean cancelled,
+                                              SoftwareUpdateEntry entry)
+            throws IOException, InterruptedException, CancellationException {
         if (updateId == null || updateId.isBlank()) {
             throw new IOException("Missing Windows Update identifier; cannot install");
         }
         Path script = PowerShellScripts.resolve("wu-install.ps1");
-        if (cancelled == null) {
+        if (cancelled == null && entry == null) {
             return runner.run(ProcessRunner.powershellScript(script.toString(), updateId), timeoutSeconds);
         }
+        AtomicLong lastStatusUpdate = new AtomicLong(0);
         return runner.runStreaming(
                 ProcessRunner.powershellScript(script.toString(), updateId),
-                line -> {},
-                pct -> {},
+                line -> {
+                    if (entry == null || line == null) return;
+                    long now = System.currentTimeMillis();
+                    if (now - lastStatusUpdate.get() >= 500) {
+                        lastStatusUpdate.set(now);
+                        String snapshot = line;
+                        // Skip echoing the final JSON blob as a status line.
+                        String trimmed = snapshot.trim();
+                        if (trimmed.startsWith("{") && trimmed.contains("rebootRequired")) return;
+                        Platform.runLater(() -> {
+                            try {
+                                entry.setStatus(snapshot.length() > 160 ? snapshot.substring(0, 160) + "..." : snapshot);
+                            } catch (Exception ignored) {}
+                        });
+                    }
+                },
+                pct -> {
+                    if (entry == null) return;
+                    Platform.runLater(() -> {
+                        try {
+                            entry.setProgress(pct);
+                        } catch (Exception ignored) {}
+                    });
+                },
                 cancelled,
                 timeoutSeconds
         );
@@ -817,23 +855,104 @@ public class SoftwareUpdateService {
 
     /**
      * Returns true if the given process result indicates a restart is required to finish
-     * the installation. Handles the JSON output of wu-install.ps1 (field "rebootRequired")
-     * and falls back to a case-insensitive text search for robustness.
+     * the installation. Handles the JSON output of wu-install.ps1 (field "rebootRequired"),
+     * MSI/winget reboot exit codes (3010, 1641), and reboot phrasing in either stream.
+     * The check is tolerant of progress lines surrounding the final JSON object, so
+     * wu-install.ps1 may emit human-readable progress before the JSON result.
      */
     public static boolean isRebootRequired(ProcessResult result) {
         if (result == null) return false;
+        if (isRebootExitCode(result.exitCode())) return true;
         String output = result.combinedOutput();
         if (output == null || output.isBlank()) return false;
+        // Try to extract the trailing JSON object containing rebootRequired (progress lines may precede it).
         try {
-            JsonNode root = JsonMapper.parseTree(output);
-            JsonNode reboot = root.has("rebootRequired") ? root.get("rebootRequired") : null;
-            if (reboot != null) {
-                if (reboot.isBoolean()) return reboot.asBoolean(false);
-                if (reboot.isTextual()) return Boolean.parseBoolean(reboot.asText());
+            JsonNode root = tryParseRebootJson(output);
+            if (root != null) {
+                JsonNode reboot = root.has("rebootRequired") ? root.get("rebootRequired") : null;
+                if (reboot == null) {
+                    // Case-insensitive fallback within the parsed fragment.
+                    java.util.Iterator<String> fields = root.fieldNames();
+                    while (fields.hasNext()) {
+                        String f = fields.next();
+                        if (f.equalsIgnoreCase("rebootRequired")) {
+                            reboot = root.get(f);
+                            break;
+                        }
+                    }
+                }
+                if (reboot != null) {
+                    if (reboot.isBoolean()) return reboot.asBoolean(false);
+                    if (reboot.isNumber()) return reboot.asInt(0) != 0;
+                    if (reboot.isTextual()) return Boolean.parseBoolean(reboot.asText().trim());
+                }
             }
         } catch (Exception ignored) {
         }
-        return output.toLowerCase().contains("rebootrequired");
+        String lower = output.toLowerCase();
+        // Plain "rebootrequired"/"restartrequired" tokens (wu-install JSON compressed form).
+        if (lower.contains("rebootrequired") || lower.contains("restartrequired")) return true;
+        // Human-readable reboot phrasing from winget/MSI wrappers.
+        if (lower.contains("reboot required") || lower.contains("restart required")
+                || lower.contains("restart is required") || lower.contains("a restart")
+                || lower.contains("please reboot") || lower.contains("please restart")
+                || lower.contains("error_success_reboot_required")
+                || lower.contains("a reboot is required")) return true;
+        return false;
+    }
+
+    /**
+     * MSI success-with-reboot exit codes. 3010 = ERROR_SUCCESS_REBOOT_REQUIRED,
+     * 1641 = ERROR_SUCCESS_REBOOT_INITIATED. winget surfaces installer codes, so a
+     * non-zero exit alone must not be treated as a plain failure when it is one of these.
+     */
+    public static boolean isRebootExitCode(int exitCode) {
+        return exitCode == ProcessResult.MSI_SUCCESS_REBOOT_REQUIRED
+                || exitCode == ProcessResult.MSI_SUCCESS_REBOOT_INITIATED;
+    }
+
+    /**
+     * True when the result should be treated as installed (exit 0 or reboot-required exit).
+     * Callers must still consult {@link #isRebootRequired(ProcessResult)} to decide whether
+     * to abort the remaining batch and prompt for restart.
+     */
+    public static boolean isSuccessOrRebootRequired(ProcessResult result) {
+        if (result == null) return false;
+        return result.success() || isRebootRequired(result);
+    }
+
+    private static JsonNode tryParseRebootJson(String output) {
+        if (output == null) return null;
+        // Fast path: whole output is JSON.
+        try {
+            JsonNode root = JsonMapper.parseTree(output);
+            if (root != null && root.isObject()) return root;
+        } catch (Exception ignored) {
+        }
+        // Slow path: find the last {...} fragment mentioning rebootRequired (progress-safe).
+        try {
+            String lower = output.toLowerCase();
+            int keyIdx = lower.lastIndexOf("rebootrequired");
+            if (keyIdx < 0) return null;
+            int openIdx = output.lastIndexOf('{', keyIdx);
+            int closeIdx = output.indexOf('}', keyIdx);
+            if (openIdx < 0 || closeIdx < 0 || closeIdx <= openIdx) return null;
+            // Balance braces forward from openIdx to capture the full object.
+            int depth = 0;
+            int end = -1;
+            for (int i = openIdx; i < output.length(); i++) {
+                char c = output.charAt(i);
+                if (c == '{') depth++;
+                else if (c == '}') {
+                    depth--;
+                    if (depth == 0) { end = i; break; }
+                }
+            }
+            if (end < 0) return null;
+            return JsonMapper.parseTree(output.substring(openIdx, end + 1));
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     /**
@@ -926,6 +1045,9 @@ public class SoftwareUpdateService {
                     return List.<SoftwareUpdateEntry>of();
                 }
                 AppLogger.warning("winget scan failed: " + ex.getMessage());
+                // Surface to the UI so a failed source is reported as a warning instead of
+                // silently collapsing into a false "Everything is up to date".
+                lastWingetError = "winget scan failed: " + ex.getMessage();
                 if (onWingetDone != null) onWingetDone.accept(0);
                 return List.<SoftwareUpdateEntry>of();
             }
@@ -947,6 +1069,10 @@ public class SoftwareUpdateService {
                     return List.<SoftwareUpdateEntry>of();
                 }
                 AppLogger.warning("Windows Update scan failed: " + ex.getMessage());
+                // Surface to the UI so a failed source warns instead of false "up to date".
+                if (lastWindowsUpdateError == null || lastWindowsUpdateError.isBlank()) {
+                    lastWindowsUpdateError = "Windows Update scan failed: " + ex.getMessage();
+                }
                 if (onWuDone != null) onWuDone.accept(0);
                 return List.<SoftwareUpdateEntry>of();
             }
@@ -970,6 +1096,14 @@ public class SoftwareUpdateService {
                     internalCancelled.set(true);
                     wingetFuture.cancel(true);
                     wuFuture.cancel(true);
+                    // Mark incomplete sources as timed out so the UI warns instead of reporting
+                    // a false "Everything is up to date" when partial results are empty.
+                    if (!wingetFuture.isDone() && (lastWingetError == null || lastWingetError.isBlank())) {
+                        lastWingetError = "winget scan timed out after " + timeout + "s";
+                    }
+                    if (!wuFuture.isDone() && (lastWindowsUpdateError == null || lastWindowsUpdateError.isBlank())) {
+                        lastWindowsUpdateError = "Windows Update scan timed out after " + timeout + "s";
+                    }
                     break;
                 }
                 try {
@@ -1035,11 +1169,16 @@ public class SoftwareUpdateService {
         if (packageId == null || packageId.isBlank()) {
             throw new IOException("Missing package identifier; cannot run winget upgrade");
         }
+        // Never pass --force: it overrides winget hash/applicability safeguards and turns
+        // phantom same-version rows into forced reinstalls. --exact keeps --id precise,
+        // --disable-interactivity prevents silent hangs on interactive installers.
         List<String> args = new ArrayList<>(List.of(
-                "upgrade", "--id", packageId, "--source", "winget",
-                "--accept-source-agreements", "--accept-package-agreements",
-                "--force"));
-        if (silent) args.add("--silent");
+                "upgrade", "--id", packageId, "--exact", "--source", "winget",
+                "--accept-source-agreements", "--accept-package-agreements"));
+        if (silent) {
+            args.add("--silent");
+            args.add("--disable-interactivity");
+        }
 
         try {
             AtomicLong lastStatusUpdate = new AtomicLong(0);
@@ -1066,6 +1205,10 @@ public class SoftwareUpdateService {
             );
             AppLogger.info("winget upgrade result for " + packageId + ": exitCode=" + r.exitCode()
                     + " output=" + (r.stdout() != null ? r.stdout().substring(0, Math.min(500, r.stdout().length())) : "null"));
+            // Reboot-required (exit 3010/1641 or reboot phrasing) counts as installed; the caller
+            // aborts the batch and prompts for restart. Check before mismatch/failure handling so a
+            // 3010 is not misreported as Failed and does not trigger another launcher retry.
+            if (isRebootRequired(r)) return r;
             if (r.success()) return r;
             if (isInstallTechnologyMismatch(r)) {
                 throw new IOException("INSTALL_TECHNOLOGY_MISMATCH");

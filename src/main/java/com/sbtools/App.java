@@ -265,7 +265,7 @@ public class App extends Application {
             case 4 -> new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin);
             case 5 -> new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin);
             case 6 -> new StartupTabView(busy, AdminCheck::isRunningAsAdmin);
-            case 7 -> new CleanerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore);
+            case 7 -> new CleanerTabView(busy, AdminCheck::isRunningAsAdminFresh, settingsStore);
             case 8 -> new DuplicateFilesTabView(busy, AdminCheck::isRunningAsAdmin);
             case 9 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
             case 10 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin, settingsStore);

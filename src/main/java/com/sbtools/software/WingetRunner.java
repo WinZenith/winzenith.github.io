@@ -342,6 +342,14 @@ public class WingetRunner {
                     workingCandidateIndex = idx;
                     return r;
                 }
+                // A reboot-required result (MSI 3010/1641 or reboot phrasing) means the installer
+                // already ran: return immediately instead of re-executing the same upgrade via the
+                // next launcher candidate, which would reinstall or report a false failure.
+                // (Mirrors SoftwareUpdateService.isRebootRequired; inlined to avoid a class cycle.)
+                if (isRebootRequiredResult(r)) {
+                    workingCandidateIndex = idx;
+                    return r;
+                }
                 lastResult = r;
             } catch (java.util.concurrent.CancellationException cex) {
                 throw cex;
@@ -352,6 +360,23 @@ public class WingetRunner {
         if (lastResult != null) return lastResult;
         if (lastEx != null) throw new java.io.IOException("Streaming failed", lastEx);
         return new ProcessResult(-1, "", "No candidates");
+    }
+
+    /**
+     * Minimal reboot-required check for fallback control (see SoftwareUpdateService.isRebootRequired
+     * for the canonical, JSON-aware version). Kept local to avoid a WingetRunner ↔
+     * SoftwareUpdateService class cycle.
+     */
+    private static boolean isRebootRequiredResult(ProcessResult r) {
+        if (r == null) return false;
+        if (r.exitCode() == ProcessResult.MSI_SUCCESS_REBOOT_REQUIRED
+                || r.exitCode() == ProcessResult.MSI_SUCCESS_REBOOT_INITIATED) return true;
+        String out = r.combinedOutput();
+        if (out == null || out.isBlank()) return false;
+        String lower = out.toLowerCase();
+        return lower.contains("rebootrequired") || lower.contains("restartrequired")
+                || lower.contains("reboot required") || lower.contains("restart required")
+                || lower.contains("error_success_reboot_required");
     }
 
     /**

@@ -247,9 +247,9 @@ public class BackupRestoreTabView extends BorderPane {
     }
 
     private void revertRollback(RestoreRow row) {
-        if (!adminCheck.getAsBoolean()) {
+        if (!com.sbtools.util.AdminCheck.isRunningAsAdminFresh()) {
             new Alert(Alert.AlertType.WARNING,
-                    "Reverting drivers requires administrator rights.").showAndWait();
+                    "Reverting drivers requires administrator rights. Please restart as administrator.").showAndWait();
             return;
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
@@ -263,9 +263,20 @@ public class BackupRestoreTabView extends BorderPane {
         AppExecutors.ioPool().execute(() -> {
             try {
                 rollbackBackupService.revert(row.entry());
+                // Verify the active driver actually matches the backup
+                // version: pnputil stages the old INF but Windows may keep
+                // the newer driver bound until reboot/manual rollback.
+                String verifyMsg = verifyRevertedVersion(row);
                 Platform.runLater(() -> {
-                    new Alert(Alert.AlertType.INFORMATION,
-                            "Driver reverted. Restart if devices do not work correctly.").showAndWait();
+                    if (verifyMsg == null) {
+                        new Alert(Alert.AlertType.INFORMATION,
+                                "Driver reverted to " + row.entry().version() + ". Restart if devices do not work correctly.").showAndWait();
+                    } else {
+                        new Alert(Alert.AlertType.WARNING,
+                                "Backup staged, but the active driver does not yet match "
+                                + row.entry().version() + ".\n\n" + verifyMsg
+                                + "\n\nRestart, then use Device Manager → Rollback if needed.").showAndWait();
+                    }
                     refreshRollback();
                 });
             } catch (Exception ex) {
@@ -275,6 +286,28 @@ public class BackupRestoreTabView extends BorderPane {
                 Platform.runLater(() -> busy.set(false));
             }
         });
+    }
+
+    /**
+     * Re-scans the device after pnputil restore and reports whether the
+     * active version matches the backup. Returns null when verified,
+     * otherwise a human-readable explanation (caller shows WARNING).
+     */
+    private String verifyRevertedVersion(RestoreRow row) {
+        try {
+            com.sbtools.drivers.DriverScanService scanner = new com.sbtools.drivers.DriverScanService();
+            com.sbtools.drivers.model.InstalledDriver fresh =
+                    scanner.scanSingleDriver(row.entry().deviceId());
+            if (fresh == null) return "Device no longer found after restore.";
+            String active = fresh.driverVersion() == null ? "" : fresh.driverVersion().trim();
+            String expected = row.entry().version() == null ? "" : row.entry().version().trim();
+            if (!expected.isBlank() && active.equals(expected)) return null;
+            return "Active version is " + (active.isBlank() ? "unknown" : active)
+                    + ", expected " + (expected.isBlank() ? "backup version" : expected) + ".";
+        } catch (Exception ex) {
+            AppLogger.warning("Post-revert verification failed: " + ex.getMessage());
+            return "Could not verify active version (" + ex.getMessage() + ").";
+        }
     }
 
     private void deleteAllBackups() {
@@ -673,18 +706,19 @@ public class BackupRestoreTabView extends BorderPane {
     private void refreshRegistryBackups(ObservableList<RegistryBackupRow> rows, Label statusLabel) {
         AppExecutors.ioPool().execute(() -> {
             try {
-                Path backupsDir = AppPaths.backupsRoot().resolve("cleanup-backups");
-                if (!Files.isDirectory(backupsDir)) {
-                    Platform.runLater(() -> {
-                        rows.clear();
-                        statusLabel.setText("No registry backups found.");
-                    });
-                    return;
-                }
+                List<Path> bases = registryBackupsRoots();
                 List<RegistryBackupRow> results = new ArrayList<>();
+                java.util.Set<String> seen = new java.util.HashSet<>();
                 SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+                for (Path backupsDir : bases) {
+                if (!Files.isDirectory(backupsDir)) {
+                    continue;
+                }
                 try (var stream = Files.list(backupsDir)) {
-                    stream.filter(p -> Files.isDirectory(p) && p.getFileName().toString().startsWith("registry_backup_"))
+                    // List ANY session dir containing .reg files (manual
+                    // "registry_backup_*" AND cleaner "yyyyMMdd-HHmmss*" share
+                    // this root). Prefix-only filtering hid cleaner backups.
+                    stream.filter(Files::isDirectory)
                             .sorted((a, b) -> b.getFileName().toString().compareTo(a.getFileName().toString()))
                             .forEach(dir -> {
                                 try {
@@ -703,17 +737,27 @@ public class BackupRestoreTabView extends BorderPane {
                                     }
                                     if (regCount > 0) {
                                         String dirName = dir.getFileName().toString();
-                                        String date = sdf.format(new Date(latestModified));
-                                        String size = RestoreRow.formatFileSize(dirSize);
-                                        results.add(new RegistryBackupRow(dirName + "/", date, size));
+                                        if (seen.add(dirName)) {
+                                            String date = sdf.format(new Date(latestModified));
+                                            String size = RestoreRow.formatFileSize(dirSize);
+                                            results.add(new RegistryBackupRow(dirName + "/", date, size));
+                                        }
                                     }
                                 } catch (IOException ignored) {
                                 }
                             });
+                } catch (IOException listEx) {
+                    AppLogger.warning("Could not list registry backups in " + backupsDir + ": " + listEx.getMessage());
                 }
+                }
+                results.sort((a, b) -> b.getFilename().compareTo(a.getFilename()));
                 Platform.runLater(() -> {
                     rows.setAll(results);
-                    statusLabel.setText(results.size() + " registry backup session(s) found.");
+                    if (results.isEmpty()) {
+                        statusLabel.setText("No registry backups found.");
+                    } else {
+                        statusLabel.setText(results.size() + " registry backup session(s) found.");
+                    }
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to list registry backups", e);
@@ -774,12 +818,14 @@ public class BackupRestoreTabView extends BorderPane {
         statusLabel.setText("Creating registry backup...");
 
         AppExecutors.ioPool().execute(() -> {
+            Path backupDir = null;
             try {
-                Path backupsDir = AppPaths.backupsRoot().resolve("cleanup-backups");
+                Path backupsDir = registryBackupsBaseForWrite();
                 Files.createDirectories(backupsDir);
 
-                String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
-                Path backupDir = backupsDir.resolve("registry_backup_" + timestamp);
+                // Millis + random suffix: two backups in the same second must
+                // never share (and overwrite) one directory.
+                backupDir = newUniqueRegistryBackupDir(backupsDir, "registry_backup_");
                 Files.createDirectories(backupDir);
 
                 int failedCount = 0;
@@ -806,7 +852,9 @@ public class BackupRestoreTabView extends BorderPane {
                 }
 
                 if (failedCount == selected.size()) {
-                    Files.deleteIfExists(backupDir);
+                    // Non-empty dirs throw on deleteIfExists: remove recursively
+                    // so failed sessions do not pollute the backup list/disk.
+                    try { deleteDirectoryRecursive(backupDir); } catch (Exception ignored) {}
                     Platform.runLater(() -> {
                         statusLabel.setText("Backup failed.");
                         new Alert(Alert.AlertType.ERROR,
@@ -851,7 +899,8 @@ public class BackupRestoreTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
         confirm.setTitle("Restore Registry Backup");
         confirm.setHeaderText("Import registry session: " + selected.getFilename());
-        confirm.setContentText("This will merge all .reg files from this backup session into the Windows registry.\n\n"
+        confirm.setContentText("Windows MERGES .reg files: values added after the backup will NOT be removed.\n\n"
+                + "A safety backup of the current state will be created first so this restore can be undone.\n\n"
                 + "Ensure all work is saved before proceeding.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
 
@@ -859,7 +908,20 @@ public class BackupRestoreTabView extends BorderPane {
         statusLabel.setText("Restoring registry backup...");
 
         AppExecutors.ioPool().execute(() -> {
+            Path safetyDir = null;
             try {
+                // Pre-restore safety net: export current state before merging,
+                // so a bad restore can be undone. Best-effort, never blocks.
+                try {
+                    Path base = registryBackupsBaseForWrite();
+                    Files.createDirectories(base);
+                    safetyDir = newUniqueRegistryBackupDir(base, "registry_backup_pre-restore_");
+                    Files.createDirectories(safetyDir);
+                    exportCurrentRegistryForSafety(safetyDir);
+                } catch (Exception safetyEx) {
+                    AppLogger.warning("Pre-restore safety backup failed: " + safetyEx.getMessage());
+                    safetyDir = null;
+                }
                 Path dirPath = resolveRegistryBackupPath(selected.getFilename());
                 List<Path> regFiles;
                 try (var stream = Files.list(dirPath)) {
@@ -893,16 +955,23 @@ public class BackupRestoreTabView extends BorderPane {
                 final int imported = regFiles.size() - regFailed;
                 final int regFailedFinal = regFailed;
                 final int totalFiles = regFiles.size();
+                final String safetyInfo = safetyDir != null
+                        ? "\n\nSafety backup of pre-restore state:\n" + safetyDir
+                          + "\n(Import it to undo this restore.)"
+                        : "\n\nNote: pre-restore safety backup could not be created.";
+                final String mergeNote = "\n\nNote: Windows merges .reg files — entries added after the backup were NOT removed.";
                 Platform.runLater(() -> {
                     if (regFailedFinal == 0) {
                         statusLabel.setText("Registry backup restored.");
                         new Alert(Alert.AlertType.INFORMATION,
-                                "All " + imported + " registry file(s) imported successfully.").showAndWait();
+                                "All " + imported + " registry file(s) merged successfully."
+                                        + mergeNote + safetyInfo).showAndWait();
+                        refreshRegistryBackups(rows, statusLabel);
                     } else {
                         statusLabel.setText(imported + " restored, " + regFailedFinal + " failed.");
                         new Alert(Alert.AlertType.WARNING,
-                                imported + " of " + totalFiles + " registry file(s) imported.\n"
-                                        + regFailedFinal + " file(s) failed.").showAndWait();
+                                imported + " of " + totalFiles + " registry file(s) merged.\n"
+                                        + regFailedFinal + " file(s) failed." + mergeNote + safetyInfo).showAndWait();
                     }
                 });
             } catch (Exception e) {
@@ -945,7 +1014,9 @@ public class BackupRestoreTabView extends BorderPane {
                     deleteDirectoryRecursive(dirPath);
                 }
                 Platform.runLater(() -> {
-                    rows.remove(selected);
+                    // Re-scan from disk: surfaces partial-delete leftovers
+                    // instead of claiming success on a ghost row.
+                    refreshRegistryBackups(rows, statusLabel);
                     statusLabel.setText("Backup session deleted.");
                 });
             } catch (Exception e) {
@@ -974,13 +1045,106 @@ public class BackupRestoreTabView extends BorderPane {
     }
 
     private static Path resolveRegistryBackupPath(String filename) throws IOException {
-        Path base = AppPaths.backupsRoot().resolve("cleanup-backups");
         String cleanName = filename.endsWith("/") ? filename.substring(0, filename.length() - 1) : filename;
-        Path filePath = base.resolve(cleanName).normalize();
-        if (!filePath.startsWith(base)) {
+        // Reject traversal segments up front before resolving against any root.
+        if (cleanName.contains("..") || cleanName.contains("/") || cleanName.contains("\\")) {
+            throw new IOException("Invalid backup path: " + filename);
+        }
+        for (Path base : registryBackupsRoots()) {
+            Path filePath = base.resolve(cleanName).normalize();
+            if (!filePath.startsWith(base)) {
+                continue;
+            }
+            if (Files.isDirectory(filePath)) {
+                return filePath;
+            }
+        }
+        // Fall back to primary for a clear missing-dir error downstream.
+        Path primary = registryBackupsRoots().get(0);
+        Path filePath = primary.resolve(cleanName).normalize();
+        if (!filePath.startsWith(primary)) {
             throw new IOException("Invalid backup path: " + filename);
         }
         return filePath;
+    }
+
+    /**
+     * All locations that may hold registry sessions: settings-aware custom
+     * dir first, then portable and legacy fallbacks. Listing all three fixes
+     * the split-brain where driver backups honored the custom directory but
+     * registry backups did not.
+     */
+    private static List<Path> registryBackupsRoots() {
+        java.util.LinkedHashSet<Path> roots = new java.util.LinkedHashSet<>();
+        try {
+            com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
+            Path custom = AppPaths.backupsRoot(s).resolve("cleanup-backups").toAbsolutePath().normalize();
+            roots.add(custom);
+        } catch (Exception ignored) {}
+        try {
+            roots.add(AppPaths.backupsRoot().resolve("cleanup-backups").toAbsolutePath().normalize());
+        } catch (Exception ignored) {}
+        try {
+            roots.add(AppPaths.legacyBackupsRoot().resolve("cleanup-backups").toAbsolutePath().normalize());
+        } catch (Exception ignored) {}
+        return new ArrayList<>(roots);
+    }
+
+    private static Path registryBackupsBaseForWrite() {
+        try {
+            com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
+            return AppPaths.backupsRoot(s).resolve("cleanup-backups");
+        } catch (Exception ignored) {}
+        return AppPaths.backupsRoot().resolve("cleanup-backups");
+    }
+
+    /**
+     * Collision-proof session dir: millis + random suffix so two backups in
+     * the same second never share (and overwrite) one directory.
+     */
+    private static Path newUniqueRegistryBackupDir(Path base, String prefix) throws IOException {
+        String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS").format(new Date());
+        for (int i = 0; i < 10; i++) {
+            String rand = String.format("%04x", java.util.concurrent.ThreadLocalRandom.current().nextInt(0x10000));
+            Path candidate = base.resolve(prefix + stamp + "-" + rand);
+            if (!Files.exists(candidate)) {
+                return candidate;
+            }
+            stamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS").format(new Date());
+        }
+        return base.resolve(prefix + stamp + "-" + java.util.UUID.randomUUID().toString().substring(0, 8));
+    }
+
+    /**
+     * Best-effort export of the current autostart/SharedDLLs state before a
+     * registry merge, so the restore can be undone. Never throws.
+     */
+    private static void exportCurrentRegistryForSafety(Path dir) {
+        String[] keys = {
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+                "HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServices",
+                "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs"
+        };
+        for (String key : keys) {
+            try {
+                String safeName = key.replace('\\', '_').replace(':', '_');
+                Path out = dir.resolve("pre-restore_" + safeName + ".reg");
+                ProcessBuilder pb = new ProcessBuilder("reg", "export", key, out.toString(), "/y");
+                pb.redirectErrorStream(true);
+                Process p = ProcessManager.start(pb);
+                boolean finished = p.waitFor(60, TimeUnit.SECONDS);
+                if (!finished) {
+                    p.destroyForcibly();
+                    try { Files.deleteIfExists(out); } catch (Exception ignored) {}
+                } else if (p.exitValue() != 0) {
+                    try { Files.deleteIfExists(out); } catch (Exception ignored) {}
+                }
+            } catch (Exception ignored) {}
+        }
     }
 
 }

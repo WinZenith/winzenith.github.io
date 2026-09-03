@@ -6,9 +6,11 @@ public class InstalledApp implements Comparable<InstalledApp> {
     private final String version;
     private final String installLocation;
     private final String uninstallString;
+    private final String quietUninstallString;
     private final String registryKeyPath;
     private final boolean win32;
     private final String appxPackageFullName;
+    private final String appxPackageName;
     private final String registryHive;
     private final String installDate;
     private final int estimatedSize;
@@ -18,14 +20,32 @@ public class InstalledApp implements Comparable<InstalledApp> {
                         String uninstallString, String registryKeyPath, boolean win32,
                         String appxPackageFullName, String registryHive,
                         String installDate, int estimatedSize, String architecture) {
+        this(name, publisher, version, installLocation, uninstallString, "", registryKeyPath,
+                win32, appxPackageFullName, registryHive, installDate, estimatedSize, architecture);
+    }
+
+    public InstalledApp(String name, String publisher, String version, String installLocation,
+                        String uninstallString, String quietUninstallString, String registryKeyPath, boolean win32,
+                        String appxPackageFullName, String registryHive,
+                        String installDate, int estimatedSize, String architecture) {
+        this(name, publisher, version, installLocation, uninstallString, quietUninstallString, registryKeyPath,
+                win32, appxPackageFullName, "", registryHive, installDate, estimatedSize, architecture);
+    }
+
+    public InstalledApp(String name, String publisher, String version, String installLocation,
+                        String uninstallString, String quietUninstallString, String registryKeyPath, boolean win32,
+                        String appxPackageFullName, String appxPackageName, String registryHive,
+                        String installDate, int estimatedSize, String architecture) {
         this.name = name != null ? name.trim() : "";
         this.publisher = publisher != null ? publisher.trim() : "";
         this.version = version != null ? version.trim() : "";
         this.installLocation = installLocation != null ? installLocation.trim() : "";
         this.uninstallString = uninstallString != null ? uninstallString.trim() : "";
+        this.quietUninstallString = quietUninstallString != null ? quietUninstallString.trim() : "";
         this.registryKeyPath = registryKeyPath != null ? registryKeyPath.trim() : "";
         this.win32 = win32;
         this.appxPackageFullName = appxPackageFullName != null ? appxPackageFullName.trim() : "";
+        this.appxPackageName = appxPackageName != null ? appxPackageName.trim() : "";
         this.registryHive = registryHive != null ? registryHive.trim() : "";
         this.installDate = installDate != null ? installDate.trim() : "";
         this.estimatedSize = estimatedSize;
@@ -44,14 +64,38 @@ public class InstalledApp implements Comparable<InstalledApp> {
     public String getVersion() { return version; }
     public String getInstallLocation() { return installLocation; }
     public String getUninstallString() { return uninstallString; }
+    public String getQuietUninstallString() { return quietUninstallString; }
+    public boolean hasQuietUninstallString() { return quietUninstallString != null && !quietUninstallString.isBlank(); }
+    /**
+     * Returns the command to run. Interactive (UninstallString) by default;
+     * quiet only when explicitly requested and available. Silent uninstall
+     * must never run without user consent. Falls back to whichever command
+     * exists when only one is present.
+     */
+    public String getEffectiveUninstallString(boolean preferQuiet) {
+        if (preferQuiet && hasQuietUninstallString()) return quietUninstallString;
+        if (uninstallString != null && !uninstallString.isBlank()) return uninstallString;
+        return quietUninstallString;
+    }
     public String getRegistryKeyPath() { return registryKeyPath; }
     public boolean isWin32() { return win32; }
     public String getAppxPackageFullName() { return appxPackageFullName; }
+    public String getAppxPackageName() { return appxPackageName; }
     public String getRegistryHive() { return registryHive; }
     public String getInstallDate() { return installDate; }
     public int getEstimatedSize() { return estimatedSize; }
     public String getArchitecture() { return architecture; }
-    public boolean hasUninstallString() { return uninstallString != null && !uninstallString.isBlank(); }
+    public boolean hasUninstallString() { return (uninstallString != null && !uninstallString.isBlank()) || hasQuietUninstallString(); }
+    public boolean hasAppxIdentity() { return appxPackageFullName != null && !appxPackageFullName.isBlank(); }
+    /**
+     * Whether the normal Uninstall action can run for this entry: Win32 needs an
+     * uninstall command, Store apps need a package identity. Used to disable the
+     * action instead of letting it fail unconditionally.
+     */
+    public boolean canUninstall() {
+        if (win32) return hasUninstallString();
+        return hasAppxIdentity();
+    }
 
     @Override
     public int compareTo(InstalledApp other) {

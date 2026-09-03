@@ -15,6 +15,7 @@ try {
     $session = New-Object -ComObject Microsoft.Update.Session
     $searcher = $session.CreateUpdateSearcher()
     $toInstall = New-Object -ComObject Microsoft.Update.UpdateColl
+    Write-Output "Searching for matching Windows Update(s)..."
     foreach ($id in $UpdateIds) {
         $criteria = "UpdateID='$id'"
         $result = $searcher.Search($criteria)
@@ -27,7 +28,9 @@ try {
         exit 1
     }
 
-    # Download phase
+    # Download phase (progress lines are consumed by the Java streaming UI; the final
+    # JSON object on the last line carries the machine-readable result).
+    Write-Output "Downloading update(s)... (this can take a long time for cumulative updates)"
     $downloader = $session.CreateUpdateDownloader()
     $downloader.Updates = $toInstall
     $downloadResult = $downloader.Download()
@@ -35,6 +38,7 @@ try {
         [Console]::Error.WriteLine("Download failed: ResultCode=$([int]$downloadResult.ResultCode)")
         exit 2
     }
+    Write-Output "Download complete. Installing update(s)... (do not close; this can take a long time)"
 
     # Install phase
     $installer = $session.CreateUpdateInstaller()

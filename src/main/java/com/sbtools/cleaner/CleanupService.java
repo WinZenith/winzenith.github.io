@@ -109,6 +109,8 @@ public class CleanupService {
             Throwable cause = ce.getCause();
             if (cause instanceof java.util.concurrent.TimeoutException) {
                 AppLogger.warning("Synchronous scan timed out after " + SCAN_OVERALL_TIMEOUT_SECONDS + "s");
+                if (token != null) token.cancel();
+                for (CompletableFuture<?> f : futures) { try { f.cancel(true); } catch (Exception ignored) {} }
                 for (CleanupRow r : rows) {
                     if (r.getScanStatus() == CleanupRow.ScanStatus.PENDING || r.getScanStatus() == CleanupRow.ScanStatus.SCANNING) {
                         r.setSizeOrCountText("Timed out");
@@ -120,6 +122,8 @@ public class CleanupService {
                 AppLogger.warning("Synchronous scan failed: " + (cause != null ? cause.getMessage() : ce.getMessage()));
             }
         } catch (java.util.concurrent.CancellationException ce) {
+            if (token != null) token.cancel();
+            for (CompletableFuture<?> f : futures) { try { f.cancel(true); } catch (Exception ignored) {} }
             AppLogger.warning("Synchronous scan canceled: " + ce.getMessage());
         } catch (Exception e) {
             AppLogger.warning("Synchronous scan failed: " + e.getMessage());
@@ -159,8 +163,7 @@ public class CleanupService {
 
         Path backupRoot = null;
         if (registryBackup) {
-            backupRoot = AppPaths.backupsRoot().resolve("cleanup-backups")
-                    .resolve(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")));
+            backupRoot = newUniqueBackupRoot();
         }
 
         for (CleanupRow row : selectedRows) {
@@ -175,7 +178,11 @@ public class CleanupService {
                 long cleaned = cleanCategory(row.getCategory(), registryBackup ? backupRoot : null, token);
                 totalBytes += cleaned;
                 if (cleaned == 0) {
-                    totalItems += 0;
+                    if (scannedBytes == 0 && scannedItems > 0) {
+                        totalItems += scannedItems;
+                    } else {
+                        totalItems += 0;
+                    }
                 } else if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
                     totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
                 } else {
@@ -348,101 +355,104 @@ public class CleanupService {
         }
 
         final Path backupRoot = registryBackup
-                ? AppPaths.backupsRoot().resolve("cleanup-backups")
-                        .resolve(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")))
+                ? newUniqueBackupRoot()
                 : null;
 
         ExecutorService executor = AppExecutors.cleanPool();
-        java.util.List<CompletableFuture<Long>> futures = new java.util.ArrayList<>();
+        // Sequential execution: categories may overlap on disk (%TEMP%, servicing
+        // state) and must not run concurrently (DISM vs SoftwareDistribution,
+        // concurrent walk+delete double-counts). One worker iterates in order.
+        java.util.Map<Integer, Long> cleanedByIndex = new java.util.concurrent.ConcurrentHashMap<>();
         java.util.Map<Integer, String> taskErrorMap = new java.util.concurrent.ConcurrentHashMap<>();
-        for (int idx = 0; idx < tasks.size(); idx++) {
-            final int taskIdx = idx;
-            final CleanupRow taskRow = tasks.get(idx);
-            CompletableFuture<Long> f = CompletableFuture.supplyAsync(() -> {
+
+        CompletableFuture<CleanSummary> finalFuture = CompletableFuture.supplyAsync(() -> {
+            boolean wasCanceled = false;
+            for (int idx = 0; idx < tasks.size(); idx++) {
+                final CleanupRow taskRow = tasks.get(idx);
                 if (token.isCancelled()) {
+                    wasCanceled = true;
+                    cleanedByIndex.put(idx, 0L);
                     if (onProgress != null) onProgress.run();
-                    return 0L;
+                    continue;
                 }
                 try {
-                    return cleanCategory(taskRow.getCategory(), backupRoot, token);
+                    long cleaned = cleanCategory(taskRow.getCategory(), backupRoot, token);
+                    cleanedByIndex.put(idx, cleaned);
                 } catch (java.util.concurrent.CancellationException ce) {
                     // Cooperative cancel — not an error
-                    return 0L;
+                    wasCanceled = true;
+                    cleanedByIndex.put(idx, 0L);
                 } catch (Exception e) {
                     String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
                     String err = taskRow.getCategory().getDisplayName() + ": " + msg;
-                    taskErrorMap.put(taskIdx, err);
+                    taskErrorMap.put(idx, err);
                     AppLogger.warning("Clean failed for " + err);
-                    return 0L;
+                    cleanedByIndex.put(idx, 0L);
                 } finally {
                     if (onProgress != null) onProgress.run();
                 }
-            }, executor);
-            futures.add(f);
-        }
+            }
+            long totalBytes = 0;
+            int totalItems = 0;
+            java.util.Map<CleanupCategory, Long> perCategory = new java.util.HashMap<>();
+            java.util.List<String> errors = new java.util.ArrayList<>();
+            boolean canceled = wasCanceled || token.isCancelled();
+            for (int i = 0; i < tasks.size(); i++) {
+                long cleaned = cleanedByIndex.getOrDefault(i, 0L);
+                CleanupRow r = tasks.get(i);
+                String taskErr = taskErrorMap.get(i);
+                if (taskErr != null) {
+                    errors.add(taskErr);
+                } else if (cleaned == 0 && r.getTotalBytes() > 0 && !canceled) {
+                    // Only generic if no specific error captured
+                    errors.add(r.getCategory().getDisplayName() + ": nothing was cleaned (files may be locked or in use)");
+                }
+                totalBytes += cleaned;
+                int scannedItems = r.getItemCount();
+                long scannedBytes = r.getTotalBytes();
+                if (cleaned == 0) {
+                    // Zero-byte categories (registry entries, empty folders) report
+                    // item counts with no bytes — credit scanned items on success.
+                    if (taskErr == null && !canceled && scannedBytes == 0 && scannedItems > 0) {
+                        totalItems += scannedItems;
+                    } else {
+                        totalItems += 0;
+                    }
+                } else if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
+                    totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
+                } else {
+                    totalItems += scannedItems;
+                }
+                perCategory.put(r.getCategory(), cleaned);
+            }
+            return new CleanSummary(totalBytes, totalItems, perCategory, errors);
+        }, executor);
 
-        long effectiveTimeoutTmp = CLEAN_OVERALL_TIMEOUT_SECONDS;
+        long timeoutSumTmp = 0;
         for (CleanupRow tr : tasks) {
             try {
                 CleanerExtension ext = CleanerRegistry.get(tr.getCategory());
-                if (ext != null) effectiveTimeoutTmp = Math.max(effectiveTimeoutTmp, ext.getCleanTimeoutSeconds());
-            } catch (Exception ignored) {}
+                timeoutSumTmp += (ext != null ? ext.getCleanTimeoutSeconds() : 120);
+            } catch (Exception ignored) { timeoutSumTmp += 120; }
         }
-        final long effectiveTimeout = effectiveTimeoutTmp;
-        CompletableFuture<CleanSummary> finalFuture = CompletableFuture
-                .allOf(futures.toArray(new CompletableFuture[0]))
-                .orTimeout(effectiveTimeout, java.util.concurrent.TimeUnit.SECONDS)
-                .thenApply(v -> {
-                    long totalBytes = 0;
-                    int totalItems = 0;
-                    java.util.Map<CleanupCategory, Long> perCategory = new java.util.HashMap<>();
-                    java.util.List<String> errors = new java.util.ArrayList<>();
-                    boolean wasCanceled = token.isCancelled();
-                    for (int i = 0; i < tasks.size(); i++) {
-                        long cleaned = 0;
-                        try {
-                            cleaned = futures.get(i).join();
-                        } catch (java.util.concurrent.CompletionException ce) {
-                            String msg = ce.getCause() != null ? ce.getCause().getMessage() : ce.getMessage();
-                            errors.add(tasks.get(i).getCategory().getDisplayName() + ": " + (msg != null ? msg : "unknown error"));
-                            continue;
-                        }
-                        CleanupRow r = tasks.get(i);
-                        String taskErr = taskErrorMap.get(i);
-                        if (taskErr != null) {
-                            errors.add(taskErr);
-                        } else if (cleaned == 0 && r.getTotalBytes() > 0 && !wasCanceled) {
-                            // Only generic if no specific error captured
-                            errors.add(r.getCategory().getDisplayName() + ": nothing was cleaned (files may be locked or in use)");
-                        }
-                        totalBytes += cleaned;
-                        int scannedItems = r.getItemCount();
-                        long scannedBytes = r.getTotalBytes();
-                        if (cleaned == 0) {
-                            totalItems += 0;
-                        } else if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
-                            totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
-                        } else {
-                            totalItems += scannedItems;
-                        }
-                        perCategory.put(r.getCategory(), cleaned);
-                    }
-                    return new CleanSummary(totalBytes, totalItems, perCategory, errors);
-                });
-        finalFuture.whenComplete((r, ex) -> {
+        // Sequential wall-clock ~= sum of per-cleaner budgets; keep a sane cap.
+        final long effectiveTimeout = Math.min(Math.max(CLEAN_OVERALL_TIMEOUT_SECONDS, timeoutSumTmp + 60), 5400);
+        CompletableFuture<CleanSummary> timedFuture = finalFuture
+                .orTimeout(effectiveTimeout, java.util.concurrent.TimeUnit.SECONDS);
+        timedFuture.whenComplete((r, ex) -> {
             if (ex != null) {
                 Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
                 if (cause instanceof java.util.concurrent.TimeoutException || ex instanceof java.util.concurrent.TimeoutException) {
                     if (token != null) token.cancel();
-                    for (CompletableFuture<Long> f : futures) { try { f.cancel(true); } catch (Exception ignored) {} }
+                    timedFuture.cancel(true);
                     AppLogger.warning("Clean timed out after " + effectiveTimeout + "s for " + tasks.size() + " categories");
                 }
             }
         });
 
         CancelableCompletableFuture<CleanSummary> result = new CancelableCompletableFuture<>(
-                new java.util.ArrayList<>(futures), executor, false);
-        result.completeFrom(finalFuture);
+                java.util.List.of(timedFuture), executor, false);
+        result.completeFrom(timedFuture);
         return result;
     }
 
@@ -461,5 +471,23 @@ public class CleanupService {
 
     public static String formatBytes(long bytes) {
         return com.sbtools.util.FormatUtils.formatBytes(bytes);
+    }
+
+    /**
+     * Settings-aware, collision-proof backup root: honors the custom backup
+     * directory (like driver backups do) and appends millis + random suffix
+     * so two cleans in the same second never share one directory.
+     */
+    private static Path newUniqueBackupRoot() {
+        Path parent;
+        try {
+            com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
+            parent = AppPaths.backupsRoot(s).resolve("cleanup-backups");
+        } catch (Exception ignored) {
+            parent = AppPaths.backupsRoot().resolve("cleanup-backups");
+        }
+        String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS"));
+        String rand = String.format("%04x", java.util.concurrent.ThreadLocalRandom.current().nextInt(0x10000));
+        return parent.resolve(stamp + "-" + rand);
     }
 }

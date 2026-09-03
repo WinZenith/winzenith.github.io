@@ -11,11 +11,16 @@ import java.util.Locale;
 /**
  * Safety gate for duplicate handling.
  * <p>
- * Guarantees that system-critical locations are never scanned or deleted.
- * User requested scope: any non-system folder on any drive is allowed.
- * Everything under {@code <drive>:\Windows}, {@code WindowsApps},
+ * Guarantees that system-critical and application locations are never scanned or deleted.
+ * User requested scope: user data folders on any drive are allowed.
+ * Everything under {@code <drive>:\Windows}, {@code <drive>:\Program Files},
+ * {@code <drive>:\Program Files (x86)}, {@code <drive>:\ProgramData},
+ * any {@code AppData} folder, {@code WindowsApps},
  * {@code System Volume Information}, {@code $Recycle.Bin}, {@code Recovery},
  * {@code EFI}, {@code Boot} is treated as protected.
+ * <p>
+ * Rationale: identical DLLs/EXEs/configs in different application folders are
+ * all required at their locations — deleting "duplicates" there breaks apps.
  */
 public final class DuplicateSafety {
 
@@ -90,6 +95,17 @@ public final class DuplicateSafety {
                 String wAppsX86 = rootPath + "program files (x86)\\windowsapps";
                 if (s.equals(wAppsX86) || s.startsWith(wAppsX86 + "\\")) return true;
 
+                // <drive>:\Program Files and <drive>:\Program Files (x86) in full:
+                // shared DLLs/EXEs across app folders are all required — never delete.
+                String pf = rootPath + "program files";
+                if (s.equals(pf) || s.startsWith(pf + "\\")) return true;
+                String pf86 = rootPath + "program files (x86)";
+                if (s.equals(pf86) || s.startsWith(pf86 + "\\")) return true;
+
+                // <drive>:\ProgramData — machine-wide app state, same reason.
+                String pdata = rootPath + "programdata";
+                if (s.equals(pdata) || s.startsWith(pdata + "\\")) return true;
+
                 // System Volume Information
                 String svi = rootPath + "system volume information";
                 if (s.equals(svi) || s.startsWith(svi + "\\")) return true;
@@ -135,6 +151,18 @@ public final class DuplicateSafety {
             // Also protect if path contains "\windowsapps\" anywhere (can be relocated)
             if (s.contains("\\windowsapps\\") || s.endsWith("\\windowsapps")) return true;
             if (s.contains("\\system volume information\\")) return true;
+            // AppData anywhere (normally <drive>:\Users\<user>\AppData\...,
+            // but also relocated/custom). Per-user app installs, packages and
+            // state live here — deleting "duplicates" breaks apps.
+            if (s.contains("\\appdata\\") || s.endsWith("\\appdata")) return true;
+            // Relocated Program Files / ProgramData outside File.listRoots
+            // enumeration edge (e.g., mounted volumes, ramdisk, UNC shares).
+            if (s.contains("\\program files\\windowsapps\\") || s.endsWith("\\program files\\windowsapps")) return true;
+            if (s.contains("\\program files (x86)\\") || s.endsWith("\\program files (x86)")) return true;
+            // Bare "\program files\" / "\programdata\" segments cover relocated
+            // installs not under a File.listRoots drive letter.
+            if (s.contains("\\program files\\") || s.endsWith("\\program files")) return true;
+            if (s.contains("\\programdata\\") || s.endsWith("\\programdata")) return true;
 
         } catch (Exception e) {
             AppLogger.warning("DuplicateSafety.isProtected check failed for " + path + ": " + e.getMessage());

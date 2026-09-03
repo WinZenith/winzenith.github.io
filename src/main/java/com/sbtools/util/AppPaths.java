@@ -116,12 +116,18 @@ public final class AppPaths {
             if (java.nio.file.Files.isDirectory(dir)) {
                 return java.nio.file.Files.isWritable(dir);
             }
-            Path parent = dir.getParent();
-            if (parent != null && java.nio.file.Files.isDirectory(parent)) {
-                return java.nio.file.Files.isWritable(parent);
+            // Walk up to the nearest existing ancestor and test writability.
+            // Never assume writable for non-existent paths (Program Files /
+            // protected exe dirs would otherwise be picked as portable root
+            // and fail later with no fallback).
+            Path probe = dir;
+            while (probe != null && !java.nio.file.Files.exists(probe)) {
+                probe = probe.getParent();
             }
-            // Heuristic: try to create dir then check
-            return true; // assume portable stick is writable, will fail later and fallback
+            if (probe != null && java.nio.file.Files.isDirectory(probe)) {
+                return java.nio.file.Files.isWritable(probe);
+            }
+            return false;
         } catch (Exception e) {
             return false;
         }

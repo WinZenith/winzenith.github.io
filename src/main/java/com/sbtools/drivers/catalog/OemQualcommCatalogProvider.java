@@ -25,25 +25,10 @@ public class OemQualcommCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String fetchLatestVersion(InstalledDriver driver) {
-        AppLogger.debug("Qualcomm: Fetching latest version for " + driver.friendlyName());
-        
-        // Qualcomm support page
-        String body = httpGet("https://www.qualcomm.com/products");
-        String v = extractVersion(body, VERSION);
-        
-        if (v == null) {
-            // Try alternative URL for drivers
-            body = httpGet("https://www.qualcomm.com/support");
-            v = extractVersion(body, VERSION);
-        }
-        
-        if (v != null) {
-            AppLogger.debug("Qualcomm: Found version " + v + " for " + driver.friendlyName());
-        } else {
-            AppLogger.debug("Qualcomm: Could not find version for " + driver.friendlyName());
-        }
-        
-        return v;
+        // Catalog-only: generic support-homepage first-number regex matches
+        // marketing/JS versions, not the device driver (wrong-version risk).
+        AppLogger.debug("Qualcomm: Legacy web scraping disabled (use catalog database). Skipping.");
+        return null;
     }
 
     @Override

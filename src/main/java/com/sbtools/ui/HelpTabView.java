@@ -94,7 +94,7 @@ public class HelpTabView extends VBox {
                 + "Click Add... to choose folder(s) on any drive (e.g., Documents, Downloads, Photos), then click Scan. "
                 + "Results are grouped by identical content: the safest keeper (newest on a non-system drive preferred) is shown as the keeper, "
                 + "and older copies are listed in the detail pane where you can uncheck individual files. "
-                + "System folders on any drive (C:\\Windows, WindowsApps, System Volume Information, $Recycle.Bin, Recovery, EFI, Boot) "
+                + "System and app folders on any drive (Windows, Program Files, ProgramData, AppData, WindowsApps, System Volume Information, $Recycle.Bin, Recovery, EFI, Boot) "
                 + "are automatically excluded and cannot be added. "
                 + "Select groups and per-file copies, then click Clean Selected. You can move files to the Recycle Bin (recommended, recoverable) "
                 + "or delete permanently (requires typing DELETE). A System Restore point can be created automatically if enabled in settings. "

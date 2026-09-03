@@ -46,6 +46,13 @@ public class StartupTabView extends BorderPane {
     private static final String TAB_TASKS = "Scheduled tasks";
     private static final String TAB_SERVICES = "Windows services";
 
+    private static final java.util.Set<String> CRITICAL_SERVICE_NAMES = java.util.Set.of(
+            "schedule", "eventlog", "rpcss", "rpceptmapper", "dcomlaunch",
+            "plugplay", "power", "brokerinfrastructure", "coremessagingregistrar",
+            "lsm", "samss", "winmgmt", "cryptsvc", "dhcp", "dnscache",
+            "mpssvc", "trustedinstaller", "gpsvc", "wcmsvc", "lanmanserver",
+            "lanmanworkstation", "profsvc", "sens", "themes", "windefend");
+
     private final StartupService service = new StartupService();
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
@@ -468,7 +475,7 @@ public class StartupTabView extends BorderPane {
                 List<StartupItem> taskItemsResult = allItems.stream().filter(i -> i.getType() == StartupItemType.TASK).collect(Collectors.toList());
                 List<StartupItem> svcItems = allItems.stream().filter(i -> i.getType() == StartupItemType.SERVICE).collect(Collectors.toList());
 
-                double totalMs = allItems.stream().mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
+                double totalMs = allItems.stream().filter(StartupItem::isEnabled).mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
                 final String formattedTotal = StartupImpactService.formatImpact(totalMs);
                 Platform.runLater(() -> {
                     registryItems.setAll(regItems);
@@ -569,11 +576,51 @@ public class StartupTabView extends BorderPane {
 
         if (selected.size() == 1) {
             StartupItem item = selected.get(0);
-            String action = item.isEnabled() ? "disable" : "enable";
+            // Guard critical system services even for single toggle
+            if (item.getType() == StartupItemType.SERVICE && item.isEnabled()
+                    && CRITICAL_SERVICE_NAMES.contains(item.getName().toLowerCase(java.util.Locale.ROOT))) {
+                Alert critical = new Alert(Alert.AlertType.WARNING);
+                critical.setTitle("Critical System Service");
+                critical.setHeaderText("Disabling critical service: " + item.getName());
+                critical.setContentText("This service is required for Windows stability/boot.\n"
+                        + "Disabling it may render the system unbootable or unstable.\n\n"
+                        + "Are you sure you want to disable \"" + item.getName() + "\"?");
+                critical.initModality(Modality.APPLICATION_MODAL);
+                if (critical.showAndWait().orElse(null) != ButtonType.OK) {
+                    return;
+                }
+            } else {
+                String action = item.isEnabled() ? "disable" : "enable";
+                Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+                confirm.setTitle("Confirm Toggle");
+                confirm.setHeaderText("Change startup item status");
+                confirm.setContentText("Are you sure you want to " + action + " \"" + item.getName() + "\"?");
+                confirm.initModality(Modality.APPLICATION_MODAL);
+                if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
+                    return;
+                }
+            }
+        } else {
+            // Bulk toggle always requires confirmation
+            List<StartupItem> criticalToDisable = selected.stream()
+                    .filter(i -> i.getType() == StartupItemType.SERVICE && i.isEnabled()
+                            && CRITICAL_SERVICE_NAMES.contains(i.getName().toLowerCase(java.util.Locale.ROOT)))
+                    .toList();
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-            confirm.setTitle("Confirm Toggle");
-            confirm.setHeaderText("Change startup item status");
-            confirm.setContentText("Are you sure you want to " + action + " \"" + item.getName() + "\"?");
+            confirm.setTitle("Confirm Bulk Toggle");
+            confirm.setHeaderText("Toggle " + selected.size() + " startup item(s)?");
+            StringBuilder msg = new StringBuilder("Are you sure you want to toggle the status of ")
+                    .append(selected.size()).append(" item(s)?\n");
+            // Preview first few names
+            List<String> preview = selected.stream().limit(5).map(StartupItem::getName).toList();
+            msg.append(String.join(", ", preview));
+            if (selected.size() > 5) msg.append(", ...");
+            if (!criticalToDisable.isEmpty()) {
+                msg.append("\n\nWARNING: This includes critical system service(s): ");
+                msg.append(criticalToDisable.stream().map(StartupItem::getName).collect(java.util.stream.Collectors.joining(", ")));
+                msg.append(".\nDisabling them may render the system unbootable.");
+            }
+            confirm.setContentText(msg.toString());
             confirm.initModality(Modality.APPLICATION_MODAL);
             if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
                 return;
@@ -608,6 +655,7 @@ public class StartupTabView extends BorderPane {
                 applyTaskFilter();
                 applyServiceFilter();
                 getSelectedTable().refresh();
+                updateBootDelayLabel();
                 if (errors.isEmpty()) {
                     statusLabel.setText("Toggled " + itemsToToggle.size() + " item(s) successfully.");
                 } else {
@@ -620,7 +668,20 @@ public class StartupTabView extends BorderPane {
         });
     }
 
+    private void updateBootDelayLabel() {
+        double totalMs = java.util.stream.Stream.of(registryItems, taskItems, serviceItems)
+                .flatMap(java.util.List::stream)
+                .filter(StartupItem::isEnabled)
+                .mapToDouble(StartupItem::getEstimatedBootImpactMs)
+                .sum();
+        bootDelayLabel.setText("Total estimated boot delay: " + StartupImpactService.formatImpact(totalMs));
+    }
+
     private void triggerDelete() {
+        // Windows services cannot be deleted — block keyboard-driven deletes on that tab
+        if (getSelectedTable() == serviceTable) {
+            return;
+        }
         List<StartupItem> selected = new ArrayList<>(getSelectedTable().getSelectionModel().getSelectedItems());
         if (selected.isEmpty() || busy.get()) return;
 
@@ -686,6 +747,7 @@ public class StartupTabView extends BorderPane {
                     taskItems.removeAll(toRemoveTask);
                     applyRegistryFilter();
                     applyTaskFilter();
+                    updateBootDelayLabel();
                     if (errors.isEmpty()) {
                         int removed = toRemoveRegistry.size() + toRemoveTask.size();
                         statusLabel.setText("Deleted " + removed + " item(s) successfully.");
@@ -802,16 +864,40 @@ public class StartupTabView extends BorderPane {
 
         restoreBtn.setOnAction(e -> {
             StartupBackupEntry selected = backupTable.getSelectionModel().getSelectedItem();
-            if (selected == null) return;
-            try {
-                service.restoreBackup(selected);
-                backups.remove(selected);
-                new Alert(Alert.AlertType.INFORMATION, "Startup item restored successfully.").showAndWait();
-                scan();
-            } catch (Exception ex) {
-                AppLogger.error("Failed to restore startup item", ex);
-                new Alert(Alert.AlertType.ERROR, "Failed to restore backup:\n" + ex.getMessage()).showAndWait();
-            }
+            if (selected == null || busy.get()) return;
+            restoreBtn.setDisable(true);
+            deleteBackupBtn.setDisable(true);
+            backupTable.setDisable(true);
+            restoreBtn.setText("Restoring...");
+            busy.set(true);
+            progress.setVisible(true);
+            statusLabel.setText("Restoring backup: " + selected.getName() + "...");
+            executor.execute(() -> {
+                try {
+                    service.restoreBackup(selected);
+                    Platform.runLater(() -> {
+                        backups.remove(selected);
+                        restoreBtn.setText("Restore Selected");
+                        backupTable.setDisable(false);
+                        busy.set(false);
+                        progress.setVisible(false);
+                        new Alert(Alert.AlertType.INFORMATION, "Startup item restored successfully.").showAndWait();
+                        scan();
+                    });
+                } catch (Exception ex) {
+                    AppLogger.error("Failed to restore startup item", ex);
+                    Platform.runLater(() -> {
+                        restoreBtn.setText("Restore Selected");
+                        backupTable.setDisable(false);
+                        restoreBtn.setDisable(false);
+                        deleteBackupBtn.setDisable(backupTable.getSelectionModel().getSelectedItem() == null);
+                        busy.set(false);
+                        progress.setVisible(false);
+                        statusLabel.setText("Restore failed.");
+                        new Alert(Alert.AlertType.ERROR, "Failed to restore backup:\n" + ex.getMessage()).showAndWait();
+                    });
+                }
+            });
         });
 
         deleteBackupBtn.setOnAction(e -> {

@@ -38,6 +38,12 @@ public class ThumbnailCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
         if (localAppData != null) {
@@ -45,10 +51,11 @@ public class ThumbnailCacheCleaner implements CleanerExtension {
             if (Files.isDirectory(explorerDir)) {
                 try (Stream<Path> files = Files.list(explorerDir)) {
                     for (Path f : (Iterable<Path>) files::iterator) {
+                        if (token != null && token.isCancelled()) break;
                         if (Files.isRegularFile(f)) {
                             String name = f.getFileName().toString().toLowerCase();
                             if (name.startsWith("thumbcache_")) {
-                                long size = Files.size(f); CleanerUtils.deletePermanently(f); if (!Files.exists(f)) cleaned += size;
+                                long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size;
                             }
                         }
                     }

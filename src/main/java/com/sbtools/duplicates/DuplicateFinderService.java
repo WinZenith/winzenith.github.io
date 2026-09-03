@@ -390,97 +390,246 @@ public class DuplicateFinderService {
     }
 
     public CleanResult clean(List<DuplicateFileRow> selectedRows) {
-        return clean(selectedRows, false);
+        return clean(selectedRows, false, null, null);
     }
 
     public CleanResult clean(List<DuplicateFileRow> selectedRows, boolean useRecycleBin) {
+        return clean(selectedRows, useRecycleBin, null, null);
+    }
+
+    /**
+     * Cancellable clean with progress.
+     *
+     * @param progress  accepts (processedFiles, totalFiles), may be null; total is best-effort
+     * @param cancelled when set, stops before the next file/row; already-deleted files stay deleted,
+     *                  remaining files are left untouched and reported via {@link CleanResult#getFailed()}
+     */
+    public CleanResult clean(List<DuplicateFileRow> selectedRows, boolean useRecycleBin,
+                             BiConsumer<Integer, Integer> progress, AtomicBoolean cancelled) {
         int deleted = 0;
         int failed = 0;
         List<DuplicateFileRow> fullyCleanedRows = new ArrayList<>();
 
+        int total = 0;
+        if (selectedRows != null) {
+            for (DuplicateFileRow r : selectedRows) {
+                if (r != null && r.isSelected() && r.getDeletablePaths() != null) {
+                    total += r.getDeletablePaths().size();
+                }
+            }
+        }
+        int processed = 0;
+        boolean wasCancelled = false;
+
+        if (selectedRows == null) return new CleanResult(0, 0, fullyCleanedRows, false);
+
         for (DuplicateFileRow row : selectedRows) {
-            if (!row.isSelected() || row.getDeletablePaths() == null) continue;
+            if (isCancelled(cancelled)) { wasCancelled = true; break; }
+            if (row == null || !row.isSelected() || row.getDeletablePaths() == null) continue;
+
+            // CRITICAL: keeper re-validation (TOCTOU guard). If the keeper is gone,
+            // protected, or no longer matches the scanned checksum, deleting the
+            // remaining copies would destroy the last copy — skip the whole group.
+            if (!isKeeperStillValid(row, cancelled)) {
+                if (isCancelled(cancelled)) { wasCancelled = true; break; }
+                int skipped = row.getDeletablePaths().size();
+                failed += skipped;
+                processed += skipped;
+                if (progress != null) {
+                    try { progress.accept(processed, total); } catch (Exception ignored) {}
+                }
+                continue;
+            }
+
             // Filter deletable paths through safety gate and re-hash validation
             List<String> safeDeletables = new ArrayList<>();
             for (String pathStr : row.getDeletablePaths()) {
+                if (isCancelled(cancelled)) { wasCancelled = true; break; }
                 try {
                     Path p = Paths.get(pathStr);
                     if (DuplicateSafety.isProtected(p)) {
                         AppLogger.warning("Blocked protected delete (safety gate): " + pathStr);
                         failed++;
+                        processed++;
+                        if (progress != null) {
+                            try { progress.accept(processed, total); } catch (Exception ignored) {}
+                        }
                         continue;
                     }
                     if (!Files.exists(toLongPath(p))) {
                         AppLogger.info("File already absent during clean: " + pathStr);
+                        processed++;
+                        if (progress != null) {
+                            try { progress.accept(processed, total); } catch (Exception ignored) {}
+                        }
                         continue;
                     }
                     // Re-hash check: ensure file still matches the scanned checksum; if changed, skip
                     if (row.getChecksumSha256() != null && !row.getChecksumSha256().isBlank()) {
                         try {
-                            String current = hashFileSha256(p);
+                            String current = hashFileSha256(p, cancelled);
+                            if (isCancelled(cancelled)) { wasCancelled = true; break; }
                             if (!row.getChecksumSha256().equalsIgnoreCase(current)) {
                                 AppLogger.warning("Skipped changed file (hash mismatch) : " + pathStr);
                                 failed++;
+                                processed++;
+                                if (progress != null) {
+                                    try { progress.accept(processed, total); } catch (Exception ignored) {}
+                                }
                                 continue;
                             }
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            wasCancelled = true;
+                            break;
                         } catch (Exception he) {
                             AppLogger.warning("Hash check failed for " + pathStr + ": " + he.getMessage() + " — skipping unverified file");
                             failed++;
+                            processed++;
+                            if (progress != null) {
+                                try { progress.accept(processed, total); } catch (Exception ignored) {}
+                            }
                             continue;
                         }
                     }
-                    // Also block system/hidden flagged non-protected? Currently only protected gate blocks; system files inside allowed folders are still allowed
                     safeDeletables.add(pathStr);
                 } catch (Exception e) {
                     AppLogger.warning("Invalid deletable path skipped: " + pathStr + " — " + e.getMessage());
                     failed++;
+                    processed++;
+                    if (progress != null) {
+                        try { progress.accept(processed, total); } catch (Exception ignored) {}
+                    }
                 }
             }
+            if (wasCancelled) break;
             if (safeDeletables.isEmpty()) {
                 // No safe files to delete in this row — do not count as fully cleaned
                 continue;
             }
 
             if (useRecycleBin) {
-                int recycled = moveToRecycleBin(safeDeletables);
+                int recycled = moveToRecycleBin(safeDeletables, cancelled);
+                if (isCancelled(cancelled)) wasCancelled = true;
                 deleted += recycled;
+                processed += safeDeletables.size();
+                if (progress != null) {
+                    try { progress.accept(processed, total); } catch (Exception ignored) {}
+                }
                 int rowFailed = safeDeletables.size() - recycled;
                 failed += rowFailed;
-                // Original row considered fully cleaned only if every original deletable was either already absent or successfully recycled
-                // For safety we base on safeDeletables set
+                // Only verified successes count (moveToRecycleBin verifies via Files.exists).
                 if (recycled == safeDeletables.size()) fullyCleanedRows.add(row);
             } else {
                 boolean rowFullyCleaned = true;
                 for (String path : safeDeletables) {
+                    if (isCancelled(cancelled)) { wasCancelled = true; rowFullyCleaned = false; break; }
                     try {
                         Path p = Paths.get(path);
                         if (DuplicateSafety.isProtected(p)) {
                             AppLogger.warning("Blocked protected permanent delete: " + path);
                             failed++;
+                            processed++;
+                            if (progress != null) {
+                                try { progress.accept(processed, total); } catch (Exception ignored) {}
+                            }
                             rowFullyCleaned = false;
                             continue;
                         }
                         if (Files.deleteIfExists(toLongPath(p))) deleted++;
                         else AppLogger.info("File already absent during clean: " + path);
+                        processed++;
+                        if (progress != null) {
+                            try { progress.accept(processed, total); } catch (Exception ignored) {}
+                        }
                     } catch (Exception e) {
                         AppLogger.warning("Failed to delete duplicate: " + path + " — " + e.getMessage());
                         failed++;
+                        processed++;
+                        if (progress != null) {
+                            try { progress.accept(processed, total); } catch (Exception ignored) {}
+                        }
                         rowFullyCleaned = false;
                     }
                 }
-                if (rowFullyCleaned) fullyCleanedRows.add(row);
+                if (rowFullyCleaned && !isCancelled(cancelled)) fullyCleanedRows.add(row);
+                if (isCancelled(cancelled)) wasCancelled = true;
             }
         }
-        return new CleanResult(deleted, failed, fullyCleanedRows);
+        if (progress != null) {
+            try { progress.accept(processed, total); } catch (Exception ignored) {}
+        }
+        return new CleanResult(deleted, failed, fullyCleanedRows, wasCancelled);
+    }
+
+    private static boolean isCancelled(AtomicBoolean cancelled) {
+        return cancelled != null && cancelled.get();
+    }
+
+    /**
+     * Keeper TOCTOU guard: the keeper must still exist, be unprotected, be a
+     * regular file, and still hash to the scanned checksum. Otherwise deleting
+     * the other copies could destroy the last remaining copy.
+     */
+    private static boolean isKeeperStillValid(DuplicateFileRow row, AtomicBoolean cancelled) {
+        if (row == null || row.getFullPath() == null || row.getFullPath().isBlank()) {
+            AppLogger.warning("Skipping group with missing keeper path");
+            return false;
+        }
+        Path keeper;
+        try {
+            keeper = Paths.get(row.getFullPath());
+        } catch (Exception e) {
+            AppLogger.warning("Skipping group with invalid keeper path: " + row.getFullPath());
+            return false;
+        }
+        if (DuplicateSafety.isProtected(keeper)) {
+            AppLogger.warning("Skipping group: keeper became protected: " + row.getFullPath());
+            return false;
+        }
+        Path effective = toLongPath(keeper);
+        try {
+            if (!Files.exists(effective) || !Files.isRegularFile(effective, LinkOption.NOFOLLOW_LINKS)) {
+                AppLogger.warning("Skipping group: keeper missing (would delete last copy): " + row.getFullPath());
+                return false;
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Skipping group: cannot stat keeper " + row.getFullPath() + " — " + e.getMessage());
+            return false;
+        }
+        String expected = row.getChecksumSha256();
+        if (expected != null && !expected.isBlank()) {
+            try {
+                String current = hashFileSha256(keeper, cancelled);
+                if (!expected.equalsIgnoreCase(current)) {
+                    AppLogger.warning("Skipping group: keeper changed since scan (hash mismatch): " + row.getFullPath());
+                    return false;
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
+            } catch (Exception e) {
+                AppLogger.warning("Skipping group: keeper hash check failed for " + row.getFullPath() + " — " + e.getMessage());
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String hashFileSha256(Path p) throws Exception {
+        return hashFileSha256(p, null);
+    }
+
+    private static String hashFileSha256(Path p, AtomicBoolean cancelled) throws Exception {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         byte[] buf = new byte[8192];
         Path effective = toLongPath(p);
         try (InputStream is = new BufferedInputStream(Files.newInputStream(effective))) {
             int r;
-            while ((r = is.read(buf)) != -1) md.update(buf, 0, r);
+            while ((r = is.read(buf)) != -1) {
+                if (isCancelled(cancelled)) throw new InterruptedException("Cancelled during hash: " + p);
+                md.update(buf, 0, r);
+            }
         }
         return HexFormat.of().formatHex(md.digest());
     }
@@ -532,12 +681,28 @@ public class DuplicateFinderService {
     }
 
     public int moveToRecycleBin(List<String> paths) {
-        if (paths.isEmpty()) return 0;
+        return moveToRecycleBin(paths, null);
+    }
+
+    /**
+     * Moves files to the Recycle Bin. The returned count is VERIFIED via
+     * {@link Files#exists} — never trust the SH return code alone because
+     * FOF_NOERRORUI suppresses per-file errors and bulk multi-string handling
+     * may process only a subset.
+     */
+    public int moveToRecycleBin(List<String> paths, AtomicBoolean cancelled) {
+        if (paths == null || paths.isEmpty()) return 0;
         List<String> validPaths = new ArrayList<>(paths.size());
         for (String p : paths) {
-            Path pathObj = Paths.get(p);
-            if (DuplicateSafety.isProtected(pathObj)) {
-                AppLogger.warning("Blocked protected recycle (safety gate): " + p);
+            if (isCancelled(cancelled)) break;
+            try {
+                Path pathObj = Paths.get(p);
+                if (DuplicateSafety.isProtected(pathObj)) {
+                    AppLogger.warning("Blocked protected recycle (safety gate): " + p);
+                    continue;
+                }
+            } catch (Exception e) {
+                AppLogger.warning("Invalid recycle path skipped: " + p);
                 continue;
             }
             // SHFileOperationW does NOT support long \\?\ paths — do not prefix.
@@ -545,6 +710,7 @@ public class DuplicateFinderService {
             validPaths.add(p);
         }
         if (validPaths.isEmpty()) return 0;
+        if (isCancelled(cancelled)) return 0;
 
         boolean hasLongPath = validPaths.stream().anyMatch(p -> p.length() >= 240);
 
@@ -558,33 +724,64 @@ public class DuplicateFinderService {
         op.fFlags = 0x40 | 0x10 | 0x400; // FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI
 
         int result = Shell32.INSTANCE.SHFileOperation(op);
-        if (result == 0) {
-            if (op.fAnyOperationsAborted) {
-                int successCount = 0;
-                for (String p : paths) {
-                    String check = stripLongPrefix(p);
-                    if (!Files.exists(toLongPath(Paths.get(check)))) successCount++;
+        if (result == 0 && !op.fAnyOperationsAborted && !hasLongPath) {
+            // Verify every file — SH may report success while skipping locked files silently.
+            int verified = countAbsent(validPaths);
+            if (verified < validPaths.size()) {
+                AppLogger.warning("SHFileOperation reported success but only "
+                        + verified + "/" + validPaths.size() + " files are gone — trying PowerShell fallback for the rest");
+                List<String> remaining = listExisting(validPaths);
+                if (!remaining.isEmpty() && !isCancelled(cancelled)) {
+                    verified += recycleViaPowerShell(remaining, cancelled);
                 }
-                return successCount;
             }
-            return validPaths.size();
+            return verified;
+        }
+        if (result == 0 && op.fAnyOperationsAborted) {
+            // User/system aborted partway — count what actually disappeared.
+            return countAbsent(validPaths);
         }
         AppLogger.warning("SHFileOperationW returned " + result + (hasLongPath ? " (contains long path >=240, trying PowerShell fallback)" : ""));
 
         // Fallback for long paths or SH failure — use PowerShell Microsoft.VisualBasic.FileIO (supports recycle via IFileOperation)
-        if (hasLongPath || result != 0) {
-            int fb = recycleViaPowerShell(validPaths);
+        if (!isCancelled(cancelled) && (hasLongPath || result != 0)) {
+            int fb = recycleViaPowerShell(validPaths, cancelled);
             if (fb > 0) {
                 AppLogger.info("PowerShell recycle fallback succeeded for " + fb + "/" + validPaths.size() + " files");
                 return fb;
             }
         }
+        // Even if SH "succeeded" with long paths, verify — anything still present counts as failure.
+        if (result == 0) return countAbsent(validPaths);
         return 0;
     }
 
-    private int recycleViaPowerShell(List<String> paths) {
+    private static int countAbsent(List<String> paths) {
+        int n = 0;
+        for (String p : paths) {
+            try {
+                String check = stripLongPrefix(p);
+                if (!Files.exists(toLongPath(Paths.get(check)))) n++;
+            } catch (Exception ignored) {}
+        }
+        return n;
+    }
+
+    private static List<String> listExisting(List<String> paths) {
+        List<String> out = new ArrayList<>();
+        for (String p : paths) {
+            try {
+                String check = stripLongPrefix(p);
+                if (Files.exists(toLongPath(Paths.get(check)))) out.add(p);
+            } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    private int recycleViaPowerShell(List<String> paths, AtomicBoolean cancelled) {
         int success = 0;
         for (String p : paths) {
+            if (isCancelled(cancelled)) break;
             try {
                 Path pathObj = Paths.get(p);
                 Path effective = toLongPath(pathObj);
@@ -599,41 +796,26 @@ public class DuplicateFinderService {
                     psCmd = "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('"
                             + escaped + "','OnlyErrorDialogs','SendToRecycleBin')";
                 }
-                ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-Command", psCmd);
-                pb.redirectErrorStream(true);
-                Process proc = pb.start();
-                boolean finished = proc.waitFor(30, TimeUnit.SECONDS);
-                if (!finished) {
-                    proc.destroyForcibly();
-                    AppLogger.warning("PowerShell recycle timed out for: " + p);
+                if (runRecycleCommand(psCmd, effective, cancelled)) {
+                    success++;
                     continue;
                 }
-                String out = new String(proc.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                if (proc.exitValue() == 0 && !Files.exists(effective)) {
-                    success++;
-                } else {
-                    // Try with \\?\ prefix for long path if first attempt failed
-                    if (p.length() >= 240 && !p.startsWith("\\\\?\\")) {
-                        try {
-                            String longP = p.length() >= 2 && p.charAt(1) == ':' ? "\\\\?\\" + p
-                                    : p.startsWith("\\\\") ? "\\\\?\\UNC\\" + p.substring(2) : p;
-                            String escapedLong = longP.replace("'", "''");
-                            String psCmdLong = isDir
-                                    ? "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('"
-                                    + escapedLong + "','OnlyErrorDialogs','SendToRecycleBin')"
-                                    : "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('"
-                                    + escapedLong + "','OnlyErrorDialogs','SendToRecycleBin')";
-                            ProcessBuilder pb2 = new ProcessBuilder("powershell", "-NoProfile", "-Command", psCmdLong);
-                            pb2.redirectErrorStream(true);
-                            Process proc2 = pb2.start();
-                            boolean fin2 = proc2.waitFor(30, TimeUnit.SECONDS);
-                            if (fin2 && proc2.exitValue() == 0 && !Files.exists(effective)) {
-                                success++;
-                                continue;
-                            }
-                        } catch (Exception ignored2) {}
-                    }
-                    AppLogger.warning("PowerShell recycle failed for " + p + " exit=" + proc.exitValue() + " out=" + out.trim());
+                if (isCancelled(cancelled)) break;
+                // Try with \\?\ prefix for long path if first attempt failed
+                if (p.length() >= 240 && !p.startsWith("\\\\?\\")) {
+                    try {
+                        String longP = p.length() >= 2 && p.charAt(1) == ':' ? "\\\\?\\" + p
+                                : p.startsWith("\\\\") ? "\\\\?\\UNC\\" + p.substring(2) : p;
+                        String escapedLong = longP.replace("'", "''");
+                        String psCmdLong = isDir
+                                ? "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('"
+                                + escapedLong + "','OnlyErrorDialogs','SendToRecycleBin')"
+                                : "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('"
+                                + escapedLong + "','OnlyErrorDialogs','SendToRecycleBin')";
+                        if (runRecycleCommand(psCmdLong, effective, cancelled)) {
+                            success++;
+                        }
+                    } catch (Exception ignored2) {}
                 }
             } catch (Exception e) {
                 AppLogger.warning("PowerShell recycle exception for " + p + ": " + e.getMessage());
@@ -642,19 +824,74 @@ public class DuplicateFinderService {
         return success;
     }
 
+    /**
+     * Runs one PowerShell recycle command with a cancellable wait.
+     * Polls so Stop can abort between files and mid-file (destroys the process).
+     */
+    private boolean runRecycleCommand(String psCmd, Path effective, AtomicBoolean cancelled) {
+        Process proc = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder("powershell", "-NoProfile", "-Command", psCmd);
+            pb.redirectErrorStream(true);
+            proc = pb.start();
+            // Cancellable wait: 30s total, 100ms slices.
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (System.currentTimeMillis() < deadline) {
+                if (isCancelled(cancelled)) {
+                    proc.destroyForcibly();
+                    return false;
+                }
+                try {
+                    boolean done = proc.waitFor(100, TimeUnit.MILLISECONDS);
+                    if (done) break;
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    proc.destroyForcibly();
+                    return false;
+                }
+            }
+            if (proc.isAlive()) {
+                proc.destroyForcibly();
+                AppLogger.warning("PowerShell recycle timed out");
+                return false;
+            }
+            String out = "";
+            try {
+                out = new String(proc.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception ignored) {}
+            if (proc.exitValue() == 0 && !Files.exists(effective)) {
+                return true;
+            }
+            AppLogger.warning("PowerShell recycle failed exit=" + proc.exitValue() + " out=" + out.trim());
+            return false;
+        } catch (Exception e) {
+            AppLogger.warning("PowerShell recycle exception: " + e.getMessage());
+            return false;
+        } finally {
+            if (proc != null && proc.isAlive()) proc.destroyForcibly();
+        }
+    }
+
     public static class CleanResult {
         private final int deleted;
         private final int failed;
         private final List<DuplicateFileRow> fullyCleanedRows;
+        private final boolean cancelled;
 
         public CleanResult(int deleted, int failed, List<DuplicateFileRow> fullyCleanedRows) {
+            this(deleted, failed, fullyCleanedRows, false);
+        }
+
+        public CleanResult(int deleted, int failed, List<DuplicateFileRow> fullyCleanedRows, boolean cancelled) {
             this.deleted = deleted;
             this.failed = failed;
-            this.fullyCleanedRows = fullyCleanedRows;
+            this.fullyCleanedRows = fullyCleanedRows != null ? fullyCleanedRows : new ArrayList<>();
+            this.cancelled = cancelled;
         }
 
         public int getDeleted() { return deleted; }
         public int getFailed() { return failed; }
         public List<DuplicateFileRow> getFullyCleanedRows() { return fullyCleanedRows; }
+        public boolean isCancelled() { return cancelled; }
     }
 }

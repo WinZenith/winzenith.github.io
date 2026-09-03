@@ -45,21 +45,16 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
             if (v == null && (name.contains("gbe") || name.contains("ethernet") || name.contains("rtl81"))) {
                 v = extractVersion(body, GBE_VERSION);
             }
-            if (v == null) {
-                v = extractVersion(body, GENERIC_VERSION);
-            }
+            // No GENERIC_VERSION fallback: a bare number on the downloads
+            // landing page is not device-specific (wrong-version risk).
             if (v != null) {
                 AppLogger.debug("Realtek: Found version " + v + " for " + driver.friendlyName());
                 return v;
             }
         }
 
-        String fallback = getFallbackVersion(driver);
-        if (fallback != null) {
-            AppLogger.debug("Realtek: Using fallback version " + fallback + " for " + driver.friendlyName());
-            return fallback;
-        }
-
+        // No hardcoded fallback versions: stale hardcodes cause downgrades
+        // or missed criticals. Catalog-only when no device-specific match.
         AppLogger.debug("Realtek: Could not determine latest version for " + driver.friendlyName());
         return null;
     }
@@ -76,15 +71,7 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
     }
 
     private String getFallbackVersion(InstalledDriver driver) {
-        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
-
-        if (name.contains("cardreader") || name.contains("card reader")) {
-            return "10.0.26100.21384";
-        }
-        if (name.contains("gbe family controller")) {
-            return "10.75.324.2026";
-        }
-
+        // Disabled: hardcoded versions go stale and cause downgrades.
         return null;
     }
 

@@ -37,7 +37,21 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
-        return cleanDiscord() + cleanVscode() + cleanAdobe() + cleanSteam() + cleanSlack() + cleanZoom() + cleanTeams();
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
+        long cleaned = 0;
+        cleaned += cleanDiscord(); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanVscode(); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanAdobe(); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanSteam(); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanSlack(); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanZoom(token); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanTeams(token);
+        return cleaned;
     }
 
     private void scanSubCache(long[] result, Consumer<CleanupRow> scanner) {
@@ -65,9 +79,14 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
     }
 
     private long cleanAppCacheDirs(List<Path> dirs) {
+        return cleanAppCacheDirs(dirs, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    private long cleanAppCacheDirs(List<Path> dirs, com.sbtools.util.CancellationToken token) {
         long cleaned = 0;
         for (Path dir : dirs) {
-            if (Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir);
+            if (token != null && token.isCancelled()) break;
+            if (Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
         }
         return cleaned;
     }
@@ -231,6 +250,11 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
     }
 
     private long cleanZoom() {
+        return cleanZoom(com.sbtools.util.CancellationToken.NONE);
+    }
+
+    private long cleanZoom(com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         String appData = CleanerUtils.safeEnv("APPDATA");
         if (appData == null) return 0;
         Path zoomData = Path.of(appData, "Zoom", "data");
@@ -238,7 +262,8 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
         long cleaned = 0;
         try (Stream<Path> files = Files.list(zoomData)) {
             for (Path f : (Iterable<Path>) files::iterator) {
-                if (Files.isRegularFile(f)) { long size = Files.size(f); CleanerUtils.deletePermanently(f); cleaned += size; }
+                if (token != null && token.isCancelled()) break;
+                if (Files.isRegularFile(f)) { long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size; }
             }
         } catch (Exception ignored) {}
         return cleaned;
@@ -281,6 +306,11 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
     }
 
     private long cleanTeams() {
+        return cleanTeams(com.sbtools.util.CancellationToken.NONE);
+    }
+
+    private long cleanTeams(com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String appData = CleanerUtils.safeEnv("APPDATA");
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
@@ -291,10 +321,11 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
             if (Files.isDirectory(teamsPackage)) {
                 try (DirectoryStream<Path> ds = Files.newDirectoryStream(teamsPackage)) {
                     for (Path pkg : ds) {
+                        if (token != null && token.isCancelled()) break;
                         String pkgName = pkg.getFileName().toString();
                         if (pkgName.contains("MicrosoftTeams") || pkgName.contains("MSTeams")) {
                             Path ac = pkg.resolve("AC");
-                            if (Files.isDirectory(ac)) cleaned += CleanerUtils.deleteDirectoryContents(ac);
+                            if (Files.isDirectory(ac)) cleaned += CleanerUtils.deleteDirectoryContents(ac, token);
                         }
                     }
                 } catch (Exception ignored) {}

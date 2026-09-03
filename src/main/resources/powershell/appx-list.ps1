@@ -15,11 +15,31 @@ $results = $apps | ForEach-Object {
             if ($size) { $sizeKB = [math]::Round($size / 1024) }
         } catch {}
     }
+    # Friendly names live in the package manifest; fall back to package identity fields.
+    # Manifest DisplayName is often an ms-resource: reference (unresolvable here) — only
+    # use literal values so we never display raw resource URIs.
+    $displayName = $_.Name
+    $displayPublisher = $_.Publisher
+    try {
+        $manifest = Get-AppxPackageManifest -Package $_.PackageFullName -ErrorAction Stop
+        if ($manifest -and $manifest.Package -and $manifest.Package.Properties) {
+            $pubDisplay = $manifest.Package.Properties.PublisherDisplayName
+            if ($pubDisplay -and $pubDisplay -notlike "ms-resource*") { $displayPublisher = $pubDisplay }
+        }
+        if ($manifest -and $manifest.Package -and $manifest.Package.Applications) {
+            $firstApp = @($manifest.Package.Applications.Application) | Select-Object -First 1
+            if ($firstApp -and $firstApp.VisualElements) {
+                $vn = $firstApp.VisualElements.DisplayName
+                if ($vn -and $vn -notlike "ms-resource*") { $displayName = $vn }
+            }
+        }
+    } catch {}
     [PSCustomObject]@{
-        Name = $_.Name
+        Name = $displayName
+        PackageName = $_.Name
         PackageFullName = $_.PackageFullName
         Version = $_.Version
-        Publisher = $_.Publisher
+        Publisher = $displayPublisher
         PublisherId = $_.PublisherId
         InstallLocation = $_.InstallLocation
         InstallDate = $installDate

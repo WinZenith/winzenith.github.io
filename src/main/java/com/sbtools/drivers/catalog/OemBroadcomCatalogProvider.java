@@ -25,25 +25,10 @@ public class OemBroadcomCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String fetchLatestVersion(InstalledDriver driver) {
-        AppLogger.debug("Broadcom: Fetching latest version for " + driver.friendlyName());
-        
-        // Broadcom support page
-        String body = httpGet("https://www.broadcom.com/support/download-search");
-        String v = extractVersion(body, VERSION);
-        
-        if (v == null) {
-            // Try alternative URL for Bluetooth drivers
-            body = httpGet("https://www.broadcom.com/products/bluetooth");
-            v = extractVersion(body, VERSION);
-        }
-        
-        if (v != null) {
-            AppLogger.debug("Broadcom: Found version " + v + " for " + driver.friendlyName());
-        } else {
-            AppLogger.debug("Broadcom: Could not find version for " + driver.friendlyName());
-        }
-        
-        return v;
+        // Catalog-only: generic support-homepage first-number regex matches
+        // JS/product versions, not the device driver (wrong-version risk).
+        AppLogger.debug("Broadcom: Legacy web scraping disabled (use catalog database). Skipping.");
+        return null;
     }
 
     @Override

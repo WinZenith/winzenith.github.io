@@ -28,14 +28,24 @@ public class FontCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         stopService("FontCache");
+        if (token != null && token.isCancelled()) { startService("FontCache"); startService("FontCache3.0.0.0"); return 0L; }
         stopService("FontCache3.0.0.0");
-        List<Path> dirs = new ArrayList<>();
-        CleanerUtils.addEnvPath(dirs, "WINDIR", "ServiceProfiles", "LocalService", "AppData", "Local", "FontCache");
-        long cleaned = CleanerUtils.cleanDirectoryPattern(dirs);
-        startService("FontCache");
-        startService("FontCache3.0.0.0");
-        return cleaned;
+        try {
+            if (token != null && token.isCancelled()) return 0L;
+            List<Path> dirs = new ArrayList<>();
+            CleanerUtils.addEnvPath(dirs, "WINDIR", "ServiceProfiles", "LocalService", "AppData", "Local", "FontCache");
+            return CleanerUtils.cleanDirectoryPattern(dirs, token);
+        } finally {
+            startService("FontCache");
+            startService("FontCache3.0.0.0");
+        }
     }
 
     private void stopService(String serviceName) {

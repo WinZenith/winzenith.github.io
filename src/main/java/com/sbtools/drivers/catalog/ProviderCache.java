@@ -185,14 +185,35 @@ public final class ProviderCache {
     private static String fingerprint(List<InstalledDriver> installed) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
+            if (installed == null) return "";
+            String catalogVersion = catalogFingerprint();
+            md.update(("catalog:" + catalogVersion + ";").getBytes(StandardCharsets.UTF_8));
             installed.stream()
-                    .map(d -> (d.deviceId() == null ? "" : d.deviceId())
-                            + "@" + (d.driverVersion() == null ? "" : d.driverVersion()))
+                    .map(d -> (d == null ? "" : "")
+                            + (d == null || d.deviceId() == null ? "" : d.deviceId())
+                            + "@" + (d == null || d.driverVersion() == null ? "" : d.driverVersion())
+                            + "#" + (d == null || d.hardwareIds() == null ? "" : d.hardwareIds())
+                            + "#" + (d == null || d.friendlyName() == null ? "" : d.friendlyName())
+                            + "#" + (d == null || d.provider() == null ? "" : d.provider())
+                            + "#" + (d == null || d.infName() == null ? "" : d.infName()))
                     .sorted()
                     .forEach(s -> md.update(s.getBytes(StandardCharsets.UTF_8)));
             return HexFormat.of().formatHex(md.digest());
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    private static String catalogFingerprint() {
+        try (var is = ProviderCache.class.getResourceAsStream("/catalog/driver-catalog.json")) {
+            if (is == null) return "no-catalog";
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = is.read(buf)) != -1) md.update(buf, 0, n);
+            return HexFormat.of().formatHex(md.digest());
+        } catch (Exception e) {
+            return "catalog-err";
         }
     }
 

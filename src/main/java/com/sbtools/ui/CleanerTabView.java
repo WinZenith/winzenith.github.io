@@ -147,6 +147,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     // Rescan state — wired to Cancel button (B5)
     private CancelableCompletableFuture<java.util.List<CleanupRow>> activeRescanFuture;
     private CancellationToken activeRescanToken;
+    private volatile java.util.concurrent.CompletableFuture<?> activeRestoreFuture;
 
     private void cancelActive() {
         cancelling.set(true);
@@ -157,6 +158,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             if (activeScanFuture != null && !activeScanFuture.isDone()) activeScanFuture.cancel(true);
             if (activeCleanFuture != null && !activeCleanFuture.isDone()) activeCleanFuture.cancel(true);
             if (activeRescanFuture != null && !activeRescanFuture.isDone()) activeRescanFuture.cancel(true);
+            if (activeRestoreFuture != null && !activeRestoreFuture.isDone()) activeRestoreFuture.cancel(true);
         } catch (Exception ignored) {}
     }
 
@@ -465,6 +467,30 @@ import java.util.concurrent.atomic.AtomicInteger;
             return;
         }
 
+        // Second explicit confirmation for irreversible user-data destruction
+        // (iOS backups, Docker images/containers, previous Windows install).
+        java.util.List<CleanupRow> destructive = selected.stream()
+                .filter(r -> r.getCategory() == CleanupCategory.ITUNES_BACKUPS
+                        || r.getCategory() == CleanupCategory.DOCKER_CACHE
+                        || r.getCategory() == CleanupCategory.OLD_WINDOWS_INSTALL)
+                .toList();
+        if (!destructive.isEmpty()) {
+            Alert destructiveAlert = new Alert(Alert.AlertType.WARNING,
+                    "You selected categories that PERMANENTLY delete user data or system rollback state:\n\n"
+                            + destructive.stream()
+                                    .map(r -> "  [!] " + r.getCategory().getDisplayName() + " — " + r.getCategory().getDescription())
+                                    .collect(java.util.stream.Collectors.joining("\n"))
+                            + "\n\niTunes backups cannot be recovered. Docker prune deletes unused images/containers. "
+                            + "Removing Windows.old prevents rollback to the previous Windows version.\n\n"
+                            + "Type-understanding: click OK only if you have independent backups.",
+                    ButtonType.OK, ButtonType.CANCEL);
+            destructiveAlert.setHeaderText("Irreversible Deletion — Confirm Again");
+            if (destructiveAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
+                busy.set(false);
+                return;
+            }
+        }
+
         boolean registryBackupRaw = false;
         if (registrySelected) {
             Alert backupPrompt = new Alert(Alert.AlertType.CONFIRMATION);
@@ -521,10 +547,13 @@ import java.util.concurrent.atomic.AtomicInteger;
                     });
                 } else {
                     boolean wasCanceled = cancelling.get() || (activeCleanToken != null && activeCleanToken.isCancelled());
-                    // B4: Only append history for meaningful successful cleans (not canceled, not zero-byte without errors)
-                    if (!wasCanceled && summary.getTotalBytes() > 0) {
+                    // Only append history for meaningful successful cleans (not canceled).
+                    // Item-only categories (registry entries, empty folders) report 0 bytes
+                    // with >0 items, so include them via totalItems.
+                    boolean meaningful = summary.getTotalBytes() > 0 || summary.getTotalItems() > 0;
+                    if (!wasCanceled && meaningful) {
                         try { historyStore.append(summary); } catch (Exception e) { AppLogger.warning("Failed to append history: " + e.getMessage()); }
-                    } else if (!wasCanceled && summary.hasErrors() && summary.getTotalBytes() == 0) {
+                    } else if (!wasCanceled && summary.hasErrors() && !meaningful) {
                         // Don't pollute history with failed zero-byte sessions
                         AppLogger.info("Skipping history append for failed/zero-byte clean");
                     }
@@ -614,14 +643,33 @@ import java.util.concurrent.atomic.AtomicInteger;
             statusLabel.setText("Creating System Restore point...");
             progressBar.setProgress(-1);
             progressBar.setVisible(true);
+            cancelButton.setDisable(false);
 
-            CompletableFuture.runAsync(() -> {
+            activeRestoreFuture = CompletableFuture.runAsync(() -> {
                 try {
                     ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
                             "Checkpoint-Computer -Description 'WinZenith Cleanup Pre-Clean' -RestorePointType MODIFY_SETTINGS");
                     pb.redirectErrorStream(true);
                     Process p = pb.start();
-                    boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
+                    boolean finished = false;
+                    long deadline = System.currentTimeMillis() + 120_000L;
+                    while (System.currentTimeMillis() < deadline) {
+                        if (cancelling.get()) {
+                            p.destroyForcibly();
+                            throw new java.util.concurrent.CancellationException("Restore point canceled");
+                        }
+                        try {
+                            if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            p.destroyForcibly();
+                            throw new java.util.concurrent.CancellationException("Restore point canceled");
+                        }
+                    }
+                    if (cancelling.get()) {
+                        p.destroyForcibly();
+                        throw new java.util.concurrent.CancellationException("Restore point canceled");
+                    }
                     if (!finished) {
                         p.destroyForcibly();
                         AppLogger.warning("System Restore point creation timed out");
@@ -638,10 +686,25 @@ import java.util.concurrent.atomic.AtomicInteger;
                             alert.showAndWait();
                         });
                     }
+                } catch (java.util.concurrent.CancellationException ce) {
+                    AppLogger.info("System Restore point creation canceled by user");
+                    throw ce;
                 } catch (Exception e) {
                     AppLogger.warning("Failed to create System Restore point: " + e.getMessage());
                 }
-            }).whenComplete((v, ex) -> Platform.runLater(doClean));
+            });
+            activeRestoreFuture.whenComplete((v, ex) -> Platform.runLater(() -> {
+                activeRestoreFuture = null;
+                if (ex != null || cancelling.get()) {
+                    statusLabel.setText("Cleanup canceled before start.");
+                    progressBar.setVisible(false);
+                    cancelButton.setDisable(true);
+                    cancelling.set(false);
+                    busy.set(false);
+                    return;
+                }
+                doClean.run();
+            }));
         } else {
             doClean.run();
         }

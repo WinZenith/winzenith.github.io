@@ -14,7 +14,9 @@ import java.util.List;
 
 public class DuplicateFileRow {
 
-    private final BooleanProperty selected = new SimpleBooleanProperty(true);
+    // Safe default: nothing is selected for deletion until the user explicitly ticks it.
+    // Mass-delete-by-default caused one-misclick data loss (see DuplicateFilesTabView).
+    private final BooleanProperty selected = new SimpleBooleanProperty(false);
     private final StringProperty fileName = new SimpleStringProperty();
     private final StringProperty fullPath = new SimpleStringProperty();
     private final LongProperty fileSize = new SimpleLongProperty();

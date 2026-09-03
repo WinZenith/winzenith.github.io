@@ -18,6 +18,9 @@ public class MemoryDumpsCleaner implements CleanerExtension {
     public CleanupCategory getCategory() { return CleanupCategory.MEMORY_DUMPS; }
 
     @Override
+    public boolean requiresAdmin() { return true; }
+
+    @Override
     public void scan(CleanupRow row) {
         long totalSize = 0;
         int itemCount = 0;
@@ -46,22 +49,31 @@ public class MemoryDumpsCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         List<Path> dirs = new ArrayList<>();
         CleanerUtils.addEnvPath(dirs, "WINDIR", "Minidump");
         String sysdrive = CleanerUtils.safeEnv("SYSTEMDRIVE");
         if (sysdrive != null) {
             for (String name : new String[]{"memory.dmp", "SWA.DMP"}) {
+                if (token != null && token.isCancelled()) break;
                 Path dump = Paths.get(sysdrive, name);
-                if (Files.isRegularFile(dump)) { long size = dump.toFile().length(); CleanerUtils.deletePermanently(dump); if (!Files.exists(dump)) cleaned += size; }
+                if (Files.isRegularFile(dump)) { long size = dump.toFile().length(); CleanerUtils.deletePermanently(dump, token); if (!Files.exists(dump)) cleaned += size; }
             }
         }
         for (Path dir : dirs) {
+            if (token != null && token.isCancelled()) break;
             if (dir != null && Files.isDirectory(dir)) {
                 try (Stream<Path> files = Files.list(dir)) {
                     for (Path f : (Iterable<Path>) files::iterator) {
+                        if (token != null && token.isCancelled()) break;
                         if (Files.isRegularFile(f) && f.getFileName().toString().toLowerCase().endsWith(".dmp")) {
-                            long size = Files.size(f); CleanerUtils.deletePermanently(f); if (!Files.exists(f)) cleaned += size;
+                            long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size;
                         }
                     }
                 } catch (Exception ignored) {}

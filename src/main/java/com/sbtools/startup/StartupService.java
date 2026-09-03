@@ -5,8 +5,11 @@ import com.fasterxml.jackson.databind.type.CollectionType;
 import com.sbtools.util.*;
 import com.sun.jna.Memory;
 import com.sun.jna.Pointer;
+import com.sun.jna.platform.win32.Advapi32;
 import com.sun.jna.platform.win32.Advapi32Util;
 import com.sun.jna.platform.win32.Version;
+import com.sun.jna.platform.win32.WinError;
+import com.sun.jna.platform.win32.WinNT;
 import com.sun.jna.platform.win32.WinReg;
 import com.sun.jna.platform.win32.WinReg.HKEY;
 import com.sun.jna.ptr.IntByReference;
@@ -56,6 +59,8 @@ public class StartupService {
         private String hive;
         private String keyPath;
         private String valueName;
+        // Preserves REG_SZ vs REG_EXPAND_SZ across backup/restore (null = legacy backup, assume REG_SZ)
+        private String registryValueType;
 
         // Task specific
         private String taskPath;
@@ -91,6 +96,8 @@ public class StartupService {
         public void setKeyPath(String keyPath) { this.keyPath = keyPath; }
         public String getValueName() { return valueName; }
         public void setValueName(String valueName) { this.valueName = valueName; }
+        public String getRegistryValueType() { return registryValueType; }
+        public void setRegistryValueType(String registryValueType) { this.registryValueType = registryValueType; }
         public String getTaskPath() { return taskPath; }
         public void setTaskPath(String taskPath) { this.taskPath = taskPath; }
         public String getBackupXmlName() { return backupXmlName; }
@@ -467,8 +474,14 @@ public class StartupService {
                 }
 
                 JsonNode tasksNode = root.path("ScheduledTasks");
+                java.util.List<JsonNode> taskNodes = new java.util.ArrayList<>();
                 if (tasksNode.isArray()) {
-                    for (JsonNode node : tasksNode) {
+                    tasksNode.forEach(taskNodes::add);
+                } else if (tasksNode.isObject()) {
+                    // PowerShell ConvertTo-Json unwraps single-element arrays as a lone object
+                    taskNodes.add(tasksNode);
+                }
+                for (JsonNode node : taskNodes) {
                         String taskName = node.path("TaskName").asText("");
                         String taskPath = node.path("TaskPath").asText("");
                         boolean enabled = node.path("Enabled").asBoolean(true);
@@ -487,7 +500,6 @@ public class StartupService {
                                 StartupItemType.TASK,
                                 null
                         ));
-                    }
                 }
             } else {
                 String msg = "Failed to run scheduled task scan script: " + result.combinedOutput();
@@ -527,8 +539,15 @@ public class StartupService {
             }
             JsonNode servicesNode = root.path("Services");
             Map<String, String> batchNewTypes = new HashMap<>();
+            java.util.List<JsonNode> serviceNodes = new java.util.ArrayList<>();
             if (servicesNode.isArray()) {
-                for (JsonNode node : servicesNode) {
+                servicesNode.forEach(serviceNodes::add);
+            } else if (servicesNode.isObject()) {
+                // PowerShell single-element array unwrapped as object
+                serviceNodes.add(servicesNode);
+            }
+            if (!serviceNodes.isEmpty()) {
+                for (JsonNode node : serviceNodes) {
                     String serviceName = node.path("Name").asText("");
                     String displayName = node.path("DisplayName").asText("");
                     String binaryPath = node.path("BinaryPath").asText("");
@@ -553,6 +572,7 @@ public class StartupService {
                             "",
                             "",
                             StartupItemType.SERVICE,
+                            startType,
                             getOriginalServiceStartType(serviceName, startType)
                     );
                     if (!ORIGINAL_SERVICE_START_TYPES.containsKey(serviceName) && !"Disabled".equalsIgnoreCase(startType)) {
@@ -621,8 +641,7 @@ public class StartupService {
                 } else if (location.contains("(Disabled)")) {
                     success = toggleDisabledItem(item, paths);
                 } else {
-                    toggleRegularItem(item, paths);
-                    success = true;
+                    success = toggleRegularItem(item, paths);
                 }
                 if (!success) {
                     throw new IOException("Failed to toggle startup item: registry value '" + valName + "' may have been deleted externally.");
@@ -723,9 +742,17 @@ public class StartupService {
                             }
                         } catch (Exception ignored) {}
                     }
-                    // Clean both approved paths
-                    for (String ap : List.of(StartupConstants.REG_STARTUP_APPROVED, StartupConstants.REG_STARTUP_APPROVED_RUNONCE,
-                            StartupConstants.REG_WOW6432_APPROVED, StartupConstants.REG_WOW6432_APPROVED_RUNONCE)) {
+                    // Clean only the approved paths matching this item's bitness to avoid
+                    // corrupting an unrelated entry with the same value name in the other view
+                    List<String> approvedPaths;
+                    if (is32) {
+                        approvedPaths = List.of(StartupConstants.REG_WOW6432_APPROVED,
+                                StartupConstants.REG_WOW6432_APPROVED_RUNONCE);
+                    } else {
+                        approvedPaths = List.of(StartupConstants.REG_STARTUP_APPROVED,
+                                StartupConstants.REG_STARTUP_APPROVED_RUNONCE);
+                    }
+                    for (String ap : approvedPaths) {
                         try {
                             if (Advapi32Util.registryValueExists(paths.hive(), ap, valName)) {
                                 Advapi32Util.registryDeleteValue(paths.hive(), ap, valName);
@@ -751,8 +778,18 @@ public class StartupService {
         invalidateCache();
     }
 
-    private void toggleRegularItem(StartupItem item, RegistryPaths paths) throws Exception {
+    private boolean toggleRegularItem(StartupItem item, RegistryPaths paths) throws Exception {
         String valName = item.getRegistryValueName();
+        // Fail fast if the Run value was deleted externally instead of creating an orphan Approved entry
+        boolean exists;
+        try {
+            exists = Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName);
+        } catch (Exception e) {
+            exists = false;
+        }
+        if (!exists) {
+            return false;
+        }
         if (!Advapi32Util.registryKeyExists(paths.hive(), paths.approvedPath())) {
             Advapi32Util.registryCreateKey(paths.hive(), paths.approvedPath());
         }
@@ -761,6 +798,7 @@ public class StartupService {
         } else {
             Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, StartupConstants.enabledBytes());
         }
+        return true;
     }
 
     private boolean toggleDisabledItem(StartupItem item, RegistryPaths paths) throws Exception {
@@ -782,9 +820,16 @@ public class StartupService {
         // or in Run (RunOnce items disabled via toggleRunOnceItem).
         String cmd = getRegistryString(paths.hive(), disabledKeyPath, valName);
         boolean inRun = false;
+        boolean sourceIsExpandSz = false;
+        if (cmd != null) {
+            sourceIsExpandSz = isRegistryExpandSz(paths.hive(), disabledKeyPath, valName);
+        }
         if (cmd == null) {
             cmd = getRegistryString(paths.hive(), enableKeyPath, valName);
             inRun = cmd != null;
+            if (inRun) {
+                sourceIsExpandSz = isRegistryExpandSz(paths.hive(), enableKeyPath, valName);
+            }
         }
         if (cmd == null) {
             return false;
@@ -794,7 +839,7 @@ public class StartupService {
             if (!Advapi32Util.registryKeyExists(paths.hive(), enableKeyPath)) {
                 Advapi32Util.registryCreateKey(paths.hive(), enableKeyPath);
             }
-            Advapi32Util.registrySetStringValue(paths.hive(), enableKeyPath, valName, cmd);
+            setRegistryStringPreservingType(paths.hive(), enableKeyPath, valName, cmd, sourceIsExpandSz);
             Advapi32Util.registryDeleteValue(paths.hive(), disabledKeyPath, valName);
         }
         if (!Advapi32Util.registryKeyExists(paths.hive(), paths.approvedPath())) {
@@ -825,14 +870,15 @@ public class StartupService {
             try {
                 if (Advapi32Util.registryValueExists(paths.hive(), runApprovedPath, valName)) {
                     Object v = Advapi32Util.registryGetValue(paths.hive(), runApprovedPath, valName);
-                    if (v instanceof byte[] b && b.length > 0 && b[0] == 0x03) legacyMoved = true;
+                    if (v instanceof byte[] b && StartupConstants.isDisabledByte(b)) legacyMoved = true;
                 }
             } catch (Exception ignored) {}
             if (legacyMoved) {
                 if (!Advapi32Util.registryKeyExists(paths.hive(), runOnceKeyPath)) {
                     Advapi32Util.registryCreateKey(paths.hive(), runOnceKeyPath);
                 }
-                Advapi32Util.registrySetStringValue(paths.hive(), runOnceKeyPath, valName, cmdInRun);
+                boolean expandSz = isRegistryExpandSz(paths.hive(), runKeyPath, valName);
+                setRegistryStringPreservingType(paths.hive(), runOnceKeyPath, valName, cmdInRun, expandSz);
                 Advapi32Util.registryDeleteValue(paths.hive(), runKeyPath, valName);
                 if (Advapi32Util.registryValueExists(paths.hive(), runApprovedPath, valName)) {
                     Advapi32Util.registryDeleteValue(paths.hive(), runApprovedPath, valName);
@@ -845,7 +891,29 @@ public class StartupService {
 
         // Determine correct approved path: prefer the one matching actual key existence, fallback to RunOnce
         String approvedPath;
-        if (Advapi32Util.registryValueExists(paths.hive(), runOnceKeyPath, valName)) {
+        boolean runExists = false;
+        boolean runOnceExists = false;
+        try {
+            runOnceExists = Advapi32Util.registryValueExists(paths.hive(), runOnceKeyPath, valName);
+        } catch (Exception ignored) {}
+        try {
+            runExists = Advapi32Util.registryValueExists(paths.hive(), runKeyPath, valName);
+        } catch (Exception ignored) {}
+        // Fail fast if neither Run nor RunOnce contains the value (deleted externally)
+        // Exception: legacy-healed case already moved value above, re-check after heal
+        if (!runExists && !runOnceExists) {
+            // Re-read after potential heal (cmdInRunOnce may have been set)
+            String recheck = getRegistryString(paths.hive(), runOnceKeyPath, valName);
+            if (recheck == null) {
+                recheck = getRegistryString(paths.hive(), runKeyPath, valName);
+            }
+            if (recheck == null) {
+                return false;
+            }
+            runOnceExists = getRegistryString(paths.hive(), runOnceKeyPath, valName) != null;
+            runExists = !runOnceExists && getRegistryString(paths.hive(), runKeyPath, valName) != null;
+        }
+        if (runOnceExists) {
             approvedPath = runOnceApprovedPath;
         } else if (Advapi32Util.registryValueExists(paths.hive(), runKeyPath, valName) && !location.contains("RunOnce")) {
             approvedPath = runApprovedPath;
@@ -903,6 +971,39 @@ public class StartupService {
         }
         Object valData = Advapi32Util.registryGetValue(hive, keyPath, valueName);
         return valData instanceof String s ? s : null;
+    }
+
+    static boolean isRegistryExpandSz(HKEY hive, String keyPath, String valueName) {
+        return queryRegistryValueType(hive, keyPath, valueName) == WinNT.REG_EXPAND_SZ;
+    }
+
+    static int queryRegistryValueType(HKEY hive, String keyPath, String valueName) {
+        WinReg.HKEYByReference phkKey = new WinReg.HKEYByReference();
+        int rc = Advapi32.INSTANCE.RegOpenKeyEx(hive, keyPath, 0, WinNT.KEY_READ, phkKey);
+        if (rc != WinError.ERROR_SUCCESS) return -1;
+        try {
+            IntByReference lpType = new IntByReference();
+            IntByReference lpcbData = new IntByReference();
+            rc = Advapi32.INSTANCE.RegQueryValueEx(phkKey.getValue(), valueName, 0, lpType, (Pointer) null, lpcbData);
+            if (rc != WinError.ERROR_SUCCESS && rc != WinError.ERROR_MORE_DATA) return -1;
+            return lpType.getValue();
+        } catch (Exception e) {
+            return -1;
+        } finally {
+            try { Advapi32.INSTANCE.RegCloseKey(phkKey.getValue()); } catch (Exception ignored) {}
+        }
+    }
+
+    static void setRegistryStringPreservingType(HKEY hive, String keyPath, String valueName, String data, boolean expandSz) {
+        if (expandSz) {
+            try {
+                Advapi32Util.registrySetExpandableStringValue(hive, keyPath, valueName, data);
+                return;
+            } catch (Exception ignored) {
+                // Fall back to REG_SZ if expandable write is unavailable
+            }
+        }
+        Advapi32Util.registrySetStringValue(hive, keyPath, valueName, data);
     }
 
     // ── Backup / Restore Mechanism ────────────────────────────────────────────
@@ -1012,6 +1113,24 @@ public class StartupService {
                 entry.setHive(paths.hive() == WinReg.HKEY_CURRENT_USER ? "HKCU" : "HKLM");
                 entry.setKeyPath(paths.keyPath());
                 entry.setValueName(item.getRegistryValueName());
+                // Re-read live registry value so backup is not stale if changed since scan
+                try {
+                    String live = getRegistryString(paths.hive(), paths.keyPath(), item.getRegistryValueName());
+                    if (live != null && !live.isBlank()) {
+                        entry.setCommand(live);
+                    }
+                } catch (Exception ignored) {}
+                // Preserve REG_SZ vs REG_EXPAND_SZ so restore does not break %VAR% expansion
+                try {
+                    int regType = queryRegistryValueType(paths.hive(), paths.keyPath(), item.getRegistryValueName());
+                    if (regType == WinNT.REG_EXPAND_SZ) {
+                        entry.setRegistryValueType("REG_EXPAND_SZ");
+                    } else {
+                        entry.setRegistryValueType("REG_SZ");
+                    }
+                } catch (Exception ignored) {
+                    entry.setRegistryValueType("REG_SZ");
+                }
             }
         }
 
@@ -1049,7 +1168,8 @@ public class StartupService {
             if (!Advapi32Util.registryKeyExists(hive, entry.getKeyPath())) {
                 Advapi32Util.registryCreateKey(hive, entry.getKeyPath());
             }
-            Advapi32Util.registrySetStringValue(hive, entry.getKeyPath(), entry.getValueName(), entry.getCommand());
+            boolean expandSz = "REG_EXPAND_SZ".equalsIgnoreCase(entry.getRegistryValueType());
+            setRegistryStringPreservingType(hive, entry.getKeyPath(), entry.getValueName(), entry.getCommand(), expandSz);
 
             String approvedKeyPath = StartupConstants.toApprovedPath(entry.getKeyPath());
             if (!approvedKeyPath.equals(entry.getKeyPath())) {

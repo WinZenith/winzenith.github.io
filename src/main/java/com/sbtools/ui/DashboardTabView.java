@@ -833,9 +833,15 @@ public class DashboardTabView extends BorderPane {
                 if (row.getTotalBytes() <= 0 && (row.getItemCount() <= 0)) {
                     continue;
                 }
-                String detailText = row.sizeOrCountTextProperty().get();
-                String sizeText = row.getTotalBytes() > 0 ? formatBytes(row.getTotalBytes()) : "";
+                // Build display text from volatile scan counters (thread-safe) instead
+                // of reading the FX StringProperty off this worker thread.
                 final long sizeBytes = row.getTotalBytes();
+                final int itemCount = row.getItemCount();
+                final String detailText = sizeBytes > 0 && itemCount > 0
+                        ? formatBytes(sizeBytes) + " (" + itemCount + " files)"
+                        : sizeBytes > 0 ? formatBytes(sizeBytes)
+                        : itemCount + " item" + (itemCount == 1 ? "" : "s");
+                String sizeText = row.getTotalBytes() > 0 ? formatBytes(row.getTotalBytes()) : "";
                 Platform.runLater(() -> {
                     if (isScanStale(generation)) return;
                     issues.add(new IssueCategory(

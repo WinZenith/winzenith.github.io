@@ -20,9 +20,10 @@ public class OemAsusCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String fetchLatestVersion(InstalledDriver driver) {
-        String body = httpGet("https://www.asus.com/support/Download-Center/");
-        Pattern p = Pattern.compile("\"version\"\\s*:\\s*\"([^\"]+)\"");
-        return extractVersion(body, p);
+        // Catalog-only: generic Download-Center scraping returns the same
+        // version for every device (wrong-device risk).
+        com.sbtools.util.AppLogger.debug("ASUS: Legacy web scraping disabled (use catalog database). Skipping.");
+        return null;
     }
 
     @Override
@@ -32,10 +33,8 @@ public class OemAsusCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
-        String body = httpGet(vendorPageUrl);
-        Pattern p = Pattern.compile("https?://[^\"]*\\.(exe|zip|msi)", Pattern.CASE_INSENSITIVE);
-        String found = findFirstMatchingLink(body, p);
-        if (found != null && isLikelyStable(found)) return found;
+        // Catalog-only: do not scrape the generic Download-Center page.
+        com.sbtools.util.AppLogger.debug("ASUS: Direct download URL resolution disabled (use catalog database). Skipping.");
         return null;
     }
 }

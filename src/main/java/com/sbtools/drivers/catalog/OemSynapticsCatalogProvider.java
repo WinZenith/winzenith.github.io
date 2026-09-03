@@ -37,36 +37,17 @@ public class OemSynapticsCatalogProvider extends AbstractOemCatalogProvider {
                 AppLogger.debug("Synaptics: Found version " + v + " for " + driver.friendlyName());
                 return v;
             }
-            v = extractVersion(body, GENERIC_VERSION_PATTERN);
-            if (v != null) {
-                AppLogger.debug("Synaptics: Found generic version " + v + " for " + driver.friendlyName());
-                return v;
-            }
+            // No generic-number fallback: first bare number on the support
+            // homepage is not device-specific (wrong-version risk).
         }
 
-        String fallback = getFallbackVersion(driver);
-        if (fallback != null) {
-            AppLogger.debug("Synaptics: Using fallback version " + fallback + " for " + driver.friendlyName());
-            return fallback;
-        }
-
+        // No hardcoded fallback versions: stale hardcodes cause downgrades.
         AppLogger.debug("Synaptics: Could not determine latest version for " + driver.friendlyName());
         return null;
     }
 
     private String getFallbackVersion(InstalledDriver driver) {
-        String name = driver.friendlyName() != null ? driver.friendlyName().toLowerCase() : "";
-        String infName = driver.infName() != null ? driver.infName().toLowerCase() : "";
-
-        if (name.contains("precision") || infName.contains("synpd")) {
-            return "19.5.35.0";
-        }
-        if (name.contains("clickpad") || name.contains("touchpad") || infName.contains("synhid")) {
-            return "19.5.35.0";
-        }
-        if (name.contains("smbus") || infName.contains("smbus")) {
-            return "19.0.0.0";
-        }
+        // Disabled: hardcoded versions go stale and cause downgrades.
         return null;
     }
 

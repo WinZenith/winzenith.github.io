@@ -129,9 +129,15 @@ public class ShredderService {
         int filesDeleted = 0;
         int foldersDeleted = 0;
         List<String> scheduledForReboot = new ArrayList<>();
+        int failed = 0;
+        int skippedMissing = 0;
+        boolean wasCancelled = false;
 
         for (int i = 0; i < recyclePaths.size(); i++) {
-            if (cancelled != null && cancelled.get()) break;
+            if (cancelled != null && cancelled.get()) {
+                wasCancelled = true;
+                break;
+            }
             String path = recyclePaths.get(i);
             int current = i + 1;
             int total = recyclePaths.size();
@@ -141,7 +147,10 @@ public class ShredderService {
             }
 
             File file = new File(path);
-            if (!file.exists()) continue;
+            if (!file.exists()) {
+                skippedMissing++;
+                continue;
+            }
 
             try {
                 ShredderResult result = secureDelete(path, passCount);
@@ -154,36 +163,59 @@ public class ShredderService {
                             scheduledForReboot.add(path);
                         } else {
                             AppLogger.warning("Failed to schedule recycle bin entry for reboot: " + path + " - " + sched.getMessage());
-                            // still track as scheduled attempt so UI can inform user
-                            scheduledForReboot.add(path);
+                            failed++;
                         }
                     } catch (Exception se) {
                         AppLogger.error("Failed to schedule reboot delete for: " + path, se);
-                        scheduledForReboot.add(path);
+                        failed++;
                     }
+                } else {
+                    AppLogger.warning("Failed to securely delete recycle bin entry: " + path
+                            + " - " + (result.getMessage() != null ? result.getMessage() : "unknown error"));
+                    failed++;
                 }
             } catch (Exception e) {
                 String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
                 if (msg.contains("in use") || msg.contains("access denied") || msg.contains("unauthorized")) {
                     try {
                         ShredderResult sched = scheduleForReboot(path);
-                        if (sched.isSuccess() || msg.contains("in use")) {
+                        if (sched.isSuccess()) {
                             scheduledForReboot.add(path);
                         } else {
-                            scheduledForReboot.add(path);
+                            AppLogger.warning("Failed to schedule recycle bin entry for reboot: " + path
+                                    + " - " + sched.getMessage());
+                            failed++;
                         }
                     } catch (Exception se) {
                         AppLogger.error("Failed to schedule reboot delete for: " + path, se);
-                        scheduledForReboot.add(path);
+                        failed++;
                     }
                 } else {
                     AppLogger.error("Failed to securely delete recycle bin entry: " + path, e);
+                    failed++;
                 }
             }
         }
 
-        return new FolderDeleteResult(true,
-                "Recycle Bin wipe: " + filesDeleted + " files securely deleted.",
+        if (wasCancelled || (cancelled != null && cancelled.get())) {
+            return new FolderDeleteResult(false, "Recycle Bin wipe cancelled by user.",
+                    filesDeleted, foldersDeleted, scheduledForReboot);
+        }
+        boolean anyHandled = filesDeleted > 0 || !scheduledForReboot.isEmpty();
+        boolean success = anyHandled && failed == 0;
+        String message;
+        if (success) {
+            message = "Recycle Bin wipe: " + filesDeleted + " files securely deleted.";
+        } else if (!anyHandled) {
+            message = "Recycle Bin wipe failed: no items were deleted"
+                    + (failed > 0 ? " (" + failed + " failed)" : "")
+                    + (skippedMissing > 0 ? " (" + skippedMissing + " already gone)" : "")
+                    + ". See app.log for details.";
+        } else {
+            message = "Recycle Bin wipe incomplete: " + filesDeleted + " deleted, "
+                    + scheduledForReboot.size() + " scheduled for reboot, " + failed + " failed.";
+        }
+        return new FolderDeleteResult(success, message,
                 filesDeleted, foldersDeleted, scheduledForReboot);
     }
 
@@ -202,10 +234,33 @@ public class ShredderService {
 
         File stopFlag = File.createTempFile("winzenith-wipe-stop-", ".flag");
         stopFlag.deleteOnExit();
+        // Blocker fix: createTempFile() creates the file, but Test-Path $StopFlagPath
+        // in wipe-free-space.ps1 treats existence as "stop requested", so the wipe
+        // would break immediately and report success without doing anything.
+        // Delete it now; it is re-created only when cancellation is requested.
+        try {
+            java.nio.file.Files.deleteIfExists(stopFlag.toPath());
+        } catch (Exception ignored) {
+            // Fallback: best-effort delete; script checks existence only.
+            stopFlag.delete();
+        }
 
+        java.util.List<String> driveFailures = new java.util.ArrayList<>();
         try {
             for (String driveLetter : driveLetters) {
                 if (cancelled != null && cancelled.get()) break;
+
+                // Track terminal (done=true) progress signals per drive so a silent
+                // no-op or per-drive error cannot be reported as success.
+                java.util.List<WipeProgress> doneSignals = new java.util.concurrent.CopyOnWriteArrayList<>();
+                java.util.function.Consumer<WipeProgress> wrappedCallback = prog -> {
+                    if (prog != null && prog.isDone()) {
+                        doneSignals.add(prog);
+                    }
+                    if (progressCallback != null) {
+                        progressCallback.accept(prog);
+                    }
+                };
 
                 List<List<String>> candidates = List.of(
                         new ArrayList<>(ProcessRunner.powershellScript(script.toString())),
@@ -244,8 +299,8 @@ public class ShredderService {
                     throw new IOException("No PowerShell executable available for wipe");
                 }
 
-                ProcessWatcher watcher = new ProcessWatcher(process, progressCallback, cancelled, stopFlag);
-                watcher.watch();
+                ProcessWatcher watcher = new ProcessWatcher(process, wrappedCallback, cancelled, stopFlag);
+                Thread watcherThread = watcher.watch();
 
                 // Cancellation poller: ensures stopFlag is created and process killed even if no output
                 final Process procForPoller = process;
@@ -283,10 +338,51 @@ public class ShredderService {
                     Thread.currentThread().interrupt();
                     throw new IOException("Free space wipe interrupted.", e);
                 }
-                if (process.exitValue() != 0 && (cancelled == null || !cancelled.get())) {
+                // Allow the async stream reader to deliver the terminal done=true signal
+                // before evaluating per-drive success. Without this join, a fast exit
+                // could be treated as success before the error line is parsed.
+                try {
+                    watcherThread.join(5000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                if (cancelled != null && cancelled.get()) {
+                    break;
+                }
+                if (process.exitValue() != 0) {
                     throw new IOException("Free space wipe failed with exit code " + process.exitValue()
                             + " on drive " + driveLetter + ".");
                 }
+                if (doneSignals.isEmpty()) {
+                    throw new IOException("Free space wipe produced no completion signal on drive "
+                            + driveLetter + ". Aborted to avoid false success.");
+                }
+                WipeProgress terminal = doneSignals.get(doneSignals.size() - 1);
+                String terminalMsg = terminal.getMessage() != null ? terminal.getMessage() : "";
+                String lowerMsg = terminalMsg.toLowerCase();
+                boolean terminalError = lowerMsg.contains("insufficient")
+                        || lowerMsg.contains("not found")
+                        || lowerMsg.contains("drive not found")
+                        || lowerMsg.contains("failed")
+                        || lowerMsg.contains("timed out")
+                        || lowerMsg.contains("no completion")
+                        || (terminal.isDone() && terminal.getPercent() == 0 && terminal.getPass() == 0
+                            && !lowerMsg.contains("wipe completed"));
+                if (terminalError) {
+                    String detail = terminalMsg.isBlank()
+                            ? "unknown error (no completion message)"
+                            : terminalMsg;
+                    driveFailures.add(driveLetter + ": " + detail);
+                    // Fail fast for single-drive wipes; for multi-drive continue so
+                    // other drives still get wiped, then report combined failure below.
+                    if (driveLetters.size() <= 1) {
+                        throw new IOException("Free space wipe failed on drive " + driveLetter + ": " + detail);
+                    }
+                    continue;
+                }
+            }
+            if ((cancelled == null || !cancelled.get()) && !driveFailures.isEmpty()) {
+                throw new IOException("Free space wipe failed: " + String.join("; ", driveFailures));
             }
         } finally {
             cleanupTempFiles();
@@ -346,7 +442,7 @@ public class ShredderService {
             this.stopFlag = stopFlag;
         }
 
-        void watch() {
+        Thread watch() {
             Thread t = new Thread(() -> {
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
@@ -378,6 +474,7 @@ public class ShredderService {
             }, "wipe-stream-reader");
             t.setDaemon(true);
             t.start();
+            return t;
         }
     }
 

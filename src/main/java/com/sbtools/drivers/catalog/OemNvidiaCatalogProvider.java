@@ -175,23 +175,42 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
 
     private int[] lookupPsidPfid(InstalledDriver driver) {
         String gpuName = normalizeGpuName(extractGpuModel(driver));
+        if (gpuName == null || gpuName.isBlank() || "unknown".equalsIgnoreCase(gpuName)) {
+            return null;
+        }
 
-        if (gpuName != null) {
-            for (Map.Entry<String, int[]> entry : GPU_PSID_PFID.entrySet()) {
-                String key = normalizeGpuName(entry.getKey());
-                if (key == null) continue;
-                if (key.equalsIgnoreCase(gpuName) || gpuName.contains(key)) {
-                    return entry.getValue();
-                }
-            }
-            for (Map.Entry<String, int[]> entry : GPU_PSID_PFID.entrySet()) {
-                String key = normalizeGpuName(entry.getKey());
-                if (key == null) continue;
-                if (key.contains(gpuName)) {
-                    return entry.getValue();
-                }
+        // Deterministic longest-key exact/substring match. Iterating a
+        // HashMap with prefix contains() is nondeterministic: "RTX 4060 Ti"
+        // contains "RTX 4060" and could resolve to the wrong pfid.
+        // Sort keys longest-first so Ti/SUPER/6GB variants win over bases.
+        java.util.List<java.util.Map.Entry<String, int[]>> sorted =
+                new java.util.ArrayList<>(GPU_PSID_PFID.entrySet());
+        sorted.sort((a, b) -> Integer.compare(
+                normalizeGpuName(b.getKey()).length(),
+                normalizeGpuName(a.getKey()).length()));
+        String lowerGpu = gpuName.toLowerCase();
+        for (java.util.Map.Entry<String, int[]> entry : sorted) {
+            String key = normalizeGpuName(entry.getKey());
+            if (key == null) continue;
+            if (key.equalsIgnoreCase(gpuName)) {
+                return entry.getValue();
             }
         }
+        for (java.util.Map.Entry<String, int[]> entry : sorted) {
+            String key = normalizeGpuName(entry.getKey());
+            if (key == null) continue;
+            String lowerKey = key.toLowerCase();
+            // Whole-token containment only: "4060 ti" must not match "4060"
+            // unless all key tokens are present as whole tokens in gpuName.
+            if (containsWholeTokens(lowerGpu, lowerKey)) {
+                // Reject base-key match when gpuName has a Ti/SUPER qualifier
+                // the key lacks (prevents 4060 Ti -> 4060).
+                if (hasQualifierMismatch(lowerGpu, lowerKey)) continue;
+                return entry.getValue();
+            }
+        }
+        // No reverse-contains fallback: a short gpuName must not match a
+        // longer key (e.g. "1060" must not pick "1060 3GB" arbitrarily).
 
         AppLogger.debug("NVIDIA: GPU not found in local database, querying lookupValueSearch API");
         try {
@@ -208,7 +227,9 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
                 String name = m.group(1).trim();
                 String pfidStr = m.group(2);
                 String normalizedName = normalizeGpuName(name);
-                if (normalizedName != null && lowerGpuName.contains(normalizedName.toLowerCase())) {
+                if (normalizedName != null && !normalizedName.isBlank()
+                        && containsWholeTokens(lowerGpuName, normalizedName.toLowerCase())
+                        && !hasQualifierMismatch(lowerGpuName, normalizedName.toLowerCase())) {
                     int pfid = Integer.parseInt(pfidStr);
                     return new int[]{107, pfid};
                 }
@@ -228,6 +249,28 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
         n = n.replaceAll("(?i)\\b Laptop\\b", "");
         n = n.replaceAll("(?i)\\bDesktop\\b", "");
         return n.trim();
+    }
+
+    private static boolean containsWholeTokens(String haystackLower, String needleLower) {
+        java.util.Set<String> hay = new java.util.HashSet<>(
+                java.util.Arrays.asList(haystackLower.split("[\\s\\-]+")));
+        for (String tok : needleLower.split("[\\s\\-]+")) {
+            if (tok.isBlank()) continue;
+            if (!hay.contains(tok)) return false;
+        }
+        return true;
+    }
+
+    private static boolean hasQualifierMismatch(String gpuLower, String keyLower) {
+        boolean gpuTi = gpuLower.contains(" ti");
+        boolean keyTi = keyLower.contains(" ti");
+        boolean gpuSuper = gpuLower.contains("super");
+        boolean keySuper = keyLower.contains("super");
+        boolean gpu3gb = gpuLower.contains("3gb");
+        boolean key3gb = keyLower.contains("3gb");
+        boolean gpu6gb = gpuLower.contains("6gb");
+        boolean key6gb = keyLower.contains("6gb");
+        return (gpuTi != keyTi) || (gpuSuper != keySuper) || (gpu3gb != key3gb) || (gpu6gb != key6gb);
     }
 
     private String extractGpuModel(InstalledDriver driver) {

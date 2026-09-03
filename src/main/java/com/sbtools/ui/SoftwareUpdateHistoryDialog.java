@@ -19,6 +19,15 @@ public class SoftwareUpdateHistoryDialog {
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
+    private static String formatInstalledAt(SoftwareUpdateHistoryEntry e) {
+        try {
+            if (e == null || e.installedAt() == null) return "";
+            return e.installedAt().atZone(ZoneId.systemDefault()).format(DATE_FMT);
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     public static void show() {
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle(AppInfo.DISPLAY_NAME + " - Update History");
@@ -32,7 +41,7 @@ public class SoftwareUpdateHistoryDialog {
 
         TableColumn<SoftwareUpdateHistoryEntry, String> dateCol = new TableColumn<>("Date");
         dateCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
-                c.getValue().installedAt().atZone(ZoneId.systemDefault()).format(DATE_FMT)));
+                formatInstalledAt(c.getValue())));
         dateCol.setPrefWidth(130);
 
         TableColumn<SoftwareUpdateHistoryEntry, String> nameCol = new TableColumn<>("Program");

@@ -39,6 +39,12 @@ public class GradleCacheCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         String userHome = CleanerUtils.safeEnv("USERPROFILE");
         if (userHome == null) return 0;
         Path caches = Paths.get(userHome, ".gradle", "caches");
@@ -47,12 +53,13 @@ public class GradleCacheCleaner implements CleanerExtension {
         try (Stream<Path> walk = Files.walk(caches, 3)) {
             List<Path> sorted = walk.sorted(java.util.Comparator.reverseOrder()).toList();
             for (Path f : sorted) {
+                if (token != null && token.isCancelled()) break;
                 if (f.equals(caches)) continue;
                 try {
                     if (Files.isRegularFile(f)) {
                         long size = Files.size(f);
-                        CleanerUtils.deletePermanently(f);
-                        cleaned += size;
+                        CleanerUtils.deletePermanently(f, token);
+                        if (!Files.exists(f)) cleaned += size;
                     } else if (Files.isDirectory(f)) {
                         Files.deleteIfExists(f);
                     }

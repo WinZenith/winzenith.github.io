@@ -44,17 +44,24 @@ public class InstallerFilesCleaner implements CleanerExtension {
 
     @Override
     public long clean(java.nio.file.Path backupRootOrNull) {
+        return clean(backupRootOrNull, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         Path tempDir = CleanerUtils.safeEnvPath("TEMP");
         if (tempDir != null && Files.isDirectory(tempDir)) {
             try (Stream<Path> files = Files.list(tempDir)) {
                 for (Path f : (Iterable<Path>) files::iterator) {
+                    if (token != null && token.isCancelled()) break;
                     if (Files.isRegularFile(f)) {
                         String name = f.getFileName().toString().toLowerCase();
                         if ((name.endsWith(".msi") || name.endsWith(".exe"))) {
                             long size = f.toFile().length();
                             if (size > 10 * 1024 * 1024) {
-                                CleanerUtils.deletePermanently(f);
+                                CleanerUtils.deletePermanently(f, token);
                                 if (!Files.exists(f)) cleaned += size;
                             }
                         }
