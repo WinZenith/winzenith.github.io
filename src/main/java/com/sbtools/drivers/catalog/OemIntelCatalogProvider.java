@@ -107,15 +107,6 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
         return tryOemSearchPage(mfr, driver);
     }
 
-    private String mapLenovoCategory(String category) {
-        return switch (category) {
-            case "bluetooth" -> "Bluetooth";
-            case "wifi" -> "Networking:Wireless LAN";
-            case "graphics" -> "Display and Video Graphics";
-            default -> "All";
-        };
-    }
-
     private String tryOemSearchPage(SystemManufacturer.Manufacturer mfr, InstalledDriver driver) {
         String deviceName = driver.friendlyName() != null ? driver.friendlyName() : "";
         String searchQuery = deviceName.replaceAll("[^a-zA-Z0-9 ]", "").trim().replace(" ", "+");
@@ -167,53 +158,6 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             AppLogger.warning("Intel: OEM search failed for " + mfr + ": " + e.getMessage());
         }
         return null;
-    }
-
-    private String scrapeIntelDownloadPage(String pageUrl) {
-        try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(pageUrl))
-                    .timeout(Duration.ofSeconds(30))
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .header("Accept-Language", "en-US,en;q=0.9")
-                    .header("Referer", "https://www.intel.com/")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-                AppLogger.warning("Intel: Download page returned HTTP " + resp.statusCode());
-                return null;
-            }
-
-            String html = resp.body();
-
-            Pattern p = Pattern.compile(
-                    "href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"",
-                    Pattern.CASE_INSENSITIVE);
-            Matcher m = p.matcher(html);
-            while (m.find()) {
-                String url = decodeHtmlEntities(m.group(1));
-                if (isDirectDownloadUrl(url) && !url.contains("intel.com/content/www")
-                        && !url.contains("downloadmirror.intel.com")) {
-                    AppLogger.info("Intel: Scraped download URL from page: " + url);
-                    return url;
-                }
-            }
-
-            AppLogger.warning("Intel: No download link found on page " + pageUrl);
-        } catch (Exception e) {
-            AppLogger.warning("Intel: Error scraping download page: " + e.getMessage());
-        }
-        return null;
-    }
-
-    private boolean isDirectDownloadUrl(String url) {
-        if (url == null) return false;
-        String lower = url.toLowerCase();
-        return (lower.endsWith(".exe") || lower.endsWith(".zip") || lower.endsWith(".msi"))
-                && !lower.endsWith(".html") && !lower.endsWith(".htm");
     }
 
     private String[] resolveDriverInfo(InstalledDriver driver) {
@@ -431,12 +375,6 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
         if (name.contains("graphics") || name.contains("iris") || name.contains("uhd") || name.contains("arc")) return "graphics";
         if (name.contains("chipset") || name.contains("pch")) return "chipset";
         return "general";
-    }
-
-    private String getFallbackVersion(InstalledDriver driver) {
-        // Disabled: substring hardcodes (e.g. "630") collide with unrelated
-        // devices and go stale. Catalog/DSA match only.
-        return null;
     }
 
     private String getTextField(JsonNode node, String field) {

@@ -30,7 +30,6 @@ import com.sbtools.util.*;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
-import javafx.beans.property.SimpleBooleanProperty;
 
 import java.awt.Desktop;
 import java.io.IOException;

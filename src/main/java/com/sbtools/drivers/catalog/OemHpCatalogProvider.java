@@ -2,8 +2,6 @@ package com.sbtools.drivers.catalog;
 
 import com.sbtools.drivers.model.InstalledDriver;
 
-import java.util.regex.Pattern;
-
 public class OemHpCatalogProvider extends AbstractOemCatalogProvider {
     public OemHpCatalogProvider() {
         super(OemVendorHelper.HP);

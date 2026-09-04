@@ -35,7 +35,6 @@ import java.util.stream.Collectors;
 
 public class SoftwareUpdateViewModel {
 
-    private static final long INSTALL_TIMEOUT_SECONDS = 1200;
     private static final long INSTALL_TIMEOUT_WINGET_SECONDS = 1200;
     private static final long INSTALL_TIMEOUT_WU_SECONDS = 3600;
 

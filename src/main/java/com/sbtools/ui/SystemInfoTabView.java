@@ -257,10 +257,6 @@ public class SystemInfoTabView extends BorderPane {
         }
     }
 
-    private void updateAdminWarning() {
-        refreshAdminWarningAsync();
-    }
-
     /**
      * Queries elevation off the FX thread (AdminCheck spawns powershell.exe and
      * can block for seconds) and publishes the banner back on the FX thread.

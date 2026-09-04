@@ -21,7 +21,6 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ContextMenu;
-import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.MenuItem;
@@ -33,7 +32,6 @@ import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableRow;
 import javafx.scene.control.TableView;
-import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.Clipboard;
@@ -280,10 +278,6 @@ public class DuplicateFilesTabView extends BorderPane {
                 statusLabel.setText("Add folder(s) to scan. System and app folders are blocked.");
             }
         }
-    }
-
-    private int getSelectedCount() {
-        return (int) rows.stream().filter(DuplicateFileRow::isSelected).count();
     }
 
     private long getSelectedDeletableCount() {

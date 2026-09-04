@@ -435,28 +435,6 @@ public class StartupService {
         }
     }
 
-    // Legacy wrappers retained for compatibility (delegates)
-    private void scanRegistryWithApproval(HKEY hive, String hivePrefix, String keyPath, List<StartupItem> items) {
-        String approved = StartupConstants.toApprovedPath(keyPath);
-        String label = hivePrefix + " Run";
-        scanRegistryUnified(hive, label, keyPath, approved, true, items);
-    }
-    private void scanOrphanedApproved(HKEY hive, String hivePrefix, List<StartupItem> items) {
-        scanOrphanedApprovedUnified(hive, hivePrefix + " Run", REG_RUN, REG_STARTUP_APPROVED, items);
-    }
-    private void scanOrphanedApprovedRunOnce(HKEY hive, String hivePrefix, List<StartupItem> items) {
-        scanOrphanedApprovedUnified(hive, hivePrefix + " RunOnce", REG_RUN_ONCE, REG_STARTUP_APPROVED_RUNONCE, items);
-    }
-    private void scanRegistry(HKEY hive, String locationLabel, String keyPath, boolean active, List<StartupItem> items) {
-        String approved = StartupConstants.toApprovedPath(keyPath);
-        scanRegistryUnified(hive, locationLabel, keyPath, approved, active, items);
-    }
-    private void scanRegistry32bit(HKEY hive, String locationLabel, String keyPath, List<StartupItem> items, boolean activeDefault) {
-        String fullPath = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\" + keyPath.substring(keyPath.lastIndexOf('\\') + 1);
-        String approvedPath = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\" + keyPath.substring(keyPath.lastIndexOf('\\') + 1);
-        scanRegistryUnified(hive, locationLabel, fullPath, approvedPath, activeDefault, items);
-    }
-
     public List<StartupItem> listScheduledTasks() {
         List<StartupItem> items = new ArrayList<>();
         if (!AppPaths.isWindows()) return items;

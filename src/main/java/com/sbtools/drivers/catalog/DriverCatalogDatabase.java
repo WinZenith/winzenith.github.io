@@ -91,22 +91,6 @@ public final class DriverCatalogDatabase {
         }
     }
 
-    private static List<CatalogEntry> loadUserSupplemental() {
-        Path userCatalog = AppPaths.localAppData().resolve("user-catalog.json");
-        if (!Files.exists(userCatalog)) {
-            return List.of();
-        }
-        try {
-            byte[] data = Files.readAllBytes(userCatalog);
-            List<CatalogEntry> entries = MAPPER.readValue(data, LIST_TYPE);
-            AppLogger.info("DriverCatalogDatabase: Loaded " + entries.size() + " supplemental user entries");
-            return entries;
-        } catch (Exception e) {
-            AppLogger.warning("DriverCatalogDatabase: Failed to load user catalog: " + e.getMessage());
-            return List.of();
-        }
-    }
-
     /**
      * Finds all catalog entries that match the given installed driver.
      * Returns matches sorted by confidence (highest first).

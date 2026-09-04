@@ -514,24 +514,4 @@ public class BrowserExtensionService {
         }
         return sb.toString();
     }
-
-    private static int compareVersions(String v1, String v2) {
-        String[] parts1 = v1.split("\\.");
-        String[] parts2 = v2.split("\\.");
-        int maxLen = Math.max(parts1.length, parts2.length);
-        for (int i = 0; i < maxLen; i++) {
-            int p1 = i < parts1.length ? parseIntOrDefault(parts1[i], 0) : 0;
-            int p2 = i < parts2.length ? parseIntOrDefault(parts2[i], 0) : 0;
-            if (p1 != p2) return Integer.compare(p1, p2);
-        }
-        return 0;
-    }
-
-    private static int parseIntOrDefault(String s, int defaultValue) {
-        try {
-            return Integer.parseInt(s.replaceAll("[^0-9]", ""));
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
 }

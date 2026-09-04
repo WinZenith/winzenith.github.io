@@ -35,11 +35,6 @@ public class OemAmdCatalogProvider extends AbstractOemCatalogProvider {
         return null;
     }
 
-    private String getFallbackVersion(InstalledDriver driver) {
-        // Disabled: hardcoded versions go stale.
-        return null;
-    }
-
     @Override
     protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
         AppLogger.info("AMD: Resolving direct download URL for " + driver.friendlyName());

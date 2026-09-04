@@ -2,8 +2,6 @@ package com.sbtools.drivers.catalog;
 
 import com.sbtools.drivers.model.InstalledDriver;
 
-import java.util.regex.Pattern;
-
 public class OemLenovoCatalogProvider extends AbstractOemCatalogProvider {
     public OemLenovoCatalogProvider() {
         super(OemVendorHelper.LENOVO);

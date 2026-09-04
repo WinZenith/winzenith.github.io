@@ -823,14 +823,6 @@ public class UninstallerService {
     }
 
     /**
-     * @deprecated Use {@link #scanPathWarnings(InstalledApp)} — kept for backward compat, do not mix with file paths.
-     */
-    @Deprecated
-    private void checkPathEntriesForLeftover(String installLocation, List<String> leftovers) {
-        // No-op: intentionally not mixing PATH warnings into deletable paths
-    }
-
-    /**
      * Scans Registry SOFTWARE keys (HKLM, HKLM-Wow6432, HKCU) and HKCR for remnants.
      */
     public List<String> scanRegistryLeftovers(InstalledApp app) {

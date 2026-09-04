@@ -1,7 +1,5 @@
 package com.sbtools.startup;
 
-import com.sun.jna.platform.win32.WinReg;
-
 public final class StartupConstants {
 
     private StartupConstants() {}

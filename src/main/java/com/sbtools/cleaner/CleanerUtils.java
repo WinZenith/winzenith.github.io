@@ -1,7 +1,6 @@
 package com.sbtools.cleaner;
 
 import com.sbtools.util.AppLogger;
-import com.sbtools.util.CancelableCompletableFuture;
 import com.sbtools.util.CancellationToken;
 import com.sbtools.util.FormatUtils;
 

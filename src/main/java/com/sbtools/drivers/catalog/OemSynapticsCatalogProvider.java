@@ -46,11 +46,6 @@ public class OemSynapticsCatalogProvider extends AbstractOemCatalogProvider {
         return null;
     }
 
-    private String getFallbackVersion(InstalledDriver driver) {
-        // Disabled: hardcoded versions go stale and cause downgrades.
-        return null;
-    }
-
     @Override
     protected String getVendorPageUrl(InstalledDriver driver) {
         return "https://www.synaptics.com/support";

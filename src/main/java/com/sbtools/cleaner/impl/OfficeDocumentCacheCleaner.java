@@ -6,8 +6,6 @@ import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 
 import java.nio.file.*;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.stream.Stream;
 
 public class OfficeDocumentCacheCleaner implements CleanerExtension {
