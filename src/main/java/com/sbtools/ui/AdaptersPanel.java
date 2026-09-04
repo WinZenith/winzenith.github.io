@@ -184,6 +184,14 @@ class AdaptersPanel extends VBox {
         NetworkAdapterRow selected = adapterTable.getSelectionModel().getSelectedItem();
         if (selected == null || busy.get()) return;
         if (!requireAdmin()) return;
+        if (!enable) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                    "Disable adapter '" + selected.getName() + "'?\n\nYou may lose network connectivity until it is re-enabled.",
+                    javafx.scene.control.ButtonType.YES, javafx.scene.control.ButtonType.NO);
+            confirm.setTitle("Confirm Disable");
+            confirm.setHeaderText(null);
+            if (confirm.showAndWait().orElse(javafx.scene.control.ButtonType.NO) != javafx.scene.control.ButtonType.YES) return;
+        }
 
         busy.set(true);
         String action = enable ? "Enable" : "Disable";

@@ -85,24 +85,9 @@ public class App extends Application {
 
         // Async elevation check to avoid FX freeze (B1). UI is built immediately;
         // elevation is requested off FX thread and exits if successful.
+        // NOTE: elevation is handled pre-launch by ElevationGate (see main()).
+        // No in-UI relaunch here: the window must never flash before the UAC prompt.
         logoImage = new Image(getClass().getResourceAsStream("/logo-ico.png"));
-        if (AppPaths.isWindows()) {
-            AdminCheck.isRunningAsAdminAsync().thenAccept(admin -> Platform.runLater(() -> {
-                if (!admin) {
-                    AppLogger.info("Requesting administrator privileges...");
-                    try {
-                        if (AdminCheck.requestElevation()) {
-                            Platform.exit();
-                        }
-                    } catch (IOException ex) {
-                        AppLogger.warning("Failed to request elevation: " + ex.getMessage());
-                    }
-                    if (!AdminCheck.isRunningAsAdmin()) {
-                        AppLogger.info("Elevation not available. Continuing without administrator privileges.");
-                    }
-                }
-            }));
-        }
 
         appSettings = settings;
         tabViews = new Node[TAB_NAMES.length];
@@ -537,6 +522,17 @@ public class App extends Application {
     }
 
     public static void main(String[] args) {
+        // Elevation consent happens BEFORE JavaFX starts: no window is ever shown
+        // before the user answers, so there is no load -> UAC -> close -> reopen flash.
+        // handlePreLaunch returns true only when an elevated child was accepted and
+        // is starting; this process must then exit quietly without launching.
+        try {
+            if (com.sbtools.util.ElevationGate.handlePreLaunch(args)) {
+                return;
+            }
+        } catch (Throwable t) {
+            System.err.println("[App] Elevation gate failed, starting normally: " + t.getMessage());
+        }
         launch(args);
     }
 

@@ -49,28 +49,123 @@ public class BrowserExtensionService {
         return Map.copyOf(lastScanErrors);
     }
 
+    private static String expandEnv(String template) {
+        if (template == null) return "";
+        String local = System.getenv("LOCALAPPDATA");
+        String app = System.getenv("APPDATA");
+        String pf = System.getenv("ProgramFiles");
+        String pf86 = System.getenv("ProgramFiles(x86)");
+        return template.replace("%LOCALAPPDATA%", local != null ? local : "")
+                .replace("%APPDATA%", app != null ? app : "")
+                .replace("%ProgramFiles%", pf != null ? pf : "")
+                .replace("%ProgramFiles(x86)%", pf86 != null ? pf86 : "");
+    }
+
+    private static List<String> wellKnownExePaths(String browser) {
+        return switch (browser) {
+            case "Chrome" -> List.of(
+                    "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe",
+                    "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
+                    "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe");
+            case "Chrome Canary" -> List.of(
+                    "%LOCALAPPDATA%\\Google\\Chrome SxS\\Application\\chrome.exe");
+            case "Edge" -> List.of(
+                    "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe",
+                    "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe");
+            case "Edge Beta" -> List.of(
+                    "%ProgramFiles%\\Microsoft\\Edge Beta\\Application\\msedge.exe",
+                    "%ProgramFiles(x86)%\\Microsoft\\Edge Beta\\Application\\msedge.exe");
+            case "Edge Dev" -> List.of(
+                    "%ProgramFiles%\\Microsoft\\Edge Dev\\Application\\msedge.exe",
+                    "%ProgramFiles(x86)%\\Microsoft\\Edge Dev\\Application\\msedge.exe");
+            case "Edge Canary" -> List.of(
+                    "%LOCALAPPDATA%\\Microsoft\\Edge SxS\\Application\\msedge.exe");
+            case "Firefox" -> List.of(
+                    "%ProgramFiles%\\Mozilla Firefox\\firefox.exe",
+                    "%ProgramFiles(x86)%\\Mozilla Firefox\\firefox.exe",
+                    "%LOCALAPPDATA%\\Mozilla Firefox\\firefox.exe");
+            case "Brave" -> List.of(
+                    "%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+                    "%ProgramFiles(x86)%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+                    "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe");
+            case "Opera" -> List.of(
+                    "%LOCALAPPDATA%\\Programs\\Opera\\opera.exe",
+                    "%APPDATA%\\Opera Software\\Opera Stable\\opera.exe");
+            case "Opera GX" -> List.of(
+                    "%LOCALAPPDATA%\\Programs\\Opera GX\\opera.exe");
+            case "Vivaldi" -> List.of(
+                    "%LOCALAPPDATA%\\Vivaldi\\Application\\vivaldi.exe",
+                    "%ProgramFiles%\\Vivaldi\\Application\\vivaldi.exe");
+            default -> List.of();
+        };
+    }
+
     /**
-     * Checks if a browser is installed by testing if its profile directory exists.
-     * Falls back to base dir for Firefox (Profiles subdir may not exist on fresh install).
+     * Checks if a browser looks installed using BOTH profile-data and executable evidence.
+     * Data dir alone is unreliable (leftover data after uninstall = false positive;
+     * fresh install never launched = false negative), so well-known exe paths are
+     * checked as well. Either signal counts as installed.
+     * NOTE: intentionally file-existence checks only — no subprocess (e.g. where.exe),
+     * because this runs on the FX thread via buildStatusText and must never block (B6).
      */
     public boolean checkBrowserInstalled(String browser) {
         String template = BROWSER_PATHS.get(browser);
-        if (template == null) return false;
-        String resolved = template.replace("%LOCALAPPDATA%", System.getenv("LOCALAPPDATA") != null ? System.getenv("LOCALAPPDATA") : "")
-                                   .replace("%APPDATA%", System.getenv("APPDATA") != null ? System.getenv("APPDATA") : "");
-        if (resolved.isBlank()) return false;
-        try {
-            Path p = Paths.get(resolved);
-            if (Files.exists(p)) return true;
-            // Fallback for Firefox: check base Firefox dir if Profiles missing
-            if ("Firefox".equals(browser)) {
-                String base = "%APPDATA%\\Mozilla\\Firefox".replace("%APPDATA%", System.getenv("APPDATA") != null ? System.getenv("APPDATA") : "");
-                if (!base.isBlank() && Files.exists(Paths.get(base))) return true;
+        boolean dataFound = false;
+        if (template != null) {
+            String resolved = expandEnv(template);
+            if (!resolved.isBlank()) {
+                try {
+                    if (Files.exists(Paths.get(resolved))) dataFound = true;
+                } catch (Exception ignored) {
+                }
             }
-            return false;
-        } catch (Exception e) {
-            return false;
+            if (!dataFound && "Firefox".equals(browser)) {
+                String base = expandEnv("%APPDATA%\\Mozilla\\Firefox");
+                try {
+                    if (!base.isBlank() && Files.exists(Paths.get(base))) dataFound = true;
+                    if (!dataFound) {
+                        String ini = expandEnv("%APPDATA%\\Mozilla\\Firefox\\profiles.ini");
+                        if (!ini.isBlank() && Files.exists(Paths.get(ini))) dataFound = true;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
         }
+        if (dataFound) return true;
+        // No profile data — fall back to executable evidence (fresh install case).
+        try {
+            for (String candidate : wellKnownExePaths(browser)) {
+                String expanded = expandEnv(candidate);
+                if (!expanded.isBlank() && Files.exists(Paths.get(expanded))) return true;
+            }
+        } catch (Exception e) {
+            return dataFound;
+        }
+        return false;
+    }
+
+    /**
+     * True when profile data exists for the browser (used to distinguish
+     * "installed but no scannable profile data" from "not installed").
+     */
+    public boolean hasProfileData(String browser) {
+        String template = BROWSER_PATHS.get(browser);
+        if (template == null) return false;
+        String resolved = expandEnv(template);
+        if (!resolved.isBlank()) {
+            try {
+                if (Files.exists(Paths.get(resolved))) return true;
+            } catch (Exception ignored) {
+            }
+        }
+        if ("Firefox".equals(browser)) {
+            try {
+                String base = expandEnv("%APPDATA%\\Mozilla\\Firefox");
+                if (!base.isBlank() && Files.exists(Paths.get(base))) return true;
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
     }
 
     /**
@@ -307,12 +402,39 @@ public class BrowserExtensionService {
                 profileDir = Paths.get(pp);
                 if (!Files.exists(profileDir)) return false;
             } else {
-                // Legacy fallback: derive from path (Extensions dir -> profile)
+                // Legacy fallback: walk up from path until a profile marker is
+                // found (Preferences / Secure Preferences / extensions.json).
+                // The old single-parent assumption broke when path pointed at
+                // the per-extension dir instead of the Extensions dir (B1).
                 String pathStr = ext.getPath();
                 if (pathStr == null || pathStr.isBlank()) return false;
-                Path extPath = Paths.get(pathStr);
-                if (!Files.exists(extPath)) return false;
-                profileDir = extPath.getParent();
+                Path cursor;
+                try {
+                    cursor = Paths.get(pathStr);
+                } catch (Exception e) {
+                    return false;
+                }
+                profileDir = null;
+                for (int depth = 0; depth < 5 && cursor != null; depth++) {
+                    try {
+                        if (Files.exists(cursor.resolve("Preferences"))
+                                || Files.exists(cursor.resolve("Secure Preferences"))
+                                || Files.exists(cursor.resolve("extensions.json"))) {
+                            profileDir = cursor;
+                            break;
+                        }
+                        if ("Extensions".equalsIgnoreCase(cursor.getFileName() != null
+                                ? cursor.getFileName().toString() : "")) {
+                            Path parent = cursor.getParent();
+                            if (parent != null && Files.exists(parent)) {
+                                profileDir = parent;
+                                break;
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    cursor = cursor.getParent();
+                }
                 if (profileDir == null || !Files.exists(profileDir)) return false;
             }
 

@@ -92,8 +92,18 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                                     candidate.vendorPageUrl()
                             );
                         } else {
-                            AppLogger.info(vendor.label() + ": Could not resolve download URL from catalog, falling back to web scraping");
-                            candidate = null;
+                            // Keep the HW-matched catalog candidate as a manual-download
+                            // flow (empty URL + vendor page) instead of dropping a
+                            // genuine update. The UI routes empty-URL candidates to
+                            // the vendor website; nothing installs silently.
+                            // The catalog version stays authoritative: do NOT fall
+                            // through to generic web scraping, whose guessed
+                            // version could displace this HW-matched one.
+                            AppLogger.info(vendor.label() + ": No direct download for "
+                                    + driver.friendlyName() + " — offering manual update to "
+                                    + candidate.availableVersion());
+                            out.add(candidate);
+                            continue;
                         }
                     }
 

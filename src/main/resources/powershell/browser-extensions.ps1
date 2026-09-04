@@ -95,6 +95,45 @@ function Resolve-LocaleMessage {
     return $null
 }
 
+function Get-ChromiumManifestPermissions {
+    param([object]$Manifest)
+    $collected = @()
+    $seen = @{}
+    $addItems = {
+        param([object]$Items)
+        if ($null -eq $Items) { return }
+        foreach ($it in @($Items)) {
+            if ($null -eq $it) { continue }
+            $s = ""
+            try {
+                if ($it -is [string]) { $s = $it }
+                else { $s = "$it" }
+            } catch { continue }
+            $s = $s.Trim()
+            if ($s -eq "" -or $seen.ContainsKey($s)) { continue }
+            $seen[$s] = $true
+            $collected += $s
+        }
+    }
+    try { &$addItems $Manifest.permissions } catch { }
+    try { &$addItems $Manifest.host_permissions } catch { }
+    try { &$addItems $Manifest.optional_permissions } catch { }
+    try { &$addItems $Manifest.optional_host_permissions } catch { }
+    try {
+        if ($Manifest.content_scripts) {
+            foreach ($cs in @($Manifest.content_scripts)) {
+                try { &$addItems $cs.matches } catch { }
+            }
+        }
+    } catch { }
+    try {
+        if ($Manifest.externally_connectable -and $Manifest.externally_connectable.matches) {
+            &$addItems $Manifest.externally_connectable.matches
+        }
+    } catch { }
+    return ($collected -join ", ")
+}
+
 function Scan-ChromiumExtensions {
     param(
         [string]$BrowserName,
@@ -166,7 +205,7 @@ function Scan-ChromiumExtensions {
                         path = $ExtensionsDir
                         profilePath = $profileDir
                         installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
-                        permissions = if ($m.permissions) { ($m.permissions -join ", ") } else { "" }
+                        permissions = Get-ChromiumManifestPermissions -Manifest $m
                     }
                 } catch {
                     [Console]::Error.WriteLine("Failed to parse Chromium manifest for ${extId}: $($_.Exception.Message)")
@@ -203,6 +242,10 @@ function Scan-ChromiumSingleProfileBrowser {
 
 function Test-FileLock {
     param([string]$Path)
+    # Best-effort only: Chromium/Firefox typically hold Preferences with shared read access,
+    # so an exclusive-open probe often succeeds even while the browser is running.
+    # Callers must ALSO check the running-process list and treat "browser running" as a
+    # hard block (close + retry). A passed lock check alone does NOT prove it is safe to write.
     # Returns true if file is locked (browser running)
     try {
         $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
@@ -335,9 +378,28 @@ function Toggle-ChromiumExtension {
             $bakFile = "$targetFile.bak.$([DateTime]::Now.ToString('yyyyMMdd-HHmmss-fff'))"
             try { Copy-Item -LiteralPath $targetFile -Destination $bakFile -Force -ErrorAction SilentlyContinue } catch { }
             $tmpFile = "$targetFile.tmp"
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
             try {
-                [System.IO.File]::WriteAllText($tmpFile, $json, [System.Text.Encoding]::UTF8)
+                [System.IO.File]::WriteAllText($tmpFile, $json, $utf8NoBom)
                 Move-Item -LiteralPath $tmpFile -Destination $targetFile -Force
+                # Integrity check: written file must still parse as JSON and retain our edit
+                try {
+                    $verifyRaw = Get-Content -LiteralPath $targetFile -Raw -ErrorAction Stop
+                    $verifyPrefs = $verifyRaw | ConvertFrom-Json -ErrorAction Stop
+                    $verifyProp = $verifyPrefs.extensions.settings.PSObject.Properties[$ExtensionId]
+                    if (-not $verifyProp -or -not $verifyProp.Value) { throw "extension entry missing after write" }
+                    $verifyState = $null
+                    if ($verifyProp.Value.PSObject.Properties['state']) { $verifyState = $verifyProp.Value.state }
+                    if ($null -ne $verifyState -and ([string]$verifyState -ne [string]$newState)) {
+                        throw "state mismatch after write (expected $newState, got $verifyState)"
+                    }
+                } catch {
+                    [Console]::Error.WriteLine("Write verification failed for $targetFile : $($_.Exception.Message). Restoring backup.")
+                    try {
+                        if (Test-Path $bakFile) { Copy-Item -LiteralPath $bakFile -Destination $targetFile -Force }
+                    } catch { }
+                    throw
+                }
                 try {
                     $filter = if ($isSecure) { "Secure Preferences.bak.*" } else { "Preferences.bak.*" }
                     Get-ChildItem (Split-Path $targetFile -Parent) -File -Filter $filter -ErrorAction SilentlyContinue |
@@ -345,7 +407,7 @@ function Toggle-ChromiumExtension {
                 } catch { }
             } catch {
                 [Console]::Error.WriteLine("Atomic write failed for $targetFile, attempting direct write: $($_.Exception.Message)")
-                try { [System.IO.File]::WriteAllText($targetFile, $json, [System.Text.Encoding]::UTF8) } catch { throw }
+                try { [System.IO.File]::WriteAllText($targetFile, $json, $utf8NoBom) } catch { throw }
             } finally {
                 try { Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue } catch { }
             }
@@ -361,7 +423,56 @@ function Toggle-ChromiumExtension {
         [Console]::Error.WriteLine("Extension $ExtensionId not found in Secure Preferences nor Preferences")
         return $false
     }
-    return $overallSuccess -or $anyUpdated
+    if (-not $overallSuccess) {
+        # Partial failure (e.g. one file locked, one written) must NOT be reported as success:
+        # Chromium would see inconsistent Preferences vs Secure Preferences and revert.
+        [Console]::Error.WriteLine("Partial toggle failure for $ExtensionId (some profile files could not be updated). Close the browser and retry.")
+        return $false
+    }
+    # Verify-after-write: re-read effective state; Chrome may have rewritten the file concurrently.
+    try {
+        $verified = Get-ChromiumExtState -ProfileDir $ProfileDir -ExtensionId $ExtensionId
+        if ($null -ne $verified -and $verified -ne $Enable) {
+            [Console]::Error.WriteLine("Toggle verification failed for $ExtensionId (expected enabled=$Enable, read enabled=$verified). Browser may have overwritten the change; close it and retry.")
+            return $false
+        }
+    } catch { }
+    return $true
+}
+
+function Get-FirefoxAddonPermissions {
+    param([object]$Addon)
+    $collected = @()
+    $seen = @{}
+    $addItems = {
+        param([object]$Items)
+        if ($null -eq $Items) { return }
+        foreach ($it in @($Items)) {
+            if ($null -eq $it) { continue }
+            $s = ""
+            try {
+                if ($it -is [string]) { $s = $it }
+                elseif ($it.PSObject -and $it.PSObject.Properties['origin']) { $s = [string]$it.origin }
+                elseif ($it.PSObject -and $it.PSObject.Properties['pattern']) { $s = [string]$it.pattern }
+                else { $s = "$it" }
+            } catch { continue }
+            $s = $s.Trim()
+            if ($s -eq "" -or $seen.ContainsKey($s)) { continue }
+            $seen[$s] = $true
+            $collected += $s
+        }
+    }
+    try { &$addItems $Addon.permissions } catch { }
+    try { &$addItems $Addon.origins } catch { }
+    try { &$addItems $Addon.hostPermissions } catch { }
+    try { &$addItems $Addon.optionalPermissions } catch { }
+    try {
+        if ($Addon.userPermissions) {
+            &$addItems $Addon.userPermissions.permissions
+            &$addItems $Addon.userPermissions.origins
+        }
+    } catch { }
+    return ($collected -join ", ")
 }
 
 function Scan-FirefoxExtensions {
@@ -404,7 +515,7 @@ function Scan-FirefoxExtensions {
                 installTime = if ($addon.installDate) {
                     try { [DateTimeOffset]::FromUnixTimeMilliseconds([long]$addon.installDate).ToString("yyyy-MM-dd HH:mm:ss") } catch { "$($addon.installDate)" }
                 } else { "" }
-                permissions = if ($addon.permissions) { ($addon.permissions -join ", ") } else { "" }
+                permissions = Get-FirefoxAddonPermissions -Addon $addon
             }
         }
     } catch {
@@ -451,9 +562,12 @@ function Toggle-FirefoxExtension {
                     if ($null -ne $addon.userDisabled) { $addon.userDisabled = $false }
                     if ($null -ne $addon.softDisabled) { $addon.softDisabled = $false }
                     if ($null -ne $addon.embedderDisabled) { $addon.embedderDisabled = $false }
+                    if ($addon.PSObject.Properties['visible']) { $addon.visible = $true }
+                    if ($addon.PSObject.Properties['active']) { $addon.active = $true }
                 } else {
                     $addon.disabled = $true
                     if ($null -ne $addon.userDisabled) { $addon.userDisabled = $true }
+                    if ($addon.PSObject.Properties['active']) { $addon.active = $false }
                 }
                 $found = $true
                 break
@@ -468,8 +582,9 @@ function Toggle-FirefoxExtension {
         $bakFile = "$extJson.bak.$([DateTime]::Now.ToString('yyyyMMdd-HHmmss-fff'))"
         try { Copy-Item -LiteralPath $extJson -Destination $bakFile -Force -ErrorAction SilentlyContinue } catch { }
         $tmpFile = "$extJson.tmp"
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
         try {
-            [System.IO.File]::WriteAllText($tmpFile, $jsonText, [System.Text.Encoding]::UTF8)
+            [System.IO.File]::WriteAllText($tmpFile, $jsonText, $utf8NoBom)
             Move-Item -LiteralPath $tmpFile -Destination $extJson -Force
             try {
                 Get-ChildItem (Split-Path $extJson -Parent) -File -Filter "extensions.json.bak.*" -ErrorAction SilentlyContinue |
@@ -477,10 +592,50 @@ function Toggle-FirefoxExtension {
             } catch { }
         } catch {
             [Console]::Error.WriteLine("Atomic write failed, attempting direct write: $($_.Exception.Message)")
-            try { [System.IO.File]::WriteAllText($extJson, $jsonText, [System.Text.Encoding]::UTF8) } catch { throw }
+            try { [System.IO.File]::WriteAllText($extJson, $jsonText, $utf8NoBom) } catch { throw }
         } finally {
             try { Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue } catch { }
         }
+        # Verify-after-write: re-read and confirm flags match the request.
+        # Without this, Firefox may silently overwrite extensions.json from its
+        # startup cache on next launch and the UI would report false success.
+        try {
+            $verifyJson = Get-Content -LiteralPath $extJson -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $verifyFound = $false
+            foreach ($va in @($verifyJson.addons)) {
+                if ($va.id -and ($va.id -replace $illegalFilenameChars, '_') -eq $ExtensionId) {
+                    $verifyFound = $true
+                    $vDisabled = $false
+                    if ($null -ne $va.disabled) { $vDisabled = [bool]$va.disabled }
+                    if ($null -ne $va.userDisabled -and $va.userDisabled) { $vDisabled = $true }
+                    if ($Enable -and $vDisabled) {
+                        [Console]::Error.WriteLine("Firefox toggle verification failed: extension still disabled after write. Close Firefox and retry.")
+                        return $false
+                    }
+                    if ((-not $Enable) -and (-not $vDisabled)) {
+                        [Console]::Error.WriteLine("Firefox toggle verification failed: extension still enabled after write. Close Firefox and retry.")
+                        return $false
+                    }
+                    break
+                }
+            }
+            if (-not $verifyFound) {
+                [Console]::Error.WriteLine("Firefox toggle verification failed: extension missing after write.")
+                return $false
+            }
+        } catch {
+            [Console]::Error.WriteLine("Firefox toggle verification failed: $($_.Exception.Message)")
+            return $false
+        }
+        # Invalidate Firefox startup cache so it rebuilds from the edited
+        # extensions.json on next launch instead of restoring the old state.
+        # Best-effort only; failures here do not fail the toggle.
+        try {
+            $cacheLz4 = Join-Path $ProfileDir "addonStartup.json.lz4"
+            if (Test-Path -LiteralPath $cacheLz4) { Remove-Item -LiteralPath $cacheLz4 -Force -ErrorAction SilentlyContinue }
+            $cacheJson = Join-Path $ProfileDir "addonStartup.json"
+            if (Test-Path -LiteralPath $cacheJson) { Remove-Item -LiteralPath $cacheJson -Force -ErrorAction SilentlyContinue }
+        } catch { }
         return $true
     } catch {
         [Console]::Error.WriteLine("Failed to toggle Firefox extension: $($_.Exception.Message)")
@@ -496,8 +651,23 @@ if ($Action -eq "Toggle") {
         exit 1
     }
     $enableFlag = [bool]::Parse($Enable)
-    $ffProfiles = "$env:APPDATA\Mozilla\Firefox\Profiles"
-    $isFirefox = $ProfilePath.StartsWith($ffProfiles, [StringComparison]::OrdinalIgnoreCase)
+    # Detect engine by profile content first (handles custom Firefox profile paths
+    # outside ...\Profiles via profiles.ini IsRelative=0), fall back to path prefix.
+    $extJsonProbe = Join-Path $ProfilePath "extensions.json"
+    $secureProbe = Join-Path $ProfilePath "Secure Preferences"
+    $prefsProbe = Join-Path $ProfilePath "Preferences"
+    $isFirefox = $false
+    try {
+        if (Test-Path -LiteralPath $extJsonProbe) { $isFirefox = $true }
+        elseif ((Test-Path -LiteralPath $secureProbe) -or (Test-Path -LiteralPath $prefsProbe)) { $isFirefox = $false }
+        else {
+            $ffProfiles = "$env:APPDATA\Mozilla\Firefox\Profiles"
+            $isFirefox = $ProfilePath.StartsWith($ffProfiles, [StringComparison]::OrdinalIgnoreCase)
+        }
+    } catch {
+        $ffProfiles = "$env:APPDATA\Mozilla\Firefox\Profiles"
+        $isFirefox = $ProfilePath.StartsWith($ffProfiles, [StringComparison]::OrdinalIgnoreCase)
+    }
     if ($isFirefox) {
         $ok = Toggle-FirefoxExtension -ProfileDir $ProfilePath -ExtensionId $ExtId -Enable $enableFlag
         if ($ok) { Write-Output "true" } else { Write-Output "false" }
@@ -552,13 +722,64 @@ if ($Browser -eq "All" -or $Browser -eq "Opera GX") {
 }
 
 # --- Firefox ---
+# Resolves profile dirs from profiles.ini (covers IsRelative=0 custom locations)
+# plus the legacy Profiles\* fallback. Dedupes existing directories only.
+
+function Get-FirefoxProfileDirs {
+    $dirs = New-Object System.Collections.ArrayList
+    $seen = @{}
+    $ffBase = Join-Path $env:APPDATA "Mozilla\Firefox"
+    $candidates = New-Object System.Collections.ArrayList
+    $ini = Join-Path $ffBase "profiles.ini"
+    if (Test-Path -LiteralPath $ini) {
+        try {
+            $curPath = $null
+            $curRelative = "1"
+            foreach ($line in (Get-Content -LiteralPath $ini -ErrorAction Stop)) {
+                $t = $line.Trim()
+                if ($t.StartsWith("[") -and $t.EndsWith("]")) {
+                    if ($null -ne $curPath) {
+                        if ($curRelative -eq "0") { [void]$candidates.Add($curPath) }
+                        else { [void]$candidates.Add((Join-Path $ffBase $curPath)) }
+                    }
+                    $curPath = $null
+                    $curRelative = "1"
+                } elseif ($t -match '^(?i)Path\s*=\s*(.+)$') {
+                    $curPath = $matches[1].Trim()
+                } elseif ($t -match '^(?i)IsRelative\s*=\s*([01])') {
+                    $curRelative = $matches[1]
+                }
+            }
+            if ($null -ne $curPath) {
+                if ($curRelative -eq "0") { [void]$candidates.Add($curPath) }
+                else { [void]$candidates.Add((Join-Path $ffBase $curPath)) }
+            }
+        } catch { }
+    }
+    $ffProfiles = Join-Path $ffBase "Profiles"
+    if (Test-Path -LiteralPath $ffProfiles) {
+        try {
+            Get-ChildItem -LiteralPath $ffProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                [void]$candidates.Add($_.FullName)
+            }
+        } catch { }
+    }
+    foreach ($c in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($c)) { continue }
+        try { $full = [System.IO.Path]::GetFullPath($c) } catch { continue }
+        $key = $full.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        if (Test-Path -LiteralPath $full -PathType Container) { [void]$dirs.Add($full) }
+    }
+    return @($dirs)
+}
 
 if ($Browser -eq "All" -or $Browser -eq "Firefox") {
-    $ffProfiles = "$env:APPDATA\Mozilla\Firefox\Profiles"
-    if (Test-Path $ffProfiles) {
-        Get-ChildItem $ffProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $result += Scan-FirefoxExtensions -ProfileDir $_.FullName
-        }
+    foreach ($profDir in (Get-FirefoxProfileDirs)) {
+        try {
+            $result += Scan-FirefoxExtensions -ProfileDir $profDir
+        } catch { }
     }
 }
 

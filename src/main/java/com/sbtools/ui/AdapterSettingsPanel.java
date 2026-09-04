@@ -36,6 +36,10 @@ class AdapterSettingsPanel extends VBox {
     private final TableView<Map.Entry<String, String>> propTable = new TableView<>(propertyRows);
     private final Label statusLabel = new Label("Ready.");
     private volatile Future<?> currentTask;
+    // Coalesce concurrent refreshes (tab selects + Refresh buttons) and track them
+    // separately from loadProperties so neither handle clobbers the other.
+    private final java.util.concurrent.atomic.AtomicBoolean refreshingAdapters = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile Future<?> refreshTask;
 
     AdapterSettingsPanel(NetworkOptimizerService service, BooleanProperty busy) {
         this.service = service;
@@ -46,28 +50,36 @@ class AdapterSettingsPanel extends VBox {
     }
 
     void refreshAdapters() {
-        currentTask = AppExecutors.ioPool().submit(() -> {
-            List<NetworkAdapterRow> adapters = service.listAdapters();
-            Platform.runLater(() -> {
-                String prev = adapterCombo.getSelectionModel().getSelectedItem();
-                adapterCombo.getItems().clear();
-                for (NetworkAdapterRow a : adapters) {
-                    adapterCombo.getItems().add(a.getName());
-                }
-                if (!adapterCombo.getItems().isEmpty()) {
-                    if (prev != null && adapterCombo.getItems().contains(prev)) {
-                        adapterCombo.getSelectionModel().select(prev);
-                    } else {
-                        adapterCombo.getSelectionModel().selectFirst();
+        if (!refreshingAdapters.compareAndSet(false, true)) return;
+        refreshTask = AppExecutors.ioPool().submit(() -> {
+            try {
+                List<NetworkAdapterRow> adapters = service.listAdapters();
+                Platform.runLater(() -> {
+                    String prev = adapterCombo.getSelectionModel().getSelectedItem();
+                    adapterCombo.getItems().clear();
+                    for (NetworkAdapterRow a : adapters) {
+                        adapterCombo.getItems().add(a.getName());
                     }
-                }
-            });
+                    if (!adapterCombo.getItems().isEmpty()) {
+                        if (prev != null && adapterCombo.getItems().contains(prev)) {
+                            adapterCombo.getSelectionModel().select(prev);
+                        } else {
+                            adapterCombo.getSelectionModel().selectFirst();
+                        }
+                    }
+                });
+            } finally {
+                refreshingAdapters.set(false);
+            }
         });
     }
 
     void dispose() {
         Future<?> t = currentTask;
         if (t != null) t.cancel(true);
+        Future<?> r = refreshTask;
+        if (r != null) r.cancel(true);
+        refreshingAdapters.set(false);
     }
 
     private VBox buildContent() {

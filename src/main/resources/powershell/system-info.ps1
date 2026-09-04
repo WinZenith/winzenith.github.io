@@ -1,5 +1,11 @@
 # Gathers hardware and OS information and returns a single JSON object.
 # Version: 2.0
+# Reliability: never prompt/hang — callers run this with -NonInteractive, but
+# belt-and-braces here too. Per-query CIM timeouts bound any single hung WMI
+# provider so the script finishes with per-section warnings (partial data)
+# instead of hanging until the caller's end-to-end timeout kills everything.
+$ProgressPreference = 'SilentlyContinue'
+try { $PSDefaultParameterValues['Get-CimInstance:OperationTimeoutSec'] = 20 } catch {}
 $result = [ordered]@{}
 $warnings = @()
 

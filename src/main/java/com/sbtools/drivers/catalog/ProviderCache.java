@@ -90,6 +90,10 @@ public final class ProviderCache {
                 return Optional.empty();
             }
             if (!cached.fingerprint.equals(fingerprint(installed))) {
+                // Stale format or changed device set: drop the file so disk
+                // never accumulates misleading results (e.g. pre-fix entries
+                // that fail the current matching rules).
+                try { Files.deleteIfExists(file); } catch (Exception ignored) {}
                 return Optional.empty();
             }
             long age = Instant.now().getEpochSecond() - cached.savedAtEpochSecond;

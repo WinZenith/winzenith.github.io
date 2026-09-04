@@ -19,7 +19,6 @@ import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
-import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
@@ -40,9 +39,13 @@ import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -57,7 +60,23 @@ public class DashboardTabView extends BorderPane {
     private final DriverCatalogAggregator catalog = DriverCatalogAggregator.createDefault();
     private final SoftwareUpdateService softwareUpdateService = new SoftwareUpdateService();
     private final com.sbtools.settings.SettingsStore settingsStore = new com.sbtools.settings.SettingsStore();
-    private final ExecutorService executor = AppExecutors.scanPool();
+    /**
+     * Dedicated pool for Dashboard sub-scans. Sub-scan workers must NEVER run
+     * on ioPool/cleanPool directly because the inner services
+     * (DriverCatalogAggregator on ioPool, CleanupService on cleanPool) submit
+     * to those same pools and block — nesting would starve the fixed pools.
+     * Cached (unbounded) so a lingering worker after Stop (e.g. a long cleanup
+     * walk whose inner join ignores interrupts) never blocks a fresh scan.
+     */
+    private final ExecutorService dashboardPool = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "dashboard-scan");
+        t.setDaemon(true);
+        return t;
+    });
+    /** Overall Dashboard scan budget (outer coordinator). */
+    private static final long DASHBOARD_SCAN_TIMEOUT_SECONDS = 360;
+    /** Local reentrancy guard. Dashboard is read-only: it must NOT hold the global busy. */
+    private final AtomicBoolean scanning = new AtomicBoolean(false);
 
     private final ObservableList<IssueCategory> issues = FXCollections.observableArrayList();
     private final Label statusLabel = new Label("Check your PC health by pressing the Scan for issues button.");
@@ -66,6 +85,12 @@ public class DashboardTabView extends BorderPane {
     private final Button stopButton = new Button("Stop");
     private TableView<IssueCategory> table;
     private volatile Future<?> scanFuture;
+    // Interruptible worker handles: submitted via dashboardPool.submit so
+    // cancel(true) truly interrupts the worker thread (CompletableFuture.cancel
+    // would NOT interrupt, leaving PowerShell/file walks stuck until timeout).
+    private volatile Future<?> driverTask;
+    private volatile Future<?> softwareTask;
+    private volatile Future<?> cleanupTask;
     private volatile int scanGeneration;
     private volatile CancellationToken scanCancellationToken;
     private volatile boolean disposed;
@@ -125,7 +150,9 @@ public class DashboardTabView extends BorderPane {
         setBottom(createStatusBar());
 
         busy.addListener((obs, oldVal, newVal) -> {
-            scanButton.setDisable(newVal);
+            // Dashboard never acquires global busy (read-only); only reflect
+            // other tabs' activity + local scanning state.
+            scanButton.setDisable(newVal || scanning.get());
             table.refresh();
         });
 
@@ -140,23 +167,27 @@ public class DashboardTabView extends BorderPane {
         scanGeneration++;
         CancellationToken token = scanCancellationToken;
         if (token != null) token.cancel();
+        cancelSubScans();
         Future<?> f = scanFuture;
         if (f != null) {
             f.cancel(true);
             scanFuture = null;
         }
-        // B2 fix: ensure global busy is cleared even when generation stale would skip finally's busy.set(false)
+        // Dashboard uses local `scanning`, never global busy — do NOT touch
+        // global busy here (would steal another tab's reference-counted hold).
+        scanning.set(false);
         try {
-            if (busy.get()) {
-                if (Platform.isFxApplicationThread()) busy.set(false);
-                else Platform.runLater(() -> busy.set(false));
-            }
+            softwareUpdateService.shutdown();
+        } catch (Exception ignored) {}
+        try {
+            dashboardPool.shutdownNow();
         } catch (Exception ignored) {}
         try {
             if (Platform.isFxApplicationThread()) {
                 progressBar.setVisible(false);
                 stopButton.setVisible(false);
                 stopButton.setDisable(true);
+                scanButton.setDisable(false);
                 if (progressRow != null) {
                     progressRow.setVisible(false);
                     progressRow.setManaged(false);
@@ -166,6 +197,7 @@ public class DashboardTabView extends BorderPane {
                     progressBar.setVisible(false);
                     stopButton.setVisible(false);
                     stopButton.setDisable(true);
+                    scanButton.setDisable(false);
                     if (progressRow != null) {
                         progressRow.setVisible(false);
                         progressRow.setManaged(false);
@@ -173,6 +205,19 @@ public class DashboardTabView extends BorderPane {
                 });
             }
         } catch (Exception ignored) {}
+    }
+
+    private void cancelSubScans() {
+        for (Future<?> f : new Future<?>[]{driverTask, softwareTask, cleanupTask}) {
+            if (f != null && !f.isDone()) {
+                try {
+                    f.cancel(true);
+                } catch (Exception ignored) {}
+            }
+        }
+        driverTask = null;
+        softwareTask = null;
+        cleanupTask = null;
     }
 
     // ── Welcome Screen ────────────────────────────────────────────────────
@@ -538,32 +583,44 @@ public class DashboardTabView extends BorderPane {
     // ── Scan Logic ────────────────────────────────────────────────────────
 
     private void startScan() {
+        if (disposed) {
+            return;
+        }
+        // Local guard first: Dashboard is read-only and never holds global busy,
+        // so concurrent Dashboard scans are prevented locally.
+        if (!scanning.compareAndSet(false, true)) {
+            statusLabel.setText("A Dashboard scan is already in progress — press Stop to cancel it.");
+            return;
+        }
+        // Defer to mutating operations running elsewhere, but do NOT acquire
+        // global busy — a read-only overview must not freeze all other tabs.
         if (busy.get()) {
+            scanning.set(false);
             statusLabel.setText("Another operation is in progress — please wait.");
             return;
         }
         final int generation = ++scanGeneration;
         final CancellationToken token = new CancellationToken();
         scanCancellationToken = token;
-        busy.set(true);
-        issues.clear();
+        // Do NOT clear previous results yet: the admin check runs off the FX
+        // thread and a non-admin result must preserve existing data (no wipe).
         progressBar.setProgress(0);
         progressBar.setVisible(true);
         stopButton.setVisible(true);
         stopButton.setDisable(false);
+        scanButton.setDisable(true);
         statusLabel.setText("Checking privileges\u2026");
-
-        showResultsView();
-        hideHealthyState();
-        resetProgressItems();
-        progressRow.setVisible(true);
-        progressRow.setManaged(true);
-
         summaryLabel.setVisible(false);
 
         try {
-            scanFuture = executor.submit(() -> {
-                if (!adminCheck.getAsBoolean()) {
+            scanFuture = dashboardPool.submit(() -> {
+                boolean isAdmin;
+                try {
+                    isAdmin = adminCheck.getAsBoolean();
+                } catch (Exception ex) {
+                    isAdmin = false;
+                }
+                if (!isAdmin) {
                     Platform.runLater(() -> {
                         if (isScanStale(generation)) return;
                         statusLabel.setText("Run as Administrator to scan for issues.");
@@ -572,29 +629,65 @@ public class DashboardTabView extends BorderPane {
                         progressBar.setVisible(false);
                         stopButton.setVisible(false);
                         stopButton.setDisable(true);
-                        busy.set(false);
-                        showWelcomeView();
+                        scanButton.setDisable(busy.get());
+                        // Previous results (if any) are intentionally preserved.
                     });
+                    scanning.set(false);
                     return;
                 }
+                if (isScanStale(generation) || token.isCancelled() || disposed) {
+                    scanning.set(false);
+                    return;
+                }
+                // Admin confirmed — now it is safe to reset the view.
                 Platform.runLater(() -> {
                     if (isScanStale(generation)) return;
+                    issues.clear();
+                    showResultsView();
+                    hideHealthyState();
+                    resetProgressItems();
+                    progressRow.setVisible(true);
+                    progressRow.setManaged(true);
                     statusLabel.setText("Scanning system for issues\u2026");
                 });
                 lastScanTime = Instant.now();
                 AtomicInteger scansComplete = new AtomicInteger();
                 int totalScans = 3;
                 try {
-                    // Use io/clean pools for sub-scans to avoid scanPool self-starvation (B2)
-                    java.util.concurrent.ExecutorService cleanupExec = com.sbtools.util.AppExecutors.cleanPool();
-                    CompletableFuture<Void> driverScan = CompletableFuture.runAsync(
-                            () -> scanDrivers(generation, token, scansComplete, totalScans), com.sbtools.util.AppExecutors.ioPool());
-                    CompletableFuture<Void> softwareScan = CompletableFuture.runAsync(
-                            () -> scanSoftware(generation, token, scansComplete, totalScans), com.sbtools.util.AppExecutors.ioPool());
-                    CompletableFuture<Void> cleanupScan = CompletableFuture.runAsync(
-                            () -> scanCleanup(generation, token, scansComplete, totalScans), cleanupExec);
+                    // Sub-scan workers run on the dedicated dashboardPool so the
+                    // inner services can safely use ioPool (catalog providers)
+                    // and cleanPool (cleanup categories) without self-starvation.
+                    // dashboardPool.submit (not runAsync) is used so cancel(true)
+                    // truly interrupts PowerShell/file-walk workers.
+                    Future<?> driverScan = dashboardPool.submit(
+                            () -> scanDrivers(generation, token, scansComplete, totalScans));
+                    Future<?> softwareScan = dashboardPool.submit(
+                            () -> scanSoftware(generation, token, scansComplete, totalScans));
+                    Future<?> cleanupScan = dashboardPool.submit(
+                            () -> scanCleanup(generation, token, scansComplete, totalScans));
+                    driverTask = driverScan;
+                    softwareTask = softwareScan;
+                    cleanupTask = cleanupScan;
 
-                    CompletableFuture.allOf(driverScan, softwareScan, cleanupScan).join();
+                    awaitAllInterruptible(
+                            List.of(driverScan, softwareScan, cleanupScan),
+                            generation, token, DASHBOARD_SCAN_TIMEOUT_SECONDS);
+
+                    boolean cancelled = isScanStale(generation) || token.isCancelled() || disposed;
+                    if (cancelled) {
+                        Platform.runLater(() -> {
+                            progressRow.setVisible(false);
+                            progressRow.setManaged(false);
+                            progressBar.setVisible(false);
+                            stopButton.setVisible(false);
+                            stopButton.setDisable(true);
+                            scanButton.setDisable(busy.get());
+                            if (!disposed) {
+                                statusLabel.setText("Scan stopped.");
+                            }
+                        });
+                        return;
+                    }
 
                     Platform.runLater(() -> {
                         if (isScanStale(generation)) return;
@@ -636,7 +729,7 @@ public class DashboardTabView extends BorderPane {
                                 .filter(ic -> !ic.isError() && "Cleanup".equals(ic.sourceProperty().get()))
                                 .mapToLong(IssueCategory::getSizeBytes).sum();
                         String errorNote = errorCount > 0
-                                ? " (" + errorCount + " cleanup scan error" + (errorCount == 1 ? "" : "s") + ")"
+                                ? " (" + errorCount + " scan error" + (errorCount == 1 ? "" : "s") + ")"
                                 : "";
                         statusLabel.setText("Scan complete \u2014 "
                                 + totalDriverSoftware + " outdated driver" + (totalDriverSoftware == 1 ? "" : "s")
@@ -653,36 +746,127 @@ public class DashboardTabView extends BorderPane {
                         updateSummaryCards();
                         updateTimestamp(generation);
                     });
-                } catch (Exception ex) {
+                } catch (CancellationException | InterruptedException ex) {
+                    Thread.currentThread().interrupt();
                     if (!isScanStale(generation)) {
-                        AppLogger.error("Dashboard scan failed", ex);
+                        AppLogger.info("Dashboard scan cancelled");
                         Platform.runLater(() -> {
                             progressRow.setVisible(false);
                             progressRow.setManaged(false);
+                            progressBar.setVisible(false);
+                            stopButton.setVisible(false);
+                            stopButton.setDisable(true);
+                            scanButton.setDisable(busy.get());
+                            statusLabel.setText("Scan stopped.");
+                        });
+                    }
+                } catch (Exception ex) {
+                    if (!isScanStale(generation) && !token.isCancelled()) {
+                        // Timeout surfaces as TimeoutException with a clear message.
+                        AppLogger.error("Dashboard scan failed", ex);
+                        Platform.runLater(() -> {
+                            if (isScanStale(generation)) return;
+                            progressRow.setVisible(false);
+                            progressRow.setManaged(false);
+                            // Non-modal: never block the FX thread with showAndWait
+                            // while teardown is still queued behind it.
                             statusLabel.setText("Scan failed: " + ex.getMessage());
-                            new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
+                        });
+                    } else if (!isScanStale(generation)) {
+                        Platform.runLater(() -> {
+                            if (isScanStale(generation)) return;
+                            statusLabel.setText("Scan stopped.");
                         });
                     }
                 } finally {
                     if (!isScanStale(generation)) {
                         scanFuture = null;
                     }
+                    cancelSubScans();
+                    scanning.set(false);
                     Platform.runLater(() -> {
                         if (isScanStale(generation)) return;
-                        busy.set(false);
                         progressBar.setVisible(false);
                         stopButton.setVisible(false);
                         stopButton.setDisable(true);
+                        scanButton.setDisable(busy.get());
                     });
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException ex) {
             AppLogger.error("Scan executor rejected task", ex);
-            busy.set(false);
+            scanning.set(false);
+            cancelSubScans();
             progressBar.setVisible(false);
             stopButton.setVisible(false);
             stopButton.setDisable(true);
+            scanButton.setDisable(busy.get());
             statusLabel.setText("Scan unavailable \u2014 try again later.");
+        }
+    }
+
+    /**
+     * Interruptible wait for the combined scan. The previous
+     * {@code CompletableFuture.allOf(...).join()} ignored interrupts, so Stop
+     * could never unblock it. Workers are plain {@code Future}s so
+     * {@code cancel(true)} truly interrupts PowerShell/file-walk threads.
+     */
+    private void awaitAllInterruptible(List<Future<?>> tasks, int generation,
+                                       CancellationToken token, long timeoutSeconds)
+            throws InterruptedException, TimeoutException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(30, timeoutSeconds));
+        while (true) {
+            if (disposed || Thread.currentThread().isInterrupted()) {
+                cancelSubScans();
+                throw new InterruptedException("Dashboard scan interrupted");
+            }
+            if (isScanStale(generation) || (token != null && token.isCancelled())) {
+                cancelSubScans();
+                throw new CancellationException("Dashboard scan cancelled");
+            }
+            if (System.nanoTime() > deadlineNanos) {
+                if (token != null) token.cancel();
+                cancelSubScans();
+                throw new TimeoutException(
+                        "Dashboard scan timed out after " + timeoutSeconds + "s — partial results kept");
+            }
+            boolean allDone = true;
+            for (Future<?> t : tasks) {
+                if (t != null && !t.isDone()) {
+                    allDone = false;
+                    break;
+                }
+            }
+            if (allDone) {
+                break;
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ie) {
+                cancelSubScans();
+                Thread.currentThread().interrupt();
+                throw ie;
+            }
+        }
+        // Surface worker failures (cancellation already handled above).
+        for (Future<?> t : tasks) {
+            if (t == null) continue;
+            try {
+                if (!t.isCancelled()) {
+                    t.get(0, TimeUnit.MILLISECONDS);
+                }
+            } catch (java.util.concurrent.ExecutionException ex) {
+                Throwable cause = ex.getCause();
+                if (cause instanceof CancellationException ce) throw ce;
+                if (cause instanceof InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw ie;
+                }
+                if (cause instanceof RuntimeException re) throw re;
+                if (cause != null) throw new RuntimeException(cause);
+            } catch (TimeoutException impossible) {
+                // isDone() was true — ignore
+            }
         }
     }
 
@@ -690,8 +874,13 @@ public class DashboardTabView extends BorderPane {
         return generation != scanGeneration;
     }
 
+    private boolean isCancelled(int generation, CancellationToken token) {
+        return disposed || isScanStale(generation) || (token != null && token.isCancelled())
+                || Thread.currentThread().isInterrupted();
+    }
+
     private void scanDrivers(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
-        if (isScanStale(generation)) return;
+        if (isCancelled(generation, token)) return;
         updateCategoryProgress(0, "scanning", generation);
         Platform.runLater(() -> {
             if (isScanStale(generation)) return;
@@ -699,9 +888,9 @@ public class DashboardTabView extends BorderPane {
         });
         try {
             List<InstalledDriver> installed = driverScanService.scanInstalled();
-            if (isScanStale(generation)) return;
+            if (isCancelled(generation, token)) return;
             List<DriverUpdateCandidate> candidates = catalog.findUpdates(installed, token);
-            if (isScanStale(generation)) return;
+            if (isCancelled(generation, token)) return;
             // Filter ignored drivers so Dashboard count matches Drivers tab
             try {
                 Set<String> excluded = loadExcludedDriverIdSet();
@@ -713,7 +902,7 @@ public class DashboardTabView extends BorderPane {
             } catch (Exception ex) {
                 AppLogger.warning("Dashboard excluded filter failed: " + ex.getMessage());
             }
-            if (isScanStale(generation)) return;
+            if (isCancelled(generation, token)) return;
             if (!candidates.isEmpty()) {
                 final List<DriverUpdateCandidate> filtered = candidates;
                 Platform.runLater(() -> {
@@ -722,7 +911,16 @@ public class DashboardTabView extends BorderPane {
                 });
             }
             updateCategoryProgress(0, "done", generation);
+        } catch (CancellationException | InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            AppLogger.info("Dashboard driver scan cancelled");
+            updateCategoryProgress(0, "failed", generation);
         } catch (Exception ex) {
+            if (isCancelled(generation, token)) {
+                AppLogger.info("Dashboard driver scan cancelled");
+                updateCategoryProgress(0, "failed", generation);
+                return;
+            }
             AppLogger.warning("Dashboard driver scan failed: " + ex.getMessage());
             updateCategoryProgress(0, "failed", generation);
             Platform.runLater(() -> {
@@ -754,16 +952,18 @@ public class DashboardTabView extends BorderPane {
     }
 
     private void scanSoftware(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
-        if (isScanStale(generation)) return;
+        if (isCancelled(generation, token)) return;
         updateCategoryProgress(1, "scanning", generation);
         Platform.runLater(() -> {
             if (isScanStale(generation)) return;
             statusLabel.setText("Scanning for software updates\u2026");
         });
         try {
+            // Honour both Stop (token) and generation-staleness so Stop truly aborts winget/WU.
             List<SoftwareUpdateEntry> updates = softwareUpdateService.scanAllConcurrent(
-                    () -> isScanStale(generation), w -> {}, wu -> {});
-            if (isScanStale(generation)) return;
+                    () -> isScanStale(generation) || (token != null && token.isCancelled()),
+                    w -> {}, wu -> {});
+            if (isCancelled(generation, token)) return;
             // Filter ignored software ids (same logic as SoftwareUpdateViewModel) so dashboard count matches Software tab
             List<SoftwareUpdateEntry> filteredUpdates = updates;
             try {
@@ -780,7 +980,7 @@ public class DashboardTabView extends BorderPane {
             } catch (Exception ex) {
                 AppLogger.warning("Dashboard skipped filter failed: " + ex.getMessage());
             }
-            if (isScanStale(generation)) return;
+            if (isCancelled(generation, token)) return;
             final List<SoftwareUpdateEntry> finalUpdates = filteredUpdates;
             if (!finalUpdates.isEmpty()) {
                 long totalSize = finalUpdates.stream().mapToLong(SoftwareUpdateEntry::sizeBytes).sum();
@@ -790,7 +990,15 @@ public class DashboardTabView extends BorderPane {
                 });
             }
             updateCategoryProgress(1, "done", generation);
+        } catch (CancellationException ex) {
+            AppLogger.info("Dashboard software scan cancelled");
+            updateCategoryProgress(1, "failed", generation);
         } catch (Exception ex) {
+            if (isCancelled(generation, token)) {
+                AppLogger.info("Dashboard software scan cancelled");
+                updateCategoryProgress(1, "failed", generation);
+                return;
+            }
             AppLogger.warning("Dashboard software scan failed: " + ex.getMessage());
             updateCategoryProgress(1, "failed", generation);
             Platform.runLater(() -> {
@@ -806,7 +1014,7 @@ public class DashboardTabView extends BorderPane {
     }
 
     private void scanCleanup(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
-        if (isScanStale(generation)) return;
+        if (isCancelled(generation, token)) return;
         updateCategoryProgress(2, "scanning", generation);
         Platform.runLater(() -> {
             if (isScanStale(generation)) return;
@@ -814,9 +1022,9 @@ public class DashboardTabView extends BorderPane {
         });
         try {
             List<CleanupRow> results = cleanupService.scan(() -> {}, com.sbtools.util.AppExecutors.cleanPool(), token);
-            if (isScanStale(generation) || token.isCancelled()) return;
+            if (isCancelled(generation, token)) return;
             for (CleanupRow row : results) {
-                if (isScanStale(generation)) return;
+                if (isCancelled(generation, token)) return;
                 if (row.getScanStatus() == CleanupRow.ScanStatus.ERROR) {
                     String detailText = row.getErrorMessage() != null ? row.getErrorMessage() : "Scan error";
                     Platform.runLater(() -> {
@@ -853,7 +1061,15 @@ public class DashboardTabView extends BorderPane {
                 });
             }
             updateCategoryProgress(2, "done", generation);
+        } catch (CancellationException ex) {
+            AppLogger.info("Dashboard cleanup scan cancelled");
+            updateCategoryProgress(2, "failed", generation);
         } catch (Exception ex) {
+            if (isCancelled(generation, token)) {
+                AppLogger.info("Dashboard cleanup scan cancelled");
+                updateCategoryProgress(2, "failed", generation);
+                return;
+            }
             AppLogger.warning("Dashboard cleanup scan failed: " + ex.getMessage());
             updateCategoryProgress(2, "failed", generation);
             Platform.runLater(() -> {
@@ -869,18 +1085,26 @@ public class DashboardTabView extends BorderPane {
     }
 
     private void stopScan() {
+        if (!scanning.get()) {
+            return;
+        }
         scanGeneration++;
         CancellationToken token = scanCancellationToken;
         if (token != null) token.cancel();
+        // Cancel inner workers first so the interruptible outer wait unblocks;
+        // cancelling only the outer Future never interrupted join().
+        cancelSubScans();
         Future<?> f = scanFuture;
         if (f != null) {
             f.cancel(true);
             scanFuture = null;
         }
-        busy.set(false);
+        // Local flag only — never decrement global busy we do not own.
+        scanning.set(false);
         progressBar.setVisible(false);
         stopButton.setVisible(false);
         stopButton.setDisable(true);
+        scanButton.setDisable(busy.get());
         statusLabel.setText("Scan stopped.");
         progressRow.setVisible(false);
         progressRow.setManaged(false);

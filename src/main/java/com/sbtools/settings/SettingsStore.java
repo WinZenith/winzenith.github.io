@@ -65,13 +65,15 @@ public class SettingsStore {
     private static AppSettings normalize(AppSettings s) {
         AppSettings base = s;
         boolean needsFix = s.excludedDriverIds() == null || s.skippedSoftwareIds() == null
-                || s.ignoredBrowserExtensionIds() == null || s.ignoredCleanupCategories() == null;
+                || s.ignoredBrowserExtensionIds() == null || s.ignoredCleanupCategories() == null
+                || s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank();
         if (needsFix) {
             base = s.toBuilder()
                     .excludedDriverIds(s.excludedDriverIds() == null ? java.util.Collections.emptyList() : s.excludedDriverIds())
                     .skippedSoftwareIds(s.skippedSoftwareIds() == null ? java.util.Collections.emptyList() : s.skippedSoftwareIds())
                     .ignoredBrowserExtensionIds(s.ignoredBrowserExtensionIds() == null ? java.util.Collections.emptyList() : s.ignoredBrowserExtensionIds())
                     .ignoredCleanupCategories(s.ignoredCleanupCategories() == null ? java.util.Collections.emptyList() : s.ignoredCleanupCategories())
+                    .networkOptimizationPreset(s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank() ? "DEFAULT" : s.networkOptimizationPreset())
                     .build();
         }
         // Sanitize backupDirectory - reject dangerous roots like C:\ or Windows

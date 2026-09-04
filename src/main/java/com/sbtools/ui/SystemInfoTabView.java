@@ -86,6 +86,11 @@ public class SystemInfoTabView extends BorderPane {
     private final java.util.concurrent.atomic.AtomicBoolean isLoading = new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile java.util.concurrent.Future<?> currentTask;
     private final java.util.concurrent.atomic.AtomicBoolean cancellationToken = new java.util.concurrent.atomic.AtomicBoolean(false);
+    // Exactly-once guard for the ref-counted global busy flag: loadInfo() acquires
+    // once, and both the worker-thread finally and the FX-thread cleanup must not
+    // each decrement (previously 1 acquire / 2 releases corrupted BusyProperty's
+    // counter and could clear another tab's still-running busy state).
+    private final java.util.concurrent.atomic.AtomicBoolean busyHeld = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public SystemInfoTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -132,9 +137,10 @@ public class SystemInfoTabView extends BorderPane {
         if (!AppPaths.isWindows()) {
             statusLabel.setText("System information is only available on Windows.");
             loadButton.setDisable(true);
-        } else if (!adminCheck.getAsBoolean()) {
-            adminWarningLabel.setVisible(true);
-            adminWarningLabel.setManaged(true);
+        } else {
+            // AdminCheck spawns powershell.exe (up to ~5s) — never block the FX
+            // thread for it. Resolve off-FX and publish the banner on FX.
+            refreshAdminWarningAsync();
         }
     }
 
@@ -146,7 +152,8 @@ public class SystemInfoTabView extends BorderPane {
         if (!isLoading.compareAndSet(false, true)) return;
         // Decouple from global busy but also set it for outer UI dimming
         busy.set(true);
-        updateAdminWarning();
+        busyHeld.set(true);
+        refreshAdminWarningAsync();
         cancellationToken.set(false);
         loadButton.setDisable(true);
         refreshButton.setDisable(true);
@@ -175,8 +182,9 @@ public class SystemInfoTabView extends BorderPane {
                 );
                 if (cancellationToken.get()) throw new InterruptedException("Cancelled");
                 Platform.runLater(() -> {
-                    currentData = data;
-                    buildTabs(data);
+                    try {
+                        currentData = data;
+                        buildTabs(data);
                     // B3 fix: surface empty-state clearly instead of silent blank
                     // Note: buildTabs now inserts placeholder when data is empty, so tabPane is never empty after.
                     // Check data content directly for correct status message.
@@ -193,6 +201,12 @@ public class SystemInfoTabView extends BorderPane {
                     refreshButton.setDisable(false);
                     exportButton.setDisable(false);
                     copyButton.setDisable(false);
+                    } catch (Exception renderEx) {
+                        // buildTabs runs on the FX thread, outside the worker try/catch:
+                        // never let a single bad section kill the FX update silently.
+                        AppLogger.error("Failed to render system info", renderEx);
+                        statusLabel.setText("Failed to display system information: " + renderEx.getMessage());
+                    }
                 });
             } catch (InterruptedException ce) {
                 Thread.currentThread().interrupt();
@@ -208,11 +222,12 @@ public class SystemInfoTabView extends BorderPane {
                     });
                 }
             } finally {
-                // Ensure loading flag is cleared even if FX toolkit is shutting down and runLater never executes
+                // Ensure loading flag is cleared even if FX toolkit is shutting down and runLater never executes.
+                // Busy is released exactly once via busyHeld (ref-counted global flag).
                 isLoading.set(false);
-                try { busy.set(false); } catch (Exception ignored) {}
+                releaseBusyOnce();
                 Platform.runLater(() -> {
-                    try { busy.set(false); } catch (Exception ignored) {}
+                    releaseBusyOnce();
                     isLoading.set(false);
                     loadButton.setDisable(false);
                     cancelButton.setDisable(true);
@@ -236,13 +251,31 @@ public class SystemInfoTabView extends BorderPane {
         cancelButton.setDisable(true);
     }
 
+    private void releaseBusyOnce() {
+        if (busyHeld.compareAndSet(true, false)) {
+            try { busy.set(false); } catch (Exception ignored) {}
+        }
+    }
+
     private void updateAdminWarning() {
-        boolean isWin = AppPaths.isWindows();
-        boolean isAdmin = false;
-        try { isAdmin = adminCheck.getAsBoolean(); } catch (Exception ignored) {}
-        boolean show = isWin && !isAdmin;
-        adminWarningLabel.setVisible(show);
-        adminWarningLabel.setManaged(show);
+        refreshAdminWarningAsync();
+    }
+
+    /**
+     * Queries elevation off the FX thread (AdminCheck spawns powershell.exe and
+     * can block for seconds) and publishes the banner back on the FX thread.
+     */
+    private void refreshAdminWarningAsync() {
+        if (!AppPaths.isWindows()) return;
+        java.util.concurrent.CompletableFuture
+                .supplyAsync(() -> {
+                    try { return adminCheck.getAsBoolean(); } catch (Exception ignored) { return false; }
+                })
+                .thenAcceptAsync(isAdmin -> {
+                    boolean show = !isAdmin;
+                    adminWarningLabel.setVisible(show);
+                    adminWarningLabel.setManaged(show);
+                }, Platform::runLater);
     }
 
     private void buildTabs(SystemInfoData data) {
@@ -1221,7 +1254,7 @@ public class SystemInfoTabView extends BorderPane {
         fileChooser.getExtensionFilters().addAll(txtFilter, jsonFilter, htmlFilter);
         fileChooser.setSelectedExtensionFilter(txtFilter);
 
-        File file = fileChooser.showSaveDialog(getScene().getWindow());
+        File file = fileChooser.showSaveDialog(getScene() != null ? getScene().getWindow() : null);
         if (file == null) return;
 
         try {

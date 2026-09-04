@@ -266,6 +266,14 @@ class WiFiPanel extends VBox {
             return;
         }
         if (!requireAdmin()) return;
+        if (!enable) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                    "Disable the Wi-Fi adapter?\n\nYou will lose wireless connectivity until it is re-enabled.",
+                    ButtonType.YES, ButtonType.NO);
+            confirm.setTitle("Confirm Disable");
+            confirm.setHeaderText(null);
+            if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
+        }
         busy.set(true);
         String action = enable ? "Enabling" : "Disabling";
         statusLabel.setText(action + " Wi-Fi adapter...");

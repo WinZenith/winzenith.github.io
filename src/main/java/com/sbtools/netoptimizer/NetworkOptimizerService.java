@@ -98,22 +98,68 @@ public class NetworkOptimizerService {
                     ProcessRunner.powershellScript(script.toString(), "-Preset", presetArg));
             String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             String combined = pr.combinedOutput();
+            String formatted = formatOptimizeResults(stdout);
             if (pr.exitCode() != 0) {
-                // Try to parse results JSON to give per-setting details
-                String details = combined;
-                if (!stdout.isEmpty()) details = stdout;
+                // Partial application: some settings may already be in effect.
+                // Report per-setting detail (not raw JSON) and log it so history matches reality.
+                String details = formatted != null ? formatted : (!stdout.isEmpty() ? stdout : combined);
                 // Detect access denied hints
                 if (combined.toLowerCase().contains("access") && combined.toLowerCase().contains("denied")) {
                     details += "\n\nTip: Run WinZenith as Administrator.";
                 }
-                return OperationResult.fail("Optimization failed with exit code " + pr.exitCode(), details);
+                logChange("Apply Optimization", preset.getDisplayName(), details, false);
+                return OperationResult.fail(
+                        "Optimization did not fully apply (exit code " + pr.exitCode() + "). Settings marked OK below are already in effect.",
+                        details);
             }
             logChange("Apply Optimization", preset.getDisplayName(), preset.getDescription(), true);
-            return OperationResult.ok(preset.getDisplayName() + " applied successfully.", stdout);
+            return OperationResult.ok(preset.getDisplayName() + " applied successfully.",
+                    formatted != null ? formatted : stdout);
         } catch (Exception e) {
             AppLogger.warning("Failed to apply optimization: " + e.getMessage());
             return OperationResult.fail("Failed to apply optimization: " + e.getMessage());
         }
+    }
+
+    /**
+     * Formats the net-optimize.ps1 per-setting JSON array
+     * ({Key, Value, Success} entries) into human-readable lines.
+     * Returns null when the output is not in that shape.
+     */
+    private String formatOptimizeResults(String stdout) {
+        if (stdout == null || stdout.isBlank()) return null;
+        try {
+            List<Map<String, Object>> raw = mapper.readValue(stdout,
+                    new TypeReference<List<Map<String, Object>>>() {});
+            if (raw == null || raw.isEmpty()) return null;
+            StringBuilder sb = new StringBuilder();
+            for (Map<String, Object> entry : raw) {
+                String key = firstPresent(entry, "Key", "key", "name", "Name");
+                String value = firstPresent(entry, "Value", "value");
+                Object okObj = firstPresentObj(entry, "Success", "success", "ok", "Ok");
+                boolean ok = okObj instanceof Boolean b ? b : false;
+                if (key.isEmpty() && value.isEmpty()) continue;
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(key.isEmpty() ? "(unnamed setting)" : key).append(": ")
+                        .append(value.isEmpty() ? "-" : value)
+                        .append(ok ? " — OK" : " — FAILED");
+            }
+            return sb.length() > 0 ? sb.toString() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String firstPresent(Map<String, Object> map, String... keys) {
+        Object v = firstPresentObj(map, keys);
+        return v != null ? v.toString() : "";
+    }
+
+    private static Object firstPresentObj(Map<String, Object> map, String... keys) {
+        for (String k : keys) {
+            if (map.containsKey(k) && map.get(k) != null) return map.get(k);
+        }
+        return null;
     }
 
     public OperationResult flushDnsCache() {
@@ -588,6 +634,11 @@ public class NetworkOptimizerService {
             return PingResult.fail(host, err.isEmpty() ? "No output from ping." : err);
         } catch (IllegalArgumentException e) {
             return PingResult.fail(host, e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new java.util.concurrent.CancellationException("Operation cancelled");
+        } catch (java.util.concurrent.CancellationException e) {
+            throw e;
         } catch (Exception e) {
             AppLogger.warning("Failed to ping: " + e.getMessage());
             return PingResult.fail(host, "Error: " + e.getMessage());
@@ -622,6 +673,11 @@ public class NetworkOptimizerService {
             }
         } catch (IllegalArgumentException e) {
             AppLogger.warning("Invalid host for traceroute: " + e.getMessage());
+            throw e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new java.util.concurrent.CancellationException("Operation cancelled");
+        } catch (java.util.concurrent.CancellationException e) {
             throw e;
         } catch (Exception e) {
             AppLogger.warning("Failed to traceroute: " + e.getMessage());

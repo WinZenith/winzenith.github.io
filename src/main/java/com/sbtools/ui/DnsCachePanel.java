@@ -39,6 +39,18 @@ class DnsCachePanel extends VBox {
     private final TextArea diagnosticOutput = new TextArea();
     private volatile Future<?> currentTask;
     private volatile Future<?> dnsQueryTask;
+    // Adapter refresh is read-only and frequent (tab selects, Refresh button): coalesce
+    // concurrent runs and track them separately so the handle of an in-flight mutating
+    // op (flush/DNS) stored in currentTask is never lost.
+    private final java.util.concurrent.atomic.AtomicBoolean refreshingAdapters = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile Future<?> refreshTask;
+    // Diagnostics (ping/traceroute) run on a local flag, NOT the shared app-wide busy flag,
+    // so a multi-minute traceroute cannot freeze every other tab. Cancellable via cancelDiagBtn.
+    private final java.util.concurrent.atomic.AtomicBoolean diagRunning = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile Future<?> diagTask;
+    private Button pingBtn;
+    private Button tracerouteBtn;
+    private Button cancelDiagBtn;
 
     DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel, BooleanSupplier adminCheck) {
         this.service = service;
@@ -53,22 +65,27 @@ class DnsCachePanel extends VBox {
     }
 
     void refreshAdapters() {
-        currentTask = AppExecutors.ioPool().submit(() -> {
-            List<NetworkAdapterRow> adapters = service.listAdapters();
-            Platform.runLater(() -> {
-                String selected = adapterCombo.getSelectionModel().getSelectedItem();
-                adapterCombo.getItems().clear();
-                for (NetworkAdapterRow a : adapters) {
-                    adapterCombo.getItems().add(a.getName());
-                }
-                if (!adapterCombo.getItems().isEmpty()) {
-                    if (selected != null && adapterCombo.getItems().contains(selected)) {
-                        adapterCombo.getSelectionModel().select(selected);
-                    } else {
-                        adapterCombo.getSelectionModel().selectFirst();
+        if (!refreshingAdapters.compareAndSet(false, true)) return;
+        refreshTask = AppExecutors.ioPool().submit(() -> {
+            try {
+                List<NetworkAdapterRow> adapters = service.listAdapters();
+                Platform.runLater(() -> {
+                    String selected = adapterCombo.getSelectionModel().getSelectedItem();
+                    adapterCombo.getItems().clear();
+                    for (NetworkAdapterRow a : adapters) {
+                        adapterCombo.getItems().add(a.getName());
                     }
-                }
-            });
+                    if (!adapterCombo.getItems().isEmpty()) {
+                        if (selected != null && adapterCombo.getItems().contains(selected)) {
+                            adapterCombo.getSelectionModel().select(selected);
+                        } else {
+                            adapterCombo.getSelectionModel().selectFirst();
+                        }
+                    }
+                });
+            } finally {
+                refreshingAdapters.set(false);
+            }
         });
     }
 
@@ -85,6 +102,12 @@ class DnsCachePanel extends VBox {
         if (t != null) t.cancel(true);
         Future<?> d = dnsQueryTask;
         if (d != null) d.cancel(true);
+        Future<?> r = refreshTask;
+        if (r != null) r.cancel(true);
+        refreshingAdapters.set(false);
+        Future<?> g = diagTask;
+        if (g != null) g.cancel(true);
+        diagRunning.set(false);
     }
 
     private VBox buildContent() {
@@ -173,11 +196,20 @@ class DnsCachePanel extends VBox {
 
         Button pingBtn = UIButton.primary("Ping");
         Button tracerouteBtn = UIButton.secondary("Traceroute");
+        Button cancelDiagBtn = UIButton.secondary("Cancel");
+        cancelDiagBtn.setDisable(true);
+        this.pingBtn = pingBtn;
+        this.tracerouteBtn = tracerouteBtn;
+        this.cancelDiagBtn = cancelDiagBtn;
 
         pingBtn.setOnAction(e -> runPing());
         tracerouteBtn.setOnAction(e -> runTraceroute());
+        cancelDiagBtn.setOnAction(e -> {
+            Future<?> g = diagTask;
+            if (g != null) g.cancel(true);
+        });
 
-        HBox pingRow = new HBox(8, new Label("Host:"), pingHostField, new Label("Count:"), pingCountField, pingBtn, tracerouteBtn);
+        HBox pingRow = new HBox(8, new Label("Host:"), pingHostField, new Label("Count:"), pingCountField, pingBtn, tracerouteBtn, cancelDiagBtn);
         pingRow.setAlignment(Pos.CENTER_LEFT);
         content.getChildren().add(pingRow);
 
@@ -407,10 +439,23 @@ class DnsCachePanel extends VBox {
         return NetworkOptimizerService.isValidIpAddress(ip);
     }
 
+    private void setDiagRunning(boolean running) {
+        diagRunning.set(running);
+        Platform.runLater(() -> {
+            if (pingBtn != null) pingBtn.setDisable(running);
+            if (tracerouteBtn != null) tracerouteBtn.setDisable(running);
+            if (cancelDiagBtn != null) cancelDiagBtn.setDisable(!running);
+        });
+    }
+
     private void runPing() {
         String host = pingHostField.getText().trim();
         if (host.isEmpty()) {
             new Alert(Alert.AlertType.WARNING, "Please enter a host to ping.").showAndWait();
+            return;
+        }
+        if (!NetworkOptimizerService.isValidHost(host)) {
+            new Alert(Alert.AlertType.WARNING, "Invalid host: " + host + "\nAllowed: letters, digits, dot, hyphen, underscore, colon (IPv6).").showAndWait();
             return;
         }
         int count;
@@ -425,15 +470,15 @@ class DnsCachePanel extends VBox {
             return;
         }
 
-        if (busy.get()) {
-            statusLabel.setText("Please wait, another operation is in progress...");
+        if (!diagRunning.compareAndSet(false, true)) {
+            statusLabel.setText("A diagnostic is already running — Cancel it first.");
             return;
         }
-        busy.set(true);
+        setDiagRunning(true);
         statusLabel.setText("Pinging " + host + "...");
         diagnosticOutput.setText("Pinging " + host + " (" + count + " packets)...\n");
 
-        currentTask = AppExecutors.ioPool().submit(() -> {
+        diagTask = AppExecutors.ioPool().submit(() -> {
             try {
                 PingResult result = service.ping(host, count);
                 Platform.runLater(() -> {
@@ -461,11 +506,16 @@ class DnsCachePanel extends VBox {
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
-                    diagnosticOutput.setText("Ping error: " + e.getMessage());
-                    statusLabel.setText("Ping failed.");
+                    if (e instanceof java.util.concurrent.CancellationException || Thread.currentThread().isInterrupted()) {
+                        diagnosticOutput.setText("Ping cancelled by user.");
+                        statusLabel.setText("Ping cancelled.");
+                    } else {
+                        diagnosticOutput.setText("Ping error: " + e.getMessage());
+                        statusLabel.setText("Ping failed.");
+                    }
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                setDiagRunning(false);
             }
         });
     }
@@ -481,15 +531,15 @@ class DnsCachePanel extends VBox {
             return;
         }
 
-        if (busy.get()) {
-            statusLabel.setText("Please wait, another operation is in progress...");
+        if (!diagRunning.compareAndSet(false, true)) {
+            statusLabel.setText("A diagnostic is already running — Cancel it first.");
             return;
         }
-        busy.set(true);
+        setDiagRunning(true);
         statusLabel.setText("Traceroute to " + host + "...");
         diagnosticOutput.setText("Traceroute to " + host + " (max 30 hops)...\n");
 
-        currentTask = AppExecutors.ioPool().submit(() -> {
+        diagTask = AppExecutors.ioPool().submit(() -> {
             try {
                 List<TracerouteHop> hops = service.traceroute(host, 30);
                 Platform.runLater(() -> {
@@ -515,11 +565,16 @@ class DnsCachePanel extends VBox {
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
-                    diagnosticOutput.setText("Traceroute error: " + e.getMessage());
-                    statusLabel.setText("Traceroute failed.");
+                    if (e instanceof java.util.concurrent.CancellationException || Thread.currentThread().isInterrupted()) {
+                        diagnosticOutput.setText("Traceroute cancelled by user.");
+                        statusLabel.setText("Traceroute cancelled.");
+                    } else {
+                        diagnosticOutput.setText("Traceroute error: " + e.getMessage());
+                        statusLabel.setText("Traceroute failed.");
+                    }
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                setDiagRunning(false);
             }
         });
     }

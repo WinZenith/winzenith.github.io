@@ -261,10 +261,49 @@ public class ProcessRunner {
         return cmd;
     }
 
+    /**
+     * Non-interactive variant for unattended automation (system-info, health checks).
+     * {@code -NonInteractive} prevents PowerShell from ever blocking on a prompt
+     * (profile, transcription, confirmation), which previously could hang the child
+     * process until the end-to-end timeout. {@code -NoLogo} keeps stdout clean.
+     */
+    public static List<String> powershellScriptNonInteractive(String scriptPath, String... args) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("powershell.exe");
+        cmd.add("-NoProfile");
+        cmd.add("-NonInteractive");
+        cmd.add("-NoLogo");
+        cmd.add("-ExecutionPolicy");
+        cmd.add("Bypass");
+        cmd.add("-File");
+        cmd.add(scriptPath);
+        for (String arg : args) {
+            cmd.add(arg);
+        }
+        return cmd;
+    }
+
     public static List<String> pwshScript(String scriptPath, String... args) {
         List<String> cmd = new ArrayList<>();
         cmd.add("pwsh.exe");
         cmd.add("-NoProfile");
+        cmd.add("-ExecutionPolicy");
+        cmd.add("Bypass");
+        cmd.add("-File");
+        cmd.add(scriptPath);
+        for (String arg : args) {
+            cmd.add(arg);
+        }
+        return cmd;
+    }
+
+    /** Non-interactive pwsh.exe counterpart of {@link #powershellScriptNonInteractive}. */
+    public static List<String> pwshScriptNonInteractive(String scriptPath, String... args) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("pwsh.exe");
+        cmd.add("-NoProfile");
+        cmd.add("-NonInteractive");
+        cmd.add("-NoLogo");
         cmd.add("-ExecutionPolicy");
         cmd.add("Bypass");
         cmd.add("-File");

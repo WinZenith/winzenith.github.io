@@ -76,8 +76,9 @@ class OptimizationPanel extends VBox {
 
         OptimizationPreset savedPreset = OptimizationPreset.DEFAULT;
         try {
-            savedPreset = OptimizationPreset.valueOf(currentSettings.networkOptimizationPreset());
-        } catch (IllegalArgumentException ignored) {
+            String raw = currentSettings != null ? currentSettings.networkOptimizationPreset() : null;
+            if (raw != null) savedPreset = OptimizationPreset.valueOf(raw.trim().toUpperCase());
+        } catch (IllegalArgumentException | NullPointerException ignored) {
         }
 
         for (OptimizationPreset preset : OptimizationPreset.values()) {
