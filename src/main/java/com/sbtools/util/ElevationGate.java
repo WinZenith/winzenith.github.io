@@ -78,6 +78,11 @@ public final class ElevationGate {
         return false;
     }
 
+    /** True when this process is the elevated relaunch (never prompt again). */
+    public static boolean isElevatedChild(String[] args) {
+        return hasArg(args, ARG_ELEVATED_RELAUNCH);
+    }
+
     private static boolean hasArg(String[] args, String flag) {
         if (args == null) {
             return false;

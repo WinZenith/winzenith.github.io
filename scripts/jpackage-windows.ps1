@@ -130,12 +130,14 @@ java-options=--add-modules=javafx.controls
     }
 
     # Clean up junk files copied from target/ into app/ (Maven build artifacts, Launch4j exe, etc.)
+    # NOTE: the Launch4j WinZenith.exe must NOT ship inside app/: it lacks the JavaFX
+    # module-path from WinZenith.cfg, so elevating/relaunching it dies instantly.
     $appDir = Join-Path $appImageRoot "app"
     foreach ($junkDir in @("classes", "generated-sources", "maven-archiver", "maven-status", "test-classes")) {
         $junkPath = Join-Path $appDir $junkDir
         if (Test-Path $junkPath) { Remove-Item -Recurse -Force $junkPath -ErrorAction SilentlyContinue }
     }
-    foreach ($junkFile in @("win-zenith-$version.jar")) {
+    foreach ($junkFile in @("win-zenith-$version.jar", "WinZenith.exe")) {
         $junkPath = Join-Path $appDir $junkFile
         if (Test-Path $junkPath) { Remove-Item -Force $junkPath -ErrorAction SilentlyContinue }
     }

@@ -3,6 +3,8 @@ package com.sbtools.util;
 import com.sun.jna.platform.win32.Kernel32;
 import com.sun.jna.platform.win32.Shell32;
 import com.sun.jna.platform.win32.ShellAPI;
+import com.sun.jna.platform.win32.WinBase;
+import com.sun.jna.ptr.IntByReference;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -117,7 +119,13 @@ public final class AdminCheck {
         /** User cancelled UAC; caller should continue unelevated. */
         DENIED_BY_USER,
         /** Elevation could not be started; caller should continue unelevated. */
-        FAILED
+        FAILED,
+        /**
+         * UAC was accepted but the child died instantly (wrong exe, missing modules).
+         * The user already consented — never prompt again for this launch, just
+         * continue unelevated.
+         */
+        CHILD_DIED
     }
 
     /**
@@ -125,17 +133,27 @@ public final class AdminCheck {
      * app args plus a loop-guard marker. Uses {@code ShellExecuteEx("runas")} with
      * {@code SEE_MASK_NOCLOSEPROCESS} so UAC Cancel is reported back instead of
      * fire-and-forget. Blocks until the user answers the UAC prompt.
+     *
+     * <p>Guarantee: at most ONE UAC prompt per call. A consented-but-dead child
+     * ({@link ElevationResult#CHILD_DIED}) is terminal — falling through to another
+     * strategy would show a second prompt for a single launch.</p>
      */
     public static ElevationResult requestElevation(String[] appArgs) throws IOException {
         List<String> forwardedAppArgs = withMarker(appArgs);
 
-        // 1) Packaged .exe (jpackage app-image / Launch4j) — re-launch it elevated.
+        // 1) Packaged .exe (jpackage app-image launcher only — a bare Launch4j exe
+        // without the cfg module-path cannot boot this JavaFX app, so getExePath()
+        // no longer returns those) — re-launch it elevated.
         String exePath = getExePath();
+        System.err.println("[AdminCheck] Elevation target: " + exePath);
         if (exePath != null && new java.io.File(exePath).exists()) {
             String lower = exePath.toLowerCase();
             boolean isJavaBinary = lower.endsWith("java.exe") || lower.endsWith("javaw.exe");
             if (!isJavaBinary) {
                 ElevationResult r = elevateViaShellExecuteEx(exePath, joinQuoted(forwardedAppArgs));
+                if (r == ElevationResult.CHILD_DIED) {
+                    return ElevationResult.FAILED;
+                }
                 if (r != ElevationResult.FAILED) {
                     return r;
                 }
@@ -159,6 +177,9 @@ public final class AdminCheck {
                     currentArgs.add(ElevationGate.ARG_ELEVATED_RELAUNCH);
                 }
                 ElevationResult r = elevateViaShellExecuteEx(command, joinQuoted(currentArgs));
+                if (r == ElevationResult.CHILD_DIED) {
+                    return ElevationResult.FAILED;
+                }
                 if (r != ElevationResult.FAILED) {
                     return r;
                 }
@@ -179,6 +200,9 @@ public final class AdminCheck {
                             : args + " " + quoteArg(ElevationGate.ARG_ELEVATED_RELAUNCH);
                 }
                 ElevationResult r = elevateViaShellExecuteEx(file, args);
+                if (r == ElevationResult.CHILD_DIED) {
+                    return ElevationResult.FAILED;
+                }
                 if (r != ElevationResult.FAILED) {
                     return r;
                 }
@@ -218,13 +242,20 @@ public final class AdminCheck {
     private static final int SEE_MASK_NOCLOSEPROCESS = 0x00000040;
     private static final int SW_SHOWNORMAL = 1;
     private static final int ERROR_CANCELLED = 1223;
+    /**
+     * How long to watch the elevated child before trusting the handoff.
+     * A healthy child is still booting its JVM at this point; an instant exit
+     * means a broken relaunch (wrong exe, missing modules) and the parent must
+     * stay alive unelevated instead of leaving the user with nothing.
+     */
+    private static final int CHILD_SURVIVAL_WAIT_MS = 3000;
 
     private static ElevationResult elevateViaShellExecuteEx(String file, String params) {
         if (file == null || file.isBlank() || !new java.io.File(file).exists()) {
             return ElevationResult.FAILED;
         }
+        ShellAPI.SHELLEXECUTEINFO info = new ShellAPI.SHELLEXECUTEINFO();
         try {
-            ShellAPI.SHELLEXECUTEINFO info = new ShellAPI.SHELLEXECUTEINFO();
             info.cbSize = info.size();
             info.fMask = SEE_MASK_NOCLOSEPROCESS;
             info.hwnd = null;
@@ -243,15 +274,43 @@ public final class AdminCheck {
                 }
                 return err == ERROR_CANCELLED ? ElevationResult.DENIED_BY_USER : ElevationResult.FAILED;
             }
+            // The UAC prompt was accepted and the child started. Never trust a blind
+            // handoff: if the elevated child dies instantly (wrong exe, missing modules,
+            // bad args) the user would otherwise see "click Yes then nothing happens".
+            // Wait briefly; only tell the parent to exit when the child is confirmed alive.
+            try {
+                int wait = Kernel32.INSTANCE.WaitForSingleObject(info.hProcess, CHILD_SURVIVAL_WAIT_MS);
+                if (wait == WinBase.WAIT_OBJECT_0) {
+                    int exitCode = -1;
+                    try {
+                        IntByReference code = new IntByReference();
+                        if (Kernel32.INSTANCE.GetExitCodeProcess(info.hProcess, code)) {
+                            exitCode = code.getValue();
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    System.err.println("[AdminCheck] Elevated child exited immediately (exit=" + exitCode
+                            + ") for: " + file + ". Continuing unelevated.");
+                    try {
+                        AppLogger.warning("Elevated child died instantly (exit=" + exitCode + ") for: " + file);
+                    } catch (Throwable ignored) {
+                    }
+                    return ElevationResult.CHILD_DIED;
+                }
+            } catch (Throwable t) {
+                // If the wait itself fails, fall through and trust the successful launch.
+                System.err.println("[AdminCheck] Child survival check unavailable: " + t.getMessage());
+            }
+            return ElevationResult.ELEVATED_CHILD_STARTED;
+        } catch (Throwable t) {
+            return ElevationResult.FAILED;
+        } finally {
             try {
                 if (info.hProcess != null) {
                     Kernel32.INSTANCE.CloseHandle(info.hProcess);
                 }
             } catch (Throwable ignored) {
             }
-            return ElevationResult.ELEVATED_CHILD_STARTED;
-        } catch (Throwable t) {
-            return ElevationResult.FAILED;
         }
     }
 
@@ -357,6 +416,7 @@ public final class AdminCheck {
     }
 
     private static String getExePath() {
+        java.util.List<java.io.File> candidates = new java.util.ArrayList<>();
         // 1) Current process image: for jpackage/Launch4j this IS WinZenith.exe.
         try {
             String command = ProcessHandle.current().info().command().orElse(null);
@@ -365,17 +425,25 @@ public final class AdminCheck {
                 if (exeFile.exists()) {
                     String name = exeFile.getName().toLowerCase();
                     if (name.endsWith(".exe") && !name.equals("java.exe") && !name.equals("javaw.exe")) {
-                        return exeFile.getAbsolutePath();
-                    }
-                    // Remember the java binary's directory: a packaged WinZenith.exe
-                    // is often a sibling (app-image root) of the runtime binary.
-                    java.io.File sibling = findSiblingExe(exeFile.getParentFile());
-                    if (sibling != null) {
-                        return sibling.getAbsolutePath();
+                        candidates.add(exeFile.getAbsoluteFile());
+                        // Launched from inside app/ (e.g. the Launch4j copy jpackage stages
+                        // next to the jars)? The real jpackage launcher usually sits one
+                        // level up next to app/ and runtime/.
+                        java.io.File above = launcherAbove(exeFile.getParentFile());
+                        if (above != null) {
+                            candidates.add(above);
+                        }
+                    } else {
+                        // Remember the java binary's directory: a packaged WinZenith.exe
+                        // is often a sibling (app-image root) of the runtime binary.
+                        java.io.File sibling = findSiblingExe(exeFile.getParentFile());
+                        if (sibling != null) {
+                            candidates.add(sibling);
+                        }
                     }
                 }
             }
-        } catch (Exception e) {
+        } catch (Exception ignored) {
         }
         // 2) CodeSource location (Launch4j exe, or app/*.jar next to the exe).
         try {
@@ -384,22 +452,103 @@ public final class AdminCheck {
                 java.io.File codeFile = new java.io.File(location.toURI());
                 if (codeFile.isFile() && codeFile.getName().toLowerCase().endsWith(".exe")
                         && codeFile.exists()) {
-                    return codeFile.getAbsolutePath();
+                    candidates.add(codeFile.getAbsoluteFile());
                 }
                 java.io.File base = codeFile.isFile() ? codeFile.getParentFile() : codeFile;
                 java.io.File sibling = findSiblingExe(base);
                 if (sibling != null) {
-                    return sibling.getAbsolutePath();
+                    candidates.add(sibling);
                 }
                 // jpackage layout: code is app/*.jar, exe is one level up.
-                if (base != null && base.getParentFile() != null) {
-                    sibling = findSiblingExe(base.getParentFile());
-                    if (sibling != null) {
-                        return sibling.getAbsolutePath();
+                if (base != null) {
+                    java.io.File above = launcherAbove(base);
+                    if (above != null) {
+                        candidates.add(above);
+                    } else if (base.getParentFile() != null) {
+                        sibling = findSiblingExe(base.getParentFile());
+                        if (sibling != null) {
+                            candidates.add(sibling);
+                        }
                     }
                 }
             }
-        } catch (Exception e) {
+        } catch (Exception ignored) {
+        }
+        return pickBestExe(candidates);
+    }
+
+    /**
+     * If {@code dir} looks like a jpackage {@code app/} directory (jars + launcher
+     * config inside, real launcher one level up), returns the top-level launcher.
+     */
+    private static java.io.File launcherAbove(java.io.File dir) {
+        try {
+            if (dir == null || !dir.isDirectory()) {
+                return null;
+            }
+            java.io.File parent = dir.getParentFile();
+            if (parent == null || !parent.isDirectory()) {
+                return null;
+            }
+            java.io.File exact = new java.io.File(parent, "WinZenith.exe");
+            if (exact.exists() && isJpackageLauncher(exact)) {
+                return exact.getAbsoluteFile();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** A jpackage app-image launcher sits next to {@code app/} and {@code runtime/}. */
+    private static boolean isJpackageLauncher(java.io.File exe) {
+        try {
+            java.io.File dir = exe.getParentFile();
+            if (dir == null || !dir.isDirectory()) {
+                return false;
+            }
+            return new java.io.File(dir, "app").isDirectory()
+                    && new java.io.File(dir, "runtime").isDirectory();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Picks the exe to elevate: only a jpackage launcher (it carries the JavaFX
+     * module-path in its .cfg). A bare {@code WinZenith.exe} from the Launch4j
+     * build or the {@code target/} dir cannot boot this modular JavaFX app
+     * standalone, so those are deliberately NOT returned — the JVM-argument
+     * strategies below handle IDE/dev launches instead. Returns null when no
+     * jpackage launcher is among the candidates.
+     */
+    private static String pickBestExe(java.util.List<java.io.File> candidates) {
+        java.util.List<java.io.File> usable = new java.util.ArrayList<>();
+        for (java.io.File c : candidates) {
+            if (c == null || !c.exists()) {
+                continue;
+            }
+            String n = c.getName().toLowerCase();
+            if (!n.endsWith(".exe") || n.equals("java.exe") || n.equals("javaw.exe")) {
+                continue;
+            }
+            boolean dup = false;
+            for (java.io.File u : usable) {
+                try {
+                    if (u.getCanonicalPath().equals(c.getCanonicalPath())) {
+                        dup = true;
+                        break;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (!dup) {
+                usable.add(c);
+            }
+        }
+        for (java.io.File u : usable) {
+            if (isJpackageLauncher(u)) {
+                return u.getAbsolutePath();
+            }
         }
         return null;
     }
