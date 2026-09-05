@@ -146,6 +146,13 @@ public class App extends Application {
         stage.show();
         AppLogger.info("Main window shown (version " + AppInfo.getVersion() + ")");
 
+        // Dashboard honors the existing scanOnStartup setting (read-only auto-scan).
+        try {
+            if (tabViews != null && tabViews.length > 0 && tabViews[0] instanceof DashboardTabView dtv) {
+                dtv.maybeAutoScan();
+            }
+        } catch (Exception ignored) {}
+
         if (settings.autoCheckForUpdates() && com.sbtools.util.AppInfo.isPackaged()) {
             updateChecker.checkForUpdateAsync(this::promptForUpdate);
         }

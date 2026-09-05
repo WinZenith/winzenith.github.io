@@ -732,3 +732,52 @@
     -fx-border-color: #50fa7b;
     -fx-effect: dropshadow(gaussian, #50fa7b, 8, 0.12, 0, 0);
 }
+
+/* Severity pills (Dashboard Status column, read-only) */
+.severity-pill {
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+    -fx-padding: 3 10 3 10;
+    -fx-background-radius: 10;
+    -fx-border-radius: 10;
+    -fx-border-width: 1;
+}
+.severity-error {
+    -fx-background-color: #ff555533;
+    -fx-text-fill: #ff5555;
+    -fx-border-color: #ff5555;
+}
+.severity-warn {
+    -fx-background-color: #ffb86c33;
+    -fx-text-fill: #ffb86c;
+    -fx-border-color: #ffb86c;
+}
+.severity-info {
+    -fx-background-color: #8be9fd33;
+    -fx-text-fill: #8be9fd;
+    -fx-border-color: #8be9fd;
+}
+.severity-ok {
+    -fx-background-color: #50fa7b33;
+    -fx-text-fill: #50fa7b;
+    -fx-border-color: #50fa7b;
+}
+
+/* Selected-row details line under the Dashboard table */
+.dashboard-details {
+    -fx-font-size: 12px;
+    -fx-text-fill: #8be9fd;
+    -fx-padding: 6 4 2 4;
+}
+
+/* Snapshot note in the Dashboard status bar */
+.dashboard-snapshot {
+    -fx-font-size: 12px;
+    -fx-text-fill: #6272a4;
+}
+
+/* Per-category Retry button (small, inline in progress item) */
+.dashboard-retry {
+    -fx-padding: 4 10 4 10;
+    -fx-font-size: 11px;
+}
