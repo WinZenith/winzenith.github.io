@@ -87,8 +87,10 @@ public class HelpTabView extends VBox {
 
         getChildren().add(createFaqSection("System Cleanup",
                 "The System Cleanup tab scans your computer for unnecessary files that consume disk space. " +
-                "Click \"Scan\" to analyze categories such as temporary files, browser caches, Windows update leftovers, and log files. " +
-                "Each category shows how much space can be reclaimed. Select the categories you want to clean and click \"Clean.\" " +
+                "Click \"Scan\" to analyze 40 categories such as temporary files, browser caches, Windows update leftovers, and log files. " +
+                "Each category shows how much space can be reclaimed plus its Risk level (Low/Medium/High), scan status, and duration. Use the search box and risk filter to narrow results. " +
+                "Double-click a row (or right-click > View details) to preview what will be cleaned. Select the categories you want to clean and click \"Clean Selected\" (HIGH-risk categories are unchecked by default and ask for extra confirmation). " +
+                "Use \"Refresh selected\" to re-scan only selected rows, \"Export...\" to save the scan as CSV, and right-click > Ignore to skip a category in future scans. " +
                 "The Registry Defragmentation tool (in a sub-tab) compacts your Windows registry to improve system performance. " +
                 "Registry defragmentation requires a restart to complete. " +
                 "Always review scan results before cleaning to avoid removing files you still need."));

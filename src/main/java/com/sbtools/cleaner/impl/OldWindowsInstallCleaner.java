@@ -28,6 +28,13 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
+        if (com.sbtools.util.WindowsServicingSafety.isServicingPending()) {
+            String reasons = String.join("; ", com.sbtools.util.WindowsServicingSafety.getPendingReasons());
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Skipped (pending system restart: " + reasons + ")");
+            return;
+        }
         Path windowsOld = getValidWindowsOldPath();
         if (windowsOld == null) {
             row.setTotalBytes(0);
@@ -76,6 +83,11 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
+        if (com.sbtools.util.WindowsServicingSafety.isServicingPending()) {
+            AppLogger.info("Skipping Windows.old removal: pending system restart ("
+                    + String.join("; ", com.sbtools.util.WindowsServicingSafety.getPendingReasons()) + ")");
+            return 0;
+        }
         Path windowsOld = getValidWindowsOldPath();
         if (windowsOld == null) return 0;
 

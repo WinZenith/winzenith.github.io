@@ -26,4 +26,12 @@ public interface CleanerExtension {
     default long getCleanTimeoutSeconds() {
         return 120;
     }
+
+    /**
+     * Human-readable target locations for preview dialogs.
+     * Additive: defaults to empty; cleaners may override without breaking existing code.
+     */
+    default java.util.List<String> describeTargets() {
+        return java.util.Collections.emptyList();
+    }
 }

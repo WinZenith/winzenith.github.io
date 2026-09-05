@@ -29,8 +29,22 @@ public class CleanerHistoryStore {
             String timestamp,
             long totalBytesFreed,
             int totalItems,
-            Map<String, Long> perCategoryBytes
-    ) {}
+            Map<String, Long> perCategoryBytes,
+            String appVersion,
+            List<String> errors
+    ) {
+        public HistoryEntry {
+            if (perCategoryBytes == null) perCategoryBytes = java.util.Collections.emptyMap();
+            if (appVersion == null) appVersion = "";
+            if (errors == null) errors = java.util.Collections.emptyList();
+        }
+
+        /** Backward-compatible constructor for pre-existing call sites and old JSON. */
+        public HistoryEntry(String timestamp, long totalBytesFreed, int totalItems,
+                            Map<String, Long> perCategoryBytes) {
+            this(timestamp, totalBytesFreed, totalItems, perCategoryBytes, "", java.util.Collections.emptyList());
+        }
+    }
 
     private Path getHistoryFile() {
         return AppPaths.dataDir().resolve("cleanup-history.json");
@@ -56,11 +70,17 @@ public class CleanerHistoryStore {
         summary.getPerCategory().forEach((cat, bytes) ->
                 perCategory.put(cat.getDisplayName(), bytes));
 
+        String version = "";
+        try {
+            version = com.sbtools.util.AppInfo.VERSION != null ? com.sbtools.util.AppInfo.VERSION : "";
+        } catch (Exception ignored) {}
         HistoryEntry entry = new HistoryEntry(
                 Instant.now().toString(),
                 summary.getTotalBytes(),
                 summary.getTotalItems(),
-                perCategory
+                perCategory,
+                version,
+                new java.util.ArrayList<>(summary.getErrors())
         );
         history.add(0, entry);
 
@@ -79,5 +99,15 @@ public class CleanerHistoryStore {
 
     public synchronized long getTotalBytesFreedAllTime() {
         return load().stream().mapToLong(HistoryEntry::totalBytesFreed).sum();
+    }
+
+    public synchronized void clear() {
+        try {
+            Path file = getHistoryFile();
+            Files.createDirectories(file.getParent());
+            MAPPER.writeValue(file.toFile(), new java.util.ArrayList<HistoryEntry>());
+        } catch (IOException e) {
+            AppLogger.warning("Failed to clear cleanup history: " + e.getMessage());
+        }
     }
 }

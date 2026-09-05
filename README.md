@@ -47,7 +47,7 @@
 | **System Information** | Detailed hardware and software information: OS, CPU, GPU, RAM, storage, BIOS, and more. |
 | **Uninstaller** | Remove desktop and store apps with leftover file, folder, and registry cleanup. |
 | **Startup Manager** | Manage startup items, scheduled tasks, and Windows services. Backup and restore configs. |
-| **System Cleanup** | Clean 21 categories of temporary files, browser cache, Windows updates leftovers, and registry. |
+| **System Cleanup** | Clean 40 categories of temporary files, browser cache, Windows updates leftovers, and registry. |
 | **Duplicate Files** | Content-hash based duplicate detection. Find and remove duplicate files to save space. |
 | **Disk Tools** | Defragmentation with visual grid, secure file shredder, and free space wipe. |
 | **Browser Extensions** | Manage extensions across Chrome, Edge, Firefox, Brave, Opera, and Vivaldi. |

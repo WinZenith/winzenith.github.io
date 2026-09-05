@@ -47,6 +47,12 @@ public final class CleanerRegistry {
         register(new JetBrainsCacheCleaner(), map);
         register(new ItunesBackupsCleaner(), map);
         register(new WindowsSearchCacheCleaner(), map);
+        register(new DeliveryOptimizationCleaner(), map);
+        register(new DirectXShaderCacheCleaner(), map);
+        register(new ServiceProfileTempCleaner(), map);
+        register(new OneDriveSyncLogsCleaner(), map);
+        register(new VsCodeWorkspaceStorageCleaner(), map);
+        register(new DotNetTempCacheCleaner(), map);
         REGISTRY = Collections.unmodifiableMap(map);
     }
 

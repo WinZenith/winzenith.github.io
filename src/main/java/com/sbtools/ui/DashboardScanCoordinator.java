@@ -31,7 +31,7 @@ public final class DashboardScanCoordinator {
     public static final long DRIVER_TIMEOUT_SECONDS = 180;
     /** Soft budget for the software sub-scan. */
     public static final long SOFTWARE_TIMEOUT_SECONDS = 180;
-    /** Soft budget for the cleanup sub-scan (21 categories, file walks). */
+    /** Soft budget for the cleanup sub-scan (40 categories, file walks). */
     public static final long CLEANUP_TIMEOUT_SECONDS = 240;
 
     private DashboardScanCoordinator() {

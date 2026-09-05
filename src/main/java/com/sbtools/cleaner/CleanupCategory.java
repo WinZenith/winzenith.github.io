@@ -34,7 +34,13 @@ public enum CleanupCategory {
     PIP_CACHE("PIP Cache", "Python package installer cache", RiskLevel.LOW),
     JETBRAINS_CACHE("JetBrains Cache", "JetBrains IDE cache files (IntelliJ, PyCharm, etc.)", RiskLevel.LOW),
     ITUNES_BACKUPS("iTunes Backups", "iOS backups at %APPDATA%\\Apple Computer\\MobileSync\\Backup (WARNING: irreversible user data, not cache)", RiskLevel.HIGH),
-    WINDOWS_SEARCH_CACHE("Windows Search Cache", "Search cache data (service-safe cleanup, index database preserved)", RiskLevel.MEDIUM);
+    WINDOWS_SEARCH_CACHE("Windows Search Cache", "Search cache data (service-safe cleanup, index database preserved)", RiskLevel.MEDIUM),
+    DELIVERY_OPTIMIZATION_FILES("Delivery Optimization Files", "Windows delivery optimization download cache (regenerated as needed)", RiskLevel.LOW),
+    DIRECTX_SHADER_CACHE("DirectX Shader Cache", "Direct3D shader cache at LocalAppData\\D3DSCache (regenerated on demand)", RiskLevel.LOW),
+    SERVICE_PROFILE_TEMP("Service Profile Temp", "Temp files under Windows ServiceProfiles (LocalService/NetworkService, 1+ day old only)", RiskLevel.LOW),
+    ONEDRIVE_SYNC_LOGS("OneDrive Sync Logs", "OneDrive sync and setup log files (*.odl, *.log in OneDrive logs)", RiskLevel.LOW),
+    VSCODE_WORKSPACE_STORAGE("VS Code Workspace Storage", "Stale VS Code workspace storage entries older than 30 days", RiskLevel.LOW),
+    DOTNET_TEMP_CACHE("Temporary ASP.NET Files", ".NET temporary compilation cache (regenerated on demand)", RiskLevel.LOW);
 
     public enum RiskLevel {
         LOW("Low", "Safe to clean, files are regenerated as needed"),

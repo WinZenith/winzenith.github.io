@@ -56,6 +56,11 @@ import java.util.concurrent.atomic.AtomicInteger;
     private Button cleanButton;
     private Button historyButton;
     private Button cancelButton;
+    private Button exportButton;
+    private Button refreshButton;
+    private javafx.scene.control.TextField searchField;
+    private javafx.scene.control.ComboBox<String> riskFilter;
+    private javafx.collections.transformation.FilteredList<CleanupRow> filteredRows;
 
     public CleanerTabView(BooleanProperty busy, java.util.function.BooleanSupplier adminCheck) {
         this(busy, adminCheck, new SettingsStore());
@@ -78,7 +83,20 @@ import java.util.concurrent.atomic.AtomicInteger;
         cleanButton = new Button("Clean Selected");
         historyButton = new Button("History");
         cancelButton = new Button("Cancel");
-        table = new TableView<>(sessionRows);
+        exportButton = new Button("Export...");
+        refreshButton = new Button("Refresh selected");
+        searchField = new javafx.scene.control.TextField();
+        searchField.setPromptText("Filter categories...");
+        searchField.setPrefWidth(160);
+        riskFilter = new javafx.scene.control.ComboBox<>();
+        riskFilter.getItems().addAll("All risks", "Low", "Medium", "High");
+        riskFilter.setValue("All risks");
+        riskFilter.setPrefWidth(110);
+        table = new TableView<>();
+        filteredRows = new javafx.collections.transformation.FilteredList<>(sessionRows, r -> true);
+        table.setItems(filteredRows);
+        searchField.textProperty().addListener((obs, o, n) -> applyTableFilter());
+        riskFilter.valueProperty().addListener((obs, o, n) -> applyTableFilter());
 
         summaryLabel = new Label();
         summaryLabel.setStyle("-fx-text-fill: #50fa7b; -fx-font-size: 13px; -fx-padding: 4 0 0 0;");
@@ -110,12 +128,18 @@ import java.util.concurrent.atomic.AtomicInteger;
             dialog.showAndWait();
         });
         cancelButton.setOnAction(e -> cancelActive());
+        exportButton.setOnAction(e -> exportScanCsv());
+        refreshButton.setOnAction(e -> refreshSelected());
 
-        HBox top = new HBox(6, scanButton, selectAllButton, deselectAllButton, presetButton,
-                cleanButton, historyButton, progressBar, statusLabel, cancelButton);
+        HBox top = new HBox(6, scanButton, refreshButton, selectAllButton, deselectAllButton, presetButton,
+                cleanButton, historyButton, exportButton, progressBar, statusLabel, cancelButton);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
+
+        HBox filterRow = new HBox(8, new Label("Search:"), searchField, new Label("Risk:"), riskFilter);
+        filterRow.setAlignment(Pos.CENTER_LEFT);
+        filterRow.setPadding(new Insets(0, 16, 0, 16));
 
         buildTable();
 
@@ -125,23 +149,118 @@ import java.util.concurrent.atomic.AtomicInteger;
 
         busy.addListener((obs, oldVal, newVal) -> {
             scanButton.setDisable(newVal);
+            refreshButton.setDisable(newVal || getSelectedCount() == 0);
             selectAllButton.setDisable(newVal);
             deselectAllButton.setDisable(newVal);
             presetButton.setDisable(newVal);
+            exportButton.setDisable(newVal || sessionRows.isEmpty());
             cleanButton.setDisable(newVal || getSelectedCount() == 0);
             cancelButton.setDisable(!newVal);
         });
 
         sessionRows.addListener((javafx.collections.ListChangeListener<CleanupRow>) c -> {
             updateSummary();
+            applyTableFilter();
             if (!busy.get()) {
                 cleanButton.setDisable(getSelectedCount() == 0);
+                refreshButton.setDisable(getSelectedCount() == 0);
+                exportButton.setDisable(sessionRows.isEmpty());
             }
         });
 
-        VBox content = new VBox(top, center);
+        exportButton.setDisable(true);
+        refreshButton.setDisable(true);
+
+        VBox content = new VBox(top, filterRow, center);
         VBox.setVgrow(center, Priority.ALWAYS);
         return content;
+    }
+
+    private void applyTableFilter() {
+        if (filteredRows == null) return;
+        String q = searchField != null && searchField.getText() != null
+                ? searchField.getText().trim().toLowerCase() : "";
+        String risk = riskFilter != null && riskFilter.getValue() != null ? riskFilter.getValue() : "All risks";
+        filteredRows.setPredicate(row -> {
+            if (row == null) return false;
+            if (!"All risks".equals(risk)) {
+                String rowRisk = row.getCategory().getRiskLevel().getDisplayName();
+                if (!risk.equalsIgnoreCase(rowRisk)) return false;
+            }
+            if (!q.isEmpty()) {
+                String hay = (row.getCategory().getDisplayName() + " "
+                        + row.getCategory().getDescription()).toLowerCase();
+                if (!hay.contains(q)) return false;
+            }
+            return true;
+        });
+    }
+
+    private void exportScanCsv() {
+        if (sessionRows.isEmpty()) return;
+        javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
+        chooser.setTitle("Export cleanup scan");
+        chooser.setInitialFileName("cleanup-scan.csv");
+        chooser.getExtensionFilters().add(new javafx.stage.FileChooser.ExtensionFilter("CSV", "*.csv"));
+        java.io.File file = chooser.showSaveDialog(table.getScene() != null ? table.getScene().getWindow() : null);
+        if (file == null) return;
+        try (java.io.PrintWriter out = new java.io.PrintWriter(file, java.nio.charset.StandardCharsets.UTF_8)) {
+            out.println("Category,Description,Risk,SizeBytes,Items,Status,Selected");
+            for (CleanupRow r : sessionRows) {
+                out.println(csv(r.getCategory().getDisplayName()) + ","
+                        + csv(r.getCategory().getDescription()) + ","
+                        + csv(r.getCategory().getRiskLevel().getDisplayName()) + ","
+                        + r.getTotalBytes() + "," + r.getItemCount() + ","
+                        + csv(r.getScanStatus().getDisplayText()) + ","
+                        + (r.isSelected() ? "yes" : "no"));
+            }
+            statusLabel.setText("Scan exported to " + file.getName());
+        } catch (Exception e) {
+            AppLogger.warning("Failed to export cleanup scan: " + e.getMessage());
+            new Alert(Alert.AlertType.ERROR, "Export failed:\n" + e.getMessage()).showAndWait();
+        }
+    }
+
+    private static String csv(String s) {
+        if (s == null) return "\"\"";
+        return "\"" + s.replace("\"", "\"\"") + "\"";
+    }
+
+    private void saveCleanReport(String reportText) {
+        javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
+        chooser.setTitle("Save cleanup report");
+        chooser.setInitialFileName("cleanup-report.txt");
+        chooser.getExtensionFilters().addAll(
+                new javafx.stage.FileChooser.ExtensionFilter("Text", "*.txt"),
+                new javafx.stage.FileChooser.ExtensionFilter("All", "*.*"));
+        java.io.File file = chooser.showSaveDialog(table.getScene() != null ? table.getScene().getWindow() : null);
+        if (file == null) return;
+        try {
+            java.nio.file.Files.writeString(file.toPath(), reportText, java.nio.charset.StandardCharsets.UTF_8);
+            statusLabel.setText("Report saved to " + file.getName());
+        } catch (Exception e) {
+            AppLogger.warning("Failed to save cleanup report: " + e.getMessage());
+            new Alert(Alert.AlertType.ERROR, "Save failed:\n" + e.getMessage()).showAndWait();
+        }
+    }
+
+    private void ignoreCategory(CleanupRow row) {
+        try {
+            settingsStore.update(current -> {
+                java.util.List<String> ignored = new java.util.ArrayList<>(
+                        current.ignoredCleanupCategories() != null
+                                ? current.ignoredCleanupCategories() : java.util.Collections.emptyList());
+                if (!ignored.contains(row.getCategory().name())) {
+                    ignored.add(row.getCategory().name());
+                }
+                return current.toBuilder().ignoredCleanupCategories(ignored).build();
+            });
+            sessionRows.remove(row);
+            statusLabel.setText(row.getCategory().getDisplayName() + " will be ignored in future scans.");
+        } catch (Exception e) {
+            AppLogger.warning("Failed to ignore cleanup category: " + e.getMessage());
+            new Alert(Alert.AlertType.ERROR, "Could not ignore category:\n" + e.getMessage()).showAndWait();
+        }
     }
 
     // Rescan state — wired to Cancel button (B5)
@@ -245,13 +364,92 @@ import java.util.concurrent.atomic.AtomicInteger;
         sizeCol.setCellValueFactory(c -> c.getValue().sizeOrCountTextProperty());
         sizeCol.setPrefWidth(140);
 
-        table.getColumns().addAll(checkCol, categoryCol, descCol, sizeCol);
+        TableColumn<CleanupRow, String> riskCol = new TableColumn<>("Risk");
+        riskCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                c.getValue().getCategory().getRiskLevel().getDisplayName()));
+        riskCol.setPrefWidth(70);
+        riskCol.setCellFactory(col -> new TableCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                    setStyle("");
+                    setTooltip(null);
+                } else {
+                    setText(item);
+                    CleanupRow row = getTableRow() != null ? (CleanupRow) getTableRow().getItem() : null;
+                    String tip = row != null ? row.getCategory().getRiskLevel().getDescription() : item;
+                    setTooltip(new Tooltip(tip));
+                    if ("High".equals(item)) {
+                        setStyle("-fx-text-fill: #ff5555; -fx-font-weight: bold;");
+                    } else if ("Medium".equals(item)) {
+                        setStyle("-fx-text-fill: #f1fa8c;");
+                    } else {
+                        setStyle("-fx-text-fill: #50fa7b;");
+                    }
+                }
+            }
+        });
+
+        TableColumn<CleanupRow, String> statusCol = new TableColumn<>("Status");
+        statusCol.setCellValueFactory(c -> c.getValue().statusTextProperty());
+        statusCol.setPrefWidth(90);
+
+        TableColumn<CleanupRow, String> durationCol = new TableColumn<>("Took");
+        durationCol.setCellValueFactory(c -> {
+            long ms = c.getValue().getScanDurationMs();
+            String text = ms > 0 ? (ms >= 1000 ? String.format("%.1fs", ms / 1000.0) : ms + " ms") : "-";
+            return new javafx.beans.property.SimpleStringProperty(text);
+        });
+        durationCol.setPrefWidth(70);
+
+        table.getColumns().addAll(checkCol, categoryCol, descCol, sizeCol, riskCol, statusCol, durationCol);
+
+        table.setRowFactory(tv -> {
+            TableRow<CleanupRow> row = new TableRow<>();
+            row.setOnMouseClicked(ev -> {
+                if (ev.getClickCount() == 2 && !row.isEmpty()) {
+                    com.sbtools.cleaner.CleanupCategoryDetailDialog dialog =
+                            new com.sbtools.cleaner.CleanupCategoryDetailDialog(row.getItem());
+                    dialog.showAndWait();
+                }
+            });
+            ContextMenu ctx = new ContextMenu();
+            MenuItem detailsItem = new MenuItem("View details...");
+            detailsItem.setOnAction(e -> {
+                if (!row.isEmpty()) {
+                    new com.sbtools.cleaner.CleanupCategoryDetailDialog(row.getItem()).showAndWait();
+                }
+            });
+            MenuItem ignoreItem = new MenuItem("Ignore category in future scans");
+            ignoreItem.setOnAction(e -> {
+                if (!row.isEmpty()) ignoreCategory(row.getItem());
+            });
+            MenuItem copyItem = new MenuItem("Copy row");
+            copyItem.setOnAction(e -> {
+                if (!row.isEmpty()) {
+                    CleanupRow r = row.getItem();
+                    String text = r.getCategory().getDisplayName() + " | "
+                            + r.sizeOrCountTextProperty().get() + " | "
+                            + r.getCategory().getRiskLevel().getDisplayName();
+                    javafx.scene.input.ClipboardContent content = new javafx.scene.input.ClipboardContent();
+                    content.putString(text);
+                    javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
+                }
+            });
+            ctx.getItems().addAll(detailsItem, ignoreItem, copyItem);
+            row.contextMenuProperty().bind(
+                    javafx.beans.binding.Bindings.when(row.emptyProperty())
+                            .then((ContextMenu) null).otherwise(ctx));
+            return row;
+        });
     }
 
     private void showPresetMenu() {
         ContextMenu menu = new ContextMenu();
         for (CleanerPresets preset : CleanerPresets.values()) {
-            MenuItem item = new MenuItem(preset.getDisplayName());
+            MenuItem item = new MenuItem(preset.getDisplayName() + " — " + preset.getDescription());
             item.setStyle("-fx-font-size: 12px;");
             item.setOnAction(e -> {
                 Set<CleanupCategory> cats = preset.getCategories();
@@ -261,6 +459,16 @@ import java.util.concurrent.atomic.AtomicInteger;
             });
             menu.getItems().add(item);
         }
+        javafx.scene.control.SeparatorMenuItem sep = new javafx.scene.control.SeparatorMenuItem();
+        menu.getItems().add(sep);
+        MenuItem invertItem = new MenuItem("Invert selection");
+        invertItem.setStyle("-fx-font-size: 12px;");
+        invertItem.setOnAction(e -> {
+            for (CleanupRow row : sessionRows) {
+                row.setSelected(!row.isSelected());
+            }
+        });
+        menu.getItems().add(invertItem);
         menu.show(presetButton, javafx.geometry.Side.BOTTOM, 0, 0);
     }
 
@@ -300,7 +508,56 @@ import java.util.concurrent.atomic.AtomicInteger;
     private void updateCleanButtonState() {
         if (!busy.get()) {
             cleanButton.setDisable(getSelectedCount() == 0);
+            refreshButton.setDisable(getSelectedCount() == 0);
         }
+    }
+
+    private void refreshSelected() {
+        if (busy.get() || !hasScanned || sessionRows.isEmpty()) return;
+        java.util.List<CleanupRow> selected = sessionRows.stream().filter(CleanupRow::isSelected).toList();
+        if (selected.isEmpty()) return;
+        busy.set(true);
+        cancelling.set(false);
+        statusLabel.setText("Refreshing " + selected.size() + " categories...");
+        progressBar.setProgress(-1);
+        progressBar.setVisible(true);
+        cancelButton.setDisable(false);
+
+        java.util.List<CleanupCategory> cats = selected.stream().map(CleanupRow::getCategory).toList();
+        activeRescanToken = new CancellationToken();
+        activeRescanFuture = service.scanCategoriesAsync(cats, () -> {}, activeRescanToken);
+        activeRescanFuture.whenComplete((results, ex) -> Platform.runLater(() -> {
+            if (ex != null) {
+                if (cancelling.get() || (activeRescanFuture != null && activeRescanFuture.isCancelled())) {
+                    statusLabel.setText("Refresh canceled.");
+                } else {
+                    statusLabel.setText("Refresh failed.");
+                    new Alert(Alert.AlertType.ERROR, "Refresh failed:\n" + ex.getMessage()).showAndWait();
+                }
+            } else if (results != null) {
+                java.util.Map<CleanupCategory, CleanupRow> map = new java.util.HashMap<>();
+                for (CleanupRow rr : results) map.put(rr.getCategory(), rr);
+                for (CleanupRow existing : sessionRows) {
+                    CleanupRow refreshed = map.get(existing.getCategory());
+                    if (refreshed != null) {
+                        existing.setTotalBytes(refreshed.getTotalBytes());
+                        existing.setItemCount(refreshed.getItemCount());
+                        existing.setSizeOrCountText(refreshed.sizeOrCountTextProperty().get());
+                        existing.setScanStatus(refreshed.getScanStatus());
+                        existing.setErrorMessage(refreshed.getErrorMessage());
+                        existing.setScanDurationMs(refreshed.getScanDurationMs());
+                    }
+                }
+                long totalBytes = sessionRows.stream().mapToLong(CleanupRow::getTotalBytes).sum();
+                statusLabel.setText("Refresh complete - " + CleanupService.formatBytes(totalBytes) + " identified.");
+                updateSummary();
+            }
+            progressBar.setVisible(false);
+            cancelButton.setDisable(true);
+            cancelling.set(false);
+            activeRescanToken = null;
+            busy.set(false);
+        }));
     }
 
     private void startScan() {
@@ -626,7 +883,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 
                             Alert resultAlert = new Alert(wasCanceled ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, sb.toString());
                             resultAlert.setHeaderText(wasCanceled ? "Cleanup Canceled" : "Cleanup Results");
-                            resultAlert.showAndWait();
+                            ButtonType saveReportBtn = new ButtonType("Save report...");
+                            resultAlert.getButtonTypes().add(saveReportBtn);
+                            var chosen = resultAlert.showAndWait().orElse(ButtonType.OK);
+                            if (chosen == saveReportBtn) {
+                                saveCleanReport(sb.toString());
+                            }
 
                             cancelling.set(false);
                             activeCleanToken = null;

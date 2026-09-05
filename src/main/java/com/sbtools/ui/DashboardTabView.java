@@ -591,8 +591,8 @@ public class DashboardTabView extends BorderPane {
 
     /**
      * Granular cleanup progress (P1): called from the cleanup worker threads as
-     * each of the ~21 categories finishes. Coalesced through a single runLater
-     * per callback (bounded, cheap) to show "Scanning… 4/21" live.
+     * each of the ~40 categories finishes. Coalesced through a single runLater
+     * per callback (bounded, cheap) to show "Scanning… 4/40" live.
      */
     private void updateCleanupProgress(int done, int total, int generation) {
         if (cleanupItem == null) return;

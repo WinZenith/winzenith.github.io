@@ -9,7 +9,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
 
 public class ShaderCacheCleaner implements CleanerExtension {
 
@@ -18,21 +17,7 @@ public class ShaderCacheCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        long totalSize = 0;
-        int itemCount = 0;
-        for (Path dir : getDirs()) {
-            if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> walk = Files.walk(dir)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                    totalSize += stats.getSum();
-                    itemCount += (int) stats.getCount();
-                } catch (Exception ignored) {}
-            }
-        }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+        CleanerUtils.scanDirectorySizes(row, getDirs(), CleanerUtils.DEFAULT_SCAN_MAX_DEPTH);
     }
 
     @Override

@@ -21,6 +21,12 @@ public final class CleanerUtils {
 
     private static final Set<String> PROTECTED_ABSOLUTE_PREFIXES = new HashSet<>();
 
+    /** Default depth cap for directory scans to avoid runaway walks. Additive optimization. */
+    public static final int DEFAULT_SCAN_MAX_DEPTH = 10;
+
+    /** Stats for directory deletes: bytes freed + locked/skipped file count. */
+    public record DeleteStats(long bytesFreed, int filesDeleted, int skippedLocked) {}
+
     private static final Set<String> PROTECTED_ROOT_FILE_NAMES = new HashSet<>(Set.of(
             "$windows.~bt", "$windows.~ws", "$sysreset",
             "pagefile.sys", "hiberfil.sys", "swapfile.sys",
@@ -37,12 +43,27 @@ public final class CleanerUtils {
             PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\winsxs");
             PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\boot");
             PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\fonts");
+            // Safety hardening: never traverse into servicing / core OS component stores.
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\servicing");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\systemapps");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\systemresources");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\security");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\policydefinitions");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\schemas");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\wbem");
         }
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\system32");
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\syswow64");
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\winsxs");
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\boot");
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\fonts");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\servicing");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\systemapps");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\systemresources");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\security");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\policydefinitions");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\schemas");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\wbem");
     }
 
     private CleanerUtils() {
@@ -171,7 +192,9 @@ public final class CleanerUtils {
     }
 
     public static void scanDirectorySizes(CleanupRow row, List<Path> dirs) {
-        scanDirectorySizes(row, dirs, -1);
+        // Capped by default to avoid runaway walks on huge trees (e.g. user profile).
+        // Explicit-depth overload remains for callers needing deeper scans.
+        scanDirectorySizes(row, dirs, DEFAULT_SCAN_MAX_DEPTH);
     }
 
     public static void scanDirectorySizes(CleanupRow row, List<Path> dirs, int maxDepth) {
@@ -201,7 +224,7 @@ public final class CleanerUtils {
         long cutoff = System.currentTimeMillis() - maxAge.toMillis();
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> walk = Files.walk(dir)) {
+                try (Stream<Path> walk = Files.walk(dir, DEFAULT_SCAN_MAX_DEPTH)) {
                     var stats = walk.filter(Files::isRegularFile)
                             .filter(p -> {
                                 try {
@@ -255,12 +278,45 @@ public final class CleanerUtils {
         return cleaned;
     }
 
-    public static long deleteDirectoryContents(Path dir) {
-        return deleteDirectoryContents(dir, null);
+    /**
+     * Conservative safety check: target must exist, must not be a protected OS path,
+     * and must not be a filesystem root. New cleaners should call this before deleting.
+     */
+    public static boolean isSafeToCleanDirectory(Path dir) {
+        if (dir == null) return false;
+        try {
+            if (!Files.isDirectory(dir)) return false;
+            if (isProtectedPath(dir)) return false;
+            Path abs = dir.toAbsolutePath().normalize();
+            if (abs.getParent() == null) return false;
+            Path root = abs.getRoot();
+            if (root != null && abs.equals(root)) return false;
+            // Never allow cleaning the whole user profile, Windows dir, or drive root content.
+            String absStr = abs.toString().toLowerCase().replace('/', '\\');
+            String userProfile = safeEnv("USERPROFILE");
+            if (userProfile != null && absStr.equals(userProfile.toLowerCase().replace('/', '\\'))) return false;
+            String windir = safeEnv("WINDIR");
+            if (windir != null && absStr.equals(windir.toLowerCase().replace('/', '\\'))) return false;
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
-    public static long deleteDirectoryContents(Path dir, CancellationToken token) {
+    /**
+     * Delete with locked-file accounting. Existing {@link #deleteDirectoryContents(Path, CancellationToken)}
+     * delegates here for backward compatibility.
+     */
+    public static DeleteStats deleteDirectoryContentsWithStats(Path dir, CancellationToken token) {
         java.util.concurrent.atomic.AtomicLong cleaned = new java.util.concurrent.atomic.AtomicLong();
+        java.util.concurrent.atomic.AtomicInteger deleted = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger skipped = new java.util.concurrent.atomic.AtomicInteger();
+        if (dir == null || !Files.isDirectory(dir) || isProtectedPath(dir)) {
+            if (dir != null && isProtectedPath(dir)) {
+                AppLogger.warning("Skipping protected directory: " + dir);
+            }
+            return new DeleteStats(0, 0, 0);
+        }
         try {
             Files.walkFileTree(dir, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), Integer.MAX_VALUE, new SimpleFileVisitor<>() {
                 @Override
@@ -287,12 +343,20 @@ public final class CleanerUtils {
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
                     if (isProtectedPath(file)) {
+                        skipped.incrementAndGet();
                         return FileVisitResult.CONTINUE;
                     }
                     try {
+                        boolean existed = Files.exists(file);
                         Files.deleteIfExists(file);
-                        cleaned.addAndGet(attrs.size());
-                    } catch (Exception ignored) {
+                        if (!Files.exists(file) && existed) {
+                            cleaned.addAndGet(attrs.size());
+                            deleted.incrementAndGet();
+                        } else if (Files.exists(file)) {
+                            skipped.incrementAndGet();
+                        }
+                    } catch (Exception e) {
+                        skipped.incrementAndGet();
                     }
                     return FileVisitResult.CONTINUE;
                 }
@@ -303,7 +367,8 @@ public final class CleanerUtils {
                     if (!d.equals(dir) && !isProtectedPath(d)) {
                         try {
                             Files.deleteIfExists(d);
-                        } catch (Exception ignored) {
+                        } catch (Exception e) {
+                            skipped.incrementAndGet();
                         }
                     }
                     return FileVisitResult.CONTINUE;
@@ -311,12 +376,40 @@ public final class CleanerUtils {
 
                 @Override
                 public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    skipped.incrementAndGet();
                     return FileVisitResult.CONTINUE;
                 }
             });
         } catch (Exception ignored) {
         }
-        return cleaned.get();
+        return new DeleteStats(cleaned.get(), deleted.get(), skipped.get());
+    }
+
+    public static long deleteDirectoryContents(Path dir) {
+        return deleteDirectoryContents(dir, null);
+    }
+
+    public static long deleteDirectoryContents(Path dir, CancellationToken token) {
+        return deleteDirectoryContentsWithStats(dir, token).bytesFreed();
+    }
+
+    /**
+     * Pattern clean with locked-file accounting (additive; existing callers unaffected).
+     */
+    public static DeleteStats cleanDirectoryPatternWithStats(List<Path> dirs, CancellationToken token) {
+        long bytes = 0;
+        int files = 0;
+        int skipped = 0;
+        for (Path dir : dirs) {
+            if (dir != null && Files.isDirectory(dir) && isSafeToCleanDirectory(dir)) {
+                DeleteStats s = deleteDirectoryContentsWithStats(dir, token);
+                bytes += s.bytesFreed();
+                files += s.filesDeleted();
+                skipped += s.skippedLocked();
+            }
+            if (token != null && token.isCancelled()) break;
+        }
+        return new DeleteStats(bytes, files, skipped);
     }
 
     public static long deleteDirectoryContentsOlderThan(Path dir, long cutoffMillis) {
