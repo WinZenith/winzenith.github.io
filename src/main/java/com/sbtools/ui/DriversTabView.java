@@ -1,9 +1,12 @@
 package com.sbtools.ui;
 
 import com.sbtools.backup.DriverBackupService;
+import com.sbtools.drivers.catalog.CatalogUpdateService;
 import com.sbtools.drivers.catalog.DriverCatalogAggregator;
+import com.sbtools.drivers.catalog.DriverCatalogDatabase;
 import com.sbtools.drivers.DriverHealthService;
 import com.sbtools.drivers.DriverInstallService;
+import com.sbtools.drivers.DriverPreflightService;
 import com.sbtools.drivers.DriverScanService;
 import com.sbtools.drivers.RebootPendingStore;
 import com.sbtools.drivers.UpdateHistoryStore;
@@ -188,6 +191,8 @@ public class DriversTabView extends BorderPane {
         ignoredListButton.setOnAction(e -> showIgnoredListDialog());
         Button historyButton = new Button("History");
         historyButton.setOnAction(e -> showUpdateHistory());
+        Button catalogButton = new Button("Refresh Catalog");
+        catalogButton.setOnAction(e -> refreshDriverCatalog());
         Button detailsButton = new Button("Details");
         detailsButton.setOnAction(e -> {
             DriverRow row = getSelectedRow();
@@ -206,10 +211,11 @@ public class DriversTabView extends BorderPane {
         stopInstallButton.setTooltip(new Tooltip("Cancel the running install / batch update"));
         ignoredListButton.setTooltip(new Tooltip("Manage ignored/excluded drivers"));
         historyButton.setTooltip(new Tooltip("View past driver update history"));
+        catalogButton.setTooltip(new Tooltip("Download the latest driver catalog (falls back to bundled when offline)"));
         detailsButton.setTooltip(new Tooltip("View details of the selected driver"));
 
         HBox row1 = new HBox(8, scanButton, stopScanButton, updateAllButton, updateSelectedButton,
-                stopInstallButton, backupButton, stopBackupButton, ignoredListButton, historyButton, detailsButton);
+                stopInstallButton, backupButton, stopBackupButton, ignoredListButton, historyButton, catalogButton, detailsButton);
         row1.setAlignment(Pos.CENTER_LEFT);
         row1.setPadding(new Insets(8, 16, 0, 16));
         row1.getStyleClass().add("toolbar");
@@ -730,14 +736,18 @@ public class DriversTabView extends BorderPane {
                                 double progress = 0.2 + (0.8 * done / Math.max(1, providerCount));
                                 progressBar.setProgress(progress);
                                 progressLabel.setText((int)(progress * 100) + "%");
-                                reconcileRows(rowByDevice, excludedIdSet);
+                                boolean rowsChanged = reconcileRows(rowByDevice, excludedIdSet);
                                 // B3: reconcile reboot-pending state so Dashboard/Drivers stay in sync
+                                boolean rebootChanged = false;
                                 try {
                                     Set<String> pendingIds = rebootStore.loadPendingIds();
                                     for (DriverRow r : rowByDevice.values()) {
                                         String did = r.installed().deviceId();
                                         if (pendingIds.contains(did)) {
-                                            r.setRebootPending(true);
+                                            if (!r.isRebootPending()) {
+                                                r.setRebootPending(true);
+                                                rebootChanged = true;
+                                            }
                                             // Keep reboot-pending drivers visibly in Outdated until reboot completes
                                             if (outdatedRows.contains(r)) {
                                                 // already there with REBOOT badge
@@ -745,20 +755,26 @@ public class DriversTabView extends BorderPane {
                                                 // has update but was in upToDate due to prior clear — move to outdated
                                                 upToDateRows.remove(r);
                                                 if (!outdatedRows.contains(r)) outdatedRows.add(r);
+                                                rebootChanged = true;
                                             } else {
                                                 // No candidate anymore but still pending — keep as reboot badge in outdated
                                                 // (provider may still report candidate; if not, treat as pending completion)
                                                 upToDateRows.remove(r);
                                                 if (!outdatedRows.contains(r)) outdatedRows.add(r);
+                                                rebootChanged = true;
                                             }
                                         } else if (r.isRebootPending()) {
                                             // Was pending but store cleared externally or version now matches — clear badge
                                             if (!r.hasUpdate()) {
                                                 r.setRebootPending(false);
+                                                rebootChanged = true;
                                             }
                                         }
                                     }
-                                    if (!pendingIds.isEmpty()) {
+                                    // Perf: only refresh tables when rows or reboot badges actually changed.
+                                    // ObservableLists already fire change events; explicit refresh is only
+                                    // needed for badge/state cell repaint.
+                                    if ((rowsChanged || rebootChanged) && !pendingIds.isEmpty()) {
                                         outdatedTable.refresh();
                                         upToDateTable.refresh();
                                     }
@@ -887,8 +903,10 @@ public class DriversTabView extends BorderPane {
      * based on each row's current candidate. Unlike the old {@code splitRows} this does not
      * clear-and-refill, so selection and scroll positions are preserved across provider
      * callbacks during a scan.
+     *
+     * @return true when any row actually moved (callers skip redundant table.refresh() otherwise).
      */
-    private void reconcileRows(Map<String, DriverRow> rowByDevice, Set<String> excludedIds) {
+    private boolean reconcileRows(Map<String, DriverRow> rowByDevice, Set<String> excludedIds) {
         java.util.Set<DriverRow> outdatedSet = new java.util.HashSet<>(outdatedRows);
         java.util.Set<DriverRow> upToDateSet = new java.util.HashSet<>(upToDateRows);
         java.util.List<DriverRow> toAddOutdated = new java.util.ArrayList<>();
@@ -913,10 +931,14 @@ public class DriversTabView extends BorderPane {
             }
         }
 
+        boolean changed = !toAddOutdated.isEmpty() || !toRemoveOutdated.isEmpty()
+                || !toAddUpToDate.isEmpty() || !toRemoveUpToDate.isEmpty();
+        if (!changed) return false;
         outdatedRows.removeAll(toRemoveOutdated);
         outdatedRows.addAll(toAddOutdated);
         upToDateRows.removeAll(toRemoveUpToDate);
         upToDateRows.addAll(toAddUpToDate);
+        return true;
     }
 
     private void showIgnoredListDialog() {
@@ -994,10 +1016,21 @@ public class DriversTabView extends BorderPane {
             return;
         }
 
-        boolean isWuInstall = "WindowsUpdate".equals(c.source())
-                && c.packageId() != null && !c.packageId().isBlank();
-        if (!isWuInstall && (c.downloadUrl() == null || c.downloadUrl().isBlank())) {
+        // Shared classification (single + batch stay identical).
+        if (DriverPreflightService.needsManualDownload(c)) {
             showManualDownloadDialog(c);
+            return;
+        }
+
+        // Pre-flight safety: disk space, backup volume, device health. Blocks on
+        // errors, shows warnings non-modally via status + confirmation.
+        AppSettings preSettings = settingsStore.load();
+        DriverPreflightService.PreflightResult pre = DriverPreflightService.check(c, preSettings, rebootStore);
+        if (!pre.ok()) {
+            new Alert(Alert.AlertType.WARNING, pre.blockReason()).showAndWait();
+            return;
+        }
+        if (pre.hasWarnings() && !confirmPreflightWarnings(row.installed().friendlyName(), pre.warnings())) {
             return;
         }
 
@@ -1058,9 +1091,12 @@ public class DriversTabView extends BorderPane {
                 Platform.runLater(() -> {
                     if (wasCancelled) {
                         statusLabel.setText("Install cancelled for " + row.installed().friendlyName() + ". No changes assumed — scan again to verify.");
-                        recordHistory(row, c, false);
+                        recordHistory(row, c, false, "cancelled by user");
                     } else if (result.installed()) {
-                        recordHistory(row, c, true);
+                        // Rollback (backup + restore point) is kept on success for safety;
+                        // DriverInstallService only prunes it on blocked/no-op paths.
+                        String detail = result.rebootRequired() ? "reboot-required; rollback kept" : "rollback kept";
+                        recordHistory(row, c, true, detail);
                         if (result.rebootRequired()) {
                             rebootStore.addPending(row.installed().deviceId(), row.installed().friendlyName());
                             row.setRebootPending(true);
@@ -1091,7 +1127,7 @@ public class DriversTabView extends BorderPane {
                             }
                         }
                     } else {
-                        recordHistory(row, c, false);
+                        recordHistory(row, c, false, result.message());
                         showErrorWithFallback(result.message(), c.vendorPageUrl());
                     }
                     DriverActionCell live = installCells.remove(row);
@@ -1128,6 +1164,10 @@ public class DriversTabView extends BorderPane {
     }
 
     private void recordHistory(DriverRow row, DriverUpdateCandidate c, boolean success) {
+        recordHistory(row, c, success, "");
+    }
+
+    private void recordHistory(DriverRow row, DriverUpdateCandidate c, boolean success, String detail) {
         try {
             historyStore.recordUpdate(
                     row.installed().deviceId(),
@@ -1135,10 +1175,52 @@ public class DriversTabView extends BorderPane {
                     row.installed().driverVersion(),
                     c.availableVersion(),
                     c.source(),
-                    success);
+                    success,
+                    detail == null ? "" : detail);
         } catch (Exception ex) {
             AppLogger.warning("Failed to record update history: " + ex.getMessage());
         }
+    }
+
+    /**
+     * Shows pre-flight warnings and asks for confirmation. Returns true to proceed.
+     * Non-blocking for single-warning cases is intentionally modal here: installing
+     * a driver is destructive and the user must acknowledge health/space risks.
+     */
+    private boolean confirmPreflightWarnings(String deviceName, List<String> warnings) {
+        String body = "Pre-install checks for " + deviceName + ":\n\n• " + String.join("\n• ", warnings)
+                + "\n\nProceed anyway?";
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, body, ButtonType.OK, ButtonType.CANCEL);
+        confirm.setTitle("Pre-install Warnings");
+        confirm.setHeaderText("Proceed with driver update?");
+        return confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
+    }
+
+    /**
+     * Online catalog refresh with bundled fallback. Runs off the FX thread;
+     * any failure keeps the current catalog and only updates the status label.
+     */
+    private void refreshDriverCatalog() {
+        String configured = CatalogUpdateService.configuredCatalogUrl();
+        if (configured.isBlank()) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "No catalog URL configured.\n\nSet -Dwinzenith.catalog.url=https://.../driver-catalog.json "
+                    + "or WINZENITH_CATALOG_URL to enable online refresh.\n\n"
+                    + "A refreshed catalog can also be placed at:\n"
+                    + CatalogUpdateService.refreshedCatalogPath()).showAndWait();
+            return;
+        }
+        setStatus("Refreshing driver catalog…");
+        scanExecutor.submit(() -> {
+            CatalogUpdateService.RefreshResult r = CatalogUpdateService.refresh(configured);
+            Platform.runLater(() -> {
+                setStatus(r.message());
+                Alert info = new Alert(r.refreshed() ? Alert.AlertType.INFORMATION : Alert.AlertType.WARNING, r.message());
+                info.setTitle("Driver Catalog");
+                info.setHeaderText(r.refreshed() ? "Catalog refreshed" : "Catalog refresh skipped");
+                info.showAndWait();
+            });
+        });
     }
 
     private void showErrorWithFallback(String message, String vendorPageUrl) {
@@ -1234,19 +1316,31 @@ public class DriversTabView extends BorderPane {
 
     /**
      * Re-scans a single driver after update to verify the new version was actually installed.
-     * Updates the row's current version and health score via FX thread.
+     * Updates the row's current version and health score via FX thread, and records a
+     * verification outcome (VERIFIED / VERSION_MISMATCH / NEEDS_REBOOT) in history detail
+     * without altering the original install history entry.
      */
     private void verifyInstalledVersion(DriverRow row, DriverUpdateCandidate oldCandidate) {
         try {
             InstalledDriver updated = scanService.scanSingleDriver(row.installed().deviceId());
             if (updated != null) {
                 String newVersion = updated.driverVersion() != null ? updated.driverVersion() : "\u2014";
-                if (!newVersion.equals(row.currentVersionProperty().get())) {
-                    AppLogger.info("Version verified: " + row.installed().friendlyName()
-                            + " updated to " + newVersion);
+                String expected = oldCandidate != null && oldCandidate.availableVersion() != null
+                        ? oldCandidate.availableVersion() : "";
+                String outcome;
+                if (row.isRebootPending()) {
+                    outcome = "NEEDS_REBOOT (reports " + newVersion + ", pending restart)";
+                } else if (!expected.isBlank() && newVersion.equals(expected)) {
+                    outcome = "VERIFIED (" + newVersion + ")";
+                } else if (!newVersion.equals(row.currentVersionProperty().get())) {
+                    outcome = "updated to " + newVersion + " (expected " + (expected.isBlank() ? "?" : expected) + ")";
+                } else {
+                    outcome = "VERSION_MISMATCH (still " + newVersion + ", expected " + (expected.isBlank() ? "?" : expected) + ")";
                 }
+                AppLogger.info("Post-install verification for " + row.installed().friendlyName() + ": " + outcome);
                 javafx.application.Platform.runLater(() -> {
                     row.refreshFrom(updated);
+                    setStatus("Verified " + row.installed().friendlyName() + ": " + outcome + ".");
                     // Never auto-clear reboot-pending on version match: Windows
                     // often reports the new version before the reboot that
                     // actually binds it. Pending clears only on reboot /
@@ -1256,6 +1350,8 @@ public class DriversTabView extends BorderPane {
                         if (upToDateTable != null) upToDateTable.refresh();
                     }
                 });
+            } else {
+                AppLogger.warning("Post-install verification: device no longer found: " + row.installed().deviceId());
             }
         } catch (Exception e) {
             AppLogger.debug("Post-update re-scan failed: " + e.getMessage());
@@ -1314,10 +1410,20 @@ public class DriversTabView extends BorderPane {
                 super.updateItem(item, empty);
                 if (empty || item == null) {
                     setText(null);
+                    setTooltip(null);
                 } else {
                     String status = item.success() ? "✓" : "✗";
-                    setText(status + " " + item.deviceName() + " " + item.oldVersion()
-                            + " → " + item.newVersion() + " (" + item.source() + ")");
+                    String text = status + " " + item.deviceName() + " " + item.oldVersion()
+                            + " → " + item.newVersion() + " (" + item.source() + ")";
+                    if (item.detail() != null && !item.detail().isBlank()) {
+                        text += " — " + item.detail();
+                    }
+                    setText(text);
+                    if (item.timestamp() != null) {
+                        setTooltip(new Tooltip(item.timestamp().toString()));
+                    } else {
+                        setTooltip(null);
+                    }
                 }
             }
         });
@@ -1355,7 +1461,28 @@ public class DriversTabView extends BorderPane {
         addDetailRow(grid, r++, "Provider:", row.installed().provider());
         addDetailRow(grid, r++, "INF Name:", row.installed().infName());
         addDetailRow(grid, r++, "Driver Key:", row.installed().driverKey());
-        addDetailRow(grid, r++, "Status:", row.installed().status());
+        // Problem-device highlight: non-OK status (e.g. Code 28) shown in red with guidance.
+        if (row.isProblematic()) {
+            Label statusVal = new Label((row.installed().status() == null ? "Unknown" : row.installed().status())
+                    + " — device reports a problem (check Device Manager). An update may help, but hardware issues can persist.");
+            statusVal.setWrapText(true);
+            statusVal.setMaxWidth(400);
+            statusVal.setStyle("-fx-text-fill: #ff5555; -fx-font-weight: bold;");
+            grid.add(new Label("Status:"), 0, r);
+            grid.add(statusVal, 1, r);
+            r++;
+        } else {
+            addDetailRow(grid, r++, "Status:", row.installed().status());
+        }
+        if (row.isRebootPending()) {
+            Label rebootVal = new Label("Yes — restart Windows to complete the installed update.");
+            rebootVal.setStyle("-fx-text-fill: #bd93f9; -fx-font-weight: bold;");
+            rebootVal.setWrapText(true);
+            rebootVal.setMaxWidth(400);
+            grid.add(new Label("Reboot Pending:"), 0, r);
+            grid.add(rebootVal, 1, r);
+            r++;
+        }
         if (row.installed().releaseDate() != null) {
             addDetailRow(grid, r++, "Release Date:", row.installed().releaseDate().format(DateTimeFormatter.ISO_LOCAL_DATE));
         }
@@ -1366,6 +1493,15 @@ public class DriversTabView extends BorderPane {
             addDetailRow(grid, r++, "Available Version:", c.availableVersion());
             addDetailRow(grid, r++, "Source:", c.source());
             addDetailRow(grid, r++, "Severity:", c.severity() != null ? c.severity().name() : "Unknown");
+            // Match explanation: why this catalog entry was chosen (HWID specificity, confidence).
+            try {
+                DriverCatalogDatabase db = DriverCatalogDatabase.load();
+                String why = db.describeMatch(row.installed());
+                if (why != null && !why.isBlank()) {
+                    addDetailRow(grid, r++, "Why this match:", why + " · catalog: " + db.sourceLabel());
+                }
+            } catch (Exception ignored) {
+            }
 
             if (c.title() != null && !c.title().isBlank()) {
                 addDetailRow(grid, r++, "Title:", c.title());
@@ -1426,7 +1562,11 @@ public class DriversTabView extends BorderPane {
                 for (UpdateHistoryStore.UpdateEntry h : deviceHistory) {
                     String icon = h.success() ? "\u2713" : "\u2717";
                     sb.append(icon).append(" ").append(h.oldVersion()).append(" \u2192 ").append(h.newVersion())
-                            .append(" (").append(h.source()).append(")\n");
+                            .append(" (").append(h.source()).append(")");
+                    if (h.detail() != null && !h.detail().isBlank()) {
+                        sb.append(" — ").append(h.detail());
+                    }
+                    sb.append("\n");
                 }
                 Label histLabel = new Label(sb.toString().trim());
                 histLabel.setStyle("-fx-font-family: monospace; -fx-font-size: 11;");
@@ -1635,12 +1775,30 @@ public class DriversTabView extends BorderPane {
                     }
                     DriverUpdateCandidate c = row.candidate();
 
-                    boolean isWuInstall = "WindowsUpdate".equals(c.source())
-                            && c.packageId() != null && !c.packageId().isBlank();
-                    if (!isWuInstall && (c.downloadUrl() == null || c.downloadUrl().isBlank())) {
+                    if (DriverPreflightService.needsManualDownload(c)) {
                         skipped++;
                         failureDetails.add(row.installed().friendlyName() + ": manual download required (" + c.source() + ")");
                         continue;
+                    }
+
+                    // Batch pre-flight: block on errors (disk/admin), log warnings without
+                    // modal dialogs (would spam for N drivers). Warnings are appended to history detail.
+                    String preflightWarnings = "";
+                    try {
+                        DriverPreflightService.PreflightResult pre =
+                                DriverPreflightService.check(c, settings, rebootStore);
+                        if (!pre.ok()) {
+                            skipped++;
+                            failureDetails.add(row.installed().friendlyName() + ": pre-flight blocked — " + pre.blockReason());
+                            recordHistory(row, c, false, "pre-flight blocked: " + pre.blockReason());
+                            continue;
+                        }
+                        if (pre.hasWarnings()) {
+                            preflightWarnings = String.join("; ", pre.warnings());
+                            AppLogger.warning("Pre-flight warnings for " + row.installed().friendlyName() + ": " + preflightWarnings);
+                        }
+                    } catch (Exception preEx) {
+                        AppLogger.warning("Pre-flight check failed for " + row.installed().friendlyName() + ": " + preEx.getMessage());
                     }
 
                     final int idx = i;
@@ -1717,11 +1875,14 @@ public class DriversTabView extends BorderPane {
                                     cell.setIdle();
                                 }
                             });
-                            recordHistory(row, c, true);
+                            recordHistory(row, c, true,
+                                    (needsReboot ? "reboot-required; rollback kept" : "rollback kept")
+                                    + (preflightWarnings.isBlank() ? "" : "; warnings: " + preflightWarnings));
                         } else {
                             failed++;
                             failureDetails.add(row.installed().friendlyName() + ": " + result.message());
-                            recordHistory(row, c, false);
+                            recordHistory(row, c, false,
+                                    result.message() + (preflightWarnings.isBlank() ? "" : "; warnings: " + preflightWarnings));
                             Platform.runLater(() -> {
                                 DriverActionCell cell = installCells.remove(row);
                                 if (cell != null) {

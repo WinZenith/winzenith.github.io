@@ -1,6 +1,6 @@
 package com.sbtools.drivers;
 
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -21,6 +21,7 @@ public class UpdateHistoryStore {
     private static final ObjectMapper mapper = new ObjectMapper()
             .enable(SerializationFeature.INDENT_OUTPUT);
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public record UpdateEntry(
             String id,
             String deviceId,
@@ -29,8 +30,14 @@ public class UpdateHistoryStore {
             String newVersion,
             String source,
             Instant timestamp,
-            boolean success
+            boolean success,
+            String detail
     ) {
+        /** Backwards-compatible accessor: old callers expect 8 fields. */
+        public UpdateEntry(String id, String deviceId, String deviceName, String oldVersion,
+                           String newVersion, String source, Instant timestamp, boolean success) {
+            this(id, deviceId, deviceName, oldVersion, newVersion, source, timestamp, success, "");
+        }
     }
 
     public List<UpdateEntry> listAll() throws IOException {
@@ -41,6 +48,11 @@ public class UpdateHistoryStore {
 
     public void recordUpdate(String deviceId, String deviceName, String oldVersion,
                              String newVersion, String source, boolean success) throws IOException {
+        recordUpdate(deviceId, deviceName, oldVersion, newVersion, source, success, "");
+    }
+
+    public void recordUpdate(String deviceId, String deviceName, String oldVersion,
+                             String newVersion, String source, boolean success, String detail) throws IOException {
         List<UpdateEntry> history = loadHistory();
         UpdateEntry entry = new UpdateEntry(
                 java.util.UUID.randomUUID().toString(),
@@ -50,11 +62,60 @@ public class UpdateHistoryStore {
                 newVersion,
                 source,
                 Instant.now(),
-                success
+                success,
+                detail == null ? "" : detail
         );
         history.add(entry);
         saveHistory(history);
         AppLogger.info("Update history recorded: " + deviceName + " " + oldVersion + " -> " + newVersion);
+    }
+
+    /**
+     * Tolerant loader: parses each entry field-by-field so history files
+     * written by older versions (8 fields, no {@code detail}) still load.
+     * Corrupt entries are skipped, never aborting the whole history.
+     */
+    private static UpdateEntry nodeToEntry(JsonNode n) {
+        if (n == null || !n.isObject()) return null;
+        try {
+            String id = text(n, "id");
+            if (id.isBlank()) id = java.util.UUID.randomUUID().toString();
+            String deviceId = text(n, "deviceId");
+            String deviceName = text(n, "deviceName");
+            String oldVersion = text(n, "oldVersion");
+            String newVersion = text(n, "newVersion");
+            String source = text(n, "source");
+            Instant ts;
+            try {
+                String raw = text(n, "timestamp");
+                ts = raw.isBlank() ? Instant.now() : Instant.parse(raw);
+            } catch (Exception ex) {
+                ts = Instant.now();
+            }
+            boolean success = n.has("success") && !n.get("success").isNull()
+                    ? n.get("success").asBoolean(false) : false;
+            String detail = n.has("detail") && !n.get("detail").isNull()
+                    ? n.get("detail").asText("") : "";
+            return new UpdateEntry(id, deviceId, deviceName, oldVersion, newVersion, source, ts, success, detail);
+        } catch (Exception ex) {
+            AppLogger.warning("Skipping corrupt history entry: " + ex.getMessage());
+            return null;
+        }
+    }
+
+    private static String text(JsonNode n, String key) {
+        JsonNode v = n.get(key);
+        return v != null && !v.isNull() ? v.asText("") : "";
+    }
+
+    private static List<UpdateEntry> parseArray(JsonNode root) {
+        List<UpdateEntry> out = new ArrayList<>();
+        if (root == null || !root.isArray()) return out;
+        for (JsonNode n : root) {
+            UpdateEntry e = nodeToEntry(n);
+            if (e != null) out.add(e);
+        }
+        return out;
     }
 
     private List<UpdateEntry> loadHistory() {
@@ -65,7 +126,7 @@ public class UpdateHistoryStore {
             try {
                 JsonNode root = mapper.readTree(p.toFile());
                 if (root.isArray()) {
-                    primary = mapper.convertValue(root, new TypeReference<List<UpdateEntry>>() {});
+                    primary = parseArray(root);
                     loadedPrimary = true;
                 }
             } catch (IOException e) {
@@ -79,7 +140,7 @@ public class UpdateHistoryStore {
                 try {
                     JsonNode root2 = mapper.readTree(legacy.toFile());
                     if (root2.isArray()) {
-                        List<UpdateEntry> legacyList = mapper.convertValue(root2, new TypeReference<List<UpdateEntry>>() {});
+                        List<UpdateEntry> legacyList = parseArray(root2);
                         if (!legacyList.isEmpty()) {
                             if (!loadedPrimary) {
                                 return new ArrayList<>(legacyList);

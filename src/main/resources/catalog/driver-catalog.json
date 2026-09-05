@@ -2265,5 +2265,140 @@
         "platform":  "win10-win11",
         "arch":  "x64",
         "lastVerified":  "2026-02-15T00:00:00Z"
+    },
+    {
+        "id":  "intel-wifi-ax211",
+        "provider":  "Intel",
+        "component":  "wifi",
+        "hardwareIds":  [
+                            "PCI\\VEN_8086&DEV_51F0"
+                        ],
+        "matchMethod":  "HARDWARE_ID",
+        "matchValue":  "PCI\\VEN_8086&DEV_51F0",
+        "latestVersion":  "23.70.0.6",
+        "vendorPageUrl":  "https://www.intel.com/content/www/us/en/download/19351/windows-10-and-windows-11-wi-fi-drivers-for-intel-wireless-adapters.html",
+        "confidence":  0.95,
+        "signed":  true,
+        "tags":  [
+                     "wifi",
+                     "wireless",
+                     "ax211",
+                     "wifi6e"
+                 ],
+        "platform":  "win10-win11",
+        "arch":  "x64",
+        "lastVerified":  "2026-09-01T00:00:00Z"
+    },
+    {
+        "id":  "intel-wifi-be200",
+        "provider":  "Intel",
+        "component":  "wifi",
+        "hardwareIds":  [
+                            "PCI\\VEN_8086&DEV_272B"
+                        ],
+        "matchMethod":  "HARDWARE_ID",
+        "matchValue":  "PCI\\VEN_8086&DEV_272B",
+        "latestVersion":  "23.70.0.6",
+        "vendorPageUrl":  "https://www.intel.com/content/www/us/en/download/19351/windows-10-and-windows-11-wi-fi-drivers-for-intel-wireless-adapters.html",
+        "confidence":  0.95,
+        "signed":  true,
+        "tags":  [
+                     "wifi",
+                     "wireless",
+                     "be200",
+                     "wifi7"
+                 ],
+        "platform":  "win10-win11",
+        "arch":  "x64",
+        "lastVerified":  "2026-09-01T00:00:00Z"
+    },
+    {
+        "id":  "nvidia-rtx4060",
+        "provider":  "Nvidia",
+        "component":  "gpu",
+        "hardwareIds":  [
+                            "PCI\\VEN_10DE&DEV_2882"
+                        ],
+        "matchMethod":  "HARDWARE_ID",
+        "matchValue":  "PCI\\VEN_10DE&DEV_2882",
+        "latestVersion":  "581.57",
+        "vendorPageUrl":  "https://www.nvidia.com/Download/index.aspx",
+        "confidence":  0.9,
+        "signed":  true,
+        "tags":  [
+                     "gpu",
+                     "geforce",
+                     "rtx4060"
+                 ],
+        "platform":  "win10-win11",
+        "arch":  "x64",
+        "lastVerified":  "2026-09-01T00:00:00Z"
+    },
+    {
+        "id":  "amd-rx7600",
+        "provider":  "AMD",
+        "component":  "gpu",
+        "hardwareIds":  [
+                            "PCI\\VEN_1002&DEV_7480"
+                        ],
+        "matchMethod":  "HARDWARE_ID",
+        "matchValue":  "PCI\\VEN_1002&DEV_7480",
+        "latestVersion":  "24.8.1",
+        "vendorPageUrl":  "https://www.amd.com/en/support",
+        "confidence":  0.9,
+        "signed":  true,
+        "tags":  [
+                     "gpu",
+                     "radeon",
+                     "rx7600"
+                 ],
+        "platform":  "win10-win11",
+        "arch":  "x64",
+        "lastVerified":  "2026-09-01T00:00:00Z"
+    },
+    {
+        "id":  "realtek-8852ce",
+        "provider":  "Realtek",
+        "component":  "wifi",
+        "hardwareIds":  [
+                            "PCI\\VEN_10EC&DEV_8852"
+                        ],
+        "matchMethod":  "HARDWARE_ID",
+        "matchValue":  "PCI\\VEN_10EC&DEV_8852",
+        "latestVersion":  "6001.15.149.0",
+        "vendorPageUrl":  "https://www.realtek.com/en/downloads",
+        "confidence":  0.85,
+        "signed":  true,
+        "tags":  [
+                     "wifi",
+                     "wireless",
+                     "realtek",
+                     "wifi6"
+                 ],
+        "platform":  "win10-win11",
+        "arch":  "x64",
+        "lastVerified":  "2026-09-01T00:00:00Z"
+    },
+    {
+        "id":  "intel-bt-ax211",
+        "provider":  "Intel",
+        "component":  "bluetooth",
+        "hardwareIds":  [
+                            "USB\\VID_8087&PID_0033"
+                        ],
+        "matchMethod":  "HARDWARE_ID",
+        "matchValue":  "USB\\VID_8087&PID_0033",
+        "latestVersion":  "23.70.0.3",
+        "vendorPageUrl":  "https://www.intel.com/content/www/us/en/download/18649/intel-wireless-bluetooth-for-windows-10-and-windows-11.html",
+        "confidence":  0.9,
+        "signed":  true,
+        "tags":  [
+                     "bluetooth",
+                     "intel",
+                     "ax211"
+                 ],
+        "platform":  "win10-win11",
+        "arch":  "x64",
+        "lastVerified":  "2026-09-01T00:00:00Z"
     }
 ]

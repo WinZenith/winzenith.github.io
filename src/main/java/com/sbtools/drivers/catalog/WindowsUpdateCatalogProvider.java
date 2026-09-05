@@ -35,23 +35,46 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
             AppLogger.debug("WindowsUpdate: Not running on Windows, skipping");
             return List.of();
         }
-        try {
-            Path script = PowerShellScripts.resolve("wu-search-drivers.ps1");
-            ProcessResult result = processRunner.run(
-                    ProcessRunner.powershellScript(script.toString(), String.valueOf(WU_SEARCH_TIMEOUT_SECONDS)));
-            if (!result.success()) {
-                AppLogger.debug("WindowsUpdate: PowerShell script failed: " + result.combinedOutput());
+        // One retry on script-level failure (timeout/non-zero exit). Empty but
+        // successful output means "no offers" and is NOT retried.
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                Path script = PowerShellScripts.resolve("wu-search-drivers.ps1");
+                ProcessResult result = processRunner.run(
+                        ProcessRunner.powershellScript(script.toString(), String.valueOf(WU_SEARCH_TIMEOUT_SECONDS)));
+                if (!result.success()) {
+                    AppLogger.debug("WindowsUpdate: PowerShell script failed (attempt " + attempt + "/2): " + result.combinedOutput());
+                    if (attempt == 1) {
+                        try {
+                            Thread.sleep(2000);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            return List.of();
+                        }
+                        continue;
+                    }
+                    return List.of();
+                }
+                AppLogger.debug("WindowsUpdate: Found " + (result.stdout() != null ? result.stdout().length() : 0) + " bytes of output");
+                return matchUpdates(installed, result.stdout());
+            } catch (IOException | InterruptedException e) {
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                AppLogger.debug("WindowsUpdate: Exception (attempt " + attempt + "/2): " + e.getMessage());
+                if (attempt == 1 && !(e instanceof InterruptedException)) {
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return List.of();
+                    }
+                    continue;
+                }
                 return List.of();
             }
-            AppLogger.debug("WindowsUpdate: Found " + (result.stdout() != null ? result.stdout().length() : 0) + " bytes of output");
-            return matchUpdates(installed, result.stdout());
-        } catch (IOException | InterruptedException e) {
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
-            AppLogger.debug("WindowsUpdate: Exception: " + e.getMessage());
-            return List.of();
         }
+        return List.of();
     }
 
     static List<DriverUpdateCandidate> matchUpdates(List<InstalledDriver> installed, String json)

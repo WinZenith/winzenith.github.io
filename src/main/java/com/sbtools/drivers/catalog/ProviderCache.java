@@ -30,6 +30,7 @@ public final class ProviderCache {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final long DEFAULT_TTL_SECONDS = 6 * 60 * 60L; // 6 hours
     private static final long WINDOWS_UPDATE_TTL_SECONDS = 30 * 60L; // 30 minutes — WU state changes frequently
+    private static final long EMPTY_RESULT_TTL_SECONDS = 15 * 60L; // 15 min negative cache for empty/transient results
     private static final ConcurrentHashMap<String, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
 
     private final Path cacheDir;
@@ -97,6 +98,18 @@ public final class ProviderCache {
                 return Optional.empty();
             }
             long age = Instant.now().getEpochSecond() - cached.savedAtEpochSecond;
+            boolean isEmpty = cached.candidates == null || cached.candidates.isEmpty();
+            if (isEmpty) {
+                // Negative cache: transient failures (e.g. scrape 403, WU timeout)
+                // are cached briefly to avoid hammering, but expire quickly
+                // so the next scan retries the network.
+                if (age > EMPTY_RESULT_TTL_SECONDS) {
+                    try { Files.deleteIfExists(file); } catch (Exception ignored) {}
+                    return Optional.empty();
+                }
+                AppLogger.debug("ProviderCache: negative-cache hit for " + providerId + " (age " + age + "s)");
+                return Optional.of(List.of());
+            }
             if (age > ttlForProvider(providerId)) {
                 return Optional.empty();
             }
@@ -113,20 +126,19 @@ public final class ProviderCache {
         ReentrantLock lock = lockFor(providerId);
         lock.lock();
         try {
-            // Do not cache empty results – they are typically transient failures (e.g. AMD scrape 403)
-            // and would block re-scan for up to 6h.
-            if (candidates == null || candidates.isEmpty()) {
-                AppLogger.debug("ProviderCache: Skipping cache write for " + providerId + " (empty result)");
-                // Also clear any stale file so next scan retries network
-                try { Files.deleteIfExists(pathFor(providerId)); } catch (Exception ignored) {}
-                return;
+            // Cache empty results briefly (negative cache) instead of deleting:
+            // avoids hammering a failing provider on every rescan while still
+            // retrying after EMPTY_RESULT_TTL_SECONDS. See read().
+            List<DriverUpdateCandidate> toStore = candidates == null ? List.of() : candidates;
+            if (toStore.isEmpty()) {
+                AppLogger.debug("ProviderCache: Caching empty result for " + providerId + " (negative cache, 15m)");
             }
             Files.createDirectories(cacheDir);
             CacheFile cached = new CacheFile();
             cached.providerId = providerId;
             cached.fingerprint = fingerprint(installed);
             cached.savedAtEpochSecond = Instant.now().getEpochSecond();
-            cached.candidates = candidates;
+            cached.candidates = toStore;
             String json = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(cached);
             Path target = pathFor(providerId);
             Path tmp = target.resolveSibling("." + target.getFileName().toString() + ".tmp");

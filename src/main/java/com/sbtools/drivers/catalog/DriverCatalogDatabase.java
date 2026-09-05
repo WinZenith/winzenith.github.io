@@ -49,32 +49,117 @@ public final class DriverCatalogDatabase {
     private final Map<String, List<CatalogEntry>> byProvider;
     private final Map<String, List<CatalogEntry>> byHardwareId;
     private final List<CatalogEntry> nameRegexEntries;
+    private final String sourceLabel;
 
     public DriverCatalogDatabase(List<CatalogEntry> entries) {
+        this(entries, "bundled");
+    }
+
+    public DriverCatalogDatabase(List<CatalogEntry> entries, String sourceLabel) {
         this.entries = List.copyOf(entries);
         this.byProvider = indexByProvider(this.entries);
         this.byHardwareId = indexByHardwareId(this.entries);
         this.nameRegexEntries = this.entries.stream()
                 .filter(e -> e.matchMethod() == CatalogEntry.MatchMethod.NAME_REGEX)
                 .toList();
+        this.sourceLabel = sourceLabel == null ? "bundled" : sourceLabel;
+    }
+
+    public String sourceLabel() {
+        return sourceLabel;
+    }
+
+    public int entryCount() {
+        return entries.size();
     }
 
     /**
-     * Loads the catalog from the bundled resource file.
-     * User-supplemental catalog is intentionally disabled for security – untrusted
-     * URLs/hashes must not be injectable via the app data directory.
-     * See decision for portable build: no user override.
+     * Loads the catalog: bundled resource as the safe fallback, plus an
+     * optionally refreshed copy at {@code <portableBase>/catalog/driver-catalog.json}
+     * (written by {@link CatalogUpdateService}). Refreshed entries are validated
+     * (https-only URLs, sane versions) and win on id conflicts; if the refreshed
+     * file is missing/corrupt the bundled catalog is used unchanged.
+     * User-supplied {@code user-catalog.json} injection remains disabled.
      */
     public static DriverCatalogDatabase load() {
-        List<CatalogEntry> all = new ArrayList<>();
-        all.addAll(loadBundled());
+        List<CatalogEntry> bundled = loadBundled();
         // Intentionally NOT loading user-supplemental catalog (security, requirement #4)
         Path userCatalog = AppPaths.localAppData().resolve("user-catalog.json");
         if (Files.exists(userCatalog)) {
             AppLogger.info("DriverCatalogDatabase: Ignoring user-catalog.json (user override disabled)");
         }
-        AppLogger.info("DriverCatalogDatabase: Loaded " + all.size() + " catalog entries");
-        return new DriverCatalogDatabase(all);
+        List<CatalogEntry> refreshed = loadRefreshed();
+        if (refreshed.isEmpty()) {
+            AppLogger.info("DriverCatalogDatabase: Loaded " + bundled.size() + " catalog entries (bundled)");
+            return new DriverCatalogDatabase(bundled, "bundled");
+        }
+        // Merge: refreshed wins on id conflict; validate each refreshed entry.
+        Map<String, CatalogEntry> merged = new HashMap<>();
+        for (CatalogEntry e : bundled) {
+            if (e != null && e.id() != null) merged.put(e.id(), e);
+        }
+        int accepted = 0;
+        for (CatalogEntry e : refreshed) {
+            if (isValidRefreshedEntry(e)) {
+                merged.put(e.id(), e);
+                accepted++;
+            } else {
+                AppLogger.warning("DriverCatalogDatabase: Rejecting invalid refreshed entry id="
+                        + (e == null ? "null" : e.id()));
+            }
+        }
+        List<CatalogEntry> all = new ArrayList<>(merged.values());
+        AppLogger.info("DriverCatalogDatabase: Loaded " + all.size() + " catalog entries (bundled="
+                + bundled.size() + " + refreshedAccepted=" + accepted + ")");
+        return new DriverCatalogDatabase(all, "bundled+refreshed(" + accepted + ")");
+    }
+
+    private static List<CatalogEntry> loadRefreshed() {
+        for (Path p : refreshedCandidates()) {
+            try {
+                if (p == null || !Files.exists(p) || Files.size(p) == 0) continue;
+                byte[] data = Files.readAllBytes(p);
+                List<CatalogEntry> list = MAPPER.readValue(data, LIST_TYPE);
+                if (list != null && !list.isEmpty()) {
+                    AppLogger.info("DriverCatalogDatabase: Found refreshed catalog at " + p + " (" + list.size() + " entries)");
+                    return list;
+                }
+            } catch (Exception e) {
+                AppLogger.warning("DriverCatalogDatabase: Failed to load refreshed catalog at " + p + ": " + e.getMessage());
+            }
+        }
+        return List.of();
+    }
+
+    private static List<Path> refreshedCandidates() {
+        List<Path> out = new ArrayList<>();
+        try {
+            Path portable = AppPaths.portableBaseDir();
+            if (portable != null) out.add(portable.resolve("catalog").resolve("driver-catalog.json"));
+        } catch (Exception ignored) {
+        }
+        try {
+            out.add(AppPaths.localAppData().resolve("catalog").resolve("driver-catalog.json"));
+        } catch (Exception ignored) {
+        }
+        return out;
+    }
+
+    static boolean isValidRefreshedEntry(CatalogEntry e) {
+        if (e == null || e.id() == null || e.id().isBlank()) return false;
+        if (e.provider() == null || e.provider().isBlank()) return false;
+        String ver = e.latestDriverVersion() != null && !e.latestDriverVersion().isBlank()
+                ? e.latestDriverVersion() : e.latestVersion();
+        if (ver == null || ver.isBlank() || ver.length() > 64) return false;
+        if (e.confidence() < 0 || e.confidence() > 1) return false;
+        // URLs must stay https (sanitizeSourceUrl enforces; reject non-https here).
+        for (String url : new String[]{e.sourceUrl(), e.vendorPageUrl()}) {
+            if (url != null && !url.isBlank()) {
+                String s = sanitizeSourceUrl(url);
+                if (s.isBlank()) return false;
+            }
+        }
+        return true;
     }
 
     private static List<CatalogEntry> loadBundled() {
@@ -151,8 +236,71 @@ public final class DriverCatalogDatabase {
         }
 
         return filtered.stream()
-                .sorted((a, b) -> Double.compare(b.confidence(), a.confidence()))
+                .sorted((a, b) -> {
+                    // Prefer more specific HWID matches (SUBSYS-full > VEN&DEV prefix),
+                    // then higher confidence. Ranking only — gating above is unchanged.
+                    int spec = Integer.compare(hwidSpecificity(driver, b), hwidSpecificity(driver, a));
+                    if (spec != 0) return spec;
+                    return Double.compare(b.confidence(), a.confidence());
+                })
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Human-readable explanation of why a driver matched its best catalog entry.
+     * Used in the Details dialog ("Why this match"). Returns "" when no match.
+     */
+    public String describeMatch(InstalledDriver driver) {
+        if (driver == null) return "";
+        List<CatalogEntry> matches = findMatchingEntries(driver);
+        if (matches.isEmpty()) return "";
+        CatalogEntry best = matches.get(0);
+        StringBuilder sb = new StringBuilder();
+        sb.append(best.id()).append(" · confidence ").append(String.format("%.0f", best.confidence() * 100)).append("%");
+        String method = best.matchMethod() != null ? best.matchMethod().name() : "HARDWARE_ID";
+        sb.append(" · ").append(method);
+        if (best.hardwareIds() != null && !best.hardwareIds().isEmpty()
+                && driver.hardwareIds() != null && !driver.hardwareIds().isBlank()) {
+            String hwUpper = driver.hardwareIds().toUpperCase();
+            boolean subsys = hwUpper.contains("SUBSYS_") && best.hardwareIds().stream()
+                    .anyMatch(h -> h != null && h.toUpperCase().contains("SUBSYS_"));
+            sb.append(subsys ? " (SUBSYS-specific)" : " (VEN/DEV)");
+        }
+        if (best.matchValue() != null && !best.matchValue().isBlank()
+                && best.matchMethod() == CatalogEntry.MatchMethod.NAME_REGEX) {
+            sb.append(" /").append(best.matchValue()).append("/");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Specificity score for HWID matching: number of '&amp;'-separated segments
+     * of the longest catalog HWID that prefix-matches the device. A full
+     * VEN+DEV+SUBSYS match outranks a VEN+DEV prefix; non-HWID entries score 0.
+     */
+    static int hwidSpecificity(InstalledDriver driver, CatalogEntry entry) {
+        try {
+            if (driver == null || entry == null || entry.hardwareIds() == null) return 0;
+            String hw = driver.hardwareIds();
+            if (hw == null || hw.isBlank()) return 0;
+            String[] deviceParts = hw.split(";");
+            int best = 0;
+            for (String devPart : deviceParts) {
+                String normDev = normalizeHardwareId(devPart);
+                if (normDev.isEmpty()) continue;
+                for (String catalogHw : entry.hardwareIds()) {
+                    String normCat = normalizeHardwareId(catalogHw);
+                    if (normCat.isEmpty()) continue;
+                    if (matchesHardwareId(normDev, normCat)) {
+                        int segments = normCat.isEmpty() ? 0 : normCat.split("&").length;
+                        if (segments > best) best = segments;
+                    }
+                }
+            }
+            return best;
+        } catch (Exception ignored) {
+            return 0;
+        }
     }
 
     /**

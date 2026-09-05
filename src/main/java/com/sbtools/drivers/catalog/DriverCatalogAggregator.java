@@ -19,7 +19,8 @@ import java.util.function.Consumer;
 
 public class DriverCatalogAggregator {
 
-    private static final long PROVIDER_TIMEOUT_SECONDS = 180;
+    /** Per-provider budget. Lowered 180s→120s: WU/OEM rarely recover after 2 min; cache covers retries. */
+    private static final long PROVIDER_TIMEOUT_SECONDS = 120;
 
     private final List<DriverCatalogProvider> providers;
     private final ProviderCache cache;
@@ -283,7 +284,8 @@ public class DriverCatalogAggregator {
         if (cache != null) {
             Optional<List<DriverUpdateCandidate>> cached = cache.read(provider.id(), installed);
             if (cached.isPresent()) {
-                AppLogger.debug("CatalogAggregator: cache hit for " + provider.id());
+                AppLogger.debug("CatalogAggregator: cache hit for " + provider.id()
+                        + " (" + cached.get().size() + " candidates)");
                 return cached.get();
             }
         }
@@ -291,11 +293,16 @@ public class DriverCatalogAggregator {
             return List.of();
         }
         List<DriverUpdateCandidate> fresh;
+        long startNanos = System.nanoTime();
         try {
             fresh = provider.findUpdates(installed);
         } catch (Exception e) {
             AppLogger.warning("Provider " + provider.id() + " failed: " + e.getMessage());
             return List.of();
+        } finally {
+            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+            // Per-provider timing pinpoints slow sources (e.g. WU PowerShell) in app.log.
+            AppLogger.debug("CatalogAggregator: provider " + provider.id() + " finished in " + elapsedMs + "ms");
         }
         if (fresh == null) {
             fresh = List.of();
