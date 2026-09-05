@@ -1,6 +1,7 @@
 package com.sbtools.software;
 
 import com.sbtools.util.AppLogger;
+import com.sbtools.util.CancelBridge;
 import com.sbtools.util.JsonMapper;
 import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessResult;
@@ -142,20 +143,9 @@ public class SoftwareUpdateService {
 
     public List<SoftwareUpdateEntry> scanForUpdates(java.util.function.BooleanSupplier cancelled) throws IOException, InterruptedException {
         if (cancelled == null) return scanForUpdates((AtomicBoolean) null);
-        // Bridge supplier -> AtomicBoolean with polling monitor
-        AtomicBoolean ab = new AtomicBoolean(cancelled.getAsBoolean());
-        Thread monitor = new Thread(() -> {
-            while (!ab.get() && !Thread.currentThread().isInterrupted()) {
-                try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-                try { if (cancelled.getAsBoolean()) ab.set(true); } catch (Exception ignored) {}
-            }
-        }, "scan-cancel-monitor");
-        monitor.setDaemon(true);
-        monitor.start();
-        try {
-            return scanForUpdates(ab);
-        } finally {
-            monitor.interrupt();
+        // Bridge supplier -> AtomicBoolean (shared helper; identical 100ms daemon-monitor semantics)
+        try (CancelBridge bridge = CancelBridge.bridge(cancelled, "scan-cancel-monitor")) {
+            return scanForUpdates(bridge.flag());
         }
     }
 
@@ -746,19 +736,8 @@ public class SoftwareUpdateService {
 
     public List<SoftwareUpdateEntry> scanForWindowsUpdates(java.util.function.BooleanSupplier cancelled) {
         if (cancelled == null) return scanForWindowsUpdates((AtomicBoolean) null);
-        AtomicBoolean ab = new AtomicBoolean(cancelled.getAsBoolean());
-        Thread monitor = new Thread(() -> {
-            while (!ab.get() && !Thread.currentThread().isInterrupted()) {
-                try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-                try { if (cancelled.getAsBoolean()) ab.set(true); } catch (Exception ignored) {}
-            }
-        }, "wu-cancel-monitor");
-        monitor.setDaemon(true);
-        monitor.start();
-        try {
-            return scanForWindowsUpdates(ab);
-        } finally {
-            monitor.interrupt();
+        try (CancelBridge bridge = CancelBridge.bridge(cancelled, "wu-cancel-monitor")) {
+            return scanForWindowsUpdates(bridge.flag());
         }
     }
 
@@ -974,20 +953,9 @@ public class SoftwareUpdateService {
                                                         java.util.function.IntConsumer onWuDone,
                                                         long overallTimeoutSeconds) {
         if (cancelled == null) return scanAllConcurrent((AtomicBoolean) null, onWingetDone, onWuDone, overallTimeoutSeconds);
-        // Bridge supplier -> AtomicBoolean
-        AtomicBoolean ab = new AtomicBoolean(cancelled.getAsBoolean());
-        Thread monitor = new Thread(() -> {
-            while (!ab.get() && !Thread.currentThread().isInterrupted()) {
-                try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-                try { if (cancelled.getAsBoolean()) ab.set(true); } catch (Exception ignored) {}
-            }
-        }, "scanAll-cancel-monitor");
-        monitor.setDaemon(true);
-        monitor.start();
-        try {
-            return scanAllConcurrent(ab, onWingetDone, onWuDone, overallTimeoutSeconds);
-        } finally {
-            monitor.interrupt();
+        // Bridge supplier -> AtomicBoolean (shared helper; identical 100ms daemon-monitor semantics)
+        try (CancelBridge bridge = CancelBridge.bridge(cancelled, "scanAll-cancel-monitor")) {
+            return scanAllConcurrent(bridge.flag(), onWingetDone, onWuDone, overallTimeoutSeconds);
         }
     }
 
@@ -1135,6 +1103,20 @@ public class SoftwareUpdateService {
         } finally {
             if (cancelMonitor != null) cancelMonitor.interrupt();
         }
+
+        // Warm the shared in-memory cache only on clean, complete, non-cancelled scans.
+        // Partial (cancelled/timed-out/error) results must never poison it — the ViewModel
+        // stale-fallback explicitly labels cached data, so only full successes qualify here.
+        try {
+            boolean userCancelled = (cancelled != null && cancelled.get()) || internalCancelled.get();
+            boolean wingetOk = wingetFuture.isDone() && !wingetFuture.isCancelled() && !wingetFuture.isCompletedExceptionally();
+            boolean wuOk = wuFuture.isDone() && !wuFuture.isCancelled() && !wuFuture.isCompletedExceptionally();
+            boolean hasErrors = (lastWingetError != null && !lastWingetError.isBlank())
+                    || (lastWindowsUpdateError != null && !lastWindowsUpdateError.isBlank());
+            if (!userCancelled && wingetOk && wuOk && !hasErrors && !allUpdates.isEmpty()) {
+                SoftwareUpdateScanCache.put(allUpdates, lastWingetError, lastWindowsUpdateError);
+            }
+        } catch (Exception ignored) {}
 
         return allUpdates;
     }

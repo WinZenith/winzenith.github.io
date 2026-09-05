@@ -8,10 +8,14 @@ import com.sbtools.util.VersionCompare;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.ListChangeListener;
+import javafx.collections.transformation.FilteredList;
+import javafx.collections.transformation.SortedList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.control.cell.CheckBoxTableCell;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -52,6 +56,15 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private javafx.beans.value.ChangeListener<Boolean> batchProgressListener;
     private javafx.beans.value.ChangeListener<Boolean> retryFailedListener;
 
+    // In-memory (session-only) filters — deliberately not persisted to AppSettings
+    private final TextField searchField = new TextField();
+    private final ComboBox<String> sourceFilter = new ComboBox<>();
+    private final CheckBox failedOnlyCheck = new CheckBox("Failed only");
+    private final Label filterCountLabel = new Label();
+    private FilteredList<SoftwareUpdateEntry> filteredRows;
+    private SortedList<SoftwareUpdateEntry> sortedRows;
+    private javafx.collections.ListChangeListener<SoftwareUpdateEntry> filterCountListener;
+
     public SoftwareUpdatesTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
         this.viewModel = new SoftwareUpdateViewModel(busy, adminCheck::getAsBoolean);
@@ -74,10 +87,35 @@ public class SoftwareUpdatesTabView extends BorderPane {
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
 
-        TableView<SoftwareUpdateEntry> table = buildTable();
+        // Session-only filter bar (search + source + failed-only). Not persisted.
+        searchField.setPromptText("Filter by name or ID...");
+        searchField.setPrefWidth(220);
+        sourceFilter.getItems().setAll("All sources", "winget", "WindowsUpdate");
+        sourceFilter.setValue("All sources");
+        sourceFilter.setPrefWidth(130);
+        filterCountLabel.setStyle("-fx-opacity: 0.75;");
+        HBox filterBar = new HBox(10, new Label("Search:"), searchField,
+                new Label("Source:"), sourceFilter, failedOnlyCheck, filterCountLabel);
+        filterBar.setAlignment(Pos.CENTER_LEFT);
+        filterBar.setPadding(new Insets(0, 16, 8, 16));
+        VBox topBox = new VBox(top, filterBar);
+
+        filteredRows = new FilteredList<>(viewModel.getRows(), p -> true);
+        sortedRows = new SortedList<>(filteredRows);
+        searchField.textProperty().addListener((obs, o, n) -> updateFilterPredicate());
+        sourceFilter.valueProperty().addListener((obs, o, n) -> updateFilterPredicate());
+        failedOnlyCheck.selectedProperty().addListener((obs, o, n) -> updateFilterPredicate());
+
+        TableView<SoftwareUpdateEntry> table = buildTable(sortedRows);
+        sortedRows.comparatorProperty().bind(table.comparatorProperty());
         VBox.setVgrow(table, Priority.ALWAYS);
-        setTop(top);
+        setTop(topBox);
         setCenter(table);
+
+        filterCountListener = ch -> updateFilterCount();
+        viewModel.getRows().addListener(filterCountListener);
+        filteredRows.addListener((ListChangeListener<SoftwareUpdateEntry>) ch -> updateFilterCount());
+        updateFilterPredicate();
 
         // Track per-entry selected listeners so we can remove on dispose / removal (fix leak B7)
         java.util.Map<SoftwareUpdateEntry, javafx.beans.value.ChangeListener<Boolean>> selectedListeners = new java.util.HashMap<>();
@@ -166,10 +204,17 @@ public class SoftwareUpdatesTabView extends BorderPane {
         updateSelectedButton.setDisable(true);
 
         selectAllButton.setDisable(true);
-        selectAllButton.setOnAction(e -> viewModel.getRows().forEach(r -> r.setSelected(true)));
+        // Select/Deselect operate on the currently visible (filtered) rows — intuitive with search active.
+        selectAllButton.setOnAction(e -> {
+            java.util.List<SoftwareUpdateEntry> visible = tableRef != null ? tableRef.getItems() : viewModel.getRows();
+            visible.forEach(r -> r.setSelected(true));
+        });
 
         deselectAllButton.setDisable(true);
-        deselectAllButton.setOnAction(e -> viewModel.getRows().forEach(r -> r.setSelected(false)));
+        deselectAllButton.setOnAction(e -> {
+            java.util.List<SoftwareUpdateEntry> visible = tableRef != null ? tableRef.getItems() : viewModel.getRows();
+            visible.forEach(r -> r.setSelected(false));
+        });
 
         retryFailedButton.setOnAction(e -> viewModel.retryFailed());
 
@@ -193,9 +238,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
         busyListener.changed(null, false, busy.get());
     }
 
-    private TableView<SoftwareUpdateEntry> buildTable() {
-        TableView<SoftwareUpdateEntry> table = new TableView<>(viewModel.getRows());
+    private TableView<SoftwareUpdateEntry> buildTable(javafx.collections.ObservableList<SoftwareUpdateEntry> items) {
+        TableView<SoftwareUpdateEntry> table = new TableView<>(items);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        table.setPlaceholder(new Label("No updates to show. Press Scan to check for app and Windows updates."));
 
         TableColumn<SoftwareUpdateEntry, Boolean> selCol = new TableColumn<>("Install");
         selCol.setCellValueFactory(c -> c.getValue().selectedProperty());
@@ -360,20 +406,104 @@ public class SoftwareUpdatesTabView extends BorderPane {
             }
         });
 
-        table.getColumns().addAll(selCol, nameCol, currentCol, availCol, sourceCol, statusCol, sizeCol, actionCol);
+        // Size before Status: numeric info groups with versions, status stays near Action.
+        table.getColumns().addAll(selCol, nameCol, currentCol, availCol, sourceCol, sizeCol, statusCol, actionCol);
 
         table.setRowFactory(tv -> {
             TableRow<SoftwareUpdateEntry> row = new TableRow<>();
             row.setOnMouseClicked(event -> {
+                if (event.getClickCount() == 2 && !row.isEmpty() && row.getItem() != null
+                        && "Failed".equals(row.getItem().getStatus())) {
+                    showErrorDetailsDialog(row.getItem());
+                    return;
+                }
                 if (!row.isEmpty() && !viewModel.busyProperty().get() && !busy.get()) {
                     SoftwareUpdateEntry entry = row.getItem();
                     if (entry != null) entry.selectedProperty().set(!entry.selectedProperty().get());
+                }
+            });
+            // Tooltip shows identifiers without extra winget calls (portable, offline-safe).
+            row.itemProperty().addListener((obs, oldItem, newItem) -> {
+                if (newItem == null) {
+                    row.setTooltip(null);
+                    row.setContextMenu(null);
+                } else {
+                    String tip = newItem.getName() + "\nID: " + newItem.id()
+                            + ("WindowsUpdate".equals(newItem.source()) && newItem.updateId() != null
+                                    ? "\nUpdateID: " + newItem.updateId() : "")
+                            + "\nSource: " + newItem.source()
+                            + (newItem.sizeBytes() > 0 ? "\nSize: " + formatBytes(newItem.sizeBytes())
+                                    : "\nSize: unknown until download");
+                    row.setTooltip(new Tooltip(tip));
+                    MenuItem copyId = new MenuItem("Copy ID");
+                    copyId.setOnAction(e -> copyToClipboard(newItem.id()));
+                    MenuItem showError = new MenuItem("Show error details...");
+                    showError.setOnAction(e -> showErrorDetailsDialog(newItem));
+                    row.setContextMenu(new ContextMenu(copyId, showError));
                 }
             });
             return row;
         });
 
         return table;
+    }
+
+    private void updateFilterPredicate() {
+        if (filteredRows == null) return;
+        String q = searchField.getText() == null ? "" : searchField.getText().trim().toLowerCase();
+        String src = sourceFilter.getValue();
+        boolean failedOnly = failedOnlyCheck.isSelected();
+        filteredRows.setPredicate(e -> {
+            if (e == null) return false;
+            if (failedOnly && !"Failed".equals(e.getStatus())) return false;
+            if (src != null && !"All sources".equals(src) && !src.equals(e.source())) return false;
+            if (!q.isEmpty()) {
+                String name = e.getName() == null ? "" : e.getName().toLowerCase();
+                String id = e.id() == null ? "" : e.id().toLowerCase();
+                if (!name.contains(q) && !id.contains(q)) return false;
+            }
+            return true;
+        });
+        updateFilterCount();
+    }
+
+    private void updateFilterCount() {
+        if (filterCountLabel == null || filteredRows == null) return;
+        int shown = filteredRows.size();
+        int total = viewModel.getRows().size();
+        filterCountLabel.setText(shown == total
+                ? total + " item(s)"
+                : "Showing " + shown + " of " + total);
+    }
+
+    private static void copyToClipboard(String text) {
+        try {
+            ClipboardContent content = new ClipboardContent();
+            content.putString(text == null ? "" : text);
+            Clipboard.getSystemClipboard().setContent(content);
+        } catch (Exception ignored) {}
+    }
+
+    private void showErrorDetailsDialog(SoftwareUpdateEntry entry) {
+        if (entry == null) return;
+        String status = entry.getStatus() == null ? "" : entry.getStatus();
+        String err = entry.getLastError() == null ? "" : entry.getLastError();
+        TextArea ta = new TextArea(status + (err.isBlank() ? "" : "\n\n" + err));
+        ta.setEditable(false);
+        ta.setWrapText(true);
+        ta.setPrefRowCount(10);
+        ta.setPrefColumnCount(70);
+        Button copyBtn = new Button("Copy");
+        copyBtn.setOnAction(e -> copyToClipboard(ta.getText()));
+        HBox btnBox = new HBox(8, copyBtn);
+        btnBox.setAlignment(Pos.CENTER_RIGHT);
+        VBox content = new VBox(8,
+                new Label("Details for " + entry.getName() + " (" + entry.id() + "):"), ta, btnBox);
+        Alert a = new Alert(Alert.AlertType.INFORMATION);
+        a.setTitle(AppInfo.DISPLAY_NAME);
+        a.setHeaderText("Update details — " + entry.getName());
+        a.getDialogPane().setContent(content);
+        a.showAndWait();
     }
 
     private void updateInstallButtonState() {
@@ -476,6 +606,12 @@ public class SoftwareUpdatesTabView extends BorderPane {
         }
         if (refreshRowsListener != null) {
             try { viewModel.getRows().removeListener(refreshRowsListener); } catch (Exception ignored) {}
+        }
+        if (filterCountListener != null) {
+            try { viewModel.getRows().removeListener(filterCountListener); } catch (Exception ignored) {}
+        }
+        if (sortedRows != null) {
+            try { sortedRows.comparatorProperty().unbind(); } catch (Exception ignored) {}
         }
         if (selectedListeners != null) {
             for (var e : new java.util.ArrayList<>(selectedListeners.entrySet())) {

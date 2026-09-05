@@ -1,0 +1,12 @@
+Sep 05, 2026 9:27:44 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 05, 2026 9:27:44 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping JSON entry with missing id: name=NoId
+Sep 05, 2026 9:27:44 PM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=google.chrome
+Sep 05, 2026 9:28:12 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 05, 2026 9:28:13 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping JSON entry with missing id: name=NoId
+Sep 05, 2026 9:28:13 PM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=google.chrome

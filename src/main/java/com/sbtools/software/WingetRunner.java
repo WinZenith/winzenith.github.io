@@ -25,12 +25,15 @@ public class WingetRunner {
     private static final Pattern VERSION_PATTERN = Pattern.compile("v?([0-9]+\\.[0-9]+\\.[0-9]+)");
 
     private final ProcessRunner runner;
-    private volatile String resolvedPath;
-    private volatile boolean resolved;
-    private volatile boolean available;
+    // JVM-wide resolution cache: winget availability/path/version are system state, not
+    // per-instance. Dashboard + Software tab each own a WingetRunner; without sharing,
+    // every scan paid for duplicate where.exe + winget --version processes.
+    private static volatile String resolvedPath;
+    private static volatile boolean resolved;
+    private static volatile boolean available;
 
-    private volatile String cachedVersion;
-    private volatile Boolean cachedJsonSupported;
+    private static volatile String cachedVersion;
+    private static volatile Boolean cachedJsonSupported;
 
     private volatile int workingCandidateIndex = -1;
 
@@ -69,11 +72,11 @@ public class WingetRunner {
 
     /**
      * Returns the cached winget version string (e.g. "v1.9.2831").
-     * Runs {@code winget --version} only once; subsequent calls return the cached value.
+     * Runs {@code winget --version} only once per JVM; subsequent calls return the cached value.
      */
     public String getVersion() {
         if (cachedVersion != null) return cachedVersion;
-        synchronized (this) {
+        synchronized (WingetRunner.class) {
             if (cachedVersion != null) return cachedVersion;
             try {
                 ProcessResult r = runner.run(buildCommand("winget", "--version"), 10);
@@ -97,7 +100,7 @@ public class WingetRunner {
      */
     public boolean supportsJsonOutput() {
         if (cachedJsonSupported != null) return cachedJsonSupported;
-        synchronized (this) {
+        synchronized (WingetRunner.class) {
             if (cachedJsonSupported != null) return cachedJsonSupported;
             String ver = getVersion();
             cachedJsonSupported = parseMajorMinorVersion(ver) >= 1.4;
@@ -122,11 +125,11 @@ public class WingetRunner {
 
     /**
      * Resolves the winget executable path using multiple strategies.
-     * Thread-safe: uses double-checked locking.
+     * Thread-safe JVM-wide: uses double-checked locking on the class.
      */
     public String resolvePath() {
         if (resolvedPath != null) return resolvedPath;
-        synchronized (this) {
+        synchronized (WingetRunner.class) {
             if (resolvedPath != null) return resolvedPath;
             resolvedPath = doResolvePath();
             return resolvedPath;
@@ -299,21 +302,13 @@ public class WingetRunner {
         if (cancelledSupplier instanceof java.util.concurrent.atomic.AtomicBoolean ab) {
             try { return runWithFallback(timeoutSeconds, ab, args); } catch (Exception e) { throw new RuntimeException(e); }
         }
-        java.util.concurrent.atomic.AtomicBoolean wrapper = new java.util.concurrent.atomic.AtomicBoolean(cancelledSupplier.getAsBoolean());
-        Thread monitor = new Thread(() -> {
-            while (!wrapper.get() && !Thread.currentThread().isInterrupted()) {
-                try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-                try { if (cancelledSupplier.getAsBoolean()) wrapper.set(true); } catch (Exception ignored) {}
+        try (com.sbtools.util.CancelBridge bridge =
+                     com.sbtools.util.CancelBridge.bridge(cancelledSupplier, "winget-cancel-monitor")) {
+            try {
+                return runWithFallback(timeoutSeconds, bridge.flag(), args);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
             }
-        }, "winget-cancel-monitor");
-        monitor.setDaemon(true);
-        monitor.start();
-        try {
-            return runWithFallback(timeoutSeconds, wrapper, args);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        } finally {
-            monitor.interrupt();
         }
     }
 

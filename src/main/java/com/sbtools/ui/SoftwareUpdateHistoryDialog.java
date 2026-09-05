@@ -3,14 +3,21 @@ package com.sbtools.ui;
 import com.sbtools.software.SoftwareUpdateHistoryEntry;
 import com.sbtools.software.SoftwareUpdateHistoryStore;
 import com.sbtools.util.AppInfo;
+import com.sbtools.util.AppLogger;
 import javafx.collections.FXCollections;
+import javafx.collections.transformation.FilteredList;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.scene.control.*;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
+import javafx.stage.FileChooser;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -36,7 +43,30 @@ public class SoftwareUpdateHistoryDialog {
         SoftwareUpdateHistoryStore store = new SoftwareUpdateHistoryStore();
         List<SoftwareUpdateHistoryEntry> entries = store.listAll();
 
-        TableView<SoftwareUpdateHistoryEntry> table = new TableView<>(FXCollections.observableArrayList(entries));
+        TextField searchField = new TextField();
+        searchField.setPromptText("Filter by program or ID...");
+        searchField.setPrefWidth(260);
+        Label countLabel = new Label(entries.size() + " entr(ies)");
+        countLabel.setStyle("-fx-opacity: 0.75;");
+        HBox filterBar = new HBox(10, new Label("Search:"), searchField, countLabel);
+        filterBar.setAlignment(Pos.CENTER_LEFT);
+
+        FilteredList<SoftwareUpdateHistoryEntry> filtered =
+                new FilteredList<>(FXCollections.observableArrayList(entries), p -> true);
+        searchField.textProperty().addListener((obs, o, n) -> {
+            String q = n == null ? "" : n.trim().toLowerCase();
+            filtered.setPredicate(e -> {
+                if (e == null) return false;
+                if (q.isEmpty()) return true;
+                String name = e.packageName() == null ? "" : e.packageName().toLowerCase();
+                String id = e.packageId() == null ? "" : e.packageId().toLowerCase();
+                return name.contains(q) || id.contains(q);
+            });
+            countLabel.setText(filtered.size() + " of " + entries.size() + " entr(ies)");
+        });
+
+        TableView<SoftwareUpdateHistoryEntry> table = new TableView<>(filtered);
+        table.setPlaceholder(new Label("No history yet. Successful and failed installs will appear here."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
         TableColumn<SoftwareUpdateHistoryEntry, String> dateCol = new TableColumn<>("Date");
@@ -97,14 +127,18 @@ public class SoftwareUpdateHistoryDialog {
             confirm.setHeaderText(AppInfo.DISPLAY_NAME);
             if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
                 store.clear();
-                table.setItems(FXCollections.observableArrayList());
+                filtered.getSource().clear();
+                countLabel.setText("0 entr(ies)");
             }
         });
 
-        HBox bottom = new HBox(8, clearBtn);
+        Button exportBtn = new Button("Export CSV");
+        exportBtn.setOnAction(e -> exportCsv(filtered));
+
+        HBox bottom = new HBox(8, clearBtn, exportBtn);
         bottom.setPadding(new Insets(8, 0, 0, 0));
 
-        VBox content = new VBox(8, table, bottom);
+        VBox content = new VBox(8, filterBar, table, bottom);
         content.setPadding(new Insets(10));
         content.setPrefWidth(750);
         content.setPrefHeight(400);
@@ -112,5 +146,38 @@ public class SoftwareUpdateHistoryDialog {
         dialog.getDialogPane().setContent(content);
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.CLOSE);
         dialog.showAndWait();
+    }
+
+    private static void exportCsv(List<SoftwareUpdateHistoryEntry> entries) {
+        try {
+            FileChooser chooser = new FileChooser();
+            chooser.setTitle("Export update history");
+            chooser.setInitialFileName("software-update-history.csv");
+            chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV", "*.csv"));
+            java.io.File target = chooser.showSaveDialog(null);
+            if (target == null) return;
+            StringBuilder sb = new StringBuilder("Date,Program,PackageId,OldVersion,NewVersion,Source,Status,Error\n");
+            for (SoftwareUpdateHistoryEntry e : entries) {
+                sb.append(csv(formatInstalledAt(e))).append(',')
+                        .append(csv(e.packageName())).append(',')
+                        .append(csv(e.packageId())).append(',')
+                        .append(csv(e.oldVersion())).append(',')
+                        .append(csv(e.newVersion())).append(',')
+                        .append(csv(e.source())).append(',')
+                        .append(e.success() ? "OK" : "Failed").append(',')
+                        .append(csv(e.errorMessage())).append('\n');
+            }
+            Path p = target.toPath();
+            Files.writeString(p, sb.toString(), StandardCharsets.UTF_8);
+        } catch (Exception ex) {
+            AppLogger.warning("History CSV export failed: " + ex.getMessage());
+            new Alert(Alert.AlertType.ERROR, "Export failed:\n" + ex.getMessage()).showAndWait();
+        }
+    }
+
+    private static String csv(String v) {
+        if (v == null) return "";
+        String s = v.replace("\"", "\"\"");
+        return s.contains(",") || s.contains("\"") || s.contains("\n") ? "\"" + s + "\"" : s;
     }
 }

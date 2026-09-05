@@ -32,7 +32,19 @@ public class IgnoredListDialog {
         dialog.setTitle(AppInfo.DISPLAY_NAME);
         dialog.setHeaderText(title);
 
-        ObservableList<String> observable = FXCollections.observableArrayList(items);
+        ObservableList<String> observable = FXCollections.observableArrayList(items == null ? List.of() : items);
+        javafx.collections.transformation.FilteredList<String> filtered =
+                new javafx.collections.transformation.FilteredList<>(observable, s -> true);
+
+        TextField searchField = new TextField();
+        searchField.setPromptText("Filter ignored items...");
+        searchField.textProperty().addListener((obs, o, n) -> {
+            String q = n == null ? "" : n.trim().toLowerCase();
+            filtered.setPredicate(s -> {
+                if (q.isEmpty()) return true;
+                return s != null && s.toLowerCase().contains(q);
+            });
+        });
 
         ListView<String> listView = new ListView<>();
         listView.setCellFactory(lv -> new ListCell<>() {
@@ -41,13 +53,16 @@ public class IgnoredListDialog {
                 super.updateItem(item, empty);
                 if (empty || item == null) {
                     setText(null);
+                    setTooltip(null);
                 } else {
                     int t = item.lastIndexOf('\t');
                     setText(t >= 0 ? item.substring(0, t) : item);
+                    // Full "name \t id" as tooltip so the identifier stays visible without extra calls.
+                    setTooltip(new Tooltip(item.replace('\t', ' ')));
                 }
             }
         });
-        listView.setItems(observable);
+        listView.setItems(filtered);
         listView.setPrefHeight(300);
 
         Button removeBtn = new Button("Remove Selected");
@@ -61,7 +76,7 @@ public class IgnoredListDialog {
             }
         });
 
-        VBox layout = new VBox(10, new Label("Skipped items:"), listView, removeBtn);
+        VBox layout = new VBox(10, new Label("Skipped items:"), searchField, listView, removeBtn);
         layout.setPadding(new Insets(10));
         layout.setPrefWidth(500);
 

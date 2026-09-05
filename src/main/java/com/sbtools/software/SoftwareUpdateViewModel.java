@@ -190,10 +190,14 @@ public class SoftwareUpdateViewModel {
                         return !skippedIdSet.contains(e.id());
                     })
                     .collect(Collectors.toList());
+            // Deduplicate by id (case-insensitive, keep-first = winget wins since winget
+            // results precede WU in scanAllConcurrent). Prevents double rows when both
+            // parsers/scans surface the same package.
+            final List<SoftwareUpdateEntry> dedupedUpdates = dedupeById(filteredUpdates);
 
             // Recompute counts after filtering for accurate UI message
-            long filteredWc = filteredUpdates.stream().filter(e -> !"WindowsUpdate".equals(e.source())).count();
-            long filteredWu = filteredUpdates.stream().filter(e -> "WindowsUpdate".equals(e.source())).count();
+            long filteredWc = dedupedUpdates.stream().filter(e -> !"WindowsUpdate".equals(e.source())).count();
+            long filteredWu = dedupedUpdates.stream().filter(e -> "WindowsUpdate".equals(e.source())).count();
             final int wc = counts[0];
             final int wuc = counts[1];
 
@@ -202,11 +206,52 @@ public class SoftwareUpdateViewModel {
             String wingetError = service.getLastWingetError();
             boolean wuFailed = wuError != null && !wuError.isBlank();
             boolean wingetFailed = wingetError != null && !wingetError.isBlank();
+            // Stale fallback: live scan empty + source error(s) + fresh cache -> show cached
+            // (ignored-filtered) with an explicit stale label instead of a false "up to date".
+            List<SoftwareUpdateEntry> displayUpdates = dedupedUpdates;
+            boolean showingStale = false;
+            java.time.Instant staleAt = null;
+            if (dedupedUpdates.isEmpty() && (wuFailed || wingetFailed)) {
+                try {
+                    var cachedOpt = SoftwareUpdateScanCache.getIfFresh();
+                    if (cachedOpt.isPresent() && cachedOpt.get().entries() != null
+                            && !cachedOpt.get().entries().isEmpty()) {
+                        List<SoftwareUpdateEntry> cachedFiltered = cachedOpt.get().entries().stream()
+                                .filter(e -> {
+                                    if (e == null || e.id() == null || e.id().isBlank()) return false;
+                                    if ("WindowsUpdate".equals(e.source())) {
+                                        return e.updateId() != null && !e.updateId().isBlank()
+                                                && !skippedIdSet.contains(e.id());
+                                    }
+                                    return !skippedIdSet.contains(e.id());
+                                })
+                                .collect(Collectors.toList());
+                        cachedFiltered = dedupeById(cachedFiltered);
+                        if (!cachedFiltered.isEmpty()) {
+                            displayUpdates = cachedFiltered;
+                            showingStale = true;
+                            staleAt = cachedOpt.get().cachedAt();
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+            final List<SoftwareUpdateEntry> finalDisplay = displayUpdates;
+            final boolean finalStale = showingStale;
+            final java.time.Instant finalStaleAt = staleAt;
             Platform.runLater(() -> {
                 if (disposed) return;
-                rows.setAll(filteredUpdates);
+                rows.setAll(finalDisplay);
+                if (finalStale) {
+                    long mins = finalStaleAt == null ? -1
+                            : java.time.Duration.between(finalStaleAt, java.time.Instant.now()).toMinutes();
+                    String age = mins < 0 ? "" : mins < 1 ? " (just now)" : " (" + mins + " min ago)";
+                    statusText.set("Live scan had warnings — showing cached results" + age + ": "
+                            + finalDisplay.size() + " item(s). Press Scan to retry.");
+                    AppLogger.warning("Showing stale software cache (" + finalDisplay.size() + " items)");
+                    return;
+                }
                 if (filteredWc > 0 && filteredWu > 0) {
-                    statusText.set(filteredUpdates.size() + " outdated item(s) found (" + filteredWc + " app(s), " + filteredWu + " Windows Update(s)).");
+                    statusText.set(dedupedUpdates.size() + " outdated item(s) found (" + filteredWc + " app(s), " + filteredWu + " Windows Update(s)).");
                 } else if (filteredWc > 0) {
                     if (wuFailed) {
                         statusText.set(filteredWc + " outdated app(s) found. (Windows Update check failed)");
@@ -222,7 +267,7 @@ public class SoftwareUpdateViewModel {
                     }
                 } else if (wc > 0 || wuc > 0) {
                     // All found were ignored
-                    statusText.set("Everything is up to date. (" + (wc + wuc - filteredUpdates.size()) + " ignored)");
+                    statusText.set("Everything is up to date. (" + (wc + wuc - dedupedUpdates.size()) + " ignored)");
                 } else {
                     if (wuFailed || wingetFailed) {
                         String err = wuFailed ? wuError : wingetError;
@@ -413,6 +458,10 @@ public class SoftwareUpdateViewModel {
 
         final boolean rebootAbort = rebootRequiredAbort.get();
         final int skippedDueToReboot = rebootAbort ? (selected.size() - finalCompleted) : 0;
+        // System state changed — cached scan results are stale from here on.
+        if (!finalSuccessful.isEmpty()) {
+            try { SoftwareUpdateScanCache.invalidate(); } catch (Exception ignored) {}
+        }
         InstallerCleanupHelper.promptAndCleanupBatchAsync(service, finalSuccessful, batchStartTime)
                 .exceptionally(ex -> {
                     AppLogger.warning("Batch cleanup failed: " + ex.getMessage());
@@ -603,6 +652,7 @@ public class SoftwareUpdateViewModel {
             if (SoftwareUpdateService.isSuccessOrRebootRequired(res)) {
                 InstallerCleanupHelper.promptAndCleanup(service, entry, start);
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), true, null);
+                try { SoftwareUpdateScanCache.invalidate(); } catch (Exception ignored) {}
                 Platform.runLater(() -> {
                     if (disposed) return;
                     statusText.set("Update installed for " + entry.getName());
@@ -700,6 +750,11 @@ public class SoftwareUpdateViewModel {
                 e.setSelected(true);
             }
             showRetryFailed.set(false);
+            final int attempt = retryCount.get();
+            Platform.runLater(() -> {
+                if (!disposed) statusText.set(
+                        "Retrying " + toRetry.size() + " failed update(s) (attempt " + attempt + "/" + MAX_RETRY_ATTEMPTS + ")...");
+            });
         }
         try {
             executor.submit(() -> {
@@ -740,6 +795,26 @@ public class SoftwareUpdateViewModel {
         synchronized (failedEntries) {
             return new ArrayList<>(failedEntries);
         }
+    }
+
+    /**
+     * Deduplicates entries by package id (case-insensitive), keeping the first occurrence.
+     * Callers pass winget results before Windows Update results so winget wins ties.
+     * Package-visible for unit tests.
+     */
+    static List<SoftwareUpdateEntry> dedupeById(List<SoftwareUpdateEntry> entries) {
+        if (entries == null || entries.size() < 2) return entries == null ? List.of() : entries;
+        java.util.LinkedHashMap<String, SoftwareUpdateEntry> byId = new java.util.LinkedHashMap<>();
+        for (SoftwareUpdateEntry e : entries) {
+            if (e == null || e.id() == null) continue;
+            String key = e.id().toLowerCase();
+            if (!byId.containsKey(key)) {
+                byId.put(key, e);
+            } else {
+                AppLogger.info("Dropping duplicate software update entry for id=" + e.id());
+            }
+        }
+        return new ArrayList<>(byId.values());
     }
 
     public void dispose() {
