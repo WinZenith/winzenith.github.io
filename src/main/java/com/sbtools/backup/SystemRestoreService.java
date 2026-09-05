@@ -13,7 +13,6 @@ import java.util.List;
 public class SystemRestoreService {
 
     private final ProcessRunner runner = new ProcessRunner(60);
-    private final ProcessRunner shortRunner = new ProcessRunner(30);
 
     public record RestorePointResult(boolean success, int sequenceNumber, String error) {
         public RestorePointResult(boolean success, int sequenceNumber) { this(success, sequenceNumber, ""); }
@@ -135,24 +134,6 @@ public class SystemRestoreService {
             throw new IOException("Failed to list restore points: " + e.getMessage(), e);
         }
         return result;
-    }
-
-    public boolean deleteRestorePoint(int sequenceNumber) {
-        try {
-            Path script = PowerShellScripts.resolve("delete-restore-point.ps1");
-            ProcessResult r = shortRunner.run(ProcessRunner.powershellScript(script.toString(), String.valueOf(sequenceNumber)));
-            boolean deleted = r.success();
-            if (!deleted) {
-                AppLogger.warning("Delete restore point " + sequenceNumber
-                        + " failed (exit=" + r.exitCode() + "): " + r.combinedOutput());
-            } else {
-                AppLogger.info("Restore point " + sequenceNumber + " deleted");
-            }
-            return deleted;
-        } catch (Exception e) {
-            AppLogger.warning("Failed to delete restore point " + sequenceNumber + ": " + e.getMessage());
-            return false;
-        }
     }
 
     public void launchSystemRestore() throws IOException {

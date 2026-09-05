@@ -1,14 +1,11 @@
 package com.sbtools.backup;
 
-import javafx.beans.property.SimpleBooleanProperty;
-import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
 
 public class SystemRestoreRow {
 
     private final int sequenceNumber;
-    private final BooleanProperty selected = new SimpleBooleanProperty(false);
     private final StringProperty description = new SimpleStringProperty();
     private final StringProperty creationTime = new SimpleStringProperty();
     private final StringProperty eventType = new SimpleStringProperty();
@@ -18,18 +15,6 @@ public class SystemRestoreRow {
         this.description.set(description != null ? description : "");
         this.creationTime.set(creationTime != null ? creationTime : "");
         this.eventType.set(formatEventType(eventTypeCode));
-    }
-
-    public boolean isSelected() {
-        return selected.get();
-    }
-
-    public void setSelected(boolean value) {
-        selected.set(value);
-    }
-
-    public BooleanProperty selectedProperty() {
-        return selected;
     }
 
     public StringProperty descriptionProperty() {

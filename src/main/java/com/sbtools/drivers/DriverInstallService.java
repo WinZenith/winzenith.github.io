@@ -139,7 +139,8 @@ public class DriverInstallService {
         String availVer = candidate.availableVersion();
         if (availVer != null && availVer.matches("(?i).*\\b(alpha|beta|rc|preview|test)\\b.*")) {
             removeBackupIfPresent(backupEntry);
-            removeRestorePointIfPresent(restorePointSeq);
+            // System restore points are intentionally kept: they are a safety net
+            // and are never auto-deleted (see Backup/Rollback policy).
             return new InstallResult(InstallStatus.BLOCKED_PRE_RELEASE, false,
                     "Blocked: candidate appears to be a pre-release (alpha/beta/rc/preview). Only stable releases are installed.");
         }
@@ -191,7 +192,7 @@ public class DriverInstallService {
             String downloadUrl = candidate.downloadUrl();
             if (!isTrustedSource(downloadUrl, candidate.source())) {
                 removeBackupIfPresent(backupEntry);
-                removeRestorePointIfPresent(restorePointSeq);
+                // Keep any restore point created above (never auto-delete).
                 return new InstallResult(InstallStatus.BLOCKED_UNTRUSTED, false,
                         "Blocked: download URL is not from a trusted vendor. URL: " + downloadUrl);
             }
@@ -206,7 +207,7 @@ public class DriverInstallService {
         }
 
         removeBackupIfPresent(backupEntry);
-        removeRestorePointIfPresent(restorePointSeq);
+        // Keep restore point (never auto-delete); only the unused driver backup is cleaned.
         return new InstallResult(InstallStatus.NO_DOWNLOAD_URL, false,
                 "No download URL available for " + candidate.source() + ". Check vendor website manually.");
     }
@@ -217,16 +218,6 @@ public class DriverInstallService {
                 backupService.removeBackupEntry(backupEntry);
             } catch (Exception e) {
                 AppLogger.warning("Failed to remove backup entry: " + e.getMessage());
-            }
-        }
-    }
-
-    private void removeRestorePointIfPresent(int sequenceNumber) {
-        if (sequenceNumber > 0) {
-            try {
-                restoreService.deleteRestorePoint(sequenceNumber);
-            } catch (Exception e) {
-                AppLogger.warning("Failed to remove restore point: " + e.getMessage());
             }
         }
     }

@@ -6,9 +6,6 @@ import javafx.application.Platform;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -24,7 +21,12 @@ public class RestoreRow {
     private final StringProperty version = new SimpleStringProperty();
     private final StringProperty backedUpAt = new SimpleStringProperty();
     private final StringProperty size = new SimpleStringProperty();
+    private final StringProperty status = new SimpleStringProperty(BackupHealth.statusLabel(BackupHealth.Status.MISSING));
     private volatile boolean sizeComputed = false;
+    private volatile BackupHealth.Status health = BackupHealth.Status.MISSING;
+    private volatile long fileCount = 0;
+    private volatile long infCount = 0;
+    private volatile long bytes = 0;
 
     public RestoreRow(DriverBackupEntry entry) {
         this.entry = entry;
@@ -46,9 +48,8 @@ public class RestoreRow {
     public void computeSizeAsync() {
         if (sizeComputed) return;
         SIZE_CALC_POOL.execute(() -> {
-            String result = computeSize(entry.backupFolder());
-            sizeComputed = true;
-            Platform.runLater(() -> size.set(result));
+            BackupHealth.Stats stats = BackupHealth.inspect(entry.backupFolder());
+            applyStats(stats);
         });
     }
 
@@ -56,13 +57,49 @@ public class RestoreRow {
         if (!sizeComputed) computeSizeAsync();
     }
 
+    /** Re-inspects disk state (used by Verify) even if previously computed. */
+    public void refreshHealthAsync() {
+        SIZE_CALC_POOL.execute(() -> {
+            BackupHealth.Stats stats = BackupHealth.inspect(entry.backupFolder());
+            sizeComputed = false;
+            applyStats(stats);
+        });
+    }
+
+    private void applyStats(BackupHealth.Stats stats) {
+        health = stats.status();
+        fileCount = stats.fileCount();
+        infCount = stats.infCount();
+        bytes = stats.bytes();
+        sizeComputed = true;
+        String sizeStr = BackupHealth.isHealthy(stats.status())
+                || stats.status() == BackupHealth.Status.EMPTY
+                ? formatFileSize(stats.bytes()) : "\u2014";
+        String statusStr = BackupHealth.statusLabel(stats.status());
+        Platform.runLater(() -> {
+            size.set(sizeStr);
+            status.set(statusStr);
+        });
+    }
+
     public static CompletableFuture<Void> computeAllSizesAsync(List<RestoreRow> rows) {
         return CompletableFuture.runAsync(() -> {
             for (RestoreRow row : rows) {
                 if (row.sizeComputed) continue;
-                String result = computeSize(row.entry.backupFolder());
+                BackupHealth.Stats stats = BackupHealth.inspect(row.entry.backupFolder());
+                row.health = stats.status();
+                row.fileCount = stats.fileCount();
+                row.infCount = stats.infCount();
+                row.bytes = stats.bytes();
                 row.sizeComputed = true;
-                Platform.runLater(() -> row.size.set(result));
+                String sizeStr = BackupHealth.isHealthy(stats.status())
+                        || stats.status() == BackupHealth.Status.EMPTY
+                        ? formatFileSize(stats.bytes()) : "\u2014";
+                String statusStr = BackupHealth.statusLabel(stats.status());
+                Platform.runLater(() -> {
+                    row.size.set(sizeStr);
+                    row.status.set(statusStr);
+                });
             }
         }, SIZE_CALC_POOL);
     }
@@ -73,31 +110,13 @@ public class RestoreRow {
     public StringProperty versionProperty() { return version; }
     public StringProperty backedUpAtProperty() { return backedUpAt; }
     public StringProperty sizeProperty() { return size; }
+    public StringProperty statusProperty() { return status; }
 
-    private static String computeSize(String backupFolder) {
-        if (backupFolder == null || backupFolder.isBlank()) return "\u2014";
-        Path folder;
-        try { folder = Path.of(backupFolder); } catch (Exception e) { return "\u2014"; }
-        // Safety: reject shallow / system locations to avoid walking C:\ on tampered index
-        try {
-            Path norm = folder.toAbsolutePath().normalize();
-            String s = norm.toString().toLowerCase().replace('/', '\\');
-            if (s.length() <= 3 || s.matches("^[a-z]:\\\\?$")) return "\u2014";
-            if (s.contains("\\windows\\") || s.endsWith("\\windows") || s.equals("c:\\windows")) return "\u2014";
-            if (s.contains("\\program files") || s.contains("\\programdata")) return "\u2014";
-            if (norm.getNameCount() < 2) return "\u2014";
-        } catch (Exception ignored) { return "\u2014"; }
-        if (!Files.isDirectory(folder)) return "\u2014";
-        try (var stream = Files.walk(folder, 5)) {
-            long bytes = stream.filter(Files::isRegularFile)
-                    .filter(p -> { try { return !Files.isSymbolicLink(p); } catch (Exception e) { return false; } })
-                    .mapToLong(p -> { try { return Files.size(p); } catch (IOException e) { return 0; } })
-                    .sum();
-            return formatFileSize(bytes);
-        } catch (IOException e) {
-            return "\u2014";
-        }
-    }
+    public BackupHealth.Status getHealth() { return health; }
+    public boolean isHealthy() { return BackupHealth.isHealthy(health); }
+    public long getFileCount() { return fileCount; }
+    public long getInfCount() { return infCount; }
+    public long getBytes() { return bytes; }
 
     public static String formatFileSize(long bytes) {
         if (bytes < 0) bytes = 0;

@@ -25,6 +25,11 @@ public class DriverBackupService {
     private static ReentrantReadWriteLock lockFor(Path indexPath) {
         return LOCKS.computeIfAbsent(indexPath.toAbsolutePath().normalize(), k -> new ReentrantReadWriteLock());
     }
+    // Short-TTL cache for allowed backup roots: avoids re-reading
+    // SettingsStore + index files on every size/health check (was O(n^2)).
+    private static volatile List<Path> cachedAllowedRoots;
+    private static volatile long cachedAllowedRootsAt;
+    private static final long ALLOWED_ROOTS_TTL_MS = 5_000;
     private final ProcessRunner processRunner = new ProcessRunner(300);
 
     public List<DriverBackupEntry> listAll() throws IOException {
@@ -320,6 +325,70 @@ public class DriverBackupService {
         }
     }
 
+    private static List<Path> cachedAllowedRoots() {
+        long now = System.currentTimeMillis();
+        List<Path> cached = cachedAllowedRoots;
+        if (cached != null && (now - cachedAllowedRootsAt) < ALLOWED_ROOTS_TTL_MS) {
+            return cached;
+        }
+        List<Path> roots = new java.util.ArrayList<>();
+        try {
+            Path primaryRoot = AppPaths.backupsRoot().toAbsolutePath().normalize();
+            roots.add(primaryRoot);
+        } catch (Exception ignored) {
+        }
+        try {
+            com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
+            if (s.backupDirectory() != null && !s.backupDirectory().isBlank()) {
+                Path custom = Path.of(s.backupDirectory()).toAbsolutePath().normalize();
+                if (AppPaths.isValidCustomBackupDir(custom) && !roots.contains(custom)) {
+                    roots.add(custom);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            Path legacy = AppPaths.legacyBackupsRoot().toAbsolutePath().normalize();
+            if (!roots.contains(legacy)) {
+                roots.add(legacy);
+            }
+        } catch (Exception ignored) {
+        }
+        cachedAllowedRoots = roots;
+        cachedAllowedRootsAt = now;
+        return roots;
+    }
+
+    /**
+     * Fast read-only guard for size/health scans: shape + allowed-roots only,
+     * no index scan. Keeps per-entry scans O(1) instead of O(indexes).
+     */
+    private boolean isSafeForRead(Path folder) {
+        if (folder == null) {
+            return false;
+        }
+        if (!BackupHealth.isPathShapeSafe(folder)) {
+            return false;
+        }
+        try {
+            Path normalized = folder.toAbsolutePath().normalize();
+            for (Path root : cachedAllowedRoots()) {
+                if (normalized.startsWith(root)) {
+                    Path rel = root.relativize(normalized);
+                    if (rel.getNameCount() >= 2) {
+                        return true;
+                    }
+                    return false;
+                }
+            }
+            // Indexed orphan locations (old custom dir) are still readable:
+            // fall back to full check which consults indexes.
+            return isSafeToDelete(folder);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private boolean isSafeToDelete(Path folder) {
         if (folder == null) return false;
         try {
@@ -329,25 +398,17 @@ public class DriverBackupService {
                 AppLogger.warning("Refusing to delete shallow folder: " + folder);
                 return false;
             }
-            java.util.List<Path> allowedRoots = new java.util.ArrayList<>();
-            Path primaryRoot = indexPath().getParent();
-            if (primaryRoot != null) allowedRoots.add(primaryRoot.toAbsolutePath().normalize());
-            // Also allow custom backupDirectory locations
+            java.util.List<Path> allowedRoots = cachedAllowedRoots();
+            // Ensure current primary root is included even if cache predates a settings change.
             try {
-                com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
-                if (s.backupDirectory() != null && !s.backupDirectory().isBlank()) {
-                    Path custom = Path.of(s.backupDirectory()).toAbsolutePath().normalize();
-                    if (isValidCustomRoot(custom)) allowedRoots.add(custom);
+                Path primaryRoot = indexPath().getParent();
+                if (primaryRoot != null) {
+                    Path normPrimary = primaryRoot.toAbsolutePath().normalize();
+                    if (!allowedRoots.contains(normPrimary)) {
+                        allowedRoots = new java.util.ArrayList<>(allowedRoots);
+                        allowedRoots.add(normPrimary);
+                    }
                 }
-            } catch (Exception ignored) {}
-            // Portable root fallback
-            try {
-                Path portable = AppPaths.backupsRoot().toAbsolutePath().normalize();
-                if (!allowedRoots.contains(portable)) allowedRoots.add(portable);
-            } catch (Exception ignored) {}
-            try {
-                Path legacy = AppPaths.legacyBackupsRoot().toAbsolutePath().normalize();
-                if (!allowedRoots.contains(legacy)) allowedRoots.add(legacy);
             } catch (Exception ignored) {}
             for (Path root : allowedRoots) {
                 if (normalized.startsWith(root)) {
@@ -396,41 +457,91 @@ public class DriverBackupService {
 
     public long getTotalSize(List<DriverBackupEntry> entries) throws IOException {
         long total = 0;
+        if (entries == null) {
+            return 0;
+        }
         for (DriverBackupEntry entry : entries) {
             try {
+                if (entry == null || entry.backupFolder() == null || entry.backupFolder().isBlank()) {
+                    continue;
+                }
                 Path folder = Path.of(entry.backupFolder());
-                if (!isSafeToDelete(folder)) {
+                if (!isSafeForRead(folder)) {
                     AppLogger.warning("Skipping size calculation for unsafe folder: " + folder);
                     continue;
                 }
                 if (Files.isDirectory(folder)) {
-                    total += directorySize(folder);
+                    // Single-pass stats (bytes + INF) shared with UI health checks.
+                    total += BackupHealth.inspect(folder).bytes();
                 }
             } catch (Exception ignored) {}
         }
         return total;
     }
 
-    private long countInfFiles(Path folder) throws IOException {
-        try (var stream = Files.walk(folder, 5)) {
-            return stream.filter(Files::isRegularFile)
-                    .filter(p -> p.toString().toLowerCase().endsWith(".inf"))
-                    .count();
+    /**
+     * Returns index entries whose folder is missing, unsafe, unreadable or
+     * contains no INF files. Used for the manual "Repair" affordance — this
+     * method never deletes anything.
+     */
+    public List<DriverBackupEntry> findStaleEntries() throws IOException {
+        List<DriverBackupEntry> all = listAll();
+        List<DriverBackupEntry> stale = new java.util.ArrayList<>();
+        for (DriverBackupEntry e : all) {
+            if (e == null) {
+                continue;
+            }
+            try {
+                BackupHealth.Stats stats = BackupHealth.inspect(e.backupFolder());
+                if (!BackupHealth.isHealthy(stats.status())) {
+                    stale.add(e);
+                }
+            } catch (Exception ex) {
+                stale.add(e);
+            }
+        }
+        return stale;
+    }
+
+    /**
+     * Removes only the given stale entries from all indexes (manual repair).
+     * Folders that still exist are left on disk; use
+     * {@link #removeBackupEntry} for full folder deletion.
+     */
+    public void purgeStaleIndexEntries(List<DriverBackupEntry> stale) throws IOException {
+        if (stale == null || stale.isEmpty()) {
+            return;
+        }
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (DriverBackupEntry e : stale) {
+            if (e != null && e.id() != null) {
+                ids.add(e.id());
+            }
+        }
+        purgeFromAllIndexes(ids);
+        AppLogger.info("Purged " + ids.size() + " stale backup index entries (folders left untouched)");
+    }
+
+    /** Free bytes available on the current backups volume, or -1 if unknown. */
+    public long usableSpaceForBackups() {
+        try {
+            Path root = indexPath().getParent();
+            if (root == null) {
+                root = AppPaths.backupsRoot();
+            }
+            return BackupHealth.usableSpace(root);
+        } catch (Exception e) {
+            return -1;
         }
     }
 
+    private long countInfFiles(Path folder) throws IOException {
+        return BackupHealth.inspect(folder).infCount();
+    }
+
     private long directorySize(Path directory) throws IOException {
-        // Limit depth and avoid following links to prevent runaway scan if backupFolder is misconfigured
-        try (var stream = Files.walk(directory, 10)) {
-            return stream.filter(Files::isRegularFile)
-                    .filter(p -> {
-                        try { return !Files.isSymbolicLink(p); } catch (Exception e) { return false; }
-                    })
-                    .mapToLong(p -> {
-                        try { return Files.size(p); } catch (IOException e) { return 0; }
-                    })
-                    .sum();
-        }
+        // Single-pass via shared helper; depth capped inside BackupHealth.
+        return BackupHealth.inspect(directory).bytes();
     }
 
     private void deleteDirectory(Path directory) throws IOException {
