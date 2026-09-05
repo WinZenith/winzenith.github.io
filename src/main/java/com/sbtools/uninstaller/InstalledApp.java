@@ -97,6 +97,17 @@ public class InstalledApp implements Comparable<InstalledApp> {
         return hasAppxIdentity();
     }
 
+    /**
+     * Returns a copy with an updated size estimate. Used for lazy AppX size
+     * enrichment without mutating the immutable model.
+     */
+    public InstalledApp withEstimatedSize(int newSizeKB) {
+        return new InstalledApp(name, publisher, version, installLocation,
+                uninstallString, quietUninstallString, registryKeyPath, win32,
+                appxPackageFullName, appxPackageName, registryHive,
+                installDate, newSizeKB, architecture);
+    }
+
     @Override
     public int compareTo(InstalledApp other) {
         int cmp = this.name.compareToIgnoreCase(other.name);

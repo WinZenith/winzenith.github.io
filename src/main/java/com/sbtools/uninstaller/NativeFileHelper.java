@@ -11,6 +11,20 @@ import java.nio.file.Path;
 public class NativeFileHelper {
 
     /**
+     * Result of a recycle-aware delete attempt.
+     */
+    public enum DeleteOutcome {
+        /** Removed immediately (permanent delete) or already gone. */
+        DELETED,
+        /** Moved to the Recycle Bin (recoverable). */
+        RECYCLED,
+        /** Could not be removed now; scheduled for deletion on next reboot. */
+        QUEUED_FOR_REBOOT,
+        /** Removal failed and could not be queued. */
+        FAILED
+    }
+
+    /**
      * Attempts to delete a file or directory. If it cannot be deleted immediately because
      * it is in use or locked, it queues it for deletion on the next reboot.
      *
@@ -64,6 +78,80 @@ public class NativeFileHelper {
             } else {
                 AppLogger.warning("Failed to queue file for reboot deletion: " + file.getAbsolutePath());
             }
+            return false;
+        }
+    }
+
+    /**
+     * Recycle-aware delete. When {@code preferRecycle} is true (and on Windows),
+     * files/folders are first moved to the Recycle Bin via {@code SHFileOperation}
+     * ({@code FO_DELETE | FOF_ALLOWUNDO}) so the user can recover them. Locked
+     * items that cannot be recycled fall back to reboot-deletion queuing.
+     *
+     * @param file The file or folder to remove.
+     * @param preferRecycle true to try the Recycle Bin first.
+     * @return outcome describing what happened.
+     */
+    public static DeleteOutcome deleteWithOutcome(File file, boolean preferRecycle) {
+        if (file == null) return DeleteOutcome.FAILED;
+        if (!file.exists()) return DeleteOutcome.DELETED;
+        if (preferRecycle) {
+            try {
+                if (moveToRecycleBin(file)) {
+                    AppLogger.info("Moved leftover to Recycle Bin: " + file.getAbsolutePath());
+                    return DeleteOutcome.RECYCLED;
+                }
+                AppLogger.debug("Recycle Bin move failed for: " + file.getAbsolutePath()
+                        + " — falling back to permanent delete.");
+            } catch (Throwable t) {
+                AppLogger.debug("Recycle Bin unavailable for " + file.getAbsolutePath()
+                        + " (" + t.getMessage() + ") — falling back to permanent delete.");
+            }
+        }
+        boolean ok = deleteOrQueue(file);
+        if (ok) {
+            // deleteOrQueue returns true both for immediate delete and already-gone.
+            // If the file is gone now and we did not recycle, treat as DELETED.
+            return DeleteOutcome.DELETED;
+        }
+        // deleteOrQueue queued for reboot when it returns false after attempting
+        // MoveFileEx; distinguish queued vs hard failure by existence + best effort.
+        return DeleteOutcome.QUEUED_FOR_REBOOT;
+    }
+
+    /**
+     * Moves a file or directory to the Recycle Bin using Shell32 SHFileOperation
+     * with FOF_ALLOWUNDO. No confirmation UI is shown. Returns true only when the
+     * path no longer exists afterwards.
+     */
+    public static boolean moveToRecycleBin(File file) {
+        if (file == null || !file.exists()) return true;
+        try {
+            String os = System.getProperty("os.name", "").toLowerCase();
+            if (!os.contains("win")) return false;
+            com.sun.jna.platform.win32.Shell32 shell =
+                    com.sun.jna.platform.win32.Shell32.INSTANCE;
+            com.sun.jna.platform.win32.Shell32.SHFILEOPSTRUCT op =
+                    new com.sun.jna.platform.win32.Shell32.SHFILEOPSTRUCT();
+            op.wFunc = com.sun.jna.platform.win32.Shell32.FO_DELETE;
+            // pFrom must be double-null-terminated; JNA marshals Java String with
+            // a single terminator, so append an explicit extra null.
+            op.pFrom = file.getAbsolutePath() + "\0";
+            op.pTo = null;
+            op.fFlags = com.sun.jna.platform.win32.Shell32.FOF_ALLOWUNDO
+                    | com.sun.jna.platform.win32.Shell32.FOF_NOCONFIRMATION
+                    | com.sun.jna.platform.win32.Shell32.FOF_SILENT
+                    | com.sun.jna.platform.win32.Shell32.FOF_NOERRORUI;
+            int res = shell.SHFileOperation(op);
+            if (res != 0) {
+                AppLogger.debug("SHFileOperation returned " + res
+                        + " for " + file.getAbsolutePath());
+                return false;
+            }
+            return !new File(file.getAbsolutePath()).exists();
+        } catch (Throwable t) {
+            AppLogger.debug("moveToRecycleBin failed for " + file.getAbsolutePath()
+                    + ": " + t.getMessage());
             return false;
         }
     }

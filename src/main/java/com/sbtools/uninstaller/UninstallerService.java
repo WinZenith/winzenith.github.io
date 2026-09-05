@@ -29,9 +29,35 @@ public class UninstallerService {
     }
 
     public List<InstalledApp> listAppxApps() {
+        return listAppxApps("appx-list.ps1");
+    }
+
+    /**
+     * Fast AppX listing without per-package recursive size computation.
+     * Used for instant table display; sizes are enriched lazily via
+     * {@link #computeAppxSizeKB(InstalledApp)}.
+     */
+    public List<InstalledApp> listAppxAppsFast() {
+        List<InstalledApp> fast;
+        try {
+            fast = listAppxApps("appx-list-fast.ps1");
+        } catch (Exception e) {
+            AppLogger.debug("Fast AppX list unavailable, falling back: " + e.getMessage());
+            fast = new ArrayList<>();
+        }
+        if (fast.isEmpty()) {
+            // Script missing (older install) or no results — fall back to full scan
+            // only when fast produced nothing to avoid an empty table.
+            List<InstalledApp> full = listAppxApps("appx-list.ps1");
+            if (!full.isEmpty()) return full;
+        }
+        return fast;
+    }
+
+    private List<InstalledApp> listAppxApps(String scriptName) {
         List<InstalledApp> apps = new ArrayList<>();
         try {
-            Path script = PowerShellScripts.resolve("appx-list.ps1");
+            Path script = PowerShellScripts.resolve(scriptName);
             ProcessResult result = processRunner.run(ProcessRunner.powershellScript(script.toString()));
             if (result.success()) {
                 String json = result.stdout();
@@ -61,6 +87,36 @@ public class UninstallerService {
         // Sort alphabetically
         apps.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
         return apps;
+    }
+
+    /**
+     * Best-effort on-disk size for a Store app (KB). Returns 0 when unknown.
+     * Runs off the FX thread; capped traversal to avoid long stalls.
+     */
+    public int computeAppxSizeKB(InstalledApp app) {
+        if (app == null || app.getInstallLocation() == null
+                || app.getInstallLocation().isBlank()) return 0;
+        try {
+            File dir = new File(app.getInstallLocation());
+            if (!dir.exists() || !dir.isDirectory()) return 0;
+            final long[] total = {0};
+            final int[] files = {0};
+            java.nio.file.Files.walk(dir.toPath())
+                    .limit(20000)
+                    .forEach(p -> {
+                        if (files[0] > 20000) return;
+                        try {
+                            if (java.nio.file.Files.isRegularFile(p)) {
+                                total[0] += java.nio.file.Files.size(p);
+                                files[0]++;
+                            }
+                        } catch (Exception ignored) {}
+                    });
+            long kb = total[0] / 1024;
+            return kb > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) kb;
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     private InstalledApp parseAppxNode(JsonNode node) {
@@ -697,6 +753,80 @@ public class UninstallerService {
     }
 
     /**
+     * Cancellable variant — checks {@code cancelled} between roots so the UI
+     * Cancel button can abort long scans. Null means not cancellable.
+     */
+    public List<String> scanFilesystemLeftovers(InstalledApp app, boolean includePrimaryLocation,
+                                                java.util.concurrent.atomic.AtomicBoolean cancelled) {
+        List<String> leftovers = new ArrayList<>();
+
+        if (includePrimaryLocation && app.getInstallLocation() != null && !app.getInstallLocation().isBlank()
+                && !isProtectedPath(app.getInstallLocation())) {
+            File installDir = new File(app.getInstallLocation());
+            if (installDir.exists()) {
+                leftovers.add(installDir.getAbsolutePath());
+            }
+        } else if (app.getInstallLocation() != null && !app.getInstallLocation().isBlank()
+                && isProtectedPath(app.getInstallLocation())) {
+            AppLogger.info("Skipping protected install location from deletable leftovers: " + app.getInstallLocation());
+        }
+
+        List<String> roots = new ArrayList<>();
+        addIfNotNull(roots, System.getenv("ProgramFiles"));
+        addIfNotNull(roots, System.getenv("ProgramFiles(x86)"));
+        addIfNotNull(roots, System.getenv("CommonProgramFiles"));
+        addIfNotNull(roots, System.getenv("CommonProgramFiles(x86)"));
+        addIfNotNull(roots, System.getenv("AppData"));
+        addIfNotNull(roots, System.getenv("LocalAppData"));
+        addIfNotNull(roots, System.getenv("ProgramData"));
+
+        String localAppData = System.getenv("LocalAppData");
+        String appData = System.getenv("AppData");
+        String userProfile = System.getenv("USERPROFILE");
+        String publicDir = System.getenv("PUBLIC");
+        if (localAppData != null) addIfNotNull(roots, localAppData + "\\Programs");
+        if (appData != null) addIfNotNull(roots, appData + "\\LocalLow");
+        if (publicDir != null) addIfNotNull(roots, publicDir + "\\Documents");
+        if (userProfile != null) addIfNotNull(roots, userProfile + "\\Desktop");
+        if (appData != null) addIfNotNull(roots, appData + "\\Microsoft\\Internet Explorer\\Quick Launch");
+
+        roots = new ArrayList<>(new java.util.LinkedHashSet<>(roots));
+
+        for (String root : roots) {
+            if (cancelled != null && cancelled.get()) break;
+            File rootDir = new File(root);
+            if (!rootDir.exists() || !rootDir.isDirectory()) continue;
+            File[] children = rootDir.listFiles();
+            if (children == null) continue;
+            for (File child : children) {
+                if (cancelled != null && cancelled.get()) break;
+                if (child.isDirectory()) {
+                    if (isFolderMatch(child.getName(), app.getName(), app.getPublisher())) {
+                        String absPath = child.getAbsolutePath();
+                        if (!leftovers.contains(absPath) && !isProtectedPath(absPath)) {
+                            leftovers.add(absPath);
+                        }
+                    } else if (isPublisherMatch(child.getName(), app.getPublisher())) {
+                        File[] vendorChildren = child.listFiles(File::isDirectory);
+                        if (vendorChildren != null) {
+                            for (File vendorChild : vendorChildren) {
+                                if (cancelled != null && cancelled.get()) break;
+                                if (isFolderMatch(vendorChild.getName(), app.getName(), null)) {
+                                    String absPath = vendorChild.getAbsolutePath();
+                                    if (!leftovers.contains(absPath) && !isProtectedPath(absPath)) {
+                                        leftovers.add(absPath);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return leftovers;
+    }
+
+    /**
      * @param includePrimaryLocation when false, the app's own installLocation is excluded
      *        from deletable results. Use this when the standard uninstaller FAILED —
      *        the live install dir must not be offered for force-deletion as that would
@@ -826,6 +956,14 @@ public class UninstallerService {
      * Scans Registry SOFTWARE keys (HKLM, HKLM-Wow6432, HKCU) and HKCR for remnants.
      */
     public List<String> scanRegistryLeftovers(InstalledApp app) {
+        return scanRegistryLeftovers(app, null);
+    }
+
+    /**
+     * Cancellable registry scan. Checks {@code cancelled} between hives/branches.
+     */
+    public List<String> scanRegistryLeftovers(InstalledApp app,
+                                              java.util.concurrent.atomic.AtomicBoolean cancelled) {
         List<String> leftovers = new ArrayList<>();
 
         // Add the primary uninstaller registry key itself if it exists (for Win32 apps)
@@ -837,13 +975,17 @@ public class UninstallerService {
                 }
             } catch (Exception ignored) {}
         }
+        if (cancelled != null && cancelled.get()) return leftovers;
 
         // Search in Software paths only — do NOT scan SYSTEM\CurrentControlSet\Services
         // because substring matching on service names can flag legitimate Windows services
-        scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SOFTWARE", app.getName(), app.getPublisher(), leftovers);
-        scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SOFTWARE\\Wow6432Node", app.getName(), app.getPublisher(), leftovers);
-        scanRegistryForLeftovers(WinReg.HKEY_CURRENT_USER, "HKCU", "SOFTWARE", app.getName(), app.getPublisher(), leftovers);
+        scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SOFTWARE", app.getName(), app.getPublisher(), leftovers, cancelled);
+        if (cancelled != null && cancelled.get()) return leftovers;
+        scanRegistryForLeftovers(WinReg.HKEY_LOCAL_MACHINE, "HKLM", "SOFTWARE\\Wow6432Node", app.getName(), app.getPublisher(), leftovers, cancelled);
+        if (cancelled != null && cancelled.get()) return leftovers;
+        scanRegistryForLeftovers(WinReg.HKEY_CURRENT_USER, "HKCU", "SOFTWARE", app.getName(), app.getPublisher(), leftovers, cancelled);
 
+        if (cancelled != null && cancelled.get()) return leftovers;
         // Scan HKCR for file association entries
         scanHkcrForLeftovers(app.getName(), app.getPublisher(), leftovers);
 
@@ -891,6 +1033,12 @@ public class UninstallerService {
     }
 
     private void scanRegistryForLeftovers(HKEY hive, String hiveLabel, String rootPath, String appName, String publisher, List<String> leftovers) {
+        scanRegistryForLeftovers(hive, hiveLabel, rootPath, appName, publisher, leftovers, null);
+    }
+
+    private void scanRegistryForLeftovers(HKEY hive, String hiveLabel, String rootPath, String appName,
+                                          String publisher, List<String> leftovers,
+                                          java.util.concurrent.atomic.AtomicBoolean cancelled) {
         try {
             if (!Advapi32Util.registryKeyExists(hive, rootPath)) {
                 return;
@@ -901,6 +1049,7 @@ public class UninstallerService {
             }
 
             for (String subkey : subkeys) {
+                if (cancelled != null && cancelled.get()) return;
                 String fullPath = rootPath + "\\" + subkey;
 
                 // Check if the subkey matches publisher name or app name
@@ -916,6 +1065,7 @@ public class UninstallerService {
                             String[] innerKeys = Advapi32Util.registryGetKeys(hive, fullPath);
                             if (innerKeys != null) {
                                 for (String innerKey : innerKeys) {
+                                    if (cancelled != null && cancelled.get()) return;
                                     if (isRegistryKeyMatch(innerKey, appName, null)) {
                                         String formattedPath = hiveLabel + "\\" + fullPath + "\\" + innerKey;
                                         if (!leftovers.contains(formattedPath)) {
@@ -1079,15 +1229,137 @@ public class UninstallerService {
      * @param failedDeletions Output list to append paths that could not be deleted immediately (e.g. locked).
      */
     public void deleteFilesystemLeftovers(List<String> paths, List<String> failedDeletions) {
+        deleteFilesystemLeftovers(paths, failedDeletions, null, false);
+    }
+
+    /**
+     * Recycle-aware variant. When {@code preferRecycle} is true, items are moved to
+     * the Recycle Bin first (recoverable); locked items fall back to reboot queue.
+     * {@code recycled} (nullable) collects paths that were recycled for summary UI.
+     */
+    public void deleteFilesystemLeftovers(List<String> paths, List<String> failedDeletions,
+                                          List<String> recycled, boolean preferRecycle) {
+        if (paths == null) return;
         for (String pathStr : paths) {
+            if (pathStr == null || pathStr.isBlank()) continue;
             File file = new File(pathStr);
-            if (file.exists()) {
+            if (!file.exists()) continue;
+            if (isProtectedPath(pathStr)) {
+                AppLogger.warning("Refused to delete protected path: " + pathStr);
+                if (failedDeletions != null) failedDeletions.add(pathStr + " (protected — skipped)");
+                continue;
+            }
+            if (preferRecycle) {
+                NativeFileHelper.DeleteOutcome outcome =
+                        NativeFileHelper.deleteWithOutcome(file, true);
+                if (outcome == NativeFileHelper.DeleteOutcome.RECYCLED) {
+                    if (recycled != null) recycled.add(pathStr);
+                } else if (outcome == NativeFileHelper.DeleteOutcome.DELETED) {
+                    // gone — nothing to report as failure
+                } else {
+                    if (failedDeletions != null) failedDeletions.add(pathStr);
+                }
+            } else {
                 boolean success = NativeFileHelper.deleteOrQueue(file);
-                if (!success) {
+                if (!success && failedDeletions != null) {
                     failedDeletions.add(pathStr);
                 }
             }
         }
+    }
+
+    /**
+     * Best-effort safety backup: exports each selected registry key via
+     * {@code reg export <key> <file> /y} into {@code backupDir}. Mirrors the
+     * Backup tab pattern. Never throws; returns files that were written.
+     */
+    public List<Path> exportRegistryKeysForBackup(List<String> registryPaths, Path backupDir) {
+        List<Path> exported = new ArrayList<>();
+        if (registryPaths == null || registryPaths.isEmpty()) return exported;
+        try {
+            java.nio.file.Files.createDirectories(backupDir);
+        } catch (Exception e) {
+            AppLogger.warning("Could not create registry backup dir: " + e.getMessage());
+            return exported;
+        }
+        int idx = 0;
+        for (String fullPath : registryPaths) {
+            if (fullPath == null || fullPath.isBlank() || !fullPath.contains("\\")) continue;
+            try {
+                String safe = fullPath.replace('\\', '_').replace('/', '_')
+                        .replace(':', '_').replaceAll("[^A-Za-z0-9_\\-\\.]+", "_");
+                if (safe.length() > 80) safe = safe.substring(0, 80);
+                Path out = backupDir.resolve(String.format("%03d_%s.reg", idx++, safe));
+                ProcessBuilder pb = new ProcessBuilder(
+                        "reg", "export", fullPath, out.toString(), "/y");
+                pb.redirectErrorStream(true);
+                Process p = com.sbtools.util.ProcessManager.start(pb);
+                boolean done = p.waitFor(60, TimeUnit.SECONDS);
+                if (!done) {
+                    p.destroyForcibly();
+                    AppLogger.warning("reg export timed out for " + fullPath);
+                } else if (p.exitValue() == 0 && java.nio.file.Files.exists(out)) {
+                    exported.add(out);
+                } else {
+                    AppLogger.warning("reg export failed for " + fullPath
+                            + " (exit=" + p.exitValue() + ")");
+                }
+            } catch (Exception e) {
+                AppLogger.warning("reg export error for " + fullPath + ": " + e.getMessage());
+            }
+        }
+        AppLogger.info("Registry pre-delete backup: " + exported.size()
+                + "/" + registryPaths.size() + " exported to " + backupDir);
+        return exported;
+    }
+
+    /**
+     * Computes the on-disk size of a file/folder (best effort, capped traversal).
+     * Returns -1 when the size cannot be determined.
+     */
+    public static long computePathSizeBytes(String absPath) {
+        if (absPath == null || absPath.isBlank()) return -1;
+        try {
+            File f = new File(absPath);
+            if (!f.exists()) return -1;
+            if (f.isFile()) return f.length();
+            final long[] total = {0};
+            final int[] count = {0};
+            java.nio.file.Files.walk(f.toPath())
+                    .limit(20000)
+                    .forEach(p -> {
+                        if (count[0] > 20000) return;
+                        try {
+                            if (java.nio.file.Files.isRegularFile(p)) {
+                                total[0] += java.nio.file.Files.size(p);
+                                count[0]++;
+                            }
+                        } catch (Exception ignored) {}
+                    });
+            return total[0];
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /**
+     * Winget fallback for Win32 entries without an uninstall command.
+     * Never auto-runs: caller must have explicit user consent.
+     */
+    public ProcessResult tryWingetUninstall(InstalledApp app, long timeoutSeconds)
+            throws IOException, InterruptedException {
+        com.sbtools.software.WingetRunner winget = new com.sbtools.software.WingetRunner();
+        if (!winget.isAvailable()) {
+            throw new IOException("winget is not available on this system.");
+        }
+        String query = app.getName() != null ? app.getName().trim() : "";
+        if (query.isEmpty()) throw new IOException("No app name for winget lookup.");
+        // --exact + --silent keeps the fallback predictable; caller already confirmed.
+        ProcessResult r = winget.runWithFallback(timeoutSeconds,
+                "uninstall", "--exact", "--silent", "--accept-source-agreements",
+                "--accept-package-agreements", "--name", query);
+        if (r == null) throw new IOException("winget uninstall produced no result.");
+        return r;
     }
 
     /**

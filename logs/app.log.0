@@ -10,3 +10,15 @@ Sep 05, 2026 9:28:13 PM com.sbtools.util.AppLogger warning
 WARNING: Skipping JSON entry with missing id: name=NoId
 Sep 05, 2026 9:28:13 PM com.sbtools.util.AppLogger info
 INFO: Dropping duplicate software update entry for id=google.chrome
+Sep 05, 2026 9:42:55 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 05, 2026 9:42:55 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping JSON entry with missing id: name=NoId
+Sep 05, 2026 9:42:55 PM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=google.chrome
+Sep 05, 2026 9:42:55 PM com.sbtools.util.AppLogger warning
+WARNING: Uninstall exe not found after env expansion: C:\Program Files\App\uninstall.exe (from: "C:\Program Files\App\uninstall.exe" /S)
+Sep 05, 2026 9:42:55 PM com.sbtools.util.AppLogger warning
+WARNING: Uninstall exe not found after env expansion: C:\Program Files\Vendor\App\uninstall.exe (from: C:\Program Files\Vendor\App\uninstall.exe /S)
+Sep 05, 2026 9:42:55 PM com.sbtools.util.AppLogger info
+INFO: Rewrote msiexec /I to /X for uninstall (from: MsiExec.exe /I{12345678-1234-1234-1234-123456789012})

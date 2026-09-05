@@ -68,8 +68,12 @@ public class HelpTabView extends VBox {
         getChildren().add(createFaqSection("Uninstaller",
                 "The Uninstaller tab lists all installed applications, including both traditional Desktop/Win32 programs and Windows Store (AppX) apps. " +
                 "Use the search bar to find a specific application. Select an app and click \"Uninstall\" for a standard removal, or \"Force Uninstall\" for stubborn applications. " +
+                "Select 2+ apps and click \"Uninstall Selected\" to remove them one-by-one — each app still asks for confirmation, mode, and restore point. " +
                 "After uninstallation, the app scans for leftover files, folders, and registry entries that were not removed. " +
-                "You can review and selectively delete these leftovers to free up additional space. " +
+                "You can review and selectively delete these leftovers: files go to the Recycle Bin by default (recoverable), registry keys are backed up to .reg first. " +
+                "Only exact matches are pre-selected; heuristic matches show a badge and stay unchecked. Use \"High-confidence only\" to reset to the safest selection. " +
+                "Use \"History\" to audit past uninstalls and \"Export...\" to save the app list as CSV. " +
+                "If an entry has no uninstaller, the app offers a winget fallback. " +
                 "Be cautious with force uninstall — it may remove shared components that other applications depend on."));
 
         getChildren().add(createFaqSection("Startup Items/Services",
