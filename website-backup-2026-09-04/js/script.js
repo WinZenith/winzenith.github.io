@@ -1,20 +1,17 @@
 /* ============================================
-   WinZenith Website - Screenshot Carousel,
-   Download Counter, Scroll Reveal & Nav
+   WinZenith Website - Screenshot Carousel
+   & Download Counter
    ============================================ */
 
 document.addEventListener('DOMContentLoaded', () => {
     initCarousel();
     loadDownloadCount();
-    initReveal();
-    initActiveNav();
 });
 
 /* --- Screenshot Carousel --- */
 function initCarousel() {
     const slides = document.querySelectorAll('.carousel-slide');
     const dots = document.querySelectorAll('.carousel-dot');
-    if (!slides.length || !dots.length) return;
     let currentIndex = 0;
     let autoPlayInterval = null;
 
@@ -31,12 +28,11 @@ function initCarousel() {
     }
 
     function startAutoPlay() {
-        stopAutoPlay();
         autoPlayInterval = setInterval(nextSlide, 5000);
     }
 
     function stopAutoPlay() {
-        if (autoPlayInterval) clearInterval(autoPlayInterval);
+        clearInterval(autoPlayInterval);
     }
 
     dots.forEach((dot, index) => {
@@ -89,54 +85,4 @@ function formatNumber(num) {
         return num.toLocaleString();
     }
     return num.toString();
-}
-
-/* --- Scroll Reveal Animations --- */
-function initReveal() {
-    const elements = document.querySelectorAll('.reveal');
-    if (!elements.length) return;
-
-    if (!('IntersectionObserver' in window)) {
-        elements.forEach(el => el.classList.add('visible'));
-        return;
-    }
-
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                entry.target.classList.add('visible');
-                observer.unobserve(entry.target);
-            }
-        });
-    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
-
-    elements.forEach(el => observer.observe(el));
-}
-
-/* --- Active Nav Link Highlighting --- */
-function initActiveNav() {
-    const links = document.querySelectorAll('.nav-link');
-    const sections = document.querySelectorAll('main section[id]');
-    if (!links.length || !sections.length) return;
-
-    if (!('IntersectionObserver' in window)) return;
-
-    const byId = {};
-    links.forEach(link => {
-        const id = link.getAttribute('href');
-        if (id && id.startsWith('#')) byId[id.slice(1)] = link;
-    });
-
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            const link = byId[entry.target.id];
-            if (!link) return;
-            if (entry.isIntersecting) {
-                links.forEach(l => l.classList.remove('active'));
-                link.classList.add('active');
-            }
-        });
-    }, { rootMargin: '-45% 0px -50% 0px' });
-
-    sections.forEach(section => observer.observe(section));
 }

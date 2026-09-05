@@ -68,31 +68,85 @@
       }
     }
     </script>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Is WinZenith completely free and safe?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. WinZenith is 100% free and contains no ads, telemetry, or bundled software. The source code is publicly available on GitHub, and the executable is verified clean by VirusTotal and Softpedia's 100% Clean Award."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does WinZenith require installation?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. WinZenith is fully portable. Simply download the ZIP, extract it, and run the executable. No installation, no registry changes, and no leftover files when you delete it."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Which Windows versions are supported?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "WinZenith supports Windows 10 and Windows 11. It requires no additional dependencies or runtimes to be installed."
+          }
+        }
+      ]
+    }
+    </script>
 </head>
 <body>
+    <a class="skip-link" href="#main">Skip to content</a>
 
-    <!-- Header -->
+    <!-- Navigation -->
     <header class="header">
-        <div class="container">
-            <img src="images/logo.png" alt="WinZenith Logo" class="header-logo">
-            <h1 class="header-title">WinZenith</h1>
+        <div class="container nav-container">
+            <a href="#top" class="brand" aria-label="WinZenith home">
+                <img src="images/logo.png" alt="WinZenith Logo" class="header-logo" width="556" height="520">
+                <span class="header-title">WinZenith</span>
+            </a>
+            <nav class="nav-links" aria-label="Primary">
+                <a href="#features" class="nav-link">Features</a>
+                <a href="#screenshots" class="nav-link">Screenshots</a>
+                <a href="#changelog" class="nav-link">Changelog</a>
+                <a href="#guide" class="nav-link">Guide</a>
+                <a href="#faq" class="nav-link">FAQ</a>
+            </nav>
+            <div class="nav-actions">
+                <span class="version-pill" title="Current version">v1.2.8</span>
+                <a href="https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.8/WinZenith-1.2.8-portable.zip"
+                   class="btn btn-primary btn-small">&#11015; Download</a>
+            </div>
         </div>
     </header>
 
+    <main id="main">
     <!-- Hero Section -->
-    <section class="hero">
+    <section class="hero" id="top">
+        <div class="hero-glow" aria-hidden="true"></div>
         <div class="container">
-            <p class="hero-description hero-description-blue">
+            <p class="hero-pill reveal">v1.2.8 &mdash; Free &bull; Portable &bull; Open Source</p>
+            <h1 class="hero-title reveal">WinZenith</h1>
+            <p class="hero-subtitle reveal">Free Windows System Optimizer &amp; Cleaner</p>
+            <p class="hero-description reveal">
                 WinZenith is a free Windows optimization suite that puts many of the maintenance and cleanup tools you normally need into a single, modern interface. From removing junk files and completely uninstalling stubborn applications to optimizing system settings, updating drivers, and even defragmenting traditional hard drives, WinZenith makes routine PC maintenance quick and straightforward.
             </p>
 
-            <div class="hero-download-block">
-                <h2 class="section-title">Download <span>WinZenith</span></h2>
+            <div class="hero-download-block reveal">
+                <div class="hero-download-row">
+                    <a href="https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.8/WinZenith-1.2.8-portable.zip"
+                       class="btn btn-primary btn-large" id="download-btn-hero">
+                        &#11015; Download WinZenith from GitHub
+                    </a>
+                    <a href="#features" class="btn btn-secondary btn-large">Explore features</a>
+                </div>
                 <p class="download-cta-text">Free. Portable. No installation required. Designed for Windows 10 and 11.</p>
-                <a href="https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.8/WinZenith-1.2.8-portable.zip"
-                   class="btn btn-primary" id="download-btn-hero">
-                    &#11015; Download WinZenith from GitHub
-                </a>
                 <div class="hero-download-meta">
                     <div class="hero-download-meta-row">
                         <a href="https://www.softpedia.com/get/Windows-Widgets/System-Utilities/WinZenith.shtml"
@@ -113,7 +167,11 @@
                 </div>
             </div>
 
-            <div class="trust-bar">
+            <div class="hero-shot reveal">
+                <img src="images/screenshot-dashboard.png" alt="WinZenith Dashboard showing system health overview" width="1281" height="740">
+            </div>
+
+            <div class="trust-bar reveal">
                 <a href="https://www.softpedia.com/get/Windows-Widgets/System-Utilities/WinZenith.shtml"
                    target="_blank" rel="noopener noreferrer" class="trust-badge">
                     &#9733; Softpedia 3.5/5 &#9733;
@@ -133,73 +191,84 @@
         </div>
     </section>
 
+    <!-- Stats Strip -->
+    <section class="stats" aria-label="WinZenith at a glance">
+        <div class="container stats-grid">
+            <div class="stat reveal"><span class="stat-number">12</span><span class="stat-label">Built-in tools</span></div>
+            <div class="stat reveal"><span class="stat-number">21</span><span class="stat-label">Cleanup categories</span></div>
+            <div class="stat reveal"><span class="stat-number">100%</span><span class="stat-label">Free, no ads</span></div>
+            <div class="stat reveal"><span class="stat-number">0</span><span class="stat-label">Installation needed</span></div>
+        </div>
+    </section>
+
     <!-- Features -->
-    <section class="section">
+    <section class="section" id="features">
         <div class="container">
-            <h2 class="section-title">Free Windows 11 Driver / Software Updater, System Cleaner and more</h2>
+            <p class="section-kicker reveal">Everything in one place</p>
+            <h2 class="section-title reveal">Free Windows 11 Driver / Software Updater, System Cleaner and more</h2>
             <div class="features-grid">
-                <div class="feature-card">
-                    <div class="feature-icon">&#128202;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
                     <div class="feature-name">Dashboard</div>
                     <div class="feature-desc">System health overview at a glance. Scan for issues across drivers, software, and cleanup.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#128295;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg></div>
                     <div class="feature-name">Driver &amp; Software Updater</div>
                     <div class="feature-desc">Scan and update outdated drivers from 12+ major providers including Intel, NVIDIA, and Realtek.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#128190;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M10 13h4"/></svg></div>
                     <div class="feature-name">Backup / Rollback</div>
                     <div class="feature-desc">Create driver backups and system restore points. Easily rollback when needed.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#128260;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg></div>
                     <div class="feature-name">Software Update</div>
                     <div class="feature-desc">Keep your applications up to date via winget. Batch updates with progress tracking.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#8505;&#65039;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><circle cx="12" cy="16" r="0.5" fill="currentColor"/></svg></div>
                     <div class="feature-name">System Information</div>
                     <div class="feature-desc">Detailed hardware and software information: OS, CPU, GPU, RAM, storage, BIOS, and more.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#128465;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></svg></div>
                     <div class="feature-name">Windows App Uninstaller</div>
                     <div class="feature-desc">Remove desktop and store apps with leftover file, folder, and registry cleanup.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#9889;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
                     <div class="feature-name">Startup Manager</div>
                     <div class="feature-desc">Manage startup items, scheduled tasks, and Windows services. Backup and restore configs.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#129529;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 7-6 2-2 6L5 3z"/><path d="M13 12l6 6"/></svg></div>
                     <div class="feature-name">System Junk Cleaner</div>
                     <div class="feature-desc">Clean 21 categories of temporary files, browser cache, Windows updates leftovers, and registry.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#128101;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></div>
                     <div class="feature-name">Duplicate Files</div>
                     <div class="feature-desc">Content-hash based duplicate detection. Find and remove duplicate files to save space.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#128191;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg></div>
                     <div class="feature-name">Disk Tools</div>
                     <div class="feature-desc">Defragmentation with visual grid, secure file shredder, and free space wipe.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#129513;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4"/><path d="M15 3h4a2 2 0 0 1 2 2v4"/><path d="M9 21H5a2 2 0 0 1-2-2v-4"/><path d="M15 21h4a2 2 0 0 0 2-2v-4"/><circle cx="12" cy="12" r="3"/></svg></div>
                     <div class="feature-name">Browser Extensions</div>
                     <div class="feature-desc">Manage extensions across Chrome, Edge, Firefox, Brave, Opera, and Vivaldi.</div>
                 </div>
-                <div class="feature-card">
-                    <div class="feature-icon">&#127760;</div>
+                <div class="feature-card reveal">
+                    <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg></div>
                     <div class="feature-name">Network Optimizer</div>
                     <div class="feature-desc">Optimize network adapters, DNS settings, and connection parameters for better performance.</div>
                 </div>
             </div>
-            <ul class="highlights-list">
+            <ul class="highlights-list reveal">
                 <li>Completely uninstall software and remove leftover registry keys and files</li>
                 <li>Free for use Windows optimization tool 2026</li>
                 <li>Safe, free alternative to commercial PC cleanup tools</li>
@@ -209,20 +278,21 @@
     </section>
 
     <!-- Screenshots Carousel -->
-    <section class="section">
+    <section class="section section-alt" id="screenshots">
         <div class="container">
-            <h2 class="section-title">Portable, Without Ads &amp; Safe PC Optimizer</h2>
-            <div class="carousel-wrapper">
+            <p class="section-kicker reveal">Take a look inside</p>
+            <h2 class="section-title reveal">Portable, Without Ads &amp; Safe PC Optimizer</h2>
+            <div class="carousel-wrapper reveal">
                 <div class="carousel">
                     <div class="carousel-slides">
                         <div class="carousel-slide active">
-                            <img src="images/screenshot-dashboard.png" alt="WinZenith Dashboard">
+                            <img src="images/screenshot-dashboard.png" alt="WinZenith Dashboard showing system health overview" width="1281" height="740">
                         </div>
                         <div class="carousel-slide">
-                            <img src="images/screenshot-drivers.png" alt="WinZenith Drivers">
+                            <img src="images/screenshot-drivers.png" alt="WinZenith driver updater scanning for outdated drivers" width="1625" height="722">
                         </div>
                         <div class="carousel-slide">
-                            <img src="images/screenshot-cleanup.png" alt="WinZenith System Cleanup">
+                            <img src="images/screenshot-cleanup.png" alt="WinZenith system cleanup removing junk files" width="1409" height="729">
                         </div>
                     </div>
                 </div>
@@ -235,27 +305,50 @@
         </div>
     </section>
 
-    <!-- Download CTA -->
-    <section class="download-cta">
+    <!-- Changelog -->
+    <section class="section" id="changelog">
         <div class="container">
-            <h2 class="section-title">Download <span>WinZenith</span></h2>
-            <p class="download-cta-text">Free. Portable. No installation required. Designed for Windows 10 and 11.</p>
-            <a href="https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.8/WinZenith-1.2.8-portable.zip"
-               class="btn btn-primary" id="download-btn-bottom">
-                &#11015; Download WinZenith from GitHub
-            </a>
-            <div style="text-align: center; margin-top: 16px;">
-                <a href="https://www.softpedia.com/get/Windows-Widgets/System-Utilities/WinZenith.shtml"
-                   target="_blank" rel="noopener noreferrer" style="display: inline-block;">
-                    <img src="https://www.softpedia.com/_img/softpedia_100_clean.webp"
-                         alt="Softpedia 100% Clean Award - WinZenith is virus free"
-                         style="height: 62px; width: auto;">
-                </a>
+            <p class="section-kicker reveal">Actively maintained</p>
+            <h2 class="section-title reveal">Latest <span>Updates</span></h2>
+            <div class="changelog-list">
+                <article class="changelog-card reveal">
+                    <div class="changelog-head">
+                        <span class="changelog-version">v1.2.8</span>
+                        <time class="changelog-date" datetime="2026-09-04">September 4, 2026</time>
+                        <span class="changelog-badge">Latest</span>
+                    </div>
+                    <ul class="changelog-items">
+                        <li>Single-instance management: WinZenith now detects an already running instance instead of launching twice</li>
+                        <li>Improved update handling for a smoother upgrade experience</li>
+                    </ul>
+                </article>
             </div>
-            <div class="download-count" style="justify-content: center; margin-top: 12px;">
-                &#10003; <span class="download-count-number">...</span> downloads
-            </div>
-            <div class="smartscreen-note">
+            <p class="changelog-more reveal">
+                <a href="https://github.com/WinZenith/winzenith.github.io/releases">View all releases on GitHub</a>
+            </p>
+        </div>
+    </section>
+
+    <!-- Guide -->
+    <section class="section section-alt" id="guide">
+        <div class="container">
+            <p class="section-kicker reveal">Up and running in a minute</p>
+            <h2 class="section-title reveal">How to <span>Run WinZenith</span></h2>
+            <ol class="steps-list">
+                <li class="step-card reveal">
+                    <span class="step-number" aria-hidden="true">1</span>
+                    <div><h3 class="step-title">Download</h3><p class="step-desc">Grab <code>WinZenith-1.2.8-portable.zip</code> from GitHub Releases.</p></div>
+                </li>
+                <li class="step-card reveal">
+                    <span class="step-number" aria-hidden="true">2</span>
+                    <div><h3 class="step-title">Extract</h3><p class="step-desc">Unzip it to any folder &mdash; USB stick included. Nothing gets installed.</p></div>
+                </li>
+                <li class="step-card reveal">
+                    <span class="step-number" aria-hidden="true">3</span>
+                    <div><h3 class="step-title">Run</h3><p class="step-desc">Launch <code>WinZenith.exe</code> as Administrator and start optimizing.</p></div>
+                </li>
+            </ol>
+            <div class="smartscreen-note reveal">
                 <strong>&#9432; Windows SmartScreen warning?</strong><br>
                 When you first run WinZenith.exe, Windows may show a "Windows protected your PC" message.
                 This is normal for new, unsigned applications. To run WinZenith:<br><br>
@@ -267,24 +360,49 @@
         </div>
     </section>
 
-    <!-- FAQ Section -->
-    <section class="section faq-section">
+    <!-- Download CTA -->
+    <section class="download-cta" id="download">
         <div class="container">
-            <h2 class="section-title">Frequently <span>Asked Questions</span></h2>
+            <p class="section-kicker reveal">Get started now</p>
+            <h2 class="section-title reveal">Download <span>WinZenith</span></h2>
+            <p class="download-cta-text reveal">Free. Portable. No installation required. Designed for Windows 10 and 11.</p>
+            <a href="https://github.com/WinZenith/winzenith.github.io/releases/download/v1.2.8/WinZenith-1.2.8-portable.zip"
+               class="btn btn-primary btn-large reveal" id="download-btn-bottom">
+                &#11015; Download WinZenith from GitHub
+            </a>
+            <div style="text-align: center; margin-top: 16px;" class="reveal">
+                <a href="https://www.softpedia.com/get/Windows-Widgets/System-Utilities/WinZenith.shtml"
+                   target="_blank" rel="noopener noreferrer" style="display: inline-block;">
+                    <img src="https://www.softpedia.com/_img/softpedia_100_clean.webp"
+                         alt="Softpedia 100% Clean Award - WinZenith is virus free"
+                         style="height: 62px; width: auto;">
+                </a>
+            </div>
+            <div class="download-count reveal" style="justify-content: center; margin-top: 12px;">
+                &#10003; <span class="download-count-number">...</span> downloads
+            </div>
+        </div>
+    </section>
+
+    <!-- FAQ Section -->
+    <section class="section faq-section" id="faq">
+        <div class="container">
+            <p class="section-kicker reveal">Good to know</p>
+            <h2 class="section-title reveal">Frequently <span>Asked Questions</span></h2>
             <div class="faq-list">
-                <details class="faq-item">
+                <details class="faq-item reveal">
                     <summary class="faq-question">Is WinZenith completely free and safe?</summary>
                     <div class="faq-answer">
                         <p>Yes. WinZenith is 100% free and contains no ads, telemetry, or bundled software. The source code is publicly available on GitHub, and the executable is verified clean by VirusTotal and Softpedia's 100% Clean Award.</p>
                     </div>
                 </details>
-                <details class="faq-item">
+                <details class="faq-item reveal">
                     <summary class="faq-question">Does WinZenith require installation?</summary>
                     <div class="faq-answer">
                         <p>No. WinZenith is fully portable. Simply download the ZIP, extract it, and run the executable. No installation, no registry changes, and no leftover files when you delete it.</p>
                     </div>
                 </details>
-                <details class="faq-item">
+                <details class="faq-item reveal">
                     <summary class="faq-question">Which Windows versions are supported?</summary>
                     <div class="faq-answer">
                         <p>WinZenith supports Windows 10 and Windows 11. It requires no additional dependencies or runtimes to be installed.</p>
@@ -293,6 +411,7 @@
             </div>
         </div>
     </section>
+    </main>
 
     <!-- Footer -->
     <footer class="footer">
