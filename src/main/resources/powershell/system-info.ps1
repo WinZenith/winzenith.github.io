@@ -1,15 +1,52 @@
 # Gathers hardware and OS information and returns a single JSON object.
-# Version: 2.0
+# Version: 3.1
 # Reliability: never prompt/hang — callers run this with -NonInteractive, but
 # belt-and-braces here too. Per-query CIM timeouts bound any single hung WMI
 # provider so the script finishes with per-section warnings (partial data)
 # instead of hanging until the caller's end-to-end timeout kills everything.
+# Performance: optional -Sections filter + per-section timings. When -Sections
+# is supplied only those sections are queried (others emitted as null/empty);
+# callers can fan out sections in parallel and merge. Bare invocation (no
+# -Sections) preserves legacy v3.0 behavior: all sections, single JSON object.
+param(
+    [string[]]$Sections
+)
 $ProgressPreference = 'SilentlyContinue'
 try { $PSDefaultParameterValues['Get-CimInstance:OperationTimeoutSec'] = 20 } catch {}
 $result = [ordered]@{}
 $warnings = @()
+$timings = [ordered]@{}
+$__scriptStart = Get-Date
+# Normalized, case-insensitive section filter. Accepts JSON keys:
+# cpu,gpu,ram,os,storage,motherboard,bios,others,networkAdapters,audioDevices,
+# battery,temperatures,usbDevices,monitors,printers
+$__selectedSections = $null
+if ($PSBoundParameters.ContainsKey('Sections') -and $Sections -and $Sections.Count -gt 0) {
+    $__selectedSections = @()
+    foreach ($__s in $Sections) {
+        if ($null -eq $__s) { continue }
+        $__t = ([string]$__s).Trim()
+        if ($__t) { $__selectedSections += $__t.ToLowerInvariant() }
+    }
+    # Also accept a single comma-separated string ("cpu,os,ram")
+    if ($__selectedSections.Count -eq 1 -and $__selectedSections[0] -match ',') {
+        $__selectedSections = @($__selectedSections[0].Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+    }
+}
+function ShouldRun([string]$__name) {
+    if ($null -eq $__selectedSections -or $__selectedSections.Count -eq 0) { return $true }
+    return $__selectedSections -contains $__name.ToLowerInvariant()
+}
+function RecordTiming([string]$__name, [datetime]$__start) {
+    try {
+        $__ms = [int]((Get-Date) - $__start).TotalMilliseconds
+        $timings[$__name] = $__ms
+    } catch {}
+}
 
 # ── CPU ──────────────────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'cpu') {
 try {
     $ErrorActionPreference = 'Stop'
     $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
@@ -47,8 +84,15 @@ try {
         stepping=''; revision=''; voltage=''
     }
 }
+    RecordTiming 'cpu' $__secStart
+} else {
+    $result['cpu'] = $null
+    $timings['cpu'] = 0
+}
 
 # ── GPU ──────────────────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'gpu') {
 try {
     $ErrorActionPreference = 'Stop'
     $gpus = @()
@@ -203,8 +247,16 @@ try {
     $warnings += "GPU: $($_.Exception.Message)"
     $result['gpu'] = @()
 }
+    RecordTiming 'gpu' $__secStart
+} else {
+    # Skipped by -Sections filter: $null (not @()) so parallel merge keeps the owning group's value.
+    $result['gpu'] = $null
+    $timings['gpu'] = 0
+}
 
 # ── RAM ──────────────────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'ram') {
 try {
     $ErrorActionPreference = 'Stop'
     $csRam = Get-CimInstance Win32_ComputerSystem
@@ -297,8 +349,15 @@ try {
     $warnings += "RAM: $($_.Exception.Message)"
     $result['ram'] = [ordered]@{ totalBytes=0; channel=''; sticks=@() }
 }
+    RecordTiming 'ram' $__secStart
+} else {
+    $result['ram'] = $null
+    $timings['ram'] = 0
+}
 
 # ── OS ───────────────────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'os') {
 try {
     $ErrorActionPreference = 'Stop'
     $os = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1
@@ -332,8 +391,15 @@ try {
         windowsDir=''; serialNumber=''; productKey=''
     }
 }
+    RecordTiming 'os' $__secStart
+} else {
+    $result['os'] = $null
+    $timings['os'] = 0
+}
 
 # ── STORAGE ──────────────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'storage') {
 try {
     $ErrorActionPreference = 'Stop'
     $disks = @()
@@ -492,8 +558,15 @@ try {
     $warnings += "Storage: $($_.Exception.Message)"
     $result['storage'] = [ordered]@{ disks=@(); partitions=@(); nvmes=@() }
 }
+    RecordTiming 'storage' $__secStart
+} else {
+    $result['storage'] = $null
+    $timings['storage'] = 0
+}
 
 # ── MOTHERBOARD ──────────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'motherboard') {
 try {
     $ErrorActionPreference = 'Stop'
     $mb = Get-CimInstance Win32_BaseBoard | Select-Object -First 1
@@ -547,8 +620,15 @@ try {
     $warnings += "Motherboard: $($_.Exception.Message)"
     $result['motherboard'] = [ordered]@{ manufacturer=''; model=''; serialNumber=''; version=''; chipset=''; southbridge='' }
 }
+    RecordTiming 'motherboard' $__secStart
+} else {
+    $result['motherboard'] = $null
+    $timings['motherboard'] = 0
+}
 
 # ── BIOS ─────────────────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'bios') {
 try {
     $ErrorActionPreference = 'Stop'
     $biosInfo = Get-CimInstance Win32_BIOS | Select-Object -First 1
@@ -566,10 +646,17 @@ try {
     $warnings += "BIOS: $($_.Exception.Message)"
     $result['bios'] = [ordered]@{ manufacturer=''; version=''; releaseDate=''; smbiosMajor=0; smbiosMinor=0 }
 }
+    RecordTiming 'bios' $__secStart
+} else {
+    $result['bios'] = $null
+    $timings['bios'] = 0
+}
 
 # ── OTHER DEVICES ────────────────────────────────────────────────────────────
 # Optimized B2: server-side WQL filtering + limited columns to avoid pulling 2-4k objects with all properties
 # (~30-60s -> <5s on device-rich hosts). Client-side regex filters retained for correctness.
+$__secStart = Get-Date
+if (ShouldRun 'others') {
 try {
     $ErrorActionPreference = 'Stop'
     $others = @()
@@ -693,12 +780,29 @@ try {
     $warnings += "Others: $($_.Exception.Message)"
     $result['others'] = @()
 }
+    RecordTiming 'others' $__secStart
+} else {
+    # Skipped by -Sections filter: $null (not @()) so parallel merge keeps the owning group's value.
+    $result['others'] = $null
+    $timings['others'] = 0
+}
 
 # ── NETWORK ADAPTERS ────────────────────────────────────────────────────────
+# v3.1: limited-column WQL + server-side physical filter to avoid pulling all
+# virtual/miniport adapters with full property sets.
+$__secStart = Get-Date
+if (ShouldRun 'networkAdapters') {
 try {
     $ErrorActionPreference = 'Stop'
     $netAdapters = @()
-    Get-CimInstance Win32_NetworkAdapter | Where-Object { $_.PhysicalAdapter -or $_.NetConnectionID } | ForEach-Object {
+    # Prefer limited columns; keep Where-Object client filter for compat
+    $netRaw = $null
+    try {
+        $netRaw = Get-CimInstance -Query "SELECT Name,Manufacturer,MACAddress,Speed,AdapterType,NetConnectionStatus,NetConnectionID,PhysicalAdapter,InterfaceIndex,Index FROM Win32_NetworkAdapter WHERE PhysicalAdapter = TRUE OR NetConnectionID IS NOT NULL" -ErrorAction Stop
+    } catch {
+        $netRaw = Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop | Where-Object { $_.PhysicalAdapter -or $_.NetConnectionID }
+    }
+    $netRaw | ForEach-Object {
         $na = $_
         $mac = ''
         try { if ($na.MACAddress) { $mac = $na.MACAddress } } catch {}
@@ -756,12 +860,26 @@ try {
     $warnings += "Network Adapters: $($_.Exception.Message)"
     $result['networkAdapters'] = @()
 }
+    RecordTiming 'networkAdapters' $__secStart
+} else {
+    # Skipped by -Sections filter: $null (not @()) so parallel merge keeps the owning group's value.
+    $result['networkAdapters'] = $null
+    $timings['networkAdapters'] = 0
+}
 
 # ── AUDIO DEVICES ──────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'audioDevices') {
 try {
     $ErrorActionPreference = 'Stop'
     $audioDevices = @()
-    Get-CimInstance Win32_SoundDevice | ForEach-Object {
+    # v3.1: limited columns via WQL (was SELECT * over Win32_SoundDevice)
+    try {
+        $audioRaw = Get-CimInstance -Query "SELECT Name,Manufacturer,Status,DeviceID FROM Win32_SoundDevice" -ErrorAction Stop
+    } catch {
+        $audioRaw = Get-CimInstance Win32_SoundDevice -ErrorAction Stop
+    }
+    $audioRaw | ForEach-Object {
         $audioDevices += [ordered]@{
             name         = if ($_.Name) { $_.Name.Trim() } else { '' }
             manufacturer = if ($_.Manufacturer) { $_.Manufacturer.Trim() } else { '' }
@@ -774,8 +892,16 @@ try {
     $warnings += "Audio Devices: $($_.Exception.Message)"
     $result['audioDevices'] = @()
 }
+    RecordTiming 'audioDevices' $__secStart
+} else {
+    # Skipped by -Sections filter: $null (not @()) so parallel merge keeps the owning group's value.
+    $result['audioDevices'] = $null
+    $timings['audioDevices'] = 0
+}
 
 # ── BATTERY ────────────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'battery') {
 try {
     $ErrorActionPreference = 'Stop'
     $batterySection = $null
@@ -828,8 +954,15 @@ try {
     $warnings += "Battery: $($_.Exception.Message)"
     $result['battery'] = $null
 }
+    RecordTiming 'battery' $__secStart
+} else {
+    $result['battery'] = $null
+    $timings['battery'] = 0
+}
 
 # ── TEMPERATURES ───────────────────────────────────────────────────────────
+$__secStart = Get-Date
+if (ShouldRun 'temperatures') {
 try {
     $ErrorActionPreference = 'Stop'
     $temps = @()
@@ -865,17 +998,28 @@ try {
     }
     $result['temperatures'] = $temps
     if ($temps.Count -eq 0) {
-        $warnings += "Temperatures: No thermal zone data (requires admin or not supported on this motherboard)."
+        # Only warn when caller actually wanted temperatures (avoids noise in parallel fan-out)
+        if (ShouldRun 'temperatures') {
+            $warnings += "Temperatures: No thermal zone data (requires admin or not supported on this motherboard)."
+        }
     }
 } catch {
     $warnings += "Temperatures: $($_.Exception.Message)"
     $result['temperatures'] = @()
+}
+    RecordTiming 'temperatures' $__secStart
+} else {
+    # Skipped by -Sections filter: $null (not @()) so parallel merge keeps the owning group's value.
+    $result['temperatures'] = $null
+    $timings['temperatures'] = 0
 }
 
 # ── USB DEVICES ──────────────────────────────────────────────────────────────
 # Optimized B2: single WQL query for PNPClass='USB' or DeviceID LIKE 'USB%' (~200ms) instead of
 # N+1 association walk via Win32_USBControllerDevice + [wmi] per device (5-15s on device-rich hosts).
 # Fallback retains legacy method for older WMI providers where WQL LIKE fails.
+$__secStart = Get-Date
+if (ShouldRun 'usbDevices') {
 try {
     $ErrorActionPreference = 'Stop'
     $usbDevices = @()
@@ -925,11 +1069,28 @@ try {
     $warnings += "USB Devices: $($_.Exception.Message)"
     $result['usbDevices'] = @()
 }
+    RecordTiming 'usbDevices' $__secStart
+} else {
+    # Skipped by -Sections filter: $null (not @()) so parallel merge keeps the owning group's value.
+    $result['usbDevices'] = $null
+    $timings['usbDevices'] = 0
+}
 
 # ── MONITORS ─────────────────────────────────────────────────────────────────
+# v3.1: cache Win32_VideoController resolution once and reuse (was queried up to 3x).
+$__secStart = Get-Date
+if (ShouldRun 'monitors') {
 try {
     $ErrorActionPreference = 'Stop'
     $monitors = @()
+    # v3.1: query VideoController once, reuse for all monitors (was up to 3 identical queries)
+    $__cachedVcRes = $null
+    try {
+        $__cachedVcRes = Get-CimInstance -Query "SELECT CurrentHorizontalResolution,CurrentVerticalResolution FROM Win32_VideoController WHERE CurrentHorizontalResolution IS NOT NULL" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $__cachedVcRes) {
+            $__cachedVcRes = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.CurrentHorizontalResolution -and $_.CurrentVerticalResolution } | Select-Object -First 1
+        }
+    } catch {}
     # Primary: WmiMonitorID in root/wmi (accurate on Win10+ with DP/HDMI, not deprecated)
     $wmiMonitors = @()
     try {
@@ -970,11 +1131,10 @@ try {
                     }
                 } catch {}
             }
-            # Try to complement resolution via Win32_VideoController current resolution (primary)
+            # Try to complement resolution via cached Win32_VideoController current resolution (primary)
             if (-not $res) {
                 try {
-                    $vcRes = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.CurrentHorizontalResolution -and $_.CurrentVerticalResolution } | Select-Object -First 1
-                    if ($vcRes) { $res = "$($vcRes.CurrentHorizontalResolution)x$($vcRes.CurrentVerticalResolution)" }
+                    if ($__cachedVcRes) { $res = "$($__cachedVcRes.CurrentHorizontalResolution)x$($__cachedVcRes.CurrentVerticalResolution)" }
                 } catch {}
             }
             $mon = [ordered]@{
@@ -1033,11 +1193,10 @@ try {
             $monitors += $mon
         }
     }
-    # Enrich first monitor resolution via VideoController if still missing
+    # Enrich first monitor resolution via cached VideoController if still missing
     if ($monitors.Count -gt 0 -and -not $monitors[0].resolution) {
         try {
-            $vcRes2 = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.CurrentHorizontalResolution -and $_.CurrentVerticalResolution } | Select-Object -First 1
-            if ($vcRes2) { $monitors[0].resolution = "$($vcRes2.CurrentHorizontalResolution)x$($vcRes2.CurrentVerticalResolution)" }
+            if ($__cachedVcRes) { $monitors[0].resolution = "$($__cachedVcRes.CurrentHorizontalResolution)x$($__cachedVcRes.CurrentVerticalResolution)" }
         } catch {}
     }
     $result['monitors'] = $monitors
@@ -1045,12 +1204,27 @@ try {
     $warnings += "Monitors: $($_.Exception.Message)"
     $result['monitors'] = @()
 }
+    RecordTiming 'monitors' $__secStart
+} else {
+    # Skipped by -Sections filter: $null (not @()) so parallel merge keeps the owning group's value.
+    $result['monitors'] = $null
+    $timings['monitors'] = 0
+}
 
 # ── PRINTERS ─────────────────────────────────────────────────────────────────
+# v3.1: limited-column WQL (was SELECT * over Win32_Printer).
+$__secStart = Get-Date
+if (ShouldRun 'printers') {
 try {
     $ErrorActionPreference = 'Stop'
     $printers = @()
-    Get-CimInstance Win32_Printer | ForEach-Object {
+    # v3.1: limited columns via WQL (was SELECT * over Win32_Printer).
+    try {
+        $printerRaw = Get-CimInstance -Query "SELECT Name,DriverName,PortName,PrinterStatus,Shared,Default FROM Win32_Printer" -ErrorAction Stop
+    } catch {
+        $printerRaw = Get-CimInstance Win32_Printer -ErrorAction Stop
+    }
+    $printerRaw | ForEach-Object {
         $printerStatus = ''
         try {
             if ($_.PrinterStatus) {
@@ -1076,8 +1250,16 @@ try {
     $warnings += "Printers: $($_.Exception.Message)"
     $result['printers'] = @()
 }
+    RecordTiming 'printers' $__secStart
+} else {
+    # Skipped by -Sections filter: $null (not @()) so parallel merge keeps the owning group's value.
+    $result['printers'] = $null
+    $timings['printers'] = 0
+}
 
 # ── OUTPUT ───────────────────────────────────────────────────────────────────
+try { $timings['totalMs'] = [int]((Get-Date) - $__scriptStart).TotalMilliseconds } catch {}
 $result['warnings'] = $warnings
-$result['version'] = '3.0'
+$result['timings'] = $timings
+$result['version'] = '3.1'
 $result | ConvertTo-Json -Depth 6 -Compress

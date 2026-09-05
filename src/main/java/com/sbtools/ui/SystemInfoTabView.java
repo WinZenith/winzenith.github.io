@@ -14,6 +14,7 @@ import com.sbtools.systeminfo.PrinterInfo;
 import com.sbtools.systeminfo.RamInfo;
 import com.sbtools.systeminfo.StorageInfo;
 import com.sbtools.systeminfo.SystemInfoData;
+import com.sbtools.systeminfo.SystemInfoReportGenerator;
 import com.sbtools.systeminfo.SystemInfoService;
 import com.sbtools.systeminfo.TemperatureInfo;
 import com.sbtools.systeminfo.UsbDeviceInfo;
@@ -23,9 +24,11 @@ import com.sbtools.util.DataSizeFormatter;
 import com.sbtools.util.JsonMapper;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleStringProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
+import javafx.collections.transformation.SortedList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
@@ -37,6 +40,8 @@ import javafx.scene.control.ProgressBar;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
+import javafx.scene.control.TableColumn;
+import javafx.scene.control.TableView;
 import javafx.scene.control.TextField;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
@@ -55,6 +60,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -78,6 +84,7 @@ public class SystemInfoTabView extends BorderPane {
     private final Button cancelButton = new Button("Cancel");
     private final Button exportButton = new Button("Export...");
     private final Button copyButton = new Button("Copy All");
+    private final Button copyTabButton = new Button("Copy Tab");
     private final ProgressIndicator spinner = new ProgressIndicator();
     private final ProgressBar progressBar = new ProgressBar(0);
     private final TabPane tabPane = new TabPane();
@@ -112,8 +119,11 @@ public class SystemInfoTabView extends BorderPane {
         exportButton.setOnAction(e -> exportToFile());
         copyButton.setDisable(true);
         copyButton.setOnAction(e -> copyToClipboard());
+        copyTabButton.setDisable(true);
+        copyTabButton.setTooltip(new javafx.scene.control.Tooltip("Copy the currently visible tab as plain text"));
+        copyTabButton.setOnAction(e -> copyVisibleTab());
 
-        HBox top = new HBox(12, loadButton, refreshButton, cancelButton, exportButton, copyButton, spinner, progressBar, statusLabel);
+        HBox top = new HBox(12, loadButton, refreshButton, cancelButton, exportButton, copyButton, copyTabButton, spinner, progressBar, statusLabel);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -138,10 +148,31 @@ public class SystemInfoTabView extends BorderPane {
             statusLabel.setText("System information is only available on Windows.");
             loadButton.setDisable(true);
         } else {
-            // AdminCheck spawns powershell.exe (up to ~5s) — never block the FX
+            // AdminCheck spawns powershell.exe (up to ~5s) â€” never block the FX
             // thread for it. Resolve off-FX and publish the banner on FX.
             refreshAdminWarningAsync();
+            // Stale-while-revalidate (v3.1): render last snapshot instantly from
+            // portable disk cache so the tab is never blank; explicit Load/Refresh
+            // still performs a fresh parallel query. Snapshot model preserved.
+            tryStaleWhileRevalidate();
         }
+    }
+
+    private void tryStaleWhileRevalidate() {
+        try {
+            SystemInfoData cached = service.tryLoadCachedSnapshot();
+            if (cached != null) {
+                currentData = cached;
+                buildTabs(cached);
+                String when = cached.collectedAt() != null && !cached.collectedAt().isBlank()
+                        ? " (collected " + cached.collectedAt() + ")" : "";
+                statusLabel.setText("Loaded cached snapshot" + when + ". Click Refresh for latest.");
+                refreshButton.setDisable(false);
+                exportButton.setDisable(false);
+                copyButton.setDisable(false);
+                copyTabButton.setDisable(false);
+            }
+        } catch (Exception ignored) {}
     }
 
     private void loadInfo() {
@@ -160,6 +191,7 @@ public class SystemInfoTabView extends BorderPane {
         cancelButton.setDisable(false);
         exportButton.setDisable(true);
         copyButton.setDisable(true);
+        copyTabButton.setDisable(true);
         spinner.setVisible(true);
         progressBar.setProgress(0);
         progressBar.setVisible(true);
@@ -193,7 +225,7 @@ public class SystemInfoTabView extends BorderPane {
                     } else if (tabPane.getTabs().isEmpty()) {
                         statusLabel.setText("No system information available. Check Warnings tab or try Refresh as Administrator.");
                     } else if (hasAnyWarningsOrPartial(data)) {
-                        statusLabel.setText("System information loaded (partial — some data unavailable).");
+                        statusLabel.setText("System information loaded (partial â€” some data unavailable).");
                     } else {
                         statusLabel.setText("System information loaded.");
                     }
@@ -201,6 +233,7 @@ public class SystemInfoTabView extends BorderPane {
                     refreshButton.setDisable(false);
                     exportButton.setDisable(false);
                     copyButton.setDisable(false);
+                    copyTabButton.setDisable(false);
                     } catch (Exception renderEx) {
                         // buildTabs runs on the FX thread, outside the worker try/catch:
                         // never let a single bad section kill the FX update silently.
@@ -237,6 +270,7 @@ public class SystemInfoTabView extends BorderPane {
                         refreshButton.setDisable(false);
                         exportButton.setDisable(false);
                         copyButton.setDisable(false);
+                        copyTabButton.setDisable(false);
                     }
                 });
             }
@@ -324,10 +358,13 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         if (data.warnings() != null && !data.warnings().isEmpty()) {
-            tabPane.getTabs().add(buildWarningsTab(data.warnings()));
+            tabPane.getTabs().add(buildWarningsTab(data));
+        } else if (data.timings() != null && !data.timings().isEmpty()) {
+            // v3.1: timings alone are worth a Diagnostics tab even without warnings
+            tabPane.getTabs().add(buildWarningsTab(data));
         }
 
-        // B3 fix: never leave tabPane empty — show placeholder so user understands failure vs. blank
+        // B3 fix: never leave tabPane empty â€” show placeholder so user understands failure vs. blank
         if (tabPane.getTabs().isEmpty()) {
             tabPane.getTabs().add(buildEmptyStateTab(data));
         }
@@ -374,9 +411,9 @@ public class SystemInfoTabView extends BorderPane {
         title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
         Label msg = new Label(
                 "WinZenith queried WMI but received no usable data.\n" +
-                "• Try Refresh or restart as Administrator (some data requires elevation).\n" +
-                "• Check the Warnings tab for diagnostics.\n" +
-                "• See logs/system-info-last.json for raw output.");
+                "â€¢ Try Refresh or restart as Administrator (some data requires elevation).\n" +
+                "â€¢ Check the Warnings tab for diagnostics.\n" +
+                "â€¢ See logs/system-info-last.json for raw output.");
         msg.setWrapText(true);
         msg.getStyleClass().addAll("label", "text-muted");
         box.getChildren().addAll(title, msg);
@@ -384,7 +421,7 @@ public class SystemInfoTabView extends BorderPane {
             Label wTitle = UILabel.sectionTitle("Warnings");
             box.getChildren().add(wTitle);
             for (String w : data.warnings()) {
-                Label wl = new Label("• " + w);
+                Label wl = new Label("â€¢ " + w);
                 wl.setWrapText(true);
                 wl.getStyleClass().addAll("label", "warning");
                 wl.setStyle("-fx-padding: 4 8; -fx-background-color: #3d2e1a; -fx-background-radius: 4; -fx-border-color: #ffb86c; -fx-border-radius: 4;");
@@ -401,7 +438,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // ── CPU ──────────────────────────────────────────────────────────────────
+    // â”€â”€ CPU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildCpuTab(CpuInfo cpu) {
         GridPane grid = createInfoGrid();
@@ -425,7 +462,7 @@ public class SystemInfoTabView extends BorderPane {
         return new Tab("CPU", wrapGrid(grid));
     }
 
-    // ── GPU ──────────────────────────────────────────────────────────────────
+    // â”€â”€ GPU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildGpuTab(List<GpuInfo> gpus) {
         VBox container = new VBox(16);
@@ -460,7 +497,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // ── RAM ──────────────────────────────────────────────────────────────────
+    // â”€â”€ RAM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildRamTab(RamInfo ram) {
         VBox container = new VBox(16);
@@ -494,7 +531,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // ── OS ───────────────────────────────────────────────────────────────────
+    // â”€â”€ OS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildOsTab(OsInfo os) {
         GridPane grid = createInfoGrid();
@@ -514,7 +551,7 @@ public class SystemInfoTabView extends BorderPane {
         return new Tab("OS", wrapGrid(grid));
     }
 
-    // ── Storage ──────────────────────────────────────────────────────────────
+    // â”€â”€ Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildStorageTab(StorageInfo storage) {
         VBox container = new VBox(16);
@@ -600,7 +637,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // ── Motherboard / BIOS ───────────────────────────────────────────────────
+    // â”€â”€ Motherboard / BIOS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildMotherboardTab(MotherboardInfo mb, BiosInfo bios) {
         VBox container = new VBox(16);
@@ -636,7 +673,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // ── Others ───────────────────────────────────────────────────────────────
+    // â”€â”€ Others â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildOthersTab(List<OtherDevice> devices) {
         VBox container = new VBox(8);
@@ -727,7 +764,7 @@ public class SystemInfoTabView extends BorderPane {
                 String rawVal = (dev.manufacturer() != null && !dev.manufacturer().isBlank())
                         ? dev.manufacturer()
                         : (dev.status() != null && !dev.status().isBlank() ? dev.status() : "");
-                String val = rawVal.isBlank() ? "—" : rawVal;
+                String val = rawVal.isBlank() ? "â€”" : rawVal;
                 r = addRow(grid, r, devName, val);
             }
             if (r == 0) {
@@ -760,7 +797,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // ── Overview ────────────────────────────────────────────────────────────
+    // â”€â”€ Overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildOverviewTab(SystemInfoData data) {
         VBox container = new VBox(16);
@@ -877,134 +914,296 @@ public class SystemInfoTabView extends BorderPane {
         return card;
     }
 
-    // ── Network ─────────────────────────────────────────────────────────────
+    // â”€â”€ Network â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // v3.1: virtualized TableView + search + detail pane. Previous per-adapter
+    // VBox cards created N GridPanes and stalled on hosts with many virtual
+    // adapters; TableView renders only visible rows and supports sorting.
 
     private Tab buildNetworkTab(List<NetworkAdapterInfo> adapters) {
-        VBox container = new VBox(16);
-        container.setPadding(new Insets(12));
+        TextField search = new TextField();
+        search.setPromptText("Search adapters\u2026");
+        search.getStyleClass().add("sysinfo-search");
 
-        for (int i = 0; i < adapters.size(); i++) {
-            NetworkAdapterInfo adapter = adapters.get(i);
-            container.getChildren().add(UILabel.sectionTitle("Adapter " + (i + 1) + ": " + adapter.name()));
+        ObservableList<NetworkAdapterInfo> base = FXCollections.observableArrayList(adapters);
+        FilteredList<NetworkAdapterInfo> filtered = new FilteredList<>(base, p -> true);
+        search.textProperty().addListener((obs, o, n) -> {
+            String lower = n == null ? "" : n.toLowerCase();
+            filtered.setPredicate(a -> lower.isEmpty()
+                    || containsLower(a.name(), lower)
+                    || containsLower(a.manufacturer(), lower)
+                    || containsLower(a.macAddress(), lower)
+                    || containsLower(a.formatIpAddresses(), lower)
+                    || containsLower(a.status(), lower));
+        });
+        SortedList<NetworkAdapterInfo> sorted = new SortedList<>(filtered);
+
+        TableView<NetworkAdapterInfo> table = new TableView<>(sorted);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        table.setPrefHeight(280);
+        table.getColumns().addAll(
+                tableColumn("Name", 220, a -> nvl(a.name())),
+                tableColumn("Status", 110, a -> nvl(a.status())),
+                tableColumn("Speed", 90, a -> nvl(a.speed())),
+                tableColumn("MAC", 130, a -> nvl(a.macAddress())),
+                tableColumn("IP", 180, NetworkAdapterInfo::formatIpAddresses));
+        sorted.comparatorProperty().bind(table.comparatorProperty());
+
+        VBox detailBox = new VBox(8);
+        table.getSelectionModel().selectedItemProperty().addListener((obs, o, sel) -> {
+            detailBox.getChildren().clear();
+            if (sel == null) {
+                return;
+            }
             GridPane grid = createInfoGrid();
             int row = 0;
-            row = addRow(grid, row, "Name", adapter.name());
-            row = addRow(grid, row, "Manufacturer", adapter.manufacturer());
-            row = addRow(grid, row, "Type", adapter.adapterType());
-            row = addRow(grid, row, "Speed", adapter.speed());
-            row = addRow(grid, row, "MAC Address", adapter.macAddress());
-            row = addRow(grid, row, "IP Addresses", adapter.formatIpAddresses());
-            row = addRow(grid, row, "DHCP", adapter.dhcpEnabled() ? "Enabled" : "Disabled");
-            row = addRow(grid, row, "Status", adapter.status());
-            container.getChildren().add(wrapGrid(grid));
+            row = addRow(grid, row, "Name", sel.name());
+            row = addRow(grid, row, "Manufacturer", sel.manufacturer());
+            row = addRow(grid, row, "Type", sel.adapterType());
+            row = addRow(grid, row, "Speed", sel.speed());
+            row = addRow(grid, row, "MAC Address", sel.macAddress());
+            row = addRow(grid, row, "IP Addresses", sel.formatIpAddresses());
+            row = addRow(grid, row, "DHCP", sel.dhcpEnabled() ? "Enabled" : "Disabled");
+            row = addRow(grid, row, "Status", sel.status());
+            detailBox.getChildren().add(wrapGridOrPlaceholder(grid, row, "No details available."));
+        });
+        if (!sorted.isEmpty()) {
+            table.getSelectionModel().select(0);
         }
 
+        VBox container = new VBox(8, search, table, detailBox);
+        container.setPadding(new Insets(12));
+        VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
         Tab tab = new Tab("Network");
         tab.setContent(scroll);
         return tab;
     }
 
-    // ── Audio ───────────────────────────────────────────────────────────────
+    // â”€â”€ Audio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildAudioTab(List<AudioDeviceInfo> devices) {
-        VBox container = new VBox(16);
-        container.setPadding(new Insets(12));
+        TextField search = new TextField();
+        search.setPromptText("Search audio devices\u2026");
+        search.getStyleClass().add("sysinfo-search");
 
-        for (int i = 0; i < devices.size(); i++) {
-            AudioDeviceInfo device = devices.get(i);
-            container.getChildren().add(UILabel.sectionTitle(device.name()));
+        ObservableList<AudioDeviceInfo> base = FXCollections.observableArrayList(devices);
+        FilteredList<AudioDeviceInfo> filtered = new FilteredList<>(base, p -> true);
+        search.textProperty().addListener((obs, o, n) -> {
+            String lower = n == null ? "" : n.toLowerCase();
+            filtered.setPredicate(d -> lower.isEmpty()
+                    || containsLower(d.name(), lower)
+                    || containsLower(d.manufacturer(), lower)
+                    || containsLower(d.status(), lower));
+        });
+        SortedList<AudioDeviceInfo> sorted = new SortedList<>(filtered);
+
+        TableView<AudioDeviceInfo> table = new TableView<>(sorted);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        table.setPrefHeight(240);
+        table.getColumns().addAll(
+                tableColumn("Name", 260, a -> nvl(a.name())),
+                tableColumn("Manufacturer", 180, a -> nvl(a.manufacturer())),
+                tableColumn("Status", 120, a -> nvl(a.status())));
+        sorted.comparatorProperty().bind(table.comparatorProperty());
+
+        VBox detailBox = new VBox(8);
+        table.getSelectionModel().selectedItemProperty().addListener((obs, o, sel) -> {
+            detailBox.getChildren().clear();
+            if (sel == null) {
+                return;
+            }
             GridPane grid = createInfoGrid();
             int row = 0;
-            row = addRow(grid, row, "Name", device.name());
-            row = addRow(grid, row, "Manufacturer", device.manufacturer());
-            row = addRow(grid, row, "Status", device.status());
-            container.getChildren().add(wrapGrid(grid));
+            row = addRow(grid, row, "Name", sel.name());
+            row = addRow(grid, row, "Manufacturer", sel.manufacturer());
+            row = addRow(grid, row, "Status", sel.status());
+            row = addRow(grid, row, "Device ID", sel.deviceId());
+            detailBox.getChildren().add(wrapGridOrPlaceholder(grid, row, "No details available."));
+        });
+        if (!sorted.isEmpty()) {
+            table.getSelectionModel().select(0);
         }
 
+        VBox container = new VBox(8, search, table, detailBox);
+        container.setPadding(new Insets(12));
+        VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
         Tab tab = new Tab("Audio");
         tab.setContent(scroll);
         return tab;
     }
 
-    // ── USB Devices ────────────────────────────────────────────────────────
+    // â”€â”€ USB Devices â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildUsbTab(List<UsbDeviceInfo> devices) {
-        VBox container = new VBox(16);
-        container.setPadding(new Insets(12));
+        TextField search = new TextField();
+        search.setPromptText("Search USB devices\u2026");
+        search.getStyleClass().add("sysinfo-search");
 
-        for (int i = 0; i < devices.size(); i++) {
-            UsbDeviceInfo dev = devices.get(i);
-            container.getChildren().add(UILabel.sectionTitle("Device " + (i + 1)));
+        ObservableList<UsbDeviceInfo> base = FXCollections.observableArrayList(devices);
+        FilteredList<UsbDeviceInfo> filtered = new FilteredList<>(base, p -> true);
+        search.textProperty().addListener((obs, o, n) -> {
+            String lower = n == null ? "" : n.toLowerCase();
+            filtered.setPredicate(d -> lower.isEmpty()
+                    || containsLower(d.name(), lower)
+                    || containsLower(d.manufacturer(), lower)
+                    || containsLower(d.deviceId(), lower)
+                    || containsLower(d.status(), lower));
+        });
+        SortedList<UsbDeviceInfo> sorted = new SortedList<>(filtered);
+
+        TableView<UsbDeviceInfo> table = new TableView<>(sorted);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        table.setPrefHeight(280);
+        table.getColumns().addAll(
+                tableColumn("Name", 240, a -> nvl(a.name())),
+                tableColumn("Manufacturer", 160, a -> nvl(a.manufacturer())),
+                tableColumn("Status", 100, a -> nvl(a.status())));
+        sorted.comparatorProperty().bind(table.comparatorProperty());
+
+        VBox detailBox = new VBox(8);
+        table.getSelectionModel().selectedItemProperty().addListener((obs, o, sel) -> {
+            detailBox.getChildren().clear();
+            if (sel == null) {
+                return;
+            }
             GridPane grid = createInfoGrid();
             int row = 0;
-            row = addRow(grid, row, "Name", dev.name());
-            row = addRow(grid, row, "Manufacturer", dev.manufacturer());
-            row = addRow(grid, row, "Device ID", dev.deviceId());
-            row = addRow(grid, row, "Status", dev.status());
-            container.getChildren().add(wrapGrid(grid));
+            row = addRow(grid, row, "Name", sel.name());
+            row = addRow(grid, row, "Manufacturer", sel.manufacturer());
+            row = addRow(grid, row, "Device ID", sel.deviceId());
+            row = addRow(grid, row, "Status", sel.status());
+            detailBox.getChildren().add(wrapGridOrPlaceholder(grid, row, "No details available."));
+        });
+        if (!sorted.isEmpty()) {
+            table.getSelectionModel().select(0);
         }
 
+        VBox container = new VBox(8, search, table, detailBox);
+        container.setPadding(new Insets(12));
+        VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
         Tab tab = new Tab("USB Devices");
         tab.setContent(scroll);
         return tab;
     }
 
-    // ── Monitors ───────────────────────────────────────────────────────────
+    // â”€â”€ Monitors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildMonitorTab(List<MonitorInfo> monitors) {
-        VBox container = new VBox(16);
-        container.setPadding(new Insets(12));
+        TextField search = new TextField();
+        search.setPromptText("Search monitors\u2026");
+        search.getStyleClass().add("sysinfo-search");
 
-        for (int i = 0; i < monitors.size(); i++) {
-            MonitorInfo mon = monitors.get(i);
-            container.getChildren().add(UILabel.sectionTitle("Monitor " + (i + 1)));
+        ObservableList<MonitorInfo> base = FXCollections.observableArrayList(monitors);
+        FilteredList<MonitorInfo> filtered = new FilteredList<>(base, p -> true);
+        search.textProperty().addListener((obs, o, n) -> {
+            String lower = n == null ? "" : n.toLowerCase();
+            filtered.setPredicate(m -> lower.isEmpty()
+                    || containsLower(m.name(), lower)
+                    || containsLower(m.manufacturer(), lower)
+                    || containsLower(m.resolution(), lower));
+        });
+        SortedList<MonitorInfo> sorted = new SortedList<>(filtered);
+
+        TableView<MonitorInfo> table = new TableView<>(sorted);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        table.setPrefHeight(220);
+        table.getColumns().addAll(
+                tableColumn("Name", 220, a -> nvl(a.name())),
+                tableColumn("Manufacturer", 160, a -> nvl(a.manufacturer())),
+                tableColumn("Resolution", 120, a -> nvl(a.resolution())),
+                tableColumn("Status", 100, a -> nvl(a.status())));
+        sorted.comparatorProperty().bind(table.comparatorProperty());
+
+        VBox detailBox = new VBox(8);
+        table.getSelectionModel().selectedItemProperty().addListener((obs, o, sel) -> {
+            detailBox.getChildren().clear();
+            if (sel == null) {
+                return;
+            }
             GridPane grid = createInfoGrid();
             int row = 0;
-            row = addRow(grid, row, "Name", mon.name());
-            row = addRow(grid, row, "Manufacturer", mon.manufacturer());
-            row = addRow(grid, row, "Screen Size", mon.screenSize());
-            row = addRow(grid, row, "Resolution", mon.resolution());
-            row = addRow(grid, row, "Status", mon.status());
-            row = addRow(grid, row, "PNP Device ID", mon.pnpDeviceId());
-            container.getChildren().add(wrapGrid(grid));
+            row = addRow(grid, row, "Name", sel.name());
+            row = addRow(grid, row, "Manufacturer", sel.manufacturer());
+            row = addRow(grid, row, "Screen Size", sel.screenSize());
+            row = addRow(grid, row, "Resolution", sel.resolution());
+            row = addRow(grid, row, "Status", sel.status());
+            row = addRow(grid, row, "PNP Device ID", sel.pnpDeviceId());
+            detailBox.getChildren().add(wrapGridOrPlaceholder(grid, row, "No details available."));
+        });
+        if (!sorted.isEmpty()) {
+            table.getSelectionModel().select(0);
         }
 
+        VBox container = new VBox(8, search, table, detailBox);
+        container.setPadding(new Insets(12));
+        VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
         Tab tab = new Tab("Monitors");
         tab.setContent(scroll);
         return tab;
     }
 
-    // ── Printers ───────────────────────────────────────────────────────────
+    // â”€â”€ Printers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildPrinterTab(List<PrinterInfo> printers) {
-        VBox container = new VBox(16);
-        container.setPadding(new Insets(12));
+        TextField search = new TextField();
+        search.setPromptText("Search printers\u2026");
+        search.getStyleClass().add("sysinfo-search");
 
-        for (int i = 0; i < printers.size(); i++) {
-            PrinterInfo printer = printers.get(i);
-            container.getChildren().add(UILabel.sectionTitle(printer.name()));
+        ObservableList<PrinterInfo> base = FXCollections.observableArrayList(printers);
+        FilteredList<PrinterInfo> filtered = new FilteredList<>(base, p -> true);
+        search.textProperty().addListener((obs, o, n) -> {
+            String lower = n == null ? "" : n.toLowerCase();
+            filtered.setPredicate(p -> lower.isEmpty()
+                    || containsLower(p.name(), lower)
+                    || containsLower(p.driver(), lower)
+                    || containsLower(p.port(), lower)
+                    || containsLower(p.status(), lower));
+        });
+        SortedList<PrinterInfo> sorted = new SortedList<>(filtered);
+
+        TableView<PrinterInfo> table = new TableView<>(sorted);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+        table.setPrefHeight(220);
+        table.getColumns().addAll(
+                tableColumn("Name", 200, a -> nvl(a.name())),
+                tableColumn("Driver", 180, a -> nvl(a.driver())),
+                tableColumn("Port", 120, a -> nvl(a.port())),
+                tableColumn("Status", 100, a -> nvl(a.status())));
+        sorted.comparatorProperty().bind(table.comparatorProperty());
+
+        VBox detailBox = new VBox(8);
+        table.getSelectionModel().selectedItemProperty().addListener((obs, o, sel) -> {
+            detailBox.getChildren().clear();
+            if (sel == null) {
+                return;
+            }
             GridPane grid = createInfoGrid();
             int row = 0;
-            row = addRow(grid, row, "Name", printer.name());
-            row = addRow(grid, row, "Driver", printer.driver());
-            row = addRow(grid, row, "Port", printer.port());
-            row = addRow(grid, row, "Status", printer.status());
-            row = addRow(grid, row, "Shared", printer.shared() ? "Yes" : "No");
-            row = addRow(grid, row, "Default", printer.isDefault() ? "Yes" : "No");
-            container.getChildren().add(wrapGrid(grid));
+            row = addRow(grid, row, "Name", sel.name());
+            row = addRow(grid, row, "Driver", sel.driver());
+            row = addRow(grid, row, "Port", sel.port());
+            row = addRow(grid, row, "Status", sel.status());
+            row = addRow(grid, row, "Shared", sel.shared() ? "Yes" : "No");
+            row = addRow(grid, row, "Default", sel.isDefault() ? "Yes" : "No");
+            detailBox.getChildren().add(wrapGrid(grid));
+        });
+        if (!sorted.isEmpty()) {
+            table.getSelectionModel().select(0);
         }
 
+        VBox container = new VBox(8, search, table, detailBox);
+        container.setPadding(new Insets(12));
+        VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
         Tab tab = new Tab("Printers");
         tab.setContent(scroll);
         return tab;
     }
 
-    // ── Battery ─────────────────────────────────────────────────────────────
+    // â”€â”€ Battery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildBatteryTab(BatteryInfo battery) {
         VBox container = new VBox(16);
@@ -1031,7 +1230,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // ── Temperatures ────────────────────────────────────────────────────────
+    // â”€â”€ Temperatures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private Tab buildTemperaturesTab(List<TemperatureInfo> temperatures) {
         VBox container = new VBox(16);
@@ -1082,27 +1281,53 @@ public class SystemInfoTabView extends BorderPane {
         return row + 1;
     }
 
-    // ── Warnings ────────────────────────────────────────────────────────────
+    // â”€â”€ Warnings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    private Tab buildWarningsTab(List<String> warnings) {
+    private Tab buildWarningsTab(SystemInfoData data) {
+        List<String> warnings = data.warnings() != null ? data.warnings() : List.of();
         VBox container = new VBox(8);
         container.setPadding(new Insets(12));
 
         Label header = UILabel.sectionTitle("Warnings");
         container.getChildren().add(header);
 
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < warnings.size(); i++) {
-            sb.append(i + 1).append(". ").append(warnings.get(i));
-            if (i < warnings.size() - 1) sb.append("\n");
+        if (!warnings.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < warnings.size(); i++) {
+                sb.append(i + 1).append(". ").append(warnings.get(i));
+                if (i < warnings.size() - 1) {
+                    sb.append("\n");
+                }
+            }
+
+            Label warningsLabel = new Label(sb.toString());
+            warningsLabel.getStyleClass().addAll("label", "warning");
+            warningsLabel.setWrapText(true);
+            warningsLabel.setMaxWidth(Double.MAX_VALUE);
+            warningsLabel.setStyle("-fx-padding: 8; -fx-background-color: #3d2e1a; -fx-background-radius: 4; -fx-border-color: #ffb86c; -fx-border-radius: 4;");
+            container.getChildren().add(warningsLabel);
         }
 
-        Label warningsLabel = new Label(sb.toString());
-        warningsLabel.getStyleClass().addAll("label", "warning");
-        warningsLabel.setWrapText(true);
-        warningsLabel.setMaxWidth(Double.MAX_VALUE);
-        warningsLabel.setStyle("-fx-padding: 8; -fx-background-color: #3d2e1a; -fx-background-radius: 4; -fx-border-color: #ffb86c; -fx-border-radius: 4;");
-        container.getChildren().add(warningsLabel);
+        // v3.1: per-section timings aid perf diagnostics (parallel fan-out).
+        if (data.timings() != null && !data.timings().isEmpty()) {
+            container.getChildren().add(UILabel.sectionTitle("Collection timings (ms)"));
+            GridPane grid = createInfoGrid();
+            int row = 0;
+            List<Map.Entry<String, Long>> entries = new ArrayList<>(data.timings().entrySet());
+            entries.sort(Map.Entry.comparingByKey());
+            for (Map.Entry<String, Long> e : entries) {
+                row = addRow(grid, row, e.getKey(), String.valueOf(e.getValue() == null ? 0 : e.getValue()));
+            }
+            if (data.collectedAt() != null && !data.collectedAt().isBlank()) {
+                row = addRow(grid, row, "Collected at", data.collectedAt());
+            }
+            if (data.version() != null && !data.version().isBlank()) {
+                row = addRow(grid, row, "Payload version", data.version());
+            }
+            container.getChildren().add(wrapGridOrPlaceholder(grid, row, "No timing data."));
+        } else if (warnings.isEmpty()) {
+            container.getChildren().add(placeholderCard("No warnings or timing data."));
+        }
 
         ScrollableContainer scroll = new ScrollableContainer(container);
         Tab tab = new Tab("Warnings");
@@ -1110,7 +1335,34 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    /** Legacy overload retained for tests/callers passing warnings only. */
+    private Tab buildWarningsTab(List<String> warnings) {
+        return buildWarningsTab(new SystemInfoData(null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null,
+                warnings != null ? List.copyOf(warnings) : List.of(), null, null));
+    }
+
+    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    private static boolean containsLower(String value, String lower) {
+        return value != null && !value.isBlank() && value.toLowerCase().contains(lower);
+    }
+
+    private static <T> TableColumn<T, String> tableColumn(String title, double prefWidth,
+                                                          java.util.function.Function<T, String> extractor) {
+        TableColumn<T, String> col = new TableColumn<>(title);
+        col.setPrefWidth(prefWidth);
+        col.setSortable(true);
+        col.setCellValueFactory(cd -> {
+            T item = cd.getValue();
+            String v = "";
+            try {
+                v = extractor.apply(item);
+            } catch (Exception ignored) {}
+            return new SimpleStringProperty(v != null ? v : "");
+        });
+        return col;
+    }
 
     private static GridPane createInfoGrid() {
         GridPane grid = new GridPane();
@@ -1226,19 +1478,58 @@ public class SystemInfoTabView extends BorderPane {
         }
     }
 
-    // ── Export / Copy ──────────────────────────────────────────────────────
+    // â”€â”€ Export / Copy â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // v3.1: reports delegate to SystemInfoReportGenerator (single implementation,
+    // header metadata, TOC). Export runs off-FX so large payloads never freeze UI.
+
+    private Boolean adminHintFast() {
+        try {
+            if (!AppPaths.isWindows()) {
+                return null;
+            }
+            // Instant, non-blocking: banner visibility mirrors last elevation check.
+            // Visible == not admin; hidden == admin (or not yet resolved -> null).
+            if (adminWarningLabel.isManaged()) {
+                return !adminWarningLabel.isVisible();
+            }
+            return null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
 
     private void copyToClipboard() {
-        if (currentData == null) return;
-        String text = generatePlainTextReport(currentData);
+        if (currentData == null) {
+            return;
+        }
+        String text = SystemInfoReportGenerator.generatePlainTextReport(currentData, adminHintFast());
         ClipboardContent content = new ClipboardContent();
         content.putString(text);
         Clipboard.getSystemClipboard().setContent(content);
         statusLabel.setText("System information copied to clipboard.");
     }
 
+    private void copyVisibleTab() {
+        if (currentData == null) {
+            return;
+        }
+        Tab selected = tabPane.getSelectionModel().getSelectedItem();
+        String tabName = selected != null ? selected.getText() : "Overview";
+        String text = SystemInfoReportGenerator.generateSectionText(currentData, tabName);
+        if (text == null || text.isBlank()) {
+            text = SystemInfoReportGenerator.generatePlainTextReport(currentData, adminHintFast());
+            tabName = "Overview";
+        }
+        ClipboardContent content = new ClipboardContent();
+        content.putString(text);
+        Clipboard.getSystemClipboard().setContent(content);
+        statusLabel.setText("Tab '" + tabName + "' copied to clipboard.");
+    }
+
     private void exportToFile() {
-        if (currentData == null) return;
+        if (currentData == null) {
+            return;
+        }
 
         FileChooser fileChooser = new FileChooser();
         fileChooser.setTitle("Export System Information");
@@ -1251,531 +1542,91 @@ public class SystemInfoTabView extends BorderPane {
         fileChooser.setSelectedExtensionFilter(txtFilter);
 
         File file = fileChooser.showSaveDialog(getScene() != null ? getScene().getWindow() : null);
-        if (file == null) return;
-
-        try {
-            String content;
-            FileChooser.ExtensionFilter selectedFilter = fileChooser.getSelectedExtensionFilter();
-            String ext = "";
-            if (selectedFilter != null) {
-                List<String> extensions = selectedFilter.getExtensions();
-                if (!extensions.isEmpty()) {
-                    ext = extensions.get(0).replace("*", "");
-                }
-            }
-            // Determine extension from selected filter first, but respect user's typed extension
-            String typedNameLower = file.getName().toLowerCase();
-            boolean typedHasExt = typedNameLower.endsWith(".json") || typedNameLower.endsWith(".html") || typedNameLower.endsWith(".txt");
-            if (!typedHasExt && ext.isEmpty()) {
-                ext = ".txt";
-            } else if (typedHasExt) {
-                if (typedNameLower.endsWith(".json")) ext = ".json";
-                else if (typedNameLower.endsWith(".html")) ext = ".html";
-                else ext = ".txt";
-            } else if (ext.isEmpty()) {
-                ext = ".txt";
-            }
-
-            if (".json".equals(ext)) {
-                content = JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValueAsString(currentData);
-            } else if (".html".equals(ext)) {
-                content = generateHtmlReport(currentData);
-            } else {
-                content = generatePlainTextReport(currentData);
-                ext = ".txt";
-            }
-
-            // Correctly strip existing extension using lastIndexOf to handle .html (5 chars) and .json (5 chars)
-            String fileName = file.getName();
-            String baseName = fileName;
-            int dotIdx = fileName.lastIndexOf('.');
-            if (dotIdx > 0) {
-                String existingExt = fileName.substring(dotIdx).toLowerCase();
-                if (existingExt.equals(".txt") || existingExt.equals(".json") || existingExt.equals(".html")) {
-                    baseName = fileName.substring(0, dotIdx);
-                }
-            }
-            if (baseName.isBlank()) baseName = "system-info";
-            file = new File(file.getParent(), baseName + ext);
-
-            Files.writeString(file.toPath(), content, StandardCharsets.UTF_8);
-            statusLabel.setText("Exported to: " + file.getName());
-        } catch (IOException ex) {
-            AppLogger.error("Failed to export system info", ex);
-            new Alert(Alert.AlertType.ERROR, "Failed to export: " + ex.getMessage()).showAndWait();
+        if (file == null) {
+            return;
         }
+
+        // Resolve target path + format synchronously (cheap), render + write off-FX.
+        FileChooser.ExtensionFilter selectedFilter = fileChooser.getSelectedExtensionFilter();
+        String ext = "";
+        if (selectedFilter != null) {
+            List<String> extensions = selectedFilter.getExtensions();
+            if (!extensions.isEmpty()) {
+                ext = extensions.get(0).replace("*", "");
+            }
+        }
+        // Determine extension from selected filter first, but respect user's typed extension
+        String typedNameLower = file.getName().toLowerCase();
+        boolean typedHasExt = typedNameLower.endsWith(".json") || typedNameLower.endsWith(".html") || typedNameLower.endsWith(".txt");
+        if (!typedHasExt && ext.isEmpty()) {
+            ext = ".txt";
+        } else if (typedHasExt) {
+            if (typedNameLower.endsWith(".json")) {
+                ext = ".json";
+            } else if (typedNameLower.endsWith(".html")) {
+                ext = ".html";
+            } else {
+                ext = ".txt";
+            }
+        } else if (ext.isEmpty()) {
+            ext = ".txt";
+        }
+
+        // Correctly strip existing extension using lastIndexOf to handle .html (5 chars) and .json (5 chars)
+        String fileName = file.getName();
+        String baseName = fileName;
+        int dotIdx = fileName.lastIndexOf('.');
+        if (dotIdx > 0) {
+            String existingExt = fileName.substring(dotIdx).toLowerCase();
+            if (existingExt.equals(".txt") || existingExt.equals(".json") || existingExt.equals(".html")) {
+                baseName = fileName.substring(0, dotIdx);
+            }
+        }
+        if (baseName.isBlank()) {
+            baseName = "system-info";
+        }
+        final File target = new File(file.getParent(), baseName + ext);
+        final String finalExt = ext;
+        final SystemInfoData snapshot = currentData;
+        final Boolean adminHint = adminHintFast();
+
+        statusLabel.setText("Exporting to " + target.getName() + "\u2026");
+        exportButton.setDisable(true);
+        executor.submit(() -> {
+            try {
+                String content;
+                if (".json".equals(finalExt)) {
+                    content = JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValueAsString(snapshot);
+                } else if (".html".equals(finalExt)) {
+                    content = SystemInfoReportGenerator.generateHtmlReport(snapshot, adminHint);
+                } else {
+                    content = SystemInfoReportGenerator.generatePlainTextReport(snapshot, adminHint);
+                }
+                Files.writeString(target.toPath(), content, StandardCharsets.UTF_8);
+                Platform.runLater(() -> {
+                    statusLabel.setText("Exported to: " + target.getName());
+                    exportButton.setDisable(false);
+                });
+            } catch (IOException ex) {
+                AppLogger.error("Failed to export system info", ex);
+                Platform.runLater(() -> {
+                    exportButton.setDisable(false);
+                    new Alert(Alert.AlertType.ERROR, "Failed to export: " + ex.getMessage()).showAndWait();
+                });
+            }
+        });
     }
 
     private static String generatePlainTextReport(SystemInfoData data) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("=== System Information ===\n");
-        sb.append("Generated by WinZenith\n\n");
-
-        if (data.os() != null) {
-            sb.append("--- Operating System ---\n");
-            appendField(sb, "OS", data.os().name());
-            appendField(sb, "Version", data.os().version());
-            appendField(sb, "Build", data.os().buildNumber());
-            appendField(sb, "Architecture", data.os().architecture());
-            appendField(sb, "Computer Name", data.os().computerName());
-            appendField(sb, "Install Date", data.os().installDate());
-            appendField(sb, "Last Boot", data.os().lastBoot());
-            appendField(sb, "Serial Number", data.os().serialNumber());
-            sb.append("\n");
-        }
-
-        if (data.cpu() != null) {
-            sb.append("--- CPU ---\n");
-            appendField(sb, "Name", data.cpu().name());
-            appendField(sb, "Manufacturer", data.cpu().manufacturer());
-            appendField(sb, "Architecture", data.cpu().architecture());
-            appendField(sb, "Socket", data.cpu().socket());
-            sb.append("Cores: ").append(data.cpu().cores()).append("\n");
-            sb.append("Threads: ").append(data.cpu().logicalCpus()).append("\n");
-            appendField(sb, "Base Clock", data.cpu().formatBaseClock());
-            appendField(sb, "Current Clock", data.cpu().formatCurrentClock());
-            appendField(sb, "L2 Cache", data.cpu().formatL2Cache());
-            appendField(sb, "L3 Cache", data.cpu().formatL3Cache());
-            appendField(sb, "Voltage", data.cpu().voltage());
-            sb.append("\n");
-        }
-
-        if (data.gpu() != null) {
-            for (int i = 0; i < data.gpu().size(); i++) {
-                GpuInfo gpu = data.gpu().get(i);
-                sb.append("--- GPU").append(data.gpu().size() > 1 ? " " + (i + 1) : "").append(" ---\n");
-                appendField(sb, "Name", gpu.name());
-                appendField(sb, "Manufacturer", gpu.manufacturer());
-                appendField(sb, "VRAM", gpu.formatVram());
-                appendField(sb, "Memory Type", gpu.memoryType());
-                appendField(sb, "Driver Version", gpu.driverVersion());
-                appendField(sb, "Driver Date", gpu.driverDate());
-                appendField(sb, "Resolution", gpu.resolution());
-                sb.append("\n");
-            }
-        }
-
-        if (data.ram() != null) {
-            sb.append("--- RAM ---\n");
-            appendField(sb, "Total", data.ram().formatTotal());
-            appendField(sb, "Channel", data.ram().channel());
-            if (data.ram().sticks() != null) {
-                for (int i = 0; i < data.ram().sticks().size(); i++) {
-                    RamInfo.RamStick stick = data.ram().sticks().get(i);
-                    sb.append("  Slot ").append(i + 1).append(": ").append(stick.formatCapacity())
-                            .append(" ").append(nvl(stick.memoryType())).append(" ").append(stick.formatSpeed())
-                            .append(" ").append(nvl(stick.manufacturer())).append("\n");
-                }
-            }
-            sb.append("\n");
-        }
-
-        if (data.storage() != null) {
-            sb.append("--- Storage ---\n");
-            if (data.storage().disks() != null) {
-                for (int i = 0; i < data.storage().disks().size(); i++) {
-                    StorageInfo.Disk disk = data.storage().disks().get(i);
-                    sb.append("Disk ").append(i + 1).append(": ").append(nvl(disk.model()))
-                            .append(" (").append(disk.formatSize()).append(") ").append(nvl(disk.interfaceType()))
-                            .append(" [").append(nvl(disk.mediaType())).append("]\n");
-                    if (data.storage().partitions() != null) {
-                        final int diskIdx = i;
-                        data.storage().partitions().stream()
-                                .filter(p -> p.diskIndex() == diskIdx)
-                                .forEach(part -> sb.append("  ").append(nvl(part.deviceID())).append(": ").append(nvl(part.volumeName()))
-                                        .append(" ").append(nvl(part.fsType()))
-                                        .append(" ").append(part.formatSize())
-                                        .append(" (").append(String.format("%.1f%% used", part.usagePercent())).append(")\n"));
-                    }
-                }
-            }
-            if (data.storage().nvmes() != null && !data.storage().nvmes().isEmpty()) {
-                sb.append("NVMe Drives:\n");
-                for (StorageInfo.Nvme nvme : data.storage().nvmes()) {
-                    sb.append("  Serial: ").append(nvme.serialNumber())
-                            .append(" | Media: ").append(nvme.mediaType())
-                            .append(" | Bus: ").append(nvme.busType()).append("\n");
-                }
-            }
-            sb.append("\n");
-        }
-
-        if (data.motherboard() != null) {
-            sb.append("--- Motherboard ---\n");
-            appendField(sb, "Manufacturer", data.motherboard().manufacturer());
-            appendField(sb, "Model", data.motherboard().model());
-            appendField(sb, "Version", data.motherboard().version());
-            appendField(sb, "Chipset", data.motherboard().chipset());
-            sb.append("\n");
-        }
-
-        if (data.bios() != null) {
-            sb.append("--- BIOS ---\n");
-            appendField(sb, "Manufacturer", data.bios().manufacturer());
-            appendField(sb, "Version", data.bios().version());
-            appendField(sb, "Release Date", data.bios().releaseDate());
-            appendField(sb, "SMBIOS", data.bios().formatSmbios());
-            sb.append("\n");
-        }
-
-        if (data.networkAdapters() != null && !data.networkAdapters().isEmpty()) {
-            sb.append("--- Network Adapters ---\n");
-            for (NetworkAdapterInfo na : data.networkAdapters()) {
-                sb.append(nvl(na.name())).append(" (").append(nvl(na.status())).append(")\n");
-                appendField(sb, "  Speed", na.speed());
-                appendField(sb, "  MAC", na.macAddress());
-                sb.append("  IP: ").append(na.formatIpAddresses()).append("\n");
-                sb.append("  DHCP: ").append(na.dhcpEnabled() ? "Yes" : "No").append("\n\n");
-            }
-        }
-
-        if (data.audioDevices() != null && !data.audioDevices().isEmpty()) {
-            sb.append("--- Audio Devices ---\n");
-            for (AudioDeviceInfo audio : data.audioDevices()) {
-                sb.append(nvl(audio.name())).append(" - ").append(nvl(audio.manufacturer()))
-                        .append(" (").append(nvl(audio.status())).append(")\n");
-            }
-            sb.append("\n");
-        }
-
-        if (data.battery() != null) {
-            BatteryInfo batt = data.battery();
-            sb.append("--- Battery ---\n");
-            appendField(sb, "Name", batt.name());
-            sb.append("Charge: ").append(batt.formatChargeLevel()).append("\n");
-            appendField(sb, "Status", batt.status());
-            appendField(sb, "Chemistry", batt.chemistry());
-            sb.append("Remaining: ").append(batt.formatRemainingCapacity()).append("\n\n");
-        }
-
-        if (data.temperatures() != null && !data.temperatures().isEmpty()) {
-            sb.append("--- Temperatures ---\n");
-            for (TemperatureInfo temp : data.temperatures()) {
-                sb.append(temp.zoneName()).append(": ").append(temp.formatTemperature()).append("\n");
-            }
-            sb.append("\n");
-        }
-
-        if (data.others() != null && !data.others().isEmpty()) {
-            sb.append("--- Other Devices ---\n");
-            for (OtherDevice dev : data.others()) {
-                sb.append(nvl(dev.name())).append(" [").append(nvl(dev.deviceClass())).append("]\n");
-            }
-            sb.append("\n");
-        }
-
-        if (data.usbDevices() != null && !data.usbDevices().isEmpty()) {
-            sb.append("--- USB Devices ---\n");
-            for (UsbDeviceInfo usb : data.usbDevices()) {
-                sb.append(nvl(usb.name())).append(" (").append(nvl(usb.status())).append(")\n");
-                appendField(sb, "  Manufacturer", usb.manufacturer());
-            }
-            sb.append("\n");
-        }
-
-        if (data.monitors() != null && !data.monitors().isEmpty()) {
-            sb.append("--- Monitors ---\n");
-            for (MonitorInfo mon : data.monitors()) {
-                sb.append(nvl(mon.name())).append(" - ").append(nvl(mon.resolution())).append("\n");
-                appendField(sb, "  Manufacturer", mon.manufacturer());
-            }
-            sb.append("\n");
-        }
-
-        if (data.printers() != null && !data.printers().isEmpty()) {
-            sb.append("--- Printers ---\n");
-            for (PrinterInfo printer : data.printers()) {
-                sb.append(nvl(printer.name())).append(" (").append(nvl(printer.status())).append(")\n");
-                appendField(sb, "  Driver", printer.driver());
-                appendField(sb, "  Port", printer.port());
-            }
-            sb.append("\n");
-        }
-
-        if (data.warnings() != null && !data.warnings().isEmpty()) {
-            sb.append("--- Warnings ---\n");
-            for (String w : data.warnings()) {
-                sb.append("! ").append(w).append("\n");
-            }
-        }
-
-        return sb.toString();
+        return SystemInfoReportGenerator.generatePlainTextReport(data);
     }
 
     private static String generateHtmlReport(SystemInfoData data) {
-        StringBuilder html = new StringBuilder();
-        html.append("<!DOCTYPE html><html><head><meta charset=\"UTF-8\">");
-        html.append("<title>System Information - WinZenith</title>");
-        html.append("<style>");
-        html.append("body{font-family:'Segoe UI',sans-serif;background:#1e1f29;color:#f8f8f2;margin:24px;}");
-        html.append("h1{color:#50fa7b;border-bottom:2px solid #44475a;padding-bottom:8px;}");
-        html.append("h2{color:#8be9fd;margin-top:24px;}");
-        html.append("table{border-collapse:collapse;width:100%;margin:8px 0 20px 0;}");
-        html.append("td{padding:6px 12px;border-bottom:1px solid #44475a;}");
-        html.append("td:first-child{color:#6272a4;font-weight:bold;width:180px;}");
-        html.append("tr:nth-child(even){background:#21222c;}");
-        html.append(".warning{color:#ffb86c;background:#3d2e1a;padding:8px;border-radius:4px;margin:8px 0;}");
-        html.append("</style></head><body>");
-        html.append("<h1>System Information</h1>");
-
-        if (data.os() != null) {
-            html.append("<h2>Operating System</h2><table>");
-            html.append(row("OS", data.os().name()));
-            html.append(row("Version", data.os().version()));
-            html.append(row("Build", data.os().buildNumber()));
-            html.append(row("Architecture", data.os().architecture()));
-            html.append(row("Computer Name", data.os().computerName()));
-            html.append(row("Install Date", data.os().installDate()));
-            html.append(row("Last Boot", data.os().lastBoot()));
-            html.append(row("Serial Number", data.os().serialNumber()));
-            html.append("</table>");
-        }
-
-        if (data.cpu() != null) {
-            html.append("<h2>CPU</h2><table>");
-            html.append(row("Name", data.cpu().name()));
-            html.append(row("Manufacturer", data.cpu().manufacturer()));
-            html.append(row("Architecture", data.cpu().architecture()));
-            html.append(row("Socket", data.cpu().socket()));
-            html.append(row("Cores", String.valueOf(data.cpu().cores())));
-            html.append(row("Threads", String.valueOf(data.cpu().logicalCpus())));
-            html.append(row("Base Clock", data.cpu().formatBaseClock()));
-            html.append(row("Current Clock", data.cpu().formatCurrentClock()));
-            html.append(row("L2 Cache", data.cpu().formatL2Cache()));
-            html.append(row("L3 Cache", data.cpu().formatL3Cache()));
-            html.append(row("Voltage", data.cpu().voltage()));
-            html.append("</table>");
-        }
-
-        if (data.gpu() != null) {
-            for (int i = 0; i < data.gpu().size(); i++) {
-                GpuInfo gpu = data.gpu().get(i);
-                html.append("<h2>GPU").append(data.gpu().size() > 1 ? " " + (i + 1) : "").append("</h2><table>");
-                html.append(row("Name", gpu.name()));
-                html.append(row("Manufacturer", gpu.manufacturer()));
-                html.append(row("VRAM", gpu.formatVram()));
-                html.append(row("Memory Type", gpu.memoryType()));
-                html.append(row("Driver Version", gpu.driverVersion()));
-                html.append(row("Driver Date", gpu.driverDate()));
-                html.append(row("Resolution", gpu.resolution()));
-                html.append("</table>");
-            }
-        }
-
-        if (data.ram() != null) {
-            html.append("<h2>RAM</h2><table>");
-            html.append(row("Total", data.ram().formatTotal()));
-            html.append(row("Channel", data.ram().channel()));
-            html.append("</table>");
-            if (data.ram().sticks() != null) {
-                for (int i = 0; i < data.ram().sticks().size(); i++) {
-                    RamInfo.RamStick stick = data.ram().sticks().get(i);
-                    html.append("<h3>Slot ").append(i + 1).append("</h3><table>");
-                    html.append(row("Capacity", stick.formatCapacity()));
-                    html.append(row("Type", stick.memoryType()));
-                    html.append(row("Speed", stick.formatSpeed()));
-                    html.append(row("Manufacturer", stick.manufacturer()));
-                    html.append(row("Part Number", stick.partNumber()));
-                    html.append("</table>");
-                }
-            }
-        }
-
-        if (data.storage() != null && data.storage().disks() != null) {
-            html.append("<h2>Storage</h2>");
-            for (int i = 0; i < data.storage().disks().size(); i++) {
-                StorageInfo.Disk disk = data.storage().disks().get(i);
-                html.append("<h3>Disk ").append(i + 1).append("</h3><table>");
-                html.append(row("Model", disk.model()));
-                html.append(row("Manufacturer", disk.manufacturer()));
-                html.append(row("Size", disk.formatSize()));
-                html.append(row("Media Type", disk.mediaType()));
-                html.append(row("Interface", disk.interfaceType()));
-                html.append(row("Serial", disk.serialNumber()));
-                html.append(row("Partitions", String.valueOf(disk.partitions())));
-                html.append("</table>");
-
-                if (data.storage().partitions() != null) {
-                    final int diskIdx = i;
-                    List<StorageInfo.Partition> diskParts = data.storage().partitions().stream()
-                            .filter(p -> p.diskIndex() == diskIdx)
-                            .toList();
-                    if (!diskParts.isEmpty()) {
-                        html.append("<h4>Partitions on Disk ").append(i + 1).append("</h4><table>");
-                        for (StorageInfo.Partition part : diskParts) {
-                            html.append("<tr><td>").append(escapeHtml(part.deviceID())).append("</td><td>")
-                                    .append(escapeHtml(part.volumeName())).append(" | ")
-                                    .append(escapeHtml(part.fsType())).append(" | ")
-                                    .append(part.formatSize()).append(" | ")
-                                    .append(String.format("%.1f%% used", part.usagePercent()))
-                                    .append("</td></tr>");
-                        }
-                        html.append("</table>");
-                    }
-                }
-            }
-
-            List<StorageInfo.Partition> unassigned = data.storage().partitions() != null
-                    ? data.storage().partitions().stream().filter(p -> p.diskIndex() < 0).toList()
-                    : List.of();
-            if (!unassigned.isEmpty()) {
-                html.append("<h3>Other Partitions</h3><table>");
-                for (StorageInfo.Partition part : unassigned) {
-                    html.append("<tr><td>").append(escapeHtml(part.deviceID())).append("</td><td>")
-                            .append(escapeHtml(part.volumeName())).append(" | ")
-                            .append(escapeHtml(part.fsType())).append(" | ")
-                            .append(part.formatSize()).append(" | ")
-                            .append(String.format("%.1f%% used", part.usagePercent()))
-                            .append("</td></tr>");
-                }
-                html.append("</table>");
-            }
-        }
-
-        if (data.storage() != null && data.storage().nvmes() != null && !data.storage().nvmes().isEmpty()) {
-            html.append("<h2>NVMe Drives</h2>");
-            for (int i = 0; i < data.storage().nvmes().size(); i++) {
-                StorageInfo.Nvme nvme = data.storage().nvmes().get(i);
-                if (data.storage().nvmes().size() > 1) {
-                    html.append("<h3>NVMe ").append(i + 1).append("</h3>");
-                }
-                html.append("<table>");
-                html.append(row("Serial Number", nvme.serialNumber()));
-                html.append(row("Media Type", nvme.mediaType()));
-                html.append(row("Bus Type", nvme.busType()));
-                html.append("</table>");
-            }
-        }
-
-        if (data.motherboard() != null) {
-            html.append("<h2>Motherboard</h2><table>");
-            html.append(row("Manufacturer", data.motherboard().manufacturer()));
-            html.append(row("Model", data.motherboard().model()));
-            html.append(row("Version", data.motherboard().version()));
-            html.append(row("Chipset", data.motherboard().chipset()));
-            html.append("</table>");
-        }
-
-        if (data.bios() != null) {
-            html.append("<h2>BIOS</h2><table>");
-            html.append(row("Manufacturer", data.bios().manufacturer()));
-            html.append(row("Version", data.bios().version()));
-            html.append(row("Release Date", data.bios().releaseDate()));
-            html.append(row("SMBIOS", data.bios().formatSmbios()));
-            html.append("</table>");
-        }
-
-        if (data.networkAdapters() != null && !data.networkAdapters().isEmpty()) {
-            html.append("<h2>Network Adapters</h2>");
-            for (NetworkAdapterInfo na : data.networkAdapters()) {
-                html.append("<h3>").append(escapeHtml(na.name())).append("</h3><table>");
-                html.append(row("Name", na.name()));
-                html.append(row("Manufacturer", na.manufacturer()));
-                html.append(row("Type", na.adapterType()));
-                html.append(row("Speed", na.speed()));
-                html.append(row("MAC Address", na.macAddress()));
-                html.append(row("IP Addresses", na.formatIpAddresses()));
-                html.append(row("DHCP", na.dhcpEnabled() ? "Enabled" : "Disabled"));
-                html.append(row("Status", na.status()));
-                html.append("</table>");
-            }
-        }
-
-        if (data.audioDevices() != null && !data.audioDevices().isEmpty()) {
-            html.append("<h2>Audio Devices</h2><table>");
-            for (AudioDeviceInfo audio : data.audioDevices()) {
-                html.append(row("Name", audio.name()));
-                html.append(row("Manufacturer", audio.manufacturer()));
-                html.append(row("Status", audio.status()));
-            }
-            html.append("</table>");
-        }
-
-        if (data.battery() != null) {
-            html.append("<h2>Battery</h2><table>");
-            html.append(row("Name", data.battery().name()));
-            html.append(row("Charge Level", data.battery().formatChargeLevel()));
-            html.append(row("Status", data.battery().status()));
-            html.append(row("Chemistry", data.battery().chemistry()));
-            html.append(row("Remaining", data.battery().formatRemainingCapacity()));
-            html.append("</table>");
-        }
-
-        if (data.temperatures() != null && !data.temperatures().isEmpty()) {
-            html.append("<h2>Temperatures</h2><table>");
-            for (TemperatureInfo temp : data.temperatures()) {
-                html.append(row(temp.zoneName(), temp.formatTemperature()));
-            }
-            html.append("</table>");
-        }
-
-        if (data.usbDevices() != null && !data.usbDevices().isEmpty()) {
-            html.append("<h2>USB Devices</h2>");
-            for (UsbDeviceInfo usb : data.usbDevices()) {
-                html.append("<h3>").append(escapeHtml(usb.name())).append("</h3><table>");
-                html.append(row("Name", usb.name()));
-                html.append(row("Manufacturer", usb.manufacturer()));
-                html.append(row("Device ID", usb.deviceId()));
-                html.append(row("Status", usb.status()));
-                html.append("</table>");
-            }
-        }
-
-        if (data.monitors() != null && !data.monitors().isEmpty()) {
-            html.append("<h2>Monitors</h2>");
-            for (MonitorInfo mon : data.monitors()) {
-                html.append("<h3>").append(escapeHtml(mon.name())).append("</h3><table>");
-                html.append(row("Name", mon.name()));
-                html.append(row("Manufacturer", mon.manufacturer()));
-                html.append(row("Resolution", mon.resolution()));
-                html.append(row("Status", mon.status()));
-                html.append("</table>");
-            }
-        }
-
-        if (data.printers() != null && !data.printers().isEmpty()) {
-            html.append("<h2>Printers</h2>");
-            for (PrinterInfo printer : data.printers()) {
-                html.append("<h3>").append(escapeHtml(printer.name())).append("</h3><table>");
-                html.append(row("Name", printer.name()));
-                html.append(row("Driver", printer.driver()));
-                html.append(row("Port", printer.port()));
-                html.append(row("Status", printer.status()));
-                html.append(row("Shared", printer.shared() ? "Yes" : "No"));
-                html.append(row("Default", printer.isDefault() ? "Yes" : "No"));
-                html.append("</table>");
-            }
-        }
-
-        if (data.warnings() != null && !data.warnings().isEmpty()) {
-            html.append("<h2>Warnings</h2>");
-            for (String w : data.warnings()) {
-                html.append("<div class=\"warning\">").append(escapeHtml(w)).append("</div>");
-            }
-        }
-
-        html.append("</body></html>");
-        return html.toString();
+        return SystemInfoReportGenerator.generateHtmlReport(data);
     }
 
     private static String nvl(String s) {
         return s != null ? s : "";
-    }
-
-    private static void appendField(StringBuilder sb, String label, String value) {
-        if (value != null && !value.isBlank()) {
-            sb.append(label).append(": ").append(value).append("\n");
-        }
-    }
-
-    private static String row(String label, String value) {
-        return "<tr><td>" + escapeHtml(label) + "</td><td>" + escapeHtml(value != null ? value : "") + "</td></tr>";
-    }
-
-    private static String escapeHtml(String text) {
-        if (text == null) return "";
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("\"", "&quot;").replace("'", "&#39;");
     }
 
     public void dispose() {
