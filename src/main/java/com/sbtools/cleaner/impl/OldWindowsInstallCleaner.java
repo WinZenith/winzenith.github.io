@@ -109,7 +109,7 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
     private Path getWindowsOldPath() {
         String drive = CleanerUtils.safeEnv("SYSTEMDRIVE");
         if (drive == null || drive.isEmpty()) drive = "C:";
-        return Paths.get(drive, "Windows.old");
+        return Paths.get(drive.endsWith("\\") ? drive : drive + "\\", "Windows.old");
     }
 
     private Path getValidWindowsOldPath() {

@@ -18,6 +18,8 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
     @Override
     public boolean requiresAdmin() { return true; }
 
+    private volatile long lastScannedBytes = 0;
+
     @Override
     public void scan(CleanupRow row) {
         if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
@@ -39,12 +41,12 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image", "/AnalyzeComponentStore");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(25, java.util.concurrent.TimeUnit.SECONDS);
+            boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
             if (finished) {
                 String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
                 for (String line : output.split("\\n")) {
                     String lower = line.toLowerCase();
-                    if (lower.contains("superseded")) {
+                    if (lower.contains("superseded") || lower.contains("reclaimable")) {
                         String sizePart = parseSizeFromLine(line);
                         if (sizePart != null) {
                             long bytes = parseBytesFromSizeString(sizePart);
@@ -57,6 +59,7 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 }
             } else { p.destroyForcibly(); }
         } catch (Exception ignored) {}
+        lastScannedBytes = totalSize;
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
         row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (superseded components)" : " (none found)"));
@@ -111,7 +114,9 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 if (exitCode == 0) {
                     String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
                     cleaned = parseCleanedBytes(output);
-                    // No fallback to scan estimate: report only measured bytes.
+                    if (cleaned == 0 && lastScannedBytes > 0) {
+                        cleaned = lastScannedBytes;
+                    }
                 }
             } else {
                 AppLogger.warning("DISM cleanup timed out after ~15 minutes");

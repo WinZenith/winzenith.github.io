@@ -91,7 +91,7 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
     }
 
     private boolean isWindowsUpdateRunning() {
-        return isServiceRunning("wuauserv") || isServiceRunning("UsoSvc");
+        return isServiceRunning("wuauserv") || isServiceRunning("TrustedInstaller");
     }
 
     private boolean isServiceRunning(String serviceName) {

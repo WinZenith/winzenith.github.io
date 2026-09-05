@@ -37,8 +37,9 @@ public class MemoryDumpsCleaner implements CleanerExtension {
         }
         String sysdrive = CleanerUtils.safeEnv("SYSTEMDRIVE");
         if (sysdrive != null) {
+            String rootDrive = sysdrive.endsWith("\\") ? sysdrive : sysdrive + "\\";
             for (String name : new String[]{"memory.dmp", "SWA.DMP"}) {
-                Path dump = Paths.get(sysdrive, name);
+                Path dump = Paths.get(rootDrive, name);
                 if (Files.isRegularFile(dump)) { totalSize += dump.toFile().length(); itemCount++; }
             }
         }
@@ -60,9 +61,10 @@ public class MemoryDumpsCleaner implements CleanerExtension {
         CleanerUtils.addEnvPath(dirs, "WINDIR", "Minidump");
         String sysdrive = CleanerUtils.safeEnv("SYSTEMDRIVE");
         if (sysdrive != null) {
+            String rootDrive = sysdrive.endsWith("\\") ? sysdrive : sysdrive + "\\";
             for (String name : new String[]{"memory.dmp", "SWA.DMP"}) {
                 if (token != null && token.isCancelled()) break;
-                Path dump = Paths.get(sysdrive, name);
+                Path dump = Paths.get(rootDrive, name);
                 if (Files.isRegularFile(dump)) { long size = dump.toFile().length(); CleanerUtils.deletePermanently(dump, token); if (!Files.exists(dump)) cleaned += size; }
             }
         }

@@ -109,39 +109,45 @@ public final class CleanerUtils {
 
     public static String extractPathFromRegistryValue(String rawValue) {
         if (rawValue == null || rawValue.isEmpty()) return null;
-        String path = rawValue;
-        if (path.startsWith("\"") && path.endsWith("\"")) {
-            path = path.substring(1, path.length() - 1);
-        }
-        if (path.startsWith("\\\\")) {
-            return null;
-        }
-        int exeIdx = path.toLowerCase().lastIndexOf(".exe");
-        if (exeIdx > 0) {
-            String afterExe = path.substring(exeIdx + 4);
-            int spaceIdx = afterExe.indexOf(" -");
-            if (spaceIdx >= 0) {
-                path = path.substring(0, exeIdx + 4 + spaceIdx);
+        String path = rawValue.trim();
+        if (path.startsWith("\"")) {
+            int closeQuote = path.indexOf('"', 1);
+            if (closeQuote > 0) {
+                path = path.substring(1, closeQuote).trim();
+            } else {
+                path = path.substring(1).trim();
             }
-            spaceIdx = afterExe.indexOf("/");
-            if (spaceIdx >= 0) {
-                path = path.substring(0, exeIdx + 4 + spaceIdx);
+        } else {
+            if (path.startsWith("\\\\")) {
+                return null;
             }
-        }
-        int dllIdx = path.toLowerCase().lastIndexOf(".dll");
-        if (dllIdx > 0) {
-            String afterDll = path.substring(dllIdx + 4);
-            int spaceIdx = afterDll.indexOf(" ");
-            if (spaceIdx >= 0) {
-                path = path.substring(0, dllIdx + 4 + spaceIdx);
+            int exeIdx = path.toLowerCase().lastIndexOf(".exe");
+            if (exeIdx > 0) {
+                String afterExe = path.substring(exeIdx + 4);
+                int spaceIdx = afterExe.indexOf(" -");
+                if (spaceIdx >= 0) {
+                    path = path.substring(0, exeIdx + 4 + spaceIdx);
+                }
+                spaceIdx = afterExe.indexOf("/");
+                if (spaceIdx >= 0) {
+                    path = path.substring(0, exeIdx + 4 + spaceIdx);
+                }
             }
-        }
-        int cplIdx = path.toLowerCase().lastIndexOf(".cpl");
-        if (cplIdx > 0) {
-            String afterCpl = path.substring(cplIdx + 4);
-            int spaceIdx = afterCpl.indexOf(",");
-            if (spaceIdx >= 0) {
-                path = path.substring(0, cplIdx + 4);
+            int dllIdx = path.toLowerCase().lastIndexOf(".dll");
+            if (dllIdx > 0) {
+                String afterDll = path.substring(dllIdx + 4);
+                int spaceIdx = afterDll.indexOf(" ");
+                if (spaceIdx >= 0) {
+                    path = path.substring(0, dllIdx + 4 + spaceIdx);
+                }
+            }
+            int cplIdx = path.toLowerCase().lastIndexOf(".cpl");
+            if (cplIdx > 0) {
+                String afterCpl = path.substring(cplIdx + 4);
+                int spaceIdx = afterCpl.indexOf(",");
+                if (spaceIdx >= 0) {
+                    path = path.substring(0, cplIdx + 4);
+                }
             }
         }
         if (!path.contains("\\") && !path.contains("/")) {

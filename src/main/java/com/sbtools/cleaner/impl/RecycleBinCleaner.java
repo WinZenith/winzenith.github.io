@@ -7,9 +7,12 @@ import com.sbtools.cleaner.CleanerUtils;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.ProcessManager;
 
+import java.io.IOException;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Comparator;
-import java.util.stream.Stream;
+import java.util.EnumSet;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class RecycleBinCleaner implements CleanerExtension {
 
@@ -18,22 +21,9 @@ public class RecycleBinCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        long size = 0;
-        int count = 0;
-        try {
-            for (java.io.File root : java.io.File.listRoots()) {
-                Path recycleBin = root.toPath().resolve("$Recycle.Bin");
-                if (Files.isDirectory(recycleBin)) {
-                    try (Stream<Path> walk = Files.walk(recycleBin)) {
-                        var result = walk.filter(Files::isRegularFile)
-                                .filter(p -> !p.getFileName().toString().startsWith("$I"))
-                                .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                        size += result.getSum();
-                        count += (int) result.getCount();
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
+        long[] stats = scanRecycleBinSizeAndCount();
+        long size = stats[0];
+        int count = (int) stats[1];
         row.setTotalBytes(size);
         row.setItemCount(count);
         row.setSizeOrCountText(size > 0 ? CleanerUtils.formatBytes(size) + " (" + count + " files)" : "Empty");
@@ -83,11 +73,30 @@ public class RecycleBinCleaner implements CleanerExtension {
                 if (token != null && token.isCancelled()) break;
                 Path recycleBin = root.toPath().resolve("$Recycle.Bin");
                 if (Files.isDirectory(recycleBin)) {
-                    java.util.List<Path> toDelete;
-                    try (Stream<Path> walk = Files.walk(recycleBin)) {
-                        toDelete = walk.sorted(Comparator.reverseOrder()).filter(f -> !f.equals(recycleBin)).toList();
-                    }
-                    for (Path f : toDelete) {
+                    java.util.List<Path> filesToDelete = new java.util.ArrayList<>();
+                    java.util.List<Path> dirsToDelete = new java.util.ArrayList<>();
+                    try {
+                        Files.walkFileTree(recycleBin, EnumSet.noneOf(FileVisitOption.class), Integer.MAX_VALUE, new SimpleFileVisitor<>() {
+                            @Override
+                            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                                if (!dir.equals(recycleBin)) {
+                                    dirsToDelete.add(dir);
+                                }
+                                return FileVisitResult.CONTINUE;
+                            }
+                            @Override
+                            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                                filesToDelete.add(file);
+                                return FileVisitResult.CONTINUE;
+                            }
+                            @Override
+                            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                                return FileVisitResult.CONTINUE;
+                            }
+                        });
+                    } catch (Exception ignored) {}
+
+                    for (Path f : filesToDelete) {
                         if (token != null && token.isCancelled()) break;
                         try {
                             long sz = Files.isRegularFile(f) ? Files.size(f) : 0L;
@@ -100,6 +109,11 @@ public class RecycleBinCleaner implements CleanerExtension {
                         } catch (Exception ignored) {
                             failedDeletes.add(f);
                         }
+                    }
+                    dirsToDelete.sort(Comparator.comparingInt(Path::getNameCount).reversed());
+                    for (Path d : dirsToDelete) {
+                        if (token != null && token.isCancelled()) break;
+                        try { Files.deleteIfExists(d); } catch (Exception ignored) {}
                     }
                 }
             }
@@ -118,21 +132,36 @@ public class RecycleBinCleaner implements CleanerExtension {
         return fallback;
     }
 
-    private long getRecycleBinSize() {
-        long size = 0;
+    private long[] scanRecycleBinSizeAndCount() {
+        AtomicLong totalSize = new AtomicLong(0);
+        AtomicLong totalCount = new AtomicLong(0);
         try {
             for (java.io.File root : java.io.File.listRoots()) {
                 Path recycleBin = root.toPath().resolve("$Recycle.Bin");
                 if (Files.isDirectory(recycleBin)) {
-                    try (Stream<Path> walk = Files.walk(recycleBin)) {
-                        size += walk.filter(Files::isRegularFile)
-                                .filter(p -> !p.getFileName().toString().startsWith("$I"))
-                                .mapToLong(p -> p.toFile().length())
-                                .sum();
-                    }
+                    try {
+                        Files.walkFileTree(recycleBin, EnumSet.noneOf(FileVisitOption.class), Integer.MAX_VALUE, new SimpleFileVisitor<>() {
+                            @Override
+                            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                                if (attrs.isRegularFile() && !file.getFileName().toString().startsWith("$I")) {
+                                    totalSize.addAndGet(attrs.size());
+                                    totalCount.incrementAndGet();
+                                }
+                                return FileVisitResult.CONTINUE;
+                            }
+                            @Override
+                            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                                return FileVisitResult.CONTINUE;
+                            }
+                        });
+                    } catch (Exception ignored) {}
                 }
             }
         } catch (Exception ignored) {}
-        return size;
+        return new long[]{totalSize.get(), totalCount.get()};
+    }
+
+    private long getRecycleBinSize() {
+        return scanRecycleBinSizeAndCount()[0];
     }
 }

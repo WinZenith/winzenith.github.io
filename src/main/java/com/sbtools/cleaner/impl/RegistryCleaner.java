@@ -134,7 +134,7 @@ public class RegistryCleaner implements CleanerExtension {
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
                 Map<String, Object> values = Advapi32Util.registryGetValues(WinReg.HKEY_LOCAL_MACHINE, keyPath);
                 for (Map.Entry<String, Object> entry : values.entrySet()) {
-                    String filePath = entry.getKey();
+                    String rawPath = entry.getKey();
                     try {
                         Object valObj = entry.getValue();
                         int refCount = 0;
@@ -143,7 +143,8 @@ public class RegistryCleaner implements CleanerExtension {
                         } else {
                             try { refCount = Integer.parseInt(valObj.toString()); } catch (Exception ignored) {}
                         }
-                        if (refCount <= 1 && !Files.exists(Paths.get(filePath))) count++;
+                        String expanded = CleanerUtils.expandEnvironmentVariables(rawPath);
+                        if (refCount <= 1 && expanded != null && !Files.exists(Paths.get(expanded))) count++;
                     } catch (Exception ignored) {}
                 }
             }
@@ -164,7 +165,7 @@ public class RegistryCleaner implements CleanerExtension {
                 List<String> toDelete = new ArrayList<>();
                 for (Map.Entry<String, Object> entry : values.entrySet()) {
                     if (token != null && token.isCancelled()) break;
-                    String filePath = entry.getKey();
+                    String rawPath = entry.getKey();
                     try {
                         Object valObj = entry.getValue();
                         int refCount = 0;
@@ -173,7 +174,8 @@ public class RegistryCleaner implements CleanerExtension {
                         } else {
                             try { refCount = Integer.parseInt(valObj.toString()); } catch (Exception ignored) {}
                         }
-                        if (refCount <= 1 && !Files.exists(Paths.get(filePath))) toDelete.add(filePath);
+                        String expanded = CleanerUtils.expandEnvironmentVariables(rawPath);
+                        if (refCount <= 1 && expanded != null && !Files.exists(Paths.get(expanded))) toDelete.add(rawPath);
                     } catch (Exception ignored) {}
                 }
                 if (!toDelete.isEmpty() && (token == null || !token.isCancelled())) backupRegKey(backupRootOrNull, "shareddlls", "HKLM", keyPath);
