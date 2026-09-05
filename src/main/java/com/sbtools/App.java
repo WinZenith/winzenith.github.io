@@ -28,6 +28,7 @@ import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import com.sbtools.util.ProcessManager;
 
 public class App extends Application {
@@ -55,6 +56,16 @@ public class App extends Application {
     private AppSettings appSettings;
     private volatile boolean checkingForUpdate = false;
     private Stage primaryStage;
+    /**
+     * Guards the close path so window-close, OS shutdown and {@link #stop()}
+     * all funnel through one cleanup. {@code shutdownRequested} is set once the
+     * user confirmed exit (or no confirmation was needed); {@code cleanupDone}
+     * ensures dispose/shutdown logic runs exactly once.
+     */
+    private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
+    private final AtomicBoolean cleanupDone = new AtomicBoolean(false);
+    /** Watchdog delay before forcing the JVM out (ms). Bounds Task Manager linger. */
+    private static final long FORCE_EXIT_DELAY_MS = 4000;
 
     @Override
     public void start(Stage stage) {
@@ -76,7 +87,19 @@ public class App extends Application {
         AppSettings settings = settingsStore.load();
 
         if (!settings.eulaAccepted()) {
-            showEula(settings);
+            if (!showEula(settings)) {
+                // User declined: exit quietly without building the main window.
+                // Platform.exit() alone would still run stop(); force the JVM out
+                // so no process lingers in Task Manager.
+                shutdownRequested.set(true);
+                try {
+                    SingleInstance.release();
+                } catch (Throwable ignored) {
+                }
+                Platform.exit();
+                armForceExitWatchdog();
+                return;
+            }
         }
 
         // Async elevation check to avoid FX freeze (B1). UI is built immediately;
@@ -112,6 +135,14 @@ public class App extends Application {
         stage.getIcons().add(logoImage);
         stage.setScene(scene);
         stage.setMaximized(true);
+        // Explicit close path: confirm when busy, then guarantee the JVM dies.
+        // Without this, Platform.exit() alone leaves the process in Task Manager
+        // whenever a non-daemon worker or hung child process is still alive.
+        Platform.setImplicitExit(true);
+        stage.setOnCloseRequest(evt -> {
+            evt.consume();
+            requestShutdown();
+        });
         stage.show();
         AppLogger.info("Main window shown (version " + AppInfo.getVersion() + ")");
 
@@ -272,16 +303,132 @@ public class App extends Application {
     // NOTE: update download is handled by AppUpdateDialog (non-blocking Task).
     // See com.sbtools.update.AppUpdateDialog.showAndDownload.
 
-    private void showEula(AppSettings settings) {
+    /**
+     * @return true when accepted (startup continues), false when declined
+     *         (caller must exit without building UI).
+     */
+    private boolean showEula(AppSettings settings) {
         EulaDialog eula = new EulaDialog();
         if (eula.showAndWait().orElse(null) != EulaDialog.ACCEPT) {
-            Platform.exit();
-            return;
+            return false;
         }
         try {
             settingsStore.save(settings.toBuilder().eulaAccepted(true).build());
         } catch (IOException e) {
             AppLogger.error("Failed to save EULA acceptance", e);
+        }
+        return true;
+    }
+
+    /**
+     * Window-close entry point (FX thread). Asks for confirmation when work is
+     * in progress, otherwise exits immediately. Always arms the force-exit
+     * watchdog so the process can never linger in Task Manager.
+     */
+    private void requestShutdown() {
+        if (shutdownRequested.get()) {
+            return;
+        }
+        if (isBusy()) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                    "An operation is still running.\nExiting now will cancel it.\n\nDo you want to exit anyway?",
+                    ButtonType.YES, ButtonType.NO);
+            confirm.setTitle("Operation in progress");
+            confirm.setHeaderText("Operation in progress");
+            if (primaryStage != null) {
+                confirm.initOwner(primaryStage);
+            }
+            if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) {
+                return;
+            }
+        }
+        shutdownRequested.set(true);
+        armForceExitWatchdog();
+        try {
+            Platform.exit();
+        } catch (Throwable ignored) {
+            System.exit(0);
+        }
+    }
+
+    private boolean isBusy() {
+        try {
+            if (busy != null && busy.get()) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (com.sbtools.util.AppExecutors.globalBusyProperty().get()) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    /**
+     * Guarantees the JVM terminates even if a worker thread ignores interrupts
+     * or a child process hangs. Daemon by design: it only fires while the JVM
+     * is otherwise kept alive, and {@code System.exit} is a no-op if we already
+     * exited cleanly.
+     */
+    private static void armForceExitWatchdog() {
+        Thread watchdog = new Thread(() -> {
+            try {
+                Thread.sleep(FORCE_EXIT_DELAY_MS);
+            } catch (InterruptedException ignored) {
+                return;
+            }
+            try {
+                AppLogger.warning("Force-exit watchdog firing; forcing JVM termination.");
+            } catch (Throwable ignored) {
+            }
+            System.exit(0);
+        }, "force-exit-watchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+    }
+
+    private void disposeAllViews() {
+        if (tabViews == null) {
+            return;
+        }
+        for (Node view : tabViews) {
+            if (view == null) continue;
+            try {
+                if (view instanceof DashboardTabView dtv) {
+                    dtv.dispose();
+                } else if (view instanceof DriversTabView dtv2) {
+                    dtv2.dispose();
+                } else if (view instanceof SoftwareUpdatesTabView suv) {
+                    suv.dispose();
+                } else if (view instanceof UninstallerTabView utv) {
+                    utv.dispose();
+                } else if (view instanceof StartupTabView stv) {
+                    stv.dispose();
+                } else if (view instanceof SystemInfoTabView sitv) {
+                    sitv.dispose();
+                } else if (view instanceof BrowserExtensionsTabView betv) {
+                    betv.dispose();
+                } else if (view instanceof NetworkOptimizerTabView notv) {
+                    notv.dispose();
+                } else if (view instanceof DuplicateFilesTabView dftv) {
+                    dftv.dispose();
+                } else if (view instanceof CleanerTabView ctv) {
+                    ctv.dispose();
+                } else if (view instanceof DiskToolsTabView dttv) {
+                    dttv.dispose();
+                }
+                // Note: BackupRestoreTabView uses only the shared daemon ioPool
+                // plus ProcessManager-tracked children, so no per-view dispose
+                // is needed; its children are reaped by shutdownAll() below.
+            } catch (Throwable t) {
+                try {
+                    AppLogger.error("Error disposing view on shutdown", t);
+                } catch (Throwable ignored) {
+                }
+            }
         }
     }
 
@@ -373,43 +520,43 @@ public class App extends Application {
 
     @Override
     public void stop() throws Exception {
+        // Direct toolkit shutdown (e.g. OS session end) may reach here without
+        // going through requestShutdown(): make sure the watchdog is armed so a
+        // hung worker can never leave the process in Task Manager.
+        boolean firstRequest = shutdownRequested.compareAndSet(false, true);
+        if (firstRequest) {
+            armForceExitWatchdog();
+        }
+        if (!cleanupDone.compareAndSet(false, true)) {
+            try {
+                super.stop();
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
         // Ensure any tracked child processes are terminated when the app stops
         try {
             AppLogger.info("Application stopping; shutting down tracked processes...");
         } catch (Throwable ignored) {}
-        if (tabViews != null) {
-            for (Node view : tabViews) {
-                if (view == null) continue;
-                if (view instanceof DashboardTabView dtv) {
-                    dtv.dispose();
-                } else if (view instanceof DriversTabView dtv2) {
-                    dtv2.dispose();
-                } else if (view instanceof SoftwareUpdatesTabView suv) {
-                    suv.dispose();
-                } else if (view instanceof UninstallerTabView utv) {
-                    utv.dispose();
-                } else if (view instanceof StartupTabView stv) {
-                    stv.dispose();
-                } else if (view instanceof SystemInfoTabView sitv) {
-                    sitv.dispose();
-                } else if (view instanceof BrowserExtensionsTabView betv) {
-                    betv.dispose();
-                } else if (view instanceof NetworkOptimizerTabView notv) {
-                    notv.dispose();
-                } else if (view instanceof DuplicateFilesTabView dftv) {
-                    dftv.dispose();
-                } else if (view instanceof CleanerTabView ctv) {
-                    ctv.dispose();
-                } else if (view instanceof DiskToolsTabView dttv) {
-                    dttv.dispose();
-                }
-            }
+        disposeAllViews();
+        try {
+            ProcessManager.shutdownAll();
+        } catch (Throwable ignored) {
         }
-        ProcessManager.shutdownAll();
-        AppExecutors.shutdown();
+        try {
+            AppExecutors.shutdown();
+        } catch (Throwable ignored) {
+        }
         try {
             SingleInstance.release();
         } catch (Throwable ignored) {}
-        super.stop();
+        try {
+            super.stop();
+        } catch (Throwable ignored) {
+        }
+        // Platform.exit() does not kill non-daemon workers or hung children.
+        // Cleanup above is best-effort and bounded; force the JVM out so the
+        // process never lingers in Task Manager after the window closes.
+        System.exit(0);
     }
 }

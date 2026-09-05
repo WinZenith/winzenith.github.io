@@ -55,6 +55,15 @@ public final class SingleInstance {
     private static volatile boolean ownsPortFile;
     private static final AtomicReference<Runnable> focusHandler = new AtomicReference<>();
 
+    static {
+        // Last-resort release if the app is killed without going through App.stop()
+        // (e.g. System.exit watchdog). Idempotent and quiet by design.
+        try {
+            Runtime.getRuntime().addShutdownHook(new Thread(SingleInstance::release, "single-instance-release"));
+        } catch (Throwable ignored) {
+        }
+    }
+
     private SingleInstance() {
     }
 

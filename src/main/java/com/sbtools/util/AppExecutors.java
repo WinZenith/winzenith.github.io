@@ -5,7 +5,11 @@ import java.util.concurrent.Executors;
 
 public final class AppExecutors {
 
-    private static final ExecutorService UI_POOL = Executors.newFixedThreadPool(2);
+    private static final ExecutorService UI_POOL = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "ui-worker");
+        t.setDaemon(true);
+        return t;
+    });
     private static final ExecutorService IO_POOL = Executors.newFixedThreadPool(4, r -> {
         Thread t = new Thread(r, "io-worker");
         t.setDaemon(true);

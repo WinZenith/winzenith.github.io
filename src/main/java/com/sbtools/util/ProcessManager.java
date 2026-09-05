@@ -71,18 +71,37 @@ public final class ProcessManager {
      * Attempts to terminate all currently-registered processes.
      * This is best-effort and may not succeed for processes owned by other users
      * or in some system states.
+     *
+     * <p>Bounded for fast application exit: an overall budget keeps window-close
+     * snappy even when a child (winget/powershell/dism) hangs. Per-process waits
+     * are short; anything still alive after the budget is left to the OS after
+     * {@code System.exit} plus a best-effort destroyForcibly.</p>
      */
     public static void shutdownAll() {
+        shutdownAll(8000);
+    }
+
+    /**
+     * Same as {@link #shutdownAll()} but with an explicit overall budget.
+     *
+     * @param budgetMs maximum time to spend across all processes
+     */
+    public static void shutdownAll(long budgetMs) {
         if (processes.isEmpty()) return;
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(1000, budgetMs));
         AppLogger.info("Shutting down all tracked processes (count=" + processes.size() + ")");
         List<Process> snapshot = new ArrayList<>(processes.values());
         for (Process p : snapshot) {
             if (p == null) continue;
+            if (System.nanoTime() > deadlineNanos) {
+                AppLogger.warning("Process shutdown budget exceeded; forcing remaining.");
+                break;
+            }
             try {
                 long pid = -1;
                 try { pid = p.pid(); } catch (Throwable ignored) {}
                 if (!p.isAlive()) {
-                    processes.remove(pid);
+                    if (pid > 0) processes.remove(pid);
                     continue;
                 }
                 AppLogger.info("Terminating process pid=" + pid);
@@ -91,26 +110,35 @@ public final class ProcessManager {
                 } catch (Throwable ignored) {}
                 boolean exited = false;
                 try {
-                    exited = p.waitFor(3, TimeUnit.SECONDS);
+                    exited = p.waitFor(2, TimeUnit.SECONDS);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                 }
-                if (!exited && p.isAlive()) {
-                    // Try Windows taskkill as a fallback for process trees
+                if (!exited && p.isAlive() && System.nanoTime() <= deadlineNanos) {
+                    // Try Windows taskkill as a fallback for process trees.
+                    // Discard output (never inheritIO: the packaged .exe has no
+                    // console and inherited streams can block shutdown).
                     try {
                         if (AppPaths.isWindows() && pid > 0) {
                             AppLogger.info("Attempting taskkill for pid=" + pid);
                             new ProcessBuilder("taskkill", "/PID", String.valueOf(pid), "/T", "/F")
-                                    .inheritIO().start().waitFor(5, TimeUnit.SECONDS);
+                                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                                    .start().waitFor(3, TimeUnit.SECONDS);
                         }
                     } catch (Throwable ignored) {
                     }
                     if (p.isAlive()) {
                         try {
                             p.destroyForcibly();
-                            p.waitFor(5, TimeUnit.SECONDS);
+                            p.waitFor(2, TimeUnit.SECONDS);
                         } catch (Throwable ignored) {
                         }
+                    }
+                } else if (p.isAlive()) {
+                    try {
+                        p.destroyForcibly();
+                    } catch (Throwable ignored) {
                     }
                 }
             } catch (Throwable e) {

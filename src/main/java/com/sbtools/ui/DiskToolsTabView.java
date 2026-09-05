@@ -65,6 +65,16 @@ import java.util.function.BooleanSupplier;
 
 public class DiskToolsTabView extends BorderPane {
 
+    /**
+     * Fire-and-forget workers must never keep the JVM alive after window close.
+     * All raw threads in this view go through here so they are daemon by construction.
+     */
+    private static Thread newDaemonThread(Runnable task, String name) {
+        Thread t = new java.lang.Thread(task, name);
+        t.setDaemon(true);
+        return t;
+    }
+
     private final BooleanProperty defragBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty wipeBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty secureBusy = new SimpleBooleanProperty(false);
@@ -141,7 +151,7 @@ public class DiskToolsTabView extends BorderPane {
 
     /* ───── Shared thread pool ───── */
     private final ExecutorService sharedExecutor = Executors.newFixedThreadPool(3, r -> {
-        Thread t = new Thread(r, "disk-tools-worker");
+        Thread t = newDaemonThread(r, "disk-tools-worker");
         t.setDaemon(true);
         return t;
     });
@@ -446,7 +456,7 @@ public class DiskToolsTabView extends BorderPane {
         emptyDrivesLabel.setVisible(false);
         emptyDrivesLabel.setManaged(false);
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             try {
                 List<DriveInfo> drives = defragService.getDrives();
                 Platform.runLater(() -> {
@@ -598,7 +608,7 @@ public class DiskToolsTabView extends BorderPane {
                 }, sharedExecutor))
                 .toList();
 
-        currentAnalyzeThread = new Thread(() -> {
+        currentAnalyzeThread = newDaemonThread(() -> {
             try {
                 CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
             } catch (java.util.concurrent.CancellationException e) {
@@ -682,7 +692,7 @@ public class DiskToolsTabView extends BorderPane {
 
         Instant startTime = Instant.now();
 
-        currentDefragThread = new Thread(() -> {
+        currentDefragThread = newDaemonThread(() -> {
             List<String> failedDrives = new ArrayList<>();
             try {
                 for (int i = 0; i < selected.size(); i++) {
@@ -863,7 +873,7 @@ public class DiskToolsTabView extends BorderPane {
         healthProgress.setVisible(true);
         healthStatus.setText("Loading disk health data...");
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             try {
                 DiskHealthService.HealthResult result = diskHealthService.getDiskHealth();
                 Platform.runLater(() -> {
@@ -1208,7 +1218,7 @@ public class DiskToolsTabView extends BorderPane {
         benchProgress.setVisible(true);
         benchStatus.setText("Initializing benchmark...");
 
-        currentBenchThread = new Thread(() -> {
+        currentBenchThread = newDaemonThread(() -> {
             try {
                 BenchmarkResult result = benchmarkService.benchmark(finalDriveLetter, testSizeMB,
                         msg -> Platform.runLater(() -> benchStatus.setText(msg)),
@@ -1542,7 +1552,7 @@ public class DiskToolsTabView extends BorderPane {
         recycleBinProgress.setVisible(true);
         recycleBinStatus.setText("Loading Recycle Bin contents...");
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             try {
                 ShredderService.RecycleBinResult result = shredderService.getRecycleBinContents();
                 Platform.runLater(() -> {
@@ -1603,7 +1613,7 @@ public class DiskToolsTabView extends BorderPane {
                 .filter(p -> p != null && !p.isBlank())
                 .toList();
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             try {
                 int passCount = getSelectedPassCount();
                 FolderDeleteResult result = shredderService.secureWipeRecycleBin(recyclePaths, passCount,
@@ -1688,7 +1698,7 @@ public class DiskToolsTabView extends BorderPane {
         entry.setStatusEnum(ShredderFileEntry.Status.PENDING);
         shredderEntries.add(0, entry);
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             try {
                 int passCount = getSelectedPassCount();
                 ShredderResult result = shredderService.secureDelete(filePath, passCount);
@@ -1757,7 +1767,7 @@ public class DiskToolsTabView extends BorderPane {
         secureDeleteProgress.setVisible(true);
         secureDeleteStatus.setText("Counting files in folder...");
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             int fileCount = 0;
             try {
                 fileCount = (int) java.nio.file.Files.walk(f.toPath())
@@ -1800,7 +1810,7 @@ public class DiskToolsTabView extends BorderPane {
 
     private void startSecureDeleteFolderInternal(String folderPath) {
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             try {
                 int passCount = getSelectedPassCount();
                 FolderDeleteResult result = shredderService.secureDeleteFolder(folderPath, passCount);
@@ -1882,7 +1892,7 @@ public class DiskToolsTabView extends BorderPane {
         secureDeleteProgress.setVisible(true);
         secureDeleteStatus.setText("Securely deleting files...");
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             int deleted = 0;
             int failed = 0;
             int passCount = getSelectedPassCount();
@@ -2228,7 +2238,7 @@ public class DiskToolsTabView extends BorderPane {
 
         Map<String, Integer> driveProgressMap = new HashMap<>();
 
-        new Thread(() -> {
+        newDaemonThread(() -> {
             try {
                 shredderService.wipeFreeSpace(driveLetters, prog -> {
                     Platform.runLater(() -> {
