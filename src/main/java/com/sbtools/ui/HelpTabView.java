@@ -25,122 +25,112 @@ public class HelpTabView extends VBox {
         getChildren().add(intro);
 
         getChildren().add(createFaqSection("Dashboard",
-                "The Dashboard is your system overview hub. Click \"Scan for Issues\" to run a comprehensive check across drivers, software updates, and cleanup opportunities. " +
-                "Results appear in a summary table grouped by category, showing how many issues were found in each area. " +
-                "You can click on any category row to jump directly to the corresponding tab for more details. " +
-                "The Dashboard does not make any changes to your system — it only reports what it finds."));
+                "The Dashboard is your system overview hub. Click \"Scan for issues\" to check Outdated Drivers, Software Updates, and System Cleanup opportunities in parallel. " +
+                "Results appear in summary cards plus a table (Category | Issues Found | Size | Source | Status). " +
+                "Click a category row to jump directly to that tab. Use \"Stop\" to cancel and \"Retry\" if a category times out or fails. Your last scan is restored on open. " +
+                "The Dashboard is read-only — it never changes your system. It honors excluded drivers and skipped software."));
 
         getChildren().add(createFaqSection("Drivers",
-                "The Drivers tab scans your installed drivers using Windows pnputil and compares them against OEM catalogs from Dell, AMD, ASUS, and Broadcom. " +
-                "Click \"Scan Drivers\" to detect available updates. Each result shows the current version, the available version, and a severity indicator (Critical, Recommended, or Optional). " +
-                "Select one or more drivers and click \"Install\" to download and install updates. " +
-                "Before installing, the app can auto-backup your current drivers and create a system restore point if those options are enabled. " +
-                "Use the exclusion list to permanently hide drivers you do not want to update — right-click a driver and select \"Ignore.\" " +
-                "The \"Update History\" section shows all previously installed driver updates with dates and statuses."));
+                "The Drivers tab scans installed devices and compares them against catalogs for Nvidia, AMD, Intel, Realtek, Broadcom, Qualcomm, Synaptics, Lenovo, Dell, HP, ASUS and Windows Update. " +
+                "Click \"Scan\" to detect updates. Each outdated row shows Device, Current vs Available version, Severity (Critical / Important / Recommended / Optional / Unknown, plus REBOOT and ISSUE badges) and Health (Excellent / Good / Fair / Poor). " +
+                "Tick rows and click \"Update Selected\" or \"Update All\", or use per-row \"Update\". Use per-row \"Ignore\" and \"Ignored\" to hide drivers, \"History\" to audit installs, \"Details\" / \"Compare\" for full info, \"Refresh Catalog\" for the latest catalog, and \"Search...\" to filter. \"Backup\" backs up all drivers. \"Stop\" / \"Stop Install\" / \"Stop Backup\" cancel the running operation. " +
+                "Admin rights are required. Before install the app runs pre-checks, can auto-backup drivers and create a restore point if enabled, blocks pre-release / untrusted / unsigned packages, and may ask for a manual vendor download. " +
+                "Drivers awaiting restart stay listed with a REBOOT badge until you reboot."));
 
         getChildren().add(createFaqSection("Backup/Rollback",
-                "This tab has two sub-sections: Driver Backup and System Restore. " +
-                "Driver Backup creates a snapshot of your currently installed drivers using pnputil. Click \"Create Backup\" to save a timestamped copy to your configured backup directory. " +
-                "You can browse existing backups and restore individual drivers or all drivers from a selected backup. " +
-                "System Restore creates Windows restore points that capture your entire system state. Click \"Create Restore Point\" to make one manually. " +
-                "The table lists all available restore points with creation dates. Select one and click \"Restore\" to roll back your system. " +
-                "Driver backups are safer for targeted rollbacks, while system restore points are useful for recovering from major changes."));
+                "This tab has three sub-tabs. \"Rollback drivers\" lists driver backups created automatically before driver updates. " +
+                "Use \"Refresh\", \"Search backups...\", \"Details\", \"Open Folder\", \"Verify\" and \"Repair\" to manage them. Select a row and click \"Revert\" to restore that driver version (admin required, restart may be needed). " +
+                "\"Delete\" removes one backup; \"Delete All\" removes all (two-step confirmation — rollback is then impossible). Nothing is deleted automatically. " +
+                "\"System restore\" is read-only: click \"Scan\" to list points, \"Create new restore point\" to create one (admin required), and \"Launch restore point\" to open the Windows System Restore wizard — the app never restores or deletes points itself. " +
+                "\"Registry backup\" backs up startup-related registry areas: click \"Backup Now\", pick core / extended areas plus optional full-hive export, then \"Restore Selected\" (merges .reg files; .hiv files need manual reg restore) or \"Delete Backup\"."));
 
         getChildren().add(createFaqSection("Software Update",
-                "This tab uses Windows Package Manager (winget) to scan for available updates to your installed applications. " +
-                "Click \"Scan\" to check for updates. Results show the app name, current version, available version, and a severity level (Critical, Important, or Minor). " +
-                "Select individual apps or click \"Update All\" to install updates in batch. " +
-                "Before each update, the app can create a system restore point automatically if enabled. " +
-                "After installation, leftover installer files are cleaned up to save disk space. " +
-                "Apps you choose to skip appear in the \"Skipped\" list and won't be suggested again until you unskip them."));
+                "This tab uses winget plus Windows Update to scan for app and Windows updates. Click \"Scan\" to check (\"Stop scan\" cancels). " +
+                "Results show Program, Current / Available Version, Source (winget / WindowsUpdate), Size and Status (no severity levels). " +
+                "Use Search, Source filter and \"Failed only\" to narrow results, then \"Select All\" / \"Deselect All\" and \"Update Selected\", or per-row \"Update\". Failed items can be retried with \"Retry Failed\" (max 3 attempts). " +
+                "If enabled, the app offers one System Restore Point before the batch. A reboot requirement stops the remaining batch — reboot and re-scan. " +
+                "After a successful install you are prompted to delete detected installer files from Downloads to save space. " +
+                "Per-row \"Ignore\" or \"Ignored List\" hides apps until unignored. \"History\" audits OK / Failed installs."));
 
         getChildren().add(createFaqSection("System Information",
-                "The System Information tab displays detailed hardware and software data about your computer. " +
-                "It starts with an Overview tab showing key specifications at a glance. " +
-                "Information is organized into sections: Overview, Operating System, CPU, GPU, RAM, Storage, BIOS, Motherboard, Network Adapters, Audio Devices, Battery, Temperatures, and Other Devices. " +
-                "Each section shows key specifications such as model names, clock speeds, memory sizes, and firmware versions. " +
-                "Use the search bar on the Others tab to filter devices by name. " +
-                "Click \"Export...\" to save system information as a TXT, JSON, or HTML file. " +
-                "Click \"Copy All\" to copy the full report to your clipboard for easy sharing. " +
-                "A Warnings tab appears if any data could not be collected. " +
+                "The System Information tab displays detailed hardware and software data. Click \"Load System Info\" to query, \"Refresh\" for latest, \"Cancel\" to stop. Your last snapshot is shown instantly on open. " +
+                "Information is organized into tabs shown only when data exists: Overview, CPU, GPU, RAM, OS, Storage, Motherboard, Network, Audio, Battery, Temperatures, Others, USB Devices, Monitors, Printers, plus Warnings (with collection timings) if anything failed. " +
+                "Others uses a category list; Network, Audio, USB, Monitors and Printers each have their own search box (e.g. \"Search adapters...\"). " +
+                "Click \"Export...\" to save as TXT, JSON, or HTML, \"Copy All\" for the full report or \"Copy Tab\" for the visible tab. " +
+                "A banner appears when not running as admin (temperatures / NVMe may be unavailable). " +
                 "This tab is read-only and does not modify any system settings."));
 
         getChildren().add(createFaqSection("Uninstaller",
-                "The Uninstaller tab lists all installed applications, including both traditional Desktop/Win32 programs and Windows Store (AppX) apps. " +
-                "Use the search bar to find a specific application. Select an app and click \"Uninstall\" for a standard removal, or \"Force Uninstall\" for stubborn applications. " +
-                "Select 2+ apps and click \"Uninstall Selected\" to remove them one-by-one — each app still asks for confirmation, mode, and restore point. " +
-                "After uninstallation, the app scans for leftover files, folders, and registry entries that were not removed. " +
-                "You can review and selectively delete these leftovers: files go to the Recycle Bin by default (recoverable), registry keys are backed up to .reg first. " +
-                "Only exact matches are pre-selected; heuristic matches show a badge and stay unchecked. Use \"High-confidence only\" to reset to the safest selection. " +
-                "Use \"History\" to audit past uninstalls and \"Export...\" to save the app list as CSV. " +
-                "If an entry has no uninstaller, the app offers a winget fallback. " +
-                "Be cautious with force uninstall — it may remove shared components that other applications depend on."));
+                "The Uninstaller tab lists installed apps. Toggle \"Desktop Apps\" / \"Windows Store Apps\", click \"Scan\" (\"Cancel\" stops it), and use \"Search apps...\" to filter. " +
+                "Select an app and click \"Uninstall\" (runs the vendor uninstaller, Interactive or Silent), or \"Force Uninstall\" as a last resort without it. " +
+                "Select 2+ apps and click \"Uninstall Selected (N)\" to remove them one-by-one — each app still asks for confirmation, mode, and restore point. " +
+                "After uninstallation, the app scans for leftover files, folders, and registry entries. Review them in the leftovers dialog: files go to the Recycle Bin by default (recoverable), registry keys are backed up to .reg first (checked by default). " +
+                "Only exact matches are pre-selected; heuristic matches show a badge and stay unchecked. Use \"High-confidence only\" to reset to the safest selection, \"Select All\" / \"Deselect All\" / \"Export List...\" as needed. PATH entries are shown read-only. " +
+                "Use \"History\" to audit past uninstalls, \"Export...\" to save the app list as CSV, and \"Open Folder\" / \"Copy\" for details. " +
+                "If an entry has no uninstaller, the app offers a winget fallback (with confirmation). " +
+                "Be cautious with force uninstall — it kills processes and deletes files/registry/Start Menu entries and cannot be undone."));
 
         getChildren().add(createFaqSection("Startup Items/Services",
-                "This tab manages programs and services that run automatically when Windows starts. " +
-                "Items are organized into three sub-tabs: Startup apps (Registry Run/RunOnce keys + Startup Folder), Scheduled Tasks, and Windows Services. " +
-                "Startup Folder items (User and Common) are merged into the Startup apps tab and can be toggled by renaming the shortcut (.disabled). " +
-                "Select an item and click \"Enable/Disable\" to prevent it from starting automatically, or \"Delete\" to remove it entirely (a backup is created). " +
-                "Use the search bar to quickly find specific items. " +
-                "You can back up your current startup configuration and restore it later via \"Backups & Restore\" — useful before making bulk changes. " +
-                "Disabling unknown services or HKLM entries requires administrator privileges and can cause system instability, so only modify items you recognize."));
+                "This tab manages programs and services that run automatically when Windows starts. Items are organized into \"Startup apps\" (Registry Run/RunOnce + Startup Folder), \"Scheduled tasks\", and \"Windows services\" (with counts). " +
+                "Startup Folder items (User and Common) are merged into Startup apps and toggled by renaming the shortcut (.disabled). Services cannot be deleted, only toggled. " +
+                "Click \"Scan\" (\"Stop\" cancels), then select an item and click \"Enable/Disable\" or \"Delete\". \"Delete\" always creates a backup first; toggling does not. Disabling a critical system service asks for extra confirmation. " +
+                "Use per-tab search plus \"Status:\" / \"Impact:\" filters, \"Select high-impact\" to select heavy enabled items, and right-click / double-click for \"Open file location\", \"Copy command\", \"Show details\" and online search. " +
+                "The footer shows total estimated boot delay (enabled items only) and last boot time. Use \"Backups & Restore\" to restore or permanently delete backups, and \"Export CSV\" for the visible tab. " +
+                "Modifying HKLM / Common Startup, system tasks or services requires administrator rights. Only modify items you recognize."));
 
         getChildren().add(createFaqSection("System Cleanup",
-                "The System Cleanup tab scans your computer for unnecessary files that consume disk space. " +
-                "Click \"Scan\" to analyze 40 categories such as temporary files, browser caches, Windows update leftovers, and log files. " +
-                "Each category shows how much space can be reclaimed plus its Risk level (Low/Medium/High), scan status, and duration. Use the search box and risk filter to narrow results. " +
-                "Double-click a row (or right-click > View details) to preview what will be cleaned. Select the categories you want to clean and click \"Clean Selected\" (HIGH-risk categories are unchecked by default and ask for extra confirmation). " +
-                "Use \"Refresh selected\" to re-scan only selected rows, \"Export...\" to save the scan as CSV, and right-click > Ignore to skip a category in future scans. " +
-                "The Registry Defragmentation tool (in a sub-tab) compacts your Windows registry to improve system performance. " +
-                "Registry defragmentation requires a restart to complete. " +
-                "Always review scan results before cleaning to avoid removing files you still need."));
+                "The System Cleanup tab scans for unnecessary files. Click \"Scan\" (\"Cancel\" stops it) to analyze 40 categories such as temporary files, browser caches, Windows update leftovers, and log files. " +
+                "Each category shows reclaimable Size / Count plus Risk (Low / Medium / High), Status, and Took time. Use Search and the Risk filter to narrow results. " +
+                "Double-click a row (or right-click > \"View details...\") to preview what will be cleaned. Select categories and click \"Clean Selected\" (HIGH-risk categories start unchecked and ask for extra confirmation; iTunes backups / Docker / Windows.old need a second irreversible-delete confirm). " +
+                "Use \"Refresh selected\" to re-scan only selected rows, \"Presets...\" for Safe / High Impact / Privacy / Maintenance / Dev Tools selections, \"Export...\" to save the scan as CSV, \"History\" for past sessions, and right-click > \"Ignore category in future scans\" to skip a category. " +
+                "If Registry is selected you are offered a .reg backup; a System Restore point can be created automatically if enabled. Some categories require admin. " +
+                "There is no registry-defragmentation tool. Always review results before cleaning."));
 
         getChildren().add(createFaqSection("Duplicate Files",
-                "This tab finds duplicate files by comparing file contents with SHA-256 hashes (after fast CRC32 and sample-hash pruning). "
-                + "Click Add... to choose folder(s) on any drive (e.g., Documents, Downloads, Photos) — or drag folders onto the list — then click Scan. "
-                + "Use Min size and Types filters to speed up large scans (they apply on the next scan), and the Keep dropdown to choose which copy is kept per group "
-                + "(newest, oldest, or shortest path; the safest non-system location always wins first). Results can be searched, auto-selected, "
-                + "and exported to CSV. "
+                "This tab finds duplicate files by comparing contents with SHA-256 hashes (after fast CRC32 and sample-hash pruning). "
+                + "Click \"Add...\" to choose folder(s) on any drive (e.g., Documents, Downloads, Photos) — or drag folders onto the list — then click \"Scan\" (\"Stop\" cancels). "
+                + "Use \"Min size:\" and \"Types:\" filters to speed up large scans (they apply on the next scan), and \"Keep:\" to choose which copy is kept per group "
+                + "(Newest, Oldest, or Shortest path; the safest non-system location always wins first). \"Search:\" filters results, \"Auto-select\" / \"Select All\" / \"Deselect All\" change selection, "
+                + "and \"Export CSV...\" saves results. "
                 + "Results are grouped by identical content: the keeper is shown as the keeper, "
-                + "and other copies are listed in the detail pane where you can tick individual files or click Keep instead to swap the keeper. "
+                + "and other copies are listed in the detail pane where you can tick individual files or click \"Keep instead\" to swap the keeper (plus \"Open\"). "
                 + "System and app folders on any drive (Windows, Program Files, ProgramData, AppData, WindowsApps, System Volume Information, $Recycle.Bin, Recovery, EFI, Boot) "
-                + "are automatically excluded and cannot be added. "
-                + "Select groups and per-file copies, then click Clean Selected. You can move files to the Recycle Bin (recommended, recoverable) "
+                + "are automatically excluded and cannot be added; scanning an entire system drive is blocked. "
+                + "Select groups and per-file copies, then click \"Clean Selected\" (admin required). You can move files to the Recycle Bin (recommended, recoverable) "
                 + "or delete permanently (requires typing DELETE). A System Restore point can be created automatically if enabled in settings. "
                 + "Scan folders and filters are remembered between runs. "
                 + "Always review the deletable list in the bottom pane before confirming."));
 
         getChildren().add(createFaqSection("Disk Tools",
-                "The Disk Tools tab contains three utilities: Defragmentation, File Shredder, and Free Space Wipe. " +
-                "Defragmentation reorganizes fragmented files on your hard drives for faster access. The visualization shows the current fragmentation state with a color-coded grid. " +
-                "Note: Defragmentation is only beneficial for traditional HDDs — do not defragment SSDs. " +
-                "File Shredder securely deletes files by overwriting them multiple times, making recovery impossible. " +
-                "Free Space Wipe overwrites the free space on a drive so that previously deleted files cannot be recovered. " +
-                "Both shredding and wiping are irreversible — make sure you have backups before proceeding."));
+                "The Disk Tools tab has four inner tabs: Defrag, Disk Health, Benchmark and Secure Erase. " +
+                "Defrag: click \"Refresh\", select drives, click \"Analyze Selected\", then \"Intelligent Defrag\" (Mode Auto / Quick / Deep, Filter All / HDD / SSD). Auto runs ReTrim on SSDs and full defrag on HDDs — SSDs are never defragmented. A color-coded grid visualizes fragmentation. Admin required. " +
+                "Disk Health: click \"Refresh\" for SMART data (model, temperature, power-on hours, SSD wear, reallocated / pending sectors, host reads/writes). " +
+                "Benchmark: pick a drive and Size (32-256 MB), click \"Start Benchmark\" for sequential read/write, 1MB / 4K IOPS and latency (\"Stop\" cancels; needs size + 100 MB free). " +
+                "Secure Erase: \"Secure File / Folder Deletion\" (Browse / Add Files, Overwrite Quick 1-pass / Standard 3-pass / Deep 7-pass, \"Secure Delete\" / \"Secure Delete Folder\" / \"Delete All\"), \"Recycle Bin Cleanup\" (\"Refresh\" + \"Secure Wipe Recycle Bin\"), and \"Free Space Wiping\" (\"Start\" / \"Stop\", 1 GB reserve kept, SSD / Unknown types blocked, system drive needs double confirmation, admin required). " +
+                "Shredding and wiping are irreversible — in-use files can be scheduled for deletion on next reboot."));
 
         getChildren().add(createFaqSection("Browser Extensions",
-                "This tab scans all major browsers installed on your system — Chrome, Edge, Firefox, Brave, Opera, and Vivaldi (plus extra browsers from browser-catalog.json) — for installed extensions. " +
+                "This tab scans installed browsers — Chrome, Chrome Canary, Edge, Edge Beta, Edge Dev, Edge Canary, Firefox, Brave, Opera, Opera GX and Vivaldi (plus extra browsers from browser-catalog.json) — for installed extensions. " +
                 "Click \"Scan All Browsers\" for a full parallel scan with determinate progress, or pick a browser in the Browser filter and click \"Rescan Browser\" for a fast single-browser refresh. Use \"Cancel\" to stop a running scan or toggle. " +
-                "Filter by Browser, Status (Enabled/Disabled/Ignored), Profile (Default, Profile 1, ...) and free-text search (name, description, ID, permissions, version). " +
-                "Each extension shows its name, version, profile, install date, description, and current state (enabled/disabled/ignored). Double-click a row (or right-click > View Details) for the full detail dialog. " +
-                "Select rows and click \"Enable\"/\"Disable\" to toggle without uninstalling (browsers must stay closed; the app blocks the toggle while they run and verifies the write). " +
-                "Right-click offers Open Extension Folder, Copy ID/Profile Path/Store URL, Open Store Page, and Ignore. " +
-                "Use \"Export...\" to save the filtered list as CSV/JSON, \"Restore Backup...\" to roll back a Preferences/extensions.json backup created during a toggle, and \"Manage Ignored\" to review ignored items. " +
-                "Tick \"Auto-scan on open\" to scan automatically. If a browser is running, a warning will be shown; changes take effect after restarting the browser. " +
-                "Only store-installed extensions are scanned; unpacked developer-mode extensions are not."));
+                "Filter by Browser, Status (Enabled / Disabled / Ignored), Profile (Default, Profile 1, ...) and free-text search (name, description, ID, permissions, version). Tick \"Auto-scan on open\" to scan automatically. " +
+                "Each extension shows its name, version, profile, install date, description, and current state (enabled / disabled / ignored). Double-click a row (or right-click > \"View Details\") for the full detail dialog. " +
+                "Select rows and click \"Enable\" / \"Disable\" to toggle without uninstalling (browsers must stay closed; the app blocks the toggle while they run, re-checks mid-batch, and verifies the write). " +
+                "Right-click offers \"Open Extension Folder\", \"Copy Extension ID\" / \"Copy Profile Path\" / \"Copy Store URL\", \"Open Store Page\", and \"Ignore\" / \"Unignore\". Use \"Select All\" / \"Deselect All\" for the filtered view. " +
+                "Use \"Export...\" to save the filtered list as CSV/JSON, \"Restore Backup...\" to roll back a Preferences / extensions.json backup created during a toggle, and \"Manage Ignored\" to review ignored items. " +
+                "Changes take effect after restarting the browser. Only store-installed extensions are scanned; unpacked developer-mode extensions are not."));
 
         getChildren().add(createFaqSection("Network Optimizer",
-                "The Network Optimizer has seven sub-tabs. "
-                + "Network Adapters lists all interfaces with status, speed, IP, DHCP, gateway and DNS; use Filter and Export CSV. "
-                + "Optimization applies TCP/IP presets (Default, Maximum Performance, Maximum Stability, Gaming). "
-                + "Use Preview Changes to diff current vs intended values; a snapshot is captured automatically before each Apply, "
-                + "and you can tick 'Create system restore point' for extra safety. Snapshots… shows guided restore info (read-only+ mode restores via Reset to Defaults). "
-                + "DNS & Cache: flush DNS, reset stack/Winsock (marks Reboot required banner), set IPv4/IPv6 DNS (presets incl. Google/Cloudflare/Quad9 v6), "
-                + "plus opt-in diagnostics that run only on click: DNS Benchmark, MTU Discovery (suggestion only), Download Speed Test, Ping/Traceroute with ping-history chart. "
-                + "Adapter Settings is a read-only enriched view (MTU, driver version, DNS) with filter + Export CSV. "
-                + "Wi-Fi shows current connection + signal history, read-only Nearby Networks survey (Scan), and saved profiles with disconnect/forget. "
-                + "Connection Overview offers ipconfig /all, route print, arp -a and netstat -ano with Copy + Save to File. "
-                + "Change History supports filter (text + OK/Failed), details pane, Export CSV and snapshot viewer."));
+                "The Network Optimizer has seven sub-tabs (admin required for changes; a \"Reboot required\" banner appears after stack / Winsock resets). "
+                + "\"Network Adapters\" lists interfaces with status, speed, IP, DHCP, gateway and DNS; use Filter, \"Refresh\", \"Enable\" / \"Disable\", \"Renew IP\" and \"Export CSV\". "
+                + "\"Optimization\" applies TCP/IP presets (Default, Maximum Performance, Maximum Stability, Gaming). "
+                + "Use \"Preview Changes\" to diff current vs intended values and \"Show Current TCP/IP Settings\" to inspect; a snapshot is captured automatically before each \"Apply\" (plus optional \"Create system restore point\"), "
+                + "and \"Snapshots...\" shows guided restore info (read-only+ mode restores via \"Reset to Defaults\"). "
+                + "\"DNS & Cache\": \"Flush DNS Cache\", \"Reset Network Stack\" / \"Reset Winsock\" (reboot banner), per-adapter DNS with \"Apply DNS\" / \"Reset to DHCP\" (presets incl. Google / Cloudflare / OpenDNS / Quad9 + IPv6), "
+                + "plus opt-in diagnostics that run only on click: \"Benchmark DNS Now\", \"Probe MTU\" (suggestion only), \"Run Speed Test\", \"Ping\" / \"Traceroute\" (with \"Cancel\" and ping-history chart). "
+                + "\"Adapter Settings\" is a read-only enriched view with filter, \"Refresh Adapters\" / \"Refresh Properties\" and \"Export CSV\". "
+                + "\"Wi-Fi\" shows current connection + signal history (\"Refresh\"), read-only Nearby Networks survey (\"Scan Nearby Networks\"), and saved profiles with \"Refresh\" / \"Disconnect\" / \"Forget\" plus \"Enable / Disable Wi-Fi\". "
+                + "\"Connection Overview\" (read-only) offers ipconfig /all, route print, arp -a and netstat -ano with \"Refresh\", \"Copy to Clipboard\" and \"Save to File...\". "
+                + "\"Change History\" (last 100 ops) supports text + OK / Failed filter, details pane, \"Refresh\" / \"Clear History\" / \"Export CSV\" and \"View Snapshots...\"."));
 
         Label contactTitle = new Label("Contact us");
         contactTitle.setStyle("-fx-font-size: 15px; -fx-font-weight: bold; -fx-text-fill: #8be9fd; -fx-padding: 0 0 6 0;");
