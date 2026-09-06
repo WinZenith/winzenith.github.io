@@ -26,7 +26,11 @@ public record AppSettings(
         boolean autoCheckForUpdates,
         List<String> ignoredBrowserExtensionIds,
         List<String> ignoredCleanupCategories,
-        boolean autoCreateRestoreBeforeCleanup
+        boolean autoCreateRestoreBeforeCleanup,
+        List<String> duplicateScanRoots,
+        long duplicateMinSizeBytes,
+        String duplicateIncludeFilter,
+        String duplicateKeeperStrategy
 ) {
     public static AppSettings defaults() {
         return new AppSettings(true, true, false,
@@ -34,7 +38,8 @@ public record AppSettings(
                 "DEFAULT", System.getProperty("user.home") + "\\Downloads",
                 false, false, false, true,
                 "", "powershell", 960, 600, true, true,
-                Collections.emptyList(), Collections.emptyList(), true);
+                Collections.emptyList(), Collections.emptyList(), true,
+                Collections.emptyList(), 1L, "", "NEWEST");
     }
 
     /**
@@ -70,6 +75,10 @@ public record AppSettings(
         private List<String> ignoredBrowserExtensionIds;
         private List<String> ignoredCleanupCategories;
         private boolean autoCreateRestoreBeforeCleanup;
+        private List<String> duplicateScanRoots;
+        private long duplicateMinSizeBytes;
+        private String duplicateIncludeFilter;
+        private String duplicateKeeperStrategy;
 
         private Builder(AppSettings s) {
             this.autoBackupDrivers = s.autoBackupDrivers;
@@ -92,6 +101,10 @@ public record AppSettings(
             this.ignoredBrowserExtensionIds = s.ignoredBrowserExtensionIds;
             this.ignoredCleanupCategories = s.ignoredCleanupCategories;
             this.autoCreateRestoreBeforeCleanup = s.autoCreateRestoreBeforeCleanup;
+            this.duplicateScanRoots = s.duplicateScanRoots;
+            this.duplicateMinSizeBytes = s.duplicateMinSizeBytes;
+            this.duplicateIncludeFilter = s.duplicateIncludeFilter;
+            this.duplicateKeeperStrategy = s.duplicateKeeperStrategy;
         }
 
         public Builder autoBackupDrivers(boolean v) { this.autoBackupDrivers = v; return this; }
@@ -114,6 +127,10 @@ public record AppSettings(
         public Builder ignoredBrowserExtensionIds(List<String> v) { this.ignoredBrowserExtensionIds = v; return this; }
         public Builder ignoredCleanupCategories(List<String> v) { this.ignoredCleanupCategories = v; return this; }
         public Builder autoCreateRestoreBeforeCleanup(boolean v) { this.autoCreateRestoreBeforeCleanup = v; return this; }
+        public Builder duplicateScanRoots(List<String> v) { this.duplicateScanRoots = v; return this; }
+        public Builder duplicateMinSizeBytes(long v) { this.duplicateMinSizeBytes = Math.max(1L, v); return this; }
+        public Builder duplicateIncludeFilter(String v) { this.duplicateIncludeFilter = v; return this; }
+        public Builder duplicateKeeperStrategy(String v) { this.duplicateKeeperStrategy = v; return this; }
 
         public AppSettings build() {
             return new AppSettings(
@@ -136,7 +153,11 @@ public record AppSettings(
                     autoCheckForUpdates,
                     ignoredBrowserExtensionIds,
                     ignoredCleanupCategories,
-                    autoCreateRestoreBeforeCleanup);
+                    autoCreateRestoreBeforeCleanup,
+                    duplicateScanRoots,
+                    duplicateMinSizeBytes,
+                    duplicateIncludeFilter,
+                    duplicateKeeperStrategy);
         }
     }
 }

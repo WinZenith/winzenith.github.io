@@ -7,12 +7,15 @@ import com.sun.jna.platform.win32.ShellAPI.SHFILEOPSTRUCT;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
@@ -35,25 +38,60 @@ import java.util.zip.CRC32;
 
 public class DuplicateFinderService {
 
+    private static final int IO_BUFFER_SIZE = 65536;
+    private static final int QUICK_HASH_BYTES = 8192;
+    private static final int SAMPLE_CHUNK_BYTES = 65536;
+    private static final long SAMPLE_SKIP_BELOW_BYTES = 256L * 1024L;
+
+    private static final ThreadLocal<byte[]> IO_BUF = ThreadLocal.withInitial(() -> new byte[IO_BUFFER_SIZE]);
+    private static final ThreadLocal<byte[]> QUICK_BUF = ThreadLocal.withInitial(() -> new byte[QUICK_HASH_BYTES]);
+
+    /** Mutable per-scan counters, converted to {@link ScanResult} on return. */
+    private static final class ScanStats {
+        long enumeratedFiles;
+        long skippedProtected;
+        long skippedFiltered;
+    }
+
     public List<DuplicateFileRow> scan(Path root, BiConsumer<Integer, Integer> progress,
                                        java.util.function.Consumer<String> phaseLabel,
                                        AtomicBoolean cancelled) {
         return scan(Collections.singletonList(root), progress, phaseLabel, cancelled);
     }
 
+    public ScanResult scanSingleWithStats(Path root, DuplicateScanOptions options,
+                                          BiConsumer<Integer, Integer> progress,
+                                          java.util.function.Consumer<String> phaseLabel,
+                                          AtomicBoolean cancelled) {
+        return scanWithStats(Collections.singletonList(root), options, progress, phaseLabel, cancelled);
+    }
+
     public List<DuplicateFileRow> scan(List<Path> roots, BiConsumer<Integer, Integer> progress,
                                        java.util.function.Consumer<String> phaseLabel,
                                        AtomicBoolean cancelled) {
+        return scanWithStats(roots, DuplicateScanOptions.defaults(), progress, phaseLabel, cancelled).getRows();
+    }
+
+    public ScanResult scanWithStats(List<Path> roots, DuplicateScanOptions options,
+                                    BiConsumer<Integer, Integer> progress,
+                                    java.util.function.Consumer<String> phaseLabel,
+                                    AtomicBoolean cancelled) {
+        DuplicateScanOptions effectiveOptions = options == null ? DuplicateScanOptions.defaults() : options;
+        DuplicateKeeperStrategy keeperStrategy = effectiveOptions.keeperStrategy() == null
+                ? DuplicateKeeperStrategy.NEWEST : effectiveOptions.keeperStrategy();
+        ScanStats stats = new ScanStats();
         List<DuplicateFileRow> result = new ArrayList<>();
         ExecutorService executor = null;
 
         try {
-            // Phase 1: walk file tree, bucket by size (skip 0-byte files)
-            if (phaseLabel != null) phaseLabel.accept("Phase 1/3 — Enumerating files...");
+            // Phase 1: walk file tree, bucket by size (skip 0-byte files + option filters)
+            if (phaseLabel != null) phaseLabel.accept("Phase 1/4 — Enumerating files...");
 
             Map<Long, List<Path>> bySize = new HashMap<>();
             Set<String> seenFileKeys = new HashSet<>();
             long[] fileCount = {0};
+            final long minSize = Math.max(1L, effectiveOptions.minSizeBytes());
+            final DuplicateScanOptions filterOptions = effectiveOptions;
 
             for (Path root : roots) {
                 if (cancelled.get()) break;
@@ -113,11 +151,13 @@ public class DuplicateFinderService {
                     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
                         if (cancelled.get()) return FileVisitResult.TERMINATE;
                         if (DuplicateSafety.isProtected(file)) {
+                            stats.skippedProtected++;
                             return FileVisitResult.CONTINUE;
                         }
                         try {
                             Path real = file.toRealPath(LinkOption.NOFOLLOW_LINKS);
                             if (!real.equals(file.toAbsolutePath().normalize()) && DuplicateSafety.isProtected(real)) {
+                                stats.skippedProtected++;
                                 return FileVisitResult.CONTINUE;
                             }
                         } catch (Exception ignored) {}
@@ -138,6 +178,14 @@ public class DuplicateFinderService {
                             return FileVisitResult.CONTINUE;
                         }
                         if (attrs.size() > 0) {
+                            if (attrs.size() < minSize) {
+                                stats.skippedFiltered++;
+                                return FileVisitResult.CONTINUE;
+                            }
+                            if (!filterOptions.matchesExtension(file.getFileName().toString())) {
+                                stats.skippedFiltered++;
+                                return FileVisitResult.CONTINUE;
+                            }
                             Object fk = attrs.fileKey();
                             if (fk != null) {
                                 String compositeKey;
@@ -171,13 +219,13 @@ public class DuplicateFinderService {
                 });
             }
 
-            if (cancelled.get()) return result;
+            if (cancelled.get()) return ScanResult.cancelled(result, stats);
 
             List<Path> toHash = new ArrayList<>();
             for (List<Path> paths : bySize.values()) {
                 if (paths.size() >= 2) toHash.addAll(paths);
             }
-            if (toHash.isEmpty()) return result;
+            if (toHash.isEmpty()) return ScanResult.completed(result, stats);
             bySize.clear();
 
             int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 8);
@@ -189,18 +237,18 @@ public class DuplicateFinderService {
             });
 
             // Phase 2: quick-hash first 8KB using CRC32 (parallel)
-            if (phaseLabel != null) phaseLabel.accept("Phase 2/3 — Quick hashing (CRC32)...");
+            if (phaseLabel != null) phaseLabel.accept("Phase 2/4 — Quick hashing (CRC32)...");
 
             int quickTotal = toHash.size();
             List<Future<Map.Entry<String, Path>>> quickFutures = new ArrayList<>(quickTotal);
 
             for (Path p : toHash) {
-                if (cancelled.get()) return result;
+                if (cancelled.get()) return ScanResult.cancelled(result, stats);
                 final Path pathForTask = p;
                 quickFutures.add(executor.submit(() -> {
                     if (cancelled.get()) return null;
                     if (DuplicateSafety.isProtected(pathForTask)) return null;
-                    byte[] localBuf = new byte[8192];
+                    byte[] localBuf = QUICK_BUF.get();
                     CRC32 crc = new CRC32();
                     Path effective = toLongPath(pathForTask);
                     try (InputStream is = new BufferedInputStream(Files.newInputStream(effective))) {
@@ -220,7 +268,7 @@ public class DuplicateFinderService {
             for (int i = 0; i < quickFutures.size(); i++) {
                 if (cancelled.get()) {
                     for (int j = i; j < quickFutures.size(); j++) quickFutures.get(j).cancel(true);
-                    return result;
+                    return ScanResult.cancelled(result, stats);
                 }
                 try {
                     Map.Entry<String, Path> entry = quickFutures.get(i).get();
@@ -232,23 +280,87 @@ public class DuplicateFinderService {
                 if (progress != null) progress.accept(quickProcessed, quickTotal);
             }
 
-            if (cancelled.get()) return result;
+            if (cancelled.get()) return ScanResult.cancelled(result, stats);
 
-            // Phase 3: full SHA-256 for groups with 2+ files, with short-circuit & mmap (parallel)
-            if (phaseLabel != null) phaseLabel.accept("Phase 3/3 — Full hashing...");
+            // Phase 3: sample-hash (head/middle/tail 64KB) to prune same-size
+            // collisions without reading multi-GB files in full (parallel).
+            // Files below the sample threshold go straight to full hashing.
+            if (phaseLabel != null) phaseLabel.accept("Phase 3/4 — Sample hashing...");
 
-            List<Path> toFullHash = new ArrayList<>();
+            List<Path> smallDirect = new ArrayList<>();
+            List<Path> toSample = new ArrayList<>();
             for (List<Path> group : quickGroups.values()) {
-                if (group.size() >= 2) toFullHash.addAll(group);
+                if (group.size() < 2) continue;
+                for (Path p : group) {
+                    try {
+                        long sz = Files.size(toLongPath(p));
+                        if (sz < SAMPLE_SKIP_BELOW_BYTES) smallDirect.add(p);
+                        else toSample.add(p);
+                    } catch (Exception e) {
+                        toSample.add(p);
+                    }
+                }
             }
             quickGroups.clear();
 
+            int middleTotal = toSample.size();
+            Map<String, List<Path>> sampleGroups = new HashMap<>();
+            if (!toSample.isEmpty()) {
+                List<Future<Map.Entry<String, Path>>> sampleFutures = new ArrayList<>(middleTotal);
+                for (Path p : toSample) {
+                    if (cancelled.get()) return ScanResult.cancelled(result, stats);
+                    final Path pathForTask = p;
+                    sampleFutures.add(executor.submit(() -> {
+                        if (cancelled.get()) return null;
+                        if (DuplicateSafety.isProtected(pathForTask)) return null;
+                        try {
+                            String sample = sampleHashSha256(pathForTask, cancelled);
+                            if (sample == null) return null;
+                            long size = Files.size(toLongPath(pathForTask));
+                            return Map.entry(size + ":" + sample, pathForTask);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            return null;
+                        } catch (Exception e) {
+                            return null;
+                        }
+                    }));
+                }
+                int sampleProcessed = 0;
+                int sampleCombinedTotal = quickTotal + middleTotal;
+                for (int i = 0; i < sampleFutures.size(); i++) {
+                    if (cancelled.get()) {
+                        for (int j = i; j < sampleFutures.size(); j++) sampleFutures.get(j).cancel(true);
+                        return ScanResult.cancelled(result, stats);
+                    }
+                    try {
+                        Map.Entry<String, Path> entry = sampleFutures.get(i).get();
+                        if (entry != null) {
+                            sampleGroups.computeIfAbsent(entry.getKey(), k -> new ArrayList<>()).add(entry.getValue());
+                        }
+                    } catch (Exception ignored) {}
+                    sampleProcessed++;
+                    if (progress != null) progress.accept(quickTotal + sampleProcessed, sampleCombinedTotal);
+                }
+            }
+
+            if (cancelled.get()) return ScanResult.cancelled(result, stats);
+
+            List<Path> toFullHash = new ArrayList<>(smallDirect);
+            for (List<Path> group : sampleGroups.values()) {
+                if (group.size() >= 2) toFullHash.addAll(group);
+            }
+            sampleGroups.clear();
+
+            // Phase 4: full SHA-256 for surviving candidates (parallel)
+            if (phaseLabel != null) phaseLabel.accept("Phase 4/4 — Full hashing...");
+
             int fullTotal = toFullHash.size();
-            int combinedTotal = quickTotal + fullTotal;
+            int combinedTotal = quickTotal + middleTotal + fullTotal;
             List<Future<Map.Entry<String, Path>>> fullFutures = new ArrayList<>(fullTotal);
 
             for (Path p : toFullHash) {
-                if (cancelled.get()) return result;
+                if (cancelled.get()) return ScanResult.cancelled(result, stats);
                 final Path pathForTask = p;
                 fullFutures.add(executor.submit(() -> {
                     if (cancelled.get()) return null;
@@ -256,7 +368,7 @@ public class DuplicateFinderService {
                     if (DuplicateSafety.isProtected(pathForTask)) return null;
                     try {
                         MessageDigest md = MessageDigest.getInstance("SHA-256");
-                        byte[] localBuf = new byte[8192];
+                        byte[] localBuf = IO_BUF.get();
                         Path effective = toLongPath(pathForTask);
                         try (InputStream is = new BufferedInputStream(Files.newInputStream(effective))) {
                             int read;
@@ -272,11 +384,11 @@ public class DuplicateFinderService {
             }
 
             Map<String, List<Path>> hashGroups = new LinkedHashMap<>();
-            int combinedProcessed = quickTotal;
+            int combinedProcessed = quickTotal + middleTotal;
             for (int i = 0; i < fullFutures.size(); i++) {
                 if (cancelled.get()) {
                     for (int j = i; j < fullFutures.size(); j++) fullFutures.get(j).cancel(true);
-                    return result;
+                    return ScanResult.cancelled(result, stats);
                 }
                 try {
                     Map.Entry<String, Path> entry = fullFutures.get(i).get();
@@ -288,7 +400,7 @@ public class DuplicateFinderService {
                 if (progress != null) progress.accept(combinedProcessed, combinedTotal);
             }
 
-            if (cancelled.get()) return result;
+            if (cancelled.get()) return ScanResult.cancelled(result, stats);
 
             for (Map.Entry<String, List<Path>> entry : hashGroups.entrySet()) {
                 List<Path> group = entry.getValue();
@@ -305,47 +417,9 @@ public class DuplicateFinderService {
                     continue;
                 }
 
-                // Keeper selection: prefer keeperRank (non-system drive > system drive), then newest, then lexicographic for determinism
-                // FIX: granular metadata handling — failure to read lastModified must not silently exclude file from keeper candidacy
-                Path keeper = null;
-                int bestRank = -1;
-                FileTime bestTime = null;
-                String bestPathStr = null;
-                for (Path p : group) {
-                    int rank;
-                    try {
-                        rank = DuplicateSafety.keeperRank(p);
-                    } catch (Exception e) {
-                        AppLogger.warning("keeperRank failed for " + p + ": " + e.getMessage());
-                        rank = 10;
-                    }
-                    FileTime ft;
-                    try {
-                        ft = Files.getLastModifiedTime(toLongPath(p));
-                    } catch (Exception e) {
-                        AppLogger.warning("Could not read lastModified for keeper selection: " + p + " — " + e.getMessage() + " (treating as oldest)");
-                        ft = FileTime.fromMillis(0);
-                    }
-                    String pathStr;
-                    try {
-                        pathStr = stripLongPrefix(p).toAbsolutePath().toString();
-                    } catch (Exception e) {
-                        pathStr = p.toString();
-                    }
-                    boolean better = false;
-                    if (keeper == null) better = true;
-                    else if (rank > bestRank) better = true;
-                    else if (rank == bestRank) {
-                        if (bestTime == null || ft.compareTo(bestTime) > 0) better = true;
-                        else if (ft.equals(bestTime) && bestPathStr != null && pathStr.compareTo(bestPathStr) < 0) better = true;
-                    }
-                    if (better) {
-                        keeper = p;
-                        bestRank = rank;
-                        bestTime = ft;
-                        bestPathStr = pathStr;
-                    }
-                }
+                // Keeper selection: keeperRank (non-system drive > system drive) stays
+                // primary for safety; the strategy only breaks ties within the same rank.
+                Path keeper = selectKeeper(group, keeperStrategy);
                 if (keeper == null) continue;
 
                 List<String> deletablePaths = new ArrayList<>();
@@ -361,18 +435,29 @@ public class DuplicateFinderService {
 
                 try {
                     long size = Files.size(toLongPath(keeper));
+                    List<String> allMembers = new ArrayList<>(group.size());
+                    for (Path p : group) {
+                        try {
+                            allMembers.add(stripLongPrefix(p).toAbsolutePath().toString());
+                        } catch (Exception e) {
+                            allMembers.add(p.toString());
+                        }
+                    }
+                    stats.enumeratedFiles = fileCount[0];
                     result.add(new DuplicateFileRow(
                             stripLongPrefix(keeper).getFileName().toString(),
                             stripLongPrefix(keeper).toAbsolutePath().toString(),
                             size,
                             entry.getKey(),
                             group.size(),
-                            deletablePaths
+                            deletablePaths,
+                            allMembers
                     ));
                 } catch (Exception ignored) {}
             }
 
-            return result;
+            stats.enumeratedFiles = fileCount[0];
+            return ScanResult.completed(result, stats);
         } catch (Exception e) {
             AppLogger.error("Duplicate scan failed", e);
             throw new RuntimeException("Duplicate scan failed: " + e.getMessage(), e);
@@ -387,6 +472,128 @@ public class DuplicateFinderService {
                 }
             }
         }
+    }
+
+    /**
+     * Selects the keeper for a duplicate group.
+     * {@link DuplicateSafety#keeperRank(Path)} stays primary (non-system drive
+     * preferred, protected never). The strategy breaks rank ties; the final
+     * tie-break is always lexicographic for determinism.
+     * Metadata failures never exclude a file — unreadable timestamps are
+     * treated as oldest (epoch 0).
+     */
+    public static Path selectKeeper(List<Path> group, DuplicateKeeperStrategy strategy) {
+        if (group == null || group.isEmpty()) return null;
+        DuplicateKeeperStrategy effective = strategy == null ? DuplicateKeeperStrategy.NEWEST : strategy;
+        Path keeper = null;
+        int bestRank = -1;
+        FileTime bestTime = null;
+        String bestPathStr = null;
+        int bestLen = Integer.MAX_VALUE;
+        for (Path p : group) {
+            int rank;
+            try {
+                rank = DuplicateSafety.keeperRank(p);
+            } catch (Exception e) {
+                AppLogger.warning("keeperRank failed for " + p + ": " + e.getMessage());
+                rank = 10;
+            }
+            FileTime ft;
+            try {
+                ft = Files.getLastModifiedTime(toLongPath(p));
+            } catch (Exception e) {
+                AppLogger.warning("Could not read lastModified for keeper selection: " + p + " — " + e.getMessage() + " (treating as oldest)");
+                ft = FileTime.fromMillis(0);
+            }
+            String pathStr;
+            try {
+                pathStr = stripLongPrefix(p).toAbsolutePath().toString();
+            } catch (Exception e) {
+                pathStr = p.toString();
+            }
+            boolean better = false;
+            if (keeper == null) better = true;
+            else if (rank > bestRank) better = true;
+            else if (rank == bestRank) {
+                switch (effective) {
+                    case OLDEST -> {
+                        int cmp = ft.compareTo(bestTime);
+                        if (cmp < 0) better = true;
+                        else if (cmp == 0 && bestPathStr != null && pathStr.compareTo(bestPathStr) < 0) better = true;
+                    }
+                    case SHORTEST_PATH -> {
+                        int len = pathStr.length();
+                        if (len < bestLen) better = true;
+                        else if (len == bestLen) {
+                            if (bestTime == null || ft.compareTo(bestTime) > 0) better = true;
+                            else if (ft.equals(bestTime) && bestPathStr != null && pathStr.compareTo(bestPathStr) < 0) better = true;
+                        }
+                    }
+                    default -> { // NEWEST
+                        if (bestTime == null || ft.compareTo(bestTime) > 0) better = true;
+                        else if (ft.equals(bestTime) && bestPathStr != null && pathStr.compareTo(bestPathStr) < 0) better = true;
+                    }
+                }
+            }
+            if (better) {
+                keeper = p;
+                bestRank = rank;
+                bestTime = ft;
+                bestPathStr = pathStr;
+                bestLen = pathStr.length();
+            }
+        }
+        return keeper;
+    }
+
+    /**
+     * Recomputes a scanned row's keeper under a different strategy without
+     * rescanning. Returns true if the keeper changed (row mutated in place).
+     */
+    public static boolean recomputeKeeper(DuplicateFileRow row, DuplicateKeeperStrategy strategy) {
+        if (row == null) return false;
+        List<String> members = row.getAllMemberPaths();
+        if (members == null || members.size() < 2) return false;
+        List<Path> paths = new ArrayList<>(members.size());
+        for (String s : members) {
+            try {
+                paths.add(Paths.get(s));
+            } catch (Exception ignored) {}
+        }
+        if (paths.size() < 2) return false;
+        Path newKeeper = selectKeeper(paths, strategy);
+        if (newKeeper == null) return false;
+        String newKeeperStr;
+        try {
+            newKeeperStr = stripLongPrefix(newKeeper).toAbsolutePath().toString();
+        } catch (Exception e) {
+            newKeeperStr = newKeeper.toString();
+        }
+        if (newKeeperStr.equals(row.getFullPath())) return false;
+        return reassignKeeper(row, newKeeperStr);
+    }
+
+    /**
+     * Makes the given member path the keeper of the row. The previous keeper
+     * becomes deletable. Returns false if the path is not a group member.
+     */
+    public static boolean reassignKeeper(DuplicateFileRow row, String newKeeperPath) {
+        if (row == null || newKeeperPath == null) return false;
+        List<String> members = new ArrayList<>(row.getAllMemberPaths());
+        if (!members.contains(newKeeperPath)) return false;
+        List<String> deletables = new ArrayList<>(members.size() - 1);
+        for (String m : members) {
+            if (!m.equals(newKeeperPath)) deletables.add(m);
+        }
+        row.setFullPath(newKeeperPath);
+        try {
+            Path keeperPath = Paths.get(newKeeperPath);
+            String name = keeperPath.getFileName() != null ? keeperPath.getFileName().toString() : row.getFileName();
+            row.setFileName(name);
+        } catch (Exception ignored) {}
+        row.setDeletablePaths(deletables);
+        row.setTotalDuplicates(members.size());
+        return true;
     }
 
     public CleanResult clean(List<DuplicateFileRow> selectedRows) {
@@ -622,7 +829,7 @@ public class DuplicateFinderService {
 
     private static String hashFileSha256(Path p, AtomicBoolean cancelled) throws Exception {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
-        byte[] buf = new byte[8192];
+        byte[] buf = IO_BUF.get();
         Path effective = toLongPath(p);
         try (InputStream is = new BufferedInputStream(Files.newInputStream(effective))) {
             int r;
@@ -869,6 +1076,92 @@ public class DuplicateFinderService {
             return false;
         } finally {
             if (proc != null && proc.isAlive()) proc.destroyForcibly();
+        }
+    }
+
+    /**
+     * Sample hash for the pruning stage: SHA-256 over head/middle/tail
+     * 64KB chunks plus the file size. Reads at most 192KB per file, so
+     * multi-GB candidates that differ outside the quick-hash window are
+     * rejected without a full read. Small files skip this stage upstream.
+     */
+    private static String sampleHashSha256(Path p, AtomicBoolean cancelled) throws Exception {
+        Path effective = toLongPath(p);
+        long size = Files.size(effective);
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        byte[] buf = IO_BUF.get();
+        ByteBuffer wrapped = ByteBuffer.wrap(buf);
+        long middle = Math.max(0, size / 2 - SAMPLE_CHUNK_BYTES / 2L);
+        long tail = Math.max(0, size - SAMPLE_CHUNK_BYTES);
+        try (FileChannel ch = FileChannel.open(effective, StandardOpenOption.READ)) {
+            readChunkInto(ch, 0, wrapped, SAMPLE_CHUNK_BYTES, md, cancelled, p);
+            if (isCancelled(cancelled)) throw new InterruptedException("Cancelled during sample hash: " + p);
+            if (middle != 0) readChunkInto(ch, middle, wrapped, SAMPLE_CHUNK_BYTES, md, cancelled, p);
+            if (isCancelled(cancelled)) throw new InterruptedException("Cancelled during sample hash: " + p);
+            if (tail != 0 && tail != middle) readChunkInto(ch, tail, wrapped, SAMPLE_CHUNK_BYTES, md, cancelled, p);
+        }
+        // Fold the size into the digest so equal samples of different sizes never collide.
+        for (int i = 7; i >= 0; i--) md.update((byte) ((size >>> (i * 8)) & 0xFF));
+        return HexFormat.of().formatHex(md.digest());
+    }
+
+    private static void readChunkInto(FileChannel ch, long position, ByteBuffer wrapped,
+                                      int chunkLen, MessageDigest md,
+                                      AtomicBoolean cancelled, Path p) throws Exception {
+        ch.position(position);
+        int remaining = chunkLen;
+        while (remaining > 0) {
+            if (isCancelled(cancelled)) throw new InterruptedException("Cancelled during sample hash: " + p);
+            wrapped.clear();
+            wrapped.limit(Math.min(remaining, wrapped.capacity()));
+            int read = ch.read(wrapped);
+            if (read <= 0) break;
+            md.update(wrapped.array(), 0, read);
+            remaining -= read;
+        }
+    }
+
+    /**
+     * Scan outcome: duplicate groups plus enumeration counters.
+     * {@link #getRows()} is the same list shape the legacy
+     * {@link #scan(List, BiConsumer, java.util.function.Consumer, AtomicBoolean)}
+     * returns, so existing callers keep working.
+     */
+    public static class ScanResult {
+        private final List<DuplicateFileRow> rows;
+        private final long enumeratedFiles;
+        private final long skippedProtected;
+        private final long skippedFiltered;
+        private final boolean cancelled;
+
+        private ScanResult(List<DuplicateFileRow> rows, ScanStats stats, boolean cancelled) {
+            this.rows = rows != null ? rows : new ArrayList<>();
+            this.enumeratedFiles = stats != null ? stats.enumeratedFiles : 0;
+            this.skippedProtected = stats != null ? stats.skippedProtected : 0;
+            this.skippedFiltered = stats != null ? stats.skippedFiltered : 0;
+            this.cancelled = cancelled;
+        }
+
+        static ScanResult completed(List<DuplicateFileRow> rows, ScanStats stats) {
+            return new ScanResult(rows, stats, false);
+        }
+
+        static ScanResult cancelled(List<DuplicateFileRow> rows, ScanStats stats) {
+            return new ScanResult(rows, stats, true);
+        }
+
+        public List<DuplicateFileRow> getRows() { return rows; }
+        public long getEnumeratedFiles() { return enumeratedFiles; }
+        public long getSkippedProtected() { return skippedProtected; }
+        public long getSkippedFiltered() { return skippedFiltered; }
+        public boolean isCancelled() { return cancelled; }
+
+        public long getReclaimableBytes() {
+            long total = 0;
+            for (DuplicateFileRow r : rows) {
+                if (r != null) total += (long) (r.getTotalDuplicates() - 1) * r.getFileSize();
+            }
+            return total;
         }
     }
 

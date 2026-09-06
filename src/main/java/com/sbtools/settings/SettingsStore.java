@@ -66,7 +66,10 @@ public class SettingsStore {
         AppSettings base = s;
         boolean needsFix = s.excludedDriverIds() == null || s.skippedSoftwareIds() == null
                 || s.ignoredBrowserExtensionIds() == null || s.ignoredCleanupCategories() == null
-                || s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank();
+                || s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank()
+                || s.duplicateScanRoots() == null || s.duplicateKeeperStrategy() == null
+                || s.duplicateKeeperStrategy().isBlank() || s.duplicateIncludeFilter() == null
+                || s.duplicateMinSizeBytes() < 1;
         if (needsFix) {
             base = s.toBuilder()
                     .excludedDriverIds(s.excludedDriverIds() == null ? java.util.Collections.emptyList() : s.excludedDriverIds())
@@ -74,6 +77,10 @@ public class SettingsStore {
                     .ignoredBrowserExtensionIds(s.ignoredBrowserExtensionIds() == null ? java.util.Collections.emptyList() : s.ignoredBrowserExtensionIds())
                     .ignoredCleanupCategories(s.ignoredCleanupCategories() == null ? java.util.Collections.emptyList() : s.ignoredCleanupCategories())
                     .networkOptimizationPreset(s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank() ? "DEFAULT" : s.networkOptimizationPreset())
+                    .duplicateScanRoots(s.duplicateScanRoots() == null ? java.util.Collections.emptyList() : s.duplicateScanRoots())
+                    .duplicateMinSizeBytes(s.duplicateMinSizeBytes() < 1 ? 1L : s.duplicateMinSizeBytes())
+                    .duplicateIncludeFilter(s.duplicateIncludeFilter() == null ? "" : s.duplicateIncludeFilter())
+                    .duplicateKeeperStrategy(s.duplicateKeeperStrategy() == null || s.duplicateKeeperStrategy().isBlank() ? "NEWEST" : s.duplicateKeeperStrategy())
                     .build();
         }
         // Sanitize backupDirectory - reject dangerous roots like C:\ or Windows

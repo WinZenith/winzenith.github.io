@@ -23,6 +23,10 @@ public class DuplicateFileRow {
     private final StringProperty checksumSha256 = new SimpleStringProperty();
     private final IntegerProperty totalDuplicates = new SimpleIntegerProperty(1);
     private List<String> deletablePaths;
+    // Full group membership (keeper + all deletables) used to recompute the
+    // keeper when the user changes keeper strategy without rescanning.
+    // Null for rows built by legacy constructors — derived on demand.
+    private List<String> allMemberPaths;
 
     public DuplicateFileRow(String fileName, String fullPath, long fileSize, String checksumSha256) {
         this.fileName.set(fileName);
@@ -34,12 +38,18 @@ public class DuplicateFileRow {
 
     public DuplicateFileRow(String fileName, String fullPath, long fileSize, String checksumSha256,
                             int totalDuplicates, List<String> deletablePaths) {
+        this(fileName, fullPath, fileSize, checksumSha256, totalDuplicates, deletablePaths, null);
+    }
+
+    public DuplicateFileRow(String fileName, String fullPath, long fileSize, String checksumSha256,
+                            int totalDuplicates, List<String> deletablePaths, List<String> allMemberPaths) {
         this.fileName.set(fileName);
         this.fullPath.set(fullPath);
         this.fileSize.set(fileSize);
         this.checksumSha256.set(checksumSha256);
         this.totalDuplicates.set(totalDuplicates);
         this.deletablePaths = deletablePaths;
+        this.allMemberPaths = allMemberPaths;
     }
 
     public BooleanProperty selectedProperty() { return selected; }
@@ -64,4 +74,25 @@ public class DuplicateFileRow {
 
     public List<String> getDeletablePaths() { return deletablePaths; }
     public void setDeletablePaths(List<String> deletablePaths) { this.deletablePaths = deletablePaths; }
+
+    /**
+     * Full group membership (keeper + deletables). Falls back to deriving
+     * from keeper + deletables for rows built before this field existed.
+     */
+    public List<String> getAllMemberPaths() {
+        if (allMemberPaths != null && !allMemberPaths.isEmpty()) return allMemberPaths;
+        List<String> derived = new ArrayList<>();
+        if (getFullPath() != null) derived.add(getFullPath());
+        if (deletablePaths != null) {
+            for (String p : deletablePaths) {
+                if (p != null && !derived.contains(p)) derived.add(p);
+            }
+        }
+        return derived;
+    }
+
+    public void setAllMemberPaths(List<String> allMemberPaths) { this.allMemberPaths = allMemberPaths; }
+
+    public void setFullPath(String v) { this.fullPath.set(v); }
+    public void setFileName(String v) { this.fileName.set(v); }
 }

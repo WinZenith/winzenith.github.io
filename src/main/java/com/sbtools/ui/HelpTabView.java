@@ -96,14 +96,18 @@ public class HelpTabView extends VBox {
                 "Always review scan results before cleaning to avoid removing files you still need."));
 
         getChildren().add(createFaqSection("Duplicate Files",
-                "This tab finds duplicate files by comparing file contents with SHA-256 hashes. "
-                + "Click Add... to choose folder(s) on any drive (e.g., Documents, Downloads, Photos), then click Scan. "
-                + "Results are grouped by identical content: the safest keeper (newest on a non-system drive preferred) is shown as the keeper, "
-                + "and older copies are listed in the detail pane where you can uncheck individual files. "
+                "This tab finds duplicate files by comparing file contents with SHA-256 hashes (after fast CRC32 and sample-hash pruning). "
+                + "Click Add... to choose folder(s) on any drive (e.g., Documents, Downloads, Photos) — or drag folders onto the list — then click Scan. "
+                + "Use Min size and Types filters to speed up large scans (they apply on the next scan), and the Keep dropdown to choose which copy is kept per group "
+                + "(newest, oldest, or shortest path; the safest non-system location always wins first). Results can be searched, auto-selected, "
+                + "and exported to CSV. "
+                + "Results are grouped by identical content: the keeper is shown as the keeper, "
+                + "and other copies are listed in the detail pane where you can tick individual files or click Keep instead to swap the keeper. "
                 + "System and app folders on any drive (Windows, Program Files, ProgramData, AppData, WindowsApps, System Volume Information, $Recycle.Bin, Recovery, EFI, Boot) "
                 + "are automatically excluded and cannot be added. "
                 + "Select groups and per-file copies, then click Clean Selected. You can move files to the Recycle Bin (recommended, recoverable) "
                 + "or delete permanently (requires typing DELETE). A System Restore point can be created automatically if enabled in settings. "
+                + "Scan folders and filters are remembered between runs. "
                 + "Always review the deletable list in the bottom pane before confirming."));
 
         getChildren().add(createFaqSection("Disk Tools",
