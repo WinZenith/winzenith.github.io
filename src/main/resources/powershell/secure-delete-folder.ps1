@@ -8,10 +8,22 @@ try {
         $result | ConvertTo-Json -Depth 3 -Compress; exit 1; return
     }
 
-    $bufferSize = 4096
+    $bufferSize = 65536
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 
-    $files = Get-ChildItem -LiteralPath $FolderPath -Recurse -File -Force -ErrorAction SilentlyContinue
+    # Strict-safety: never follow directory junctions / symlinks (would escape target).
+    # Enumerate files without following reparse points; skip any reparse-point file.
+    $files = Get-ChildItem -LiteralPath $FolderPath -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) }
+    $skippedReparse = @()
+    try {
+        $allFiles = Get-ChildItem -LiteralPath $FolderPath -Recurse -File -Force -ErrorAction SilentlyContinue
+        foreach ($a in @($allFiles)) {
+            try {
+                if ($a.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $skippedReparse += $a.FullName }
+            } catch {}
+        }
+    } catch {}
     if (-not $files) {
         Remove-Item -LiteralPath $FolderPath -Recurse -Force -ErrorAction SilentlyContinue
         $result.success = $true
@@ -70,7 +82,9 @@ try {
         }
     }
 
-    $remainingDirs = Get-ChildItem -LiteralPath $FolderPath -Recurse -Directory -Force -ErrorAction SilentlyContinue | Sort-Object -Property FullName -Descending
+    $remainingDirs = Get-ChildItem -LiteralPath $FolderPath -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
+        Sort-Object -Property FullName -Descending
     foreach ($dir in $remainingDirs) {
         try {
             if (-not (Test-Path -LiteralPath $dir.FullName)) { continue }
@@ -94,6 +108,9 @@ try {
         $result.message = "Secure folder delete: $($result.filesDeleted) files overwritten, $($result.foldersDeleted) folders removed, $($result.scheduledForReboot.Count) scheduled for reboot."
     } else {
         $result.message = "Secure folder delete: $($result.filesDeleted) files overwritten, $($result.foldersDeleted) folders removed."
+    }
+    if ($skippedReparse.Count -gt 0) {
+        $result.message += " Skipped $($skippedReparse.Count) symlink/junction(s) (not followed)."
     }
 
 } catch {

@@ -43,15 +43,53 @@ public class ShredderService {
     }
 
     public FolderDeleteResult secureDeleteFolder(String folderPath, int passCount) throws IOException, InterruptedException {
+        return secureDeleteFolder(folderPath, passCount, null, null);
+    }
+
+    /**
+     * Streaming variant with per-file progress and cooperative cancellation.
+     * Previously per-file {progress,phase:overwrite} lines were ignored and cancel
+     * was unsupported. Progress lines are filtered out of the final JSON parse
+     * (last {success} line wins) so mixed stdout no longer causes parse errors.
+     */
+    public FolderDeleteResult secureDeleteFolder(String folderPath, int passCount,
+                                                 Consumer<String> progressCallback,
+                                                 AtomicBoolean cancelled) throws IOException, InterruptedException {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Secure erase is only available on Windows.");
         }
         Path script = PowerShellScripts.resolve("secure-delete-folder.ps1");
-        ProcessResult result = runWithFallback(script.toString(), folderPath, String.valueOf(passCount));
+        ProcessResult result = runStreamingWithFallback(script.toString(),
+                line -> {
+                    if (line == null) return;
+                    String t = line.trim();
+                    // Surface per-file progress, hide raw JSON from status text
+                    if (t.startsWith("{") && t.contains("\"phase\"") && progressCallback != null) {
+                        try {
+                            JsonNode n = JsonMapper.mapper().readTree(t);
+                            if (n.has("phase") && "overwrite".equals(n.get("phase").asText())
+                                    && n.has("current") && n.has("total")) {
+                                progressCallback.accept("Overwriting file "
+                                        + n.get("current").asInt() + "/" + n.get("total").asInt()
+                                        + (n.has("file") ? ": " + n.get("file").asText() : ""));
+                                return;
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    if (t.startsWith("{") && t.contains("\"progress\"")) return;
+                    if (progressCallback != null) progressCallback.accept(line);
+                }, null, cancelled, folderPath, String.valueOf(passCount));
+        if (cancelled != null && cancelled.get()) {
+            return new FolderDeleteResult(false, "Secure folder delete cancelled by user.", 0, 0, List.of());
+        }
         if (!result.success()) {
             return new FolderDeleteResult(false, "Process failed: " + result.combinedOutput(), 0, 0, List.of());
         }
-        String json = result.stdout().trim();
+        String json = extractLastSuccessJson(result.stdout());
+        if (json.isBlank()) {
+            return new FolderDeleteResult(false, "No result returned by secure folder delete.", 0, 0, List.of());
+        }
         try {
             return JsonMapper.mapper().readValue(json, FolderDeleteResult.class);
         } catch (Exception e) {
@@ -89,7 +127,73 @@ public class ShredderService {
         throw new IOException("No PowerShell executable available");
     }
 
+    private ProcessResult runStreamingWithFallback(String scriptPath, Consumer<String> lineCallback,
+                                                    Consumer<Double> progressCallback,
+                                                    AtomicBoolean cancelled, String... args)
+            throws IOException {
+        IOException pending = null;
+        for (List<String> cmd : List.of(ProcessRunner.powershellScript(scriptPath, args),
+                ProcessRunner.pwshScript(scriptPath, args))) {
+            try {
+                return processRunner.runStreaming(cmd, lineCallback, progressCallback, cancelled);
+            } catch (IOException e) {
+                String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                boolean missing = msg.contains("cannot run program") || msg.contains("no such file") || msg.contains("error=2");
+                if (missing && cmd.get(0).equals("powershell.exe")) {
+                    AppLogger.warning("Shredder: powershell.exe not found, trying pwsh.exe");
+                    pending = e;
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (pending != null) throw pending;
+        throw new IOException("No PowerShell executable available");
+    }
+
+    private static String extractLastSuccessJson(String output) {
+        if (output == null || output.isBlank()) return "";
+        String last = "";
+        for (String line : output.split("\\R")) {
+            String t = line.trim();
+            if (t.startsWith("{") && t.contains("\"success\"")) last = t;
+        }
+        return last.isBlank() ? output.trim() : last;
+    }
+
     public record RecycleBinResult(List<RecycleBinEntry> entries, long totalSizeBytes, int fileCount) {}
+
+    /**
+     * Deletes the $I metadata sibling of a shredded $R recycle file.
+     * $Rxxx -> $Ixxx in the same $Recycle.Bin directory. Best-effort only.
+     */
+    private static void deleteSiblingRecycleMetadata(String recyclePath) {
+        try {
+            if (recyclePath == null || recyclePath.isBlank()) return;
+            File r = new File(recyclePath);
+            String name = r.getName();
+            if (name.length() < 2) return;
+            // $R<id>.<ext> -> $I<id>.<ext>; also handle $R without extension
+            String siblingName = null;
+            if (name.startsWith("$R") || name.startsWith("$r")) {
+                siblingName = "$I" + name.substring(2);
+            } else {
+                return;
+            }
+            File parent = r.getParentFile();
+            if (parent == null) return;
+            File sibling = new File(parent, siblingName);
+            if (sibling.exists()) {
+                try {
+                    java.nio.file.Files.deleteIfExists(sibling.toPath());
+                    AppLogger.info("Removed orphan recycle metadata: " + sibling.getAbsolutePath());
+                } catch (Exception e) {
+                    AppLogger.warning("Could not remove recycle metadata " + sibling + ": " + e.getMessage());
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
 
     public RecycleBinResult getRecycleBinContents() throws IOException, InterruptedException {
         if (!AppPaths.isWindows()) {
@@ -156,6 +260,10 @@ public class ShredderService {
                 ShredderResult result = secureDelete(path, passCount);
                 if (result.isDeleted()) {
                     filesDeleted++;
+                    // Reliability fix: deleting $R data directly leaves the $I metadata
+                    // orphaned (ghost entries in Explorer). Remove the sibling $I file
+                    // (plain delete — tiny metadata, no shred needed) after success.
+                    deleteSiblingRecycleMetadata(path);
                 } else if (result.isScheduledForReboot()) {
                     try {
                         ShredderResult sched = scheduleForReboot(path);
@@ -482,7 +590,12 @@ public class ShredderService {
         if (!result.success()) {
             return new ShredderResult(filePath, false, false, false, "Process failed: " + result.combinedOutput());
         }
-        String json = result.stdout().trim();
+        // Reliability fix: scripts may emit progress/noise lines; parse the last
+        // {success} line instead of the whole stdout blob.
+        String json = extractLastSuccessJson(result.stdout());
+        if (json.isBlank()) {
+            return new ShredderResult(filePath, false, false, false, "No result returned.");
+        }
         try {
             return JsonMapper.mapper().readValue(json, ShredderResult.class);
         } catch (Exception e) {

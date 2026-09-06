@@ -281,7 +281,9 @@ foreach ($phys in $physicalDisks) {
                             0x09 { if ($rawValue -gt 0 -and $powerOnHours -lt 0) { $powerOnHours = $rawValue } }
                             0x0C { if ($rawValue -gt 0 -and $powerCycleCount -lt 0) { $powerCycleCount = $rawValue } }
                             0xC0 { if ($rawValue -gt 0 -and $loadCycleCount -lt 0) { $loadCycleCount = $rawValue } }
-                            0xC4 { if ($rawValue -ge 0 -and $pendingSectors -lt 0) { $pendingSectors = $rawValue } } # 0xC4 = Reallocation Event Count -> treat as pending indicator
+                            # Reliability fix: 0xC4 is Reallocation Event Count, NOT pending.
+                            # Map to reallocated when still unknown; pending comes only from 0xC5.
+                            0xC4 { if ($rawValue -ge 0 -and $reallocatedSectors -lt 0) { $reallocatedSectors = $rawValue } }
                             0xC5 { if ($rawValue -ge 0 -and $pendingSectors -lt 0) { $pendingSectors = $rawValue } } # 0xC5 = Current Pending Sector Count
                             0xC6 { if ($rawValue -ge 0 -and $uncorrectableSectors -lt 0) { $uncorrectableSectors = $rawValue } }
                             0xBE { if ($rawValue -gt 0 -and $rawValue -lt 200 -and $temperature -lt 0) { $temperature = $rawValue } }
@@ -301,6 +303,20 @@ foreach ($phys in $physicalDisks) {
             }
             if ($perf.PSObject.Properties['DataWritten'] -and $totalHostWrites -lt 0) {
                 $v = [uint64]$perf.DataWritten; if ($v -gt 0) { $totalHostWrites = $v }
+            }
+        }
+
+        # Reliability fix (WMI-only): do not blindly trust Healthy when sector counters
+        # already show damage. Thresholds: any counter >10 => Critical, >0 => Caution.
+        # PredictFailure=Critical above already wins; this only upgrades Healthy/OK.
+        if ($healthStatus -match '^(Healthy|OK|Unknown)$') {
+            $worst = 0
+            foreach ($v in @($reallocatedSectors, $pendingSectors, $uncorrectableSectors)) {
+                if ($v -ne $null -and $v -ge 0 -and $v -gt $worst) { $worst = $v }
+            }
+            if ($worst -gt 10) { $healthStatus = 'Critical' }
+            elseif ($worst -gt 0) {
+                if ($healthStatus -ne 'Critical') { $healthStatus = 'Caution' }
             }
         }
     }

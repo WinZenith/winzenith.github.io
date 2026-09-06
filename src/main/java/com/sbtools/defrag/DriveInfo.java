@@ -76,6 +76,20 @@ public class DriveInfo {
 
     public boolean isSsd() { return "SSD".equalsIgnoreCase(mediaType.get()); }
 
+    public boolean isHdd() { return "HDD".equalsIgnoreCase(mediaType.get()); }
+
+    public boolean isUnknownMedia() {
+        String m = mediaType.get();
+        return m == null || m.isBlank()
+                || (!"SSD".equalsIgnoreCase(m) && !"HDD".equalsIgnoreCase(m));
+    }
+
+    /**
+     * Unknown media must never be treated as HDD (flash wear risk for USB/SD/Spaces/RAID).
+     * Only explicit HDD may be defragmented without an override.
+     */
+    public boolean isSafeToDefragWithoutOverride() { return isHdd(); }
+
     public long getUsedBytes() { return sizeBytes.get() - freeBytes.get(); }
 
     /* ── Extended analysis fields ── */

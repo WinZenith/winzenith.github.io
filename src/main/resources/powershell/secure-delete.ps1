@@ -9,6 +9,15 @@ try {
         $result | ConvertTo-Json -Depth 2 -Compress; exit 1; return
     }
     $file = Get-Item -LiteralPath $FilePath -Force
+    # Strict-safety helper: clear ReadOnly so shred works; symlinks/reparse points
+    # are blocked Java-side (ShredderSafety) — double-guard here.
+    try {
+        if ($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            $result.message = "Refusing to shred a reparse point / symlink: $FilePath"
+            $result | ConvertTo-Json -Depth 2 -Compress; exit 1; return
+        }
+        if ($file.IsReadOnly) { $file.IsReadOnly = $false }
+    } catch {}
     $length = $file.Length
     if ($length -eq 0) {
         Remove-Item -LiteralPath $FilePath -Force -ErrorAction SilentlyContinue
@@ -20,7 +29,7 @@ try {
         }
         $result | ConvertTo-Json -Depth 2 -Compress; return
     }
-    $bufferSize = 4096
+    $bufferSize = 65536
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $stream = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
     $buffer = New-Object byte[] $bufferSize

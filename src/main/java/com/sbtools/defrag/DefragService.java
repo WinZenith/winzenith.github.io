@@ -22,7 +22,9 @@ public class DefragService {
     public enum DefragOption {
         FAST,
         FULL,
-        FREE_SPACE
+        FREE_SPACE,
+        /** Deep = FULL defrag followed by free-space consolidation. */
+        DEEP
     }
 
     private static final long TIMEOUT_SECONDS = 3600;
@@ -178,10 +180,76 @@ public class DefragService {
     }
 
     /**
+     * Pre-flight validation for defrag. Returns a list of warnings (empty = OK).
+     * Does not throw for warnings; callers surface them in the confirmation dialog.
+     * Hard blockers (missing size) return a message prefixed with "BLOCK: ".
+     */
+    public static List<String> validateForDefrag(DriveInfo drive) {
+        List<String> warnings = new ArrayList<>();
+        if (drive == null) {
+            warnings.add("BLOCK: No drive selected.");
+            return warnings;
+        }
+        String fs = drive.getFileSystem() != null ? drive.getFileSystem().toUpperCase() : "";
+        if (!fs.isBlank() && !fs.contains("NTFS")) {
+            warnings.add("File system is " + fs + " (Optimize-Volume defrag is NTFS-optimized; "
+                    + "FAT32/exFAT/ReFS results may be limited).");
+        }
+        long size = drive.getSizeBytes();
+        long free = drive.getFreeBytes();
+        if (size > 0 && free >= 0) {
+            double freePct = (double) free / size * 100.0;
+            if (freePct < 15.0) {
+                warnings.add(String.format("Low free space: %.1f%% free (%s free of %s). "
+                        + "Defrag needs ~15%% free for reliable results.",
+                        freePct, drive.getFreeFormatted(), drive.getSizeFormatted()));
+            }
+            if (free <= 0) {
+                warnings.add("BLOCK: No free space reported on " + drive.getDriveLetter() + ".");
+            }
+        }
+        if (drive.isUnknownMedia()) {
+            warnings.add("Media type is Unknown (" + drive.getMediaType() + ") — may be flash "
+                    + "(USB/SD/Spaces/RAID). Defragging flash causes wear without benefit.");
+        }
+        return warnings;
+    }
+
+    /**
+     * Streaming runner with powershell.exe -> pwsh.exe fallback (mirrors getDrives()).
+     */
+    private ProcessResult runStreamingWithFallback(Path script, Consumer<String> lineCallback,
+                                                   Consumer<Double> progressCallback,
+                                                   AtomicBoolean cancelled, String... args)
+            throws IOException, CancellationException {
+        List<List<String>> candidates = List.of(
+                ProcessRunner.powershellScript(script.toString(), args),
+                ProcessRunner.pwshScript(script.toString(), args));
+        IOException pending = null;
+        for (List<String> cmd : candidates) {
+            try {
+                return processRunner.runStreaming(cmd, lineCallback, progressCallback, cancelled);
+            } catch (IOException e) {
+                String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                boolean missing = msg.contains("cannot run program") || msg.contains("no such file")
+                        || msg.contains("error=2");
+                if (missing && cmd.get(0).equals("powershell.exe")) {
+                    AppLogger.warning("Defrag: powershell.exe not found, trying pwsh.exe: " + e.getMessage());
+                    pending = e;
+                    continue;
+                }
+                throw e;
+            }
+        }
+        if (pending != null) throw pending;
+        throw new IOException("No PowerShell executable available");
+    }
+
+    /**
      * Returns true if the drive is an SSD and should skip fragmentation analysis.
      */
     public static boolean isSsd(DriveInfo drive) {
-        return "SSD".equalsIgnoreCase(drive.getMediaType());
+        return drive != null && "SSD".equalsIgnoreCase(drive.getMediaType());
     }
 
     /**
@@ -208,6 +276,35 @@ public class DefragService {
                 drive.setPageFileSizeBytes(cached.pageFileSizeBytes());
                 drive.setHiberFileSizeBytes(cached.hiberFileSizeBytes());
                 drive.setSwapFileSizeBytes(cached.swapFileSizeBytes());
+            } else {
+                // Reliability fix: SSDs previously never collected MFT/pagefile metadata
+                // (early return with empty cache left sizes at 0). Collect metadata-only
+                // via the script so visualization stays accurate.
+                try {
+                    Path metaScript = PowerShellScripts.resolve("analyze-fragmentation.ps1");
+                    ProcessResult meta = runStreamingWithFallback(metaScript,
+                            line -> {
+                                if (line.startsWith("stage:") && progressCallback != null) {
+                                    progressCallback.accept(line.substring(6));
+                                }
+                            }, null, cancelled, letter);
+                    String metaJson = extractJson(meta.stdout());
+                    if (!metaJson.isBlank()) {
+                        var parsed = JsonMapper.mapper().readTree(metaJson);
+                        long mftSize = parsed.has("mftSizeBytes") ? parsed.get("mftSizeBytes").asLong(0) : 0;
+                        long pageSize = parsed.has("pageFileSizeBytes") ? parsed.get("pageFileSizeBytes").asLong(0) : 0;
+                        long hiberSize = parsed.has("hiberFileSizeBytes") ? parsed.get("hiberFileSizeBytes").asLong(0) : 0;
+                        long swapSize = parsed.has("swapFileSizeBytes") ? parsed.get("swapFileSizeBytes").asLong(0) : 0;
+                        drive.setMftSizeBytes(mftSize);
+                        drive.setPageFileSizeBytes(pageSize);
+                        drive.setHiberFileSizeBytes(hiberSize);
+                        drive.setSwapFileSizeBytes(swapSize);
+                        metadataCache.put(letter, new MetadataCacheEntry(mftSize, pageSize, hiberSize, swapSize,
+                                System.currentTimeMillis()));
+                    }
+                } catch (Exception metaEx) {
+                    AppLogger.warning("SSD metadata collection failed for " + letter + ": " + metaEx.getMessage());
+                }
             }
             if (progressCallback != null) {
                 progressCallback.accept("SSD detected — fragmentation analysis skipped. Use Trim instead.");
@@ -232,13 +329,12 @@ public class DefragService {
         }
 
         Path script = PowerShellScripts.resolve("analyze-fragmentation.ps1");
-        ProcessResult result = processRunner.runStreaming(
-                ProcessRunner.powershellScript(script.toString(), args.toArray(new String[0])),
+        ProcessResult result = runStreamingWithFallback(script,
                 line -> {
                     if (line.startsWith("stage:") && progressCallback != null) {
                         progressCallback.accept(line.substring(6));
                     }
-                }, null, cancelled);
+                }, null, cancelled, args.toArray(new String[0]));
 
         if (!result.success()) {
             throw new IOException("Analysis failed: " + result.combinedOutput());
@@ -299,23 +395,46 @@ public class DefragService {
                        Consumer<Double> progressCallback, AtomicBoolean cancelled)
             throws IOException, CancellationException {
         if (!AppPaths.isWindows()) return;
-        String letter = drive.getDriveLetter().replace(":", "");
+        // Deep = FULL followed by FREE_SPACE (previously mapped to FREE_SPACE only,
+        // contradicting the "full + free space" tooltip). Run sequentially with
+        // progress split 0-0.7 / 0.7-1.0 so the bar stays monotonic.
+        if (option == DefragOption.DEEP) {
+            doSingleDefrag(drive, "FULL", statusCallback,
+                    pct -> { if (progressCallback != null) progressCallback.accept(pct * 0.7); },
+                    cancelled, "Full defrag");
+            if (cancelled != null && cancelled.get()) throw new CancellationException("Operation cancelled by user");
+            doSingleDefrag(drive, "FREE_SPACE", statusCallback,
+                    pct -> { if (progressCallback != null) progressCallback.accept(0.7 + pct * 0.3); },
+                    cancelled, "Free space consolidation");
+            metadataCache.remove(drive.getDriveLetter().replace(":", ""));
+            return;
+        }
         String mode = switch (option) {
             case FAST -> "FAST";
             case FULL -> "FULL";
             case FREE_SPACE -> "FREE_SPACE";
+            case DEEP -> "FULL"; // unreachable (handled above)
         };
+        doSingleDefrag(drive, mode, statusCallback, progressCallback, cancelled, null);
+        metadataCache.remove(drive.getDriveLetter().replace(":", ""));
+    }
+
+    private void doSingleDefrag(DriveInfo drive, String mode, Consumer<String> statusCallback,
+                                Consumer<Double> progressCallback, AtomicBoolean cancelled,
+                                String phaseLabel)
+            throws IOException, CancellationException {
+        String letter = drive.getDriveLetter().replace(":", "");
         Path script = PowerShellScripts.resolve("optimize-volume.ps1");
-        ProcessResult result = processRunner.runStreaming(
-                ProcessRunner.powershellScript(script.toString(), letter, mode),
+        String prefix = (phaseLabel != null && !phaseLabel.isBlank()) ? "[" + phaseLabel + "] " : "";
+        ProcessResult result = runStreamingWithFallback(script,
                 line -> {
                     // Filter out raw JSON progress/result lines from status display
                     if (line != null && line.trim().startsWith("{") && line.contains("\"success\"")) {
                         // Don't show raw JSON as status; let caller handle
                         return;
                     }
-                    if (statusCallback != null) statusCallback.accept(line);
-                }, progressCallback, cancelled);
+                    if (statusCallback != null) statusCallback.accept(prefix + line);
+                }, progressCallback, cancelled, letter, mode);
         checkOptimizeResult(result);
     }
 
@@ -325,13 +444,13 @@ public class DefragService {
         if (!AppPaths.isWindows()) return;
         String letter = drive.getDriveLetter().replace(":", "");
         Path script = PowerShellScripts.resolve("optimize-volume.ps1");
-        ProcessResult result = processRunner.runStreaming(
-                ProcessRunner.powershellScript(script.toString(), letter, "TRIM"),
+        ProcessResult result = runStreamingWithFallback(script,
                 line -> {
                     if (line != null && line.trim().startsWith("{") && line.contains("\"success\"")) return;
                     if (statusCallback != null) statusCallback.accept(line);
-                }, progressCallback, cancelled);
+                }, progressCallback, cancelled, letter, "TRIM");
         checkOptimizeResult(result);
+        metadataCache.remove(letter);
     }
 
     private void checkOptimizeResult(ProcessResult result) throws IOException {

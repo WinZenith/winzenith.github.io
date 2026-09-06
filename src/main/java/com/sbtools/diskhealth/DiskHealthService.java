@@ -68,6 +68,7 @@ public class DiskHealthService {
                         }
                         info.setRawSmartAttributes(attrs);
                     }
+                    applyWmiThresholdOverride(info);
                     drives.add(info);
                 }
             }
@@ -76,5 +77,25 @@ public class DiskHealthService {
             AppLogger.error("Failed to parse disk health JSON", e);
             throw new IOException("Failed to parse disk health: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Defense-in-depth health override (WMI-only mode): upgrade Healthy/OK/Unknown
+     * when sector counters already show damage. Mirrors disk-health.ps1 thresholds
+     * so stale scripts still get correct UI coloring.
+     */
+    private static void applyWmiThresholdOverride(DiskHealthInfo info) {
+        if (info == null) return;
+        String s = info.getHealthStatus();
+        if (s == null) return;
+        if (!s.equalsIgnoreCase("Healthy") && !s.equalsIgnoreCase("OK")
+                && !s.equalsIgnoreCase("Unknown")) return;
+        long worst = 0;
+        for (long v : new long[]{info.getReallocatedSectors(),
+                info.getCurrentPendingSectorCount(), info.getUncorrectableSectorCount()}) {
+            if (v >= 0 && v > worst) worst = v;
+        }
+        if (worst > 10) info.setHealthStatus("Critical");
+        else if (worst > 0) info.setHealthStatus("Caution");
     }
 }

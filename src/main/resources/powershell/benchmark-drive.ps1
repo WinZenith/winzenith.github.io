@@ -34,6 +34,8 @@ $result = [ordered]@{
     seqWriteMBps = 0.0
     seqReadMBps = 0.0
     randomReadIOPS = 0.0
+    randomRead4KIOPS = 0.0
+    avg4KLatencyMs = 0.0
     message = ''
 }
 
@@ -70,7 +72,10 @@ try {
     Write-Output ('{"progress":0,"phase":"write"}')
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-    $stream = [System.IO.File]::Open($testFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    # Reliability: WriteThrough reduces OS cache influence on seq-write numbers.
+    $stream = New-Object System.IO.FileStream($testFile, [System.IO.FileMode]::Create,
+        [System.IO.FileAccess]::Write, [System.IO.FileShare]::None,
+        65536, [System.IO.FileOptions]::WriteThrough)
     $written = 0
     while ($written -lt $totalBytes) {
         Check-Stop
@@ -94,7 +99,9 @@ try {
     Write-Output ('{"progress":50,"phase":"read"}')
     $sw.Restart()
 
-    $stream = [System.IO.File]::Open($testFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    $stream = New-Object System.IO.FileStream($testFile, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read,
+        65536, [System.IO.FileOptions]::SequentialScan)
     $readBuffer = New-Object byte[] $bufferSize
     $totalRead = 0
     while ($totalRead -lt $totalBytes) {
@@ -117,9 +124,13 @@ try {
 
     Write-Output ('{"progress":90,"phase":"random_read"}')
     $sw.Restart()
-    $stream = [System.IO.File]::Open($testFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    # Reliability fix: previously fixed 200x1MB regardless of size (tiny sample on
+    # 256MB files, oversized on 32MB). Scale with size, clamped to 200-800 ops.
+    $maxOps = [Math]::Min(800, [Math]::Max(200, $TestSizeMB * 3))
+    $stream = New-Object System.IO.FileStream($testFile, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read,
+        65536, [System.IO.FileOptions]::RandomAccess)
     $randomOps = 0
-    $maxOps = 200
     $rngForSeek = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $seekBuf = New-Object byte[] 8
     while ($randomOps -lt $maxOps) {
@@ -140,6 +151,33 @@ try {
     $randomSeconds = $sw.Elapsed.TotalSeconds
     if ($randomSeconds -gt 0) {
         $result.randomReadIOPS = [math]::Round($maxOps / $randomSeconds, 1)
+    }
+
+    # Additive 4K random-read (QD1): 400 x 4KB seeks. Small, bounded (~1.6MB IO)
+    # so total runtime stays predictable. Reports IOPS + avg latency.
+    Write-Output ('{"progress":96,"phase":"random_read_4k"}')
+    try {
+        $fourK = 4096
+        $fourKBuf = New-Object byte[] $fourK
+        $fourKOpts = 400
+        $fourKSw = [System.Diagnostics.Stopwatch]::StartNew()
+        for ($i = 0; $i -lt $fourKOpts; $i++) {
+            Check-Stop
+            $rngForSeek.GetBytes($seekBuf)
+            $maxOff = [math]::Max(1, $totalBytes - $fourK)
+            $off = [long]([BitConverter]::ToUInt64($seekBuf, 0) % $maxOff)
+            $stream.Seek($off, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $stream.Read($fourKBuf, 0, $fourK) | Out-Null
+        }
+        $fourKSw.Stop()
+        $secs4k = $fourKSw.Elapsed.TotalSeconds
+        if ($secs4k -gt 0) {
+            $result.randomRead4KIOPS = [math]::Round($fourKOpts / $secs4k, 1)
+            $result.avg4KLatencyMs = [math]::Round($secs4k * 1000 / $fourKOpts, 3)
+        }
+    } catch {
+        # 4K phase is additive; 1MB results above remain valid even if this fails.
+        Write-Output ("{`"progress`":96,`"phase`":`"random_read_4k`",`"message`":`"4K phase skipped: " + $_.Exception.Message.Replace('"','\"') + "`"}")
     }
 
     $result.success = $true

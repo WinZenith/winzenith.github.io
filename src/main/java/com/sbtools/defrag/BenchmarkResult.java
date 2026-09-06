@@ -13,6 +13,10 @@ public class BenchmarkResult {
     private double seqReadMBps;
     private double randomReadIOPS;
     private String message;
+    /** Additive 4K random-read result (0 = not measured by older scripts). */
+    private double randomRead4KIOPS;
+    /** Additive average 4K read latency in ms (0 = not measured). */
+    private double avg4KLatencyMs;
 
     public BenchmarkResult() {}
 
@@ -43,4 +47,12 @@ public class BenchmarkResult {
     @JsonProperty("message")
     public String getMessage() { return message; }
     public void setMessage(String v) { message = v; }
+
+    @JsonProperty("randomRead4KIOPS")
+    public double getRandomRead4KIOPS() { return randomRead4KIOPS; }
+    public void setRandomRead4KIOPS(double v) { randomRead4KIOPS = v; }
+
+    @JsonProperty("avg4KLatencyMs")
+    public double getAvg4KLatencyMs() { return avg4KLatencyMs; }
+    public void setAvg4KLatencyMs(double v) { avg4KLatencyMs = v; }
 }

@@ -91,6 +91,7 @@ public class BenchmarkService {
                             case "write" -> "Sequential write test...";
                             case "read" -> "Sequential read test...";
                             case "random_read" -> "Random read test...";
+                            case "random_read_4k" -> "4K random read test...";
                             case "done" -> "Benchmark complete.";
                             case "error" -> tree.has("message") ? tree.get("message").asText() : "Error";
                             default -> "Running...";

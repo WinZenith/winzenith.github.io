@@ -26,7 +26,7 @@ if ($defragOut) {
     if ($defragOut -match 'Total fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*%') {
         $fragmentationPercent = [int]$matches[1]
     }
-    if ($defragOut -match 'Total fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*(bytes|KB|MB|GB|fragments)') {
+    if ($defragOut -match 'Total fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*(bytes|KB|MB|GB|TB|fragments)') {
         $val = $matches[1] -replace ',', ''
         $unit = $matches[2]
         switch ($unit) {
@@ -34,10 +34,11 @@ if ($defragOut) {
             'KB'        { $fragmentsFound = [long]$val * 1024 }
             'MB'        { $fragmentsFound = [long]$val * 1024 * 1024 }
             'GB'        { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
+            'TB'        { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024) }
             'fragments' { $fragmentedFileCount = [long]$val }
         }
     }
-    if ($fragmentsFound -eq 0 -and $defragOut -match 'Fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*(bytes|KB|MB|GB|fragments)') {
+    if ($fragmentsFound -eq 0 -and $defragOut -match 'Fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*(bytes|KB|MB|GB|TB|fragments)') {
         $val = $matches[1] -replace ',', ''
         $unit = $matches[2]
         switch ($unit) {
@@ -45,6 +46,7 @@ if ($defragOut) {
             'KB'        { $fragmentsFound = [long]$val * 1024 }
             'MB'        { $fragmentsFound = [long]$val * 1024 * 1024 }
             'GB'        { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
+            'TB'        { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024) }
             'fragments' { $fragmentedFileCount = [long]$val }
         }
     }
@@ -73,15 +75,47 @@ if ($defragOut) {
 }
 
 # ── Stage 2: Fallback to Optimize-Volume -Analyze if defrag /A was insufficient ──
+# Prefer structured object properties (locale-independent), fall back to verbose text parsing.
 if ($fragmentationPercent -eq 0 -and $fragmentsFound -eq 0) {
     Write-Output "stage:Running deep analysis (Optimize-Volume)..."
+    try {
+        $optObj = Optimize-Volume -DriveLetter $drive -Analyze -ErrorAction SilentlyContinue
+        if ($optObj) {
+            foreach ($o in @($optObj)) {
+                try {
+                    if ($o.PSObject.Properties['FragmentationPercentage'] -and $o.FragmentationPercentage -ne $null) {
+                        $v = [int]$o.FragmentationPercentage
+                        if ($v -gt 0) { $fragmentationPercent = $v }
+                    }
+                } catch {}
+                try {
+                    if ($o.PSObject.Properties['FragmentedSpace'] -and $o.FragmentedSpace -ne $null) {
+                        $v = [long]$o.FragmentedSpace
+                        if ($v -gt 0 -and $fragmentsFound -eq 0) { $fragmentsFound = $v }
+                    }
+                } catch {}
+                try {
+                    if ($o.PSObject.Properties['FragmentedFiles'] -and $o.FragmentedFiles -ne $null) {
+                        $v = [int]$o.FragmentedFiles
+                        if ($v -gt 0) { $fragmentedFileCount = $v }
+                    }
+                } catch {}
+                try {
+                    if ($o.PSObject.Properties['TotalFiles'] -and $o.TotalFiles -ne $null) {
+                        $v = [int]$o.TotalFiles
+                        if ($v -gt 0) { $totalFileCount = $v }
+                    }
+                } catch {}
+            }
+        }
+    } catch {}
     try {
         $optOut = @(Optimize-Volume -DriveLetter $drive -Analyze -Verbose 2>&1 6>&1)
     } catch { $optOut = @() }
 
     foreach ($line in $optOut) {
         if ($line -isnot [string]) { continue }
-        if ($line -match 'Total fragmented space\s*:\s*([\d,]+\.?\d*)\s*(KB|MB|GB|Bytes|bytes)') {
+        if ($line -match 'Total fragmented space\s*:\s*([\d,]+\.?\d*)\s*(KB|MB|GB|TB|Bytes|bytes)') {
             if ($fragmentsFound -eq 0) {
                 $val = $matches[1] -replace ',', ''
                 $unit = $matches[2]
@@ -91,6 +125,7 @@ if ($fragmentationPercent -eq 0 -and $fragmentsFound -eq 0) {
                     'KB'    { $fragmentsFound = [long]$val * 1024 }
                     'MB'    { $fragmentsFound = [long]$val * 1024 * 1024 }
                     'GB'    { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
+                    'TB'    { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024) }
                 }
             }
         }
@@ -181,9 +216,11 @@ $totalDirectories = 0
 # ── Stage 7: Ensure minimums ──
 if ($totalFileCount -eq 0) { $totalFileCount = 1 }
 
-if ($fragmentedFileCount -gt 0 -and $averageFragmentsPerFile -eq 0) {
-    $averageFragmentsPerFile = [Math]::Round($fragmentedFileCount / [Math]::Max(1, $totalFileCount), 2)
-}
+# Reliability fix: previously averageFragmentsPerFile was estimated as
+# fragmentedFileCount/totalFileCount (always <=1, mathematically wrong — the true
+# average is totalFragments/fragmentedFiles which defrag.exe does not report).
+# Leave it at the parsed value (or 0) instead of synthesizing misleading data.
+if ($fragmentedFileCount -eq 0) { $averageFragmentsPerFile = 0 }
 
 # ── Build result ──
 Write-Output "stage:Finalizing..."

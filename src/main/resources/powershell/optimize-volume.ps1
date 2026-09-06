@@ -23,11 +23,28 @@ function SelectAction {
         'FAST'       { return @{ Cmd = "Optimize-Volume -DriveLetter $drive -Defrag -ReGatheringFlags 1 -Verbose"; Phases = 2 } }
         'FULL'       { return @{ Cmd = "Optimize-Volume -DriveLetter $drive -Defrag -Verbose"; Phases = 3 } }
         'FREE_SPACE' { return @{ Cmd = "Optimize-Volume -DriveLetter $drive -FreeSpace -Verbose"; Phases = 1 } }
+        'DEEP'       { return @{ Cmd = "__DEEP__"; Phases = 4 } }
         default { throw "Unknown mode: $m" }
     }
 }
 
 try {
+    # DEEP = FULL (0-70%) + FREE_SPACE (70-100%) for direct script callers.
+    # Java DefragService implements DEEP as two calls; both paths stay consistent.
+    if ($Mode.ToUpper() -eq 'DEEP') {
+        EmitProgress 0
+        & ([scriptblock]::Create("Optimize-Volume -DriveLetter $drive -Defrag -Verbose")) *>&1 | ForEach-Object {
+            $m2 = if ($_ -is [string]) { $_ } elseif ($_.Message) { $_.Message } else { "$_" }
+            if ($m2 -match '(\d+)%\s*complete') { EmitProgress ([int]([int]$matches[1] * 0.7)) }
+        }
+        & ([scriptblock]::Create("Optimize-Volume -DriveLetter $drive -FreeSpace -Verbose")) *>&1 | ForEach-Object {
+            $m2 = if ($_ -is [string]) { $_ } elseif ($_.Message) { $_.Message } else { "$_" }
+            if ($m2 -match '(\d+)%\s*complete') { EmitProgress ([int](70 + [int]$matches[1] * 0.3)) }
+        }
+        EmitProgress 100
+        EmitResult $true "Deep defrag (full + free space consolidation) completed successfully."
+        return
+    }
     $action = SelectAction $Mode
     $totalPhases = $action.Phases
 

@@ -10,6 +10,7 @@ import com.sbtools.shredder.FolderDeleteResult;
 import com.sbtools.shredder.RecycleBinEntry;
 import com.sbtools.shredder.ShredderFileEntry;
 import com.sbtools.shredder.ShredderResult;
+import com.sbtools.shredder.ShredderSafety;
 import com.sbtools.shredder.ShredderService;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
@@ -124,6 +125,8 @@ public class DiskToolsTabView extends BorderPane {
     private final Button addFilesBtn = new Button("Add Files");
     private final Button secureDeleteBtn = new Button("Secure Delete");
     private final Button deleteAllBtn = new Button("Delete All");
+    private final Button stopSecureBtn = new Button("Stop");
+    private final AtomicBoolean secureCancelled = new AtomicBoolean(false);
     private final ProgressBar secureDeleteProgress = new ProgressBar(0);
     private final Label secureDeleteStatus = new Label();
     private final ComboBox<String> overwritePresetCombo = new ComboBox<>(
@@ -181,6 +184,8 @@ public class DiskToolsTabView extends BorderPane {
     private final Label benchSeqWriteLabel = new Label("-");
     private final Label benchSeqReadLabel = new Label("-");
     private final Label benchRandomReadLabel = new Label("-");
+    private final Label benchRandom4KLabel = new Label("-");
+    private final Label benchLatencyLabel = new Label("-");
 
     public DiskToolsTabView(BooleanSupplier adminCheck) {
         this.adminCheck = adminCheck;
@@ -657,6 +662,32 @@ public class DiskToolsTabView extends BorderPane {
             return;
         }
 
+        // Reliability: pre-flight checks (FS, free space, Unknown media).
+        // BLOCK entries stop the operation; warnings are appended to the confirm dialog.
+        List<String> blockers = new ArrayList<>();
+        List<String> preWarnings = new ArrayList<>();
+        List<String> unknownLetters = new ArrayList<>();
+        for (DriveInfo d : selected) {
+            for (String w : DefragService.validateForDefrag(d)) {
+                if (w.startsWith("BLOCK:")) blockers.add(d.getDriveLetter() + ": " + w.substring(6).trim());
+                else preWarnings.add(d.getDriveLetter() + ": " + w);
+            }
+            if (!d.isSsd() && d.isUnknownMedia()) unknownLetters.add(d.getDriveLetter());
+        }
+        if (!blockers.isEmpty()) {
+            new Alert(Alert.AlertType.ERROR,
+                    "Cannot start defrag:\n\n" + String.join("\n", blockers)).showAndWait();
+            return;
+        }
+        if (!unknownLetters.isEmpty()) {
+            Alert uw = new Alert(Alert.AlertType.WARNING,
+                    "Unknown media type on " + String.join(", ", unknownLetters) + ".\n\n"
+                            + "These may be flash media (USB/SD/Storage Spaces/RAID) where "
+                            + "defrag causes wear without benefit.\n\nContinue anyway?");
+            uw.setHeaderText("Unknown drive type");
+            if (uw.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        }
+
         String mode = defragModeCombo.getSelectionModel().getSelectedItem();
         if (mode == null) mode = "Auto";
         final String defragMode = mode;
@@ -681,6 +712,7 @@ public class DiskToolsTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Drives:\n" + drivesInfo.toString()
                         + "\nMode: " + modeDescription
+                        + (preWarnings.isEmpty() ? "" : "\n\nWarnings:\n" + String.join("\n", preWarnings))
                         + "\n\nProceed?");
         confirm.setHeaderText("Intelligent Defrag (" + mode + ")");
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
@@ -720,6 +752,7 @@ public class DiskToolsTabView extends BorderPane {
                             String hddModeLabel = switch (option) {
                                 case FAST -> "Quick Defrag";
                                 case FREE_SPACE -> "Free Space Consolidation";
+                                case DEEP -> "Deep Defrag (Full + Free Space)";
                                 default -> "Full Defrag";
                             };
                             String statusPrefix = hddModeLabel + " on " + letter;
@@ -733,6 +766,10 @@ public class DiskToolsTabView extends BorderPane {
                                     defragCancelled);
                         }
                         lastDefragged.put(letter, Instant.now());
+                        // Reliability: fragmentation numbers are stale after defrag.
+                        // Drop the analyzed flag so the schematic viz hides until re-analyze.
+                        analyzedDrives.remove(letter);
+                        lastAnalyzed.remove(letter);
                     } catch (Exception driveEx) {
                         if (defragCancelled.get() || driveEx instanceof java.util.concurrent.CancellationException) throw driveEx;
                         AppLogger.error("Defrag failed for " + letter, driveEx);
@@ -777,7 +814,7 @@ public class DiskToolsTabView extends BorderPane {
     private DefragService.DefragOption resolveDefragOption(String mode, DriveInfo drive) {
         return switch (mode) {
             case "Quick" -> DefragService.DefragOption.FAST;
-            case "Deep" -> DefragService.DefragOption.FREE_SPACE;
+            case "Deep" -> DefragService.DefragOption.DEEP;
             default -> {
                 if (drive.isSsd()) {
                     yield DefragService.DefragOption.FAST;
@@ -815,13 +852,14 @@ public class DiskToolsTabView extends BorderPane {
 
         legendBox.getChildren().setAll(
                 DefragVisualization.createLegendItem(Color.rgb(139, 233, 253), "System/MFT"),
-                DefragVisualization.createLegendItem(Color.rgb(189, 147, 249), "Directories"),
-                DefragVisualization.createLegendItem(Color.rgb(241, 250, 140), "Frequently Used"),
+                DefragVisualization.createLegendItem(Color.rgb(241, 250, 140), "Frequently Used (est.)"),
                 DefragVisualization.createLegendItem(Color.rgb(80, 250, 123), "Normal"),
                 DefragVisualization.createLegendItem(Color.rgb(255, 85, 85), "Fragmented"),
                 DefragVisualization.createLegendItem(Color.rgb(255, 184, 108), "Page/Hibernation"),
                 DefragVisualization.createLegendItem(Color.rgb(68, 71, 90), "Free")
         );
+        // Directories legend is hidden: totalDirectories is not collected
+        // (always 0) and painting it would imply false precision.
     }
 
     /* ===================================================================
@@ -979,7 +1017,7 @@ public class DiskToolsTabView extends BorderPane {
         }
         if (info.isSsd() && info.getWearLevel() >= 0) {
             if (hasSmartSection) { addSmartSeparator(row++); hasSmartSection = false; }
-            addSmartRow(row++, "Wear Level", info.getWearLevel() + "%");
+            addSmartRow(row++, "Wear (used)", info.getWearLevel() + "% used");
             hasSmartSection = true;
         }
 
@@ -1030,6 +1068,8 @@ public class DiskToolsTabView extends BorderPane {
                 + "  |  " + info.getMediaType() + "  |  " + info.getInterfaceType();
         if ("smartctl".equals(info.getDataSource())) {
             summary += "  |  Data: smartctl";
+        } else {
+            summary += "  |  Data: WMI (limited — no smartmontools dependency)";
         }
         overallHealthLabel.setText(summary);
         if (info.isHealthOk()) {
@@ -1090,8 +1130,10 @@ public class DiskToolsTabView extends BorderPane {
        =================================================================== */
 
     private VBox buildBenchmarkContent() {
-        Label desc = new Label("Test sequential read/write speed and random IOPS of a drive.");
+        Label desc = new Label("Test sequential read/write speed, 1MB random IOPS and 4K random read of a drive. "
+                + "Larger sizes are more accurate but slower; results may be cache-influenced on repeated runs.");
         desc.getStyleClass().add("text-muted");
+        desc.setWrapText(true);
 
         benchDriveCombo.setPrefWidth(250);
         benchDriveCombo.setTooltip(new Tooltip("Select a drive to benchmark"));
@@ -1127,13 +1169,19 @@ public class DiskToolsTabView extends BorderPane {
         benchSeqWriteLabel.getStyleClass().addAll("label", "large", "accent");
         benchSeqReadLabel.getStyleClass().addAll("label", "large", "accent");
         benchRandomReadLabel.getStyleClass().addAll("label", "large", "accent");
+        benchRandom4KLabel.getStyleClass().addAll("label", "large", "accent");
+        benchLatencyLabel.getStyleClass().addAll("label", "large", "accent");
 
         Label seqWriteTitle = new Label("Sequential Write:");
         seqWriteTitle.getStyleClass().addAll("label", "text-muted");
         Label seqReadTitle = new Label("Sequential Read:");
         seqReadTitle.getStyleClass().addAll("label", "text-muted");
-        Label randomReadTitle = new Label("Random Read IOPS:");
+        Label randomReadTitle = new Label("Random Read IOPS (1MB):");
         randomReadTitle.getStyleClass().addAll("label", "text-muted");
+        Label random4KTitle = new Label("Random Read IOPS (4K):");
+        random4KTitle.getStyleClass().addAll("label", "text-muted");
+        Label latencyTitle = new Label("Avg 4K Latency:");
+        latencyTitle.getStyleClass().addAll("label", "text-muted");
 
         GridPane resultsGrid = new GridPane();
         resultsGrid.setHgap(32);
@@ -1145,11 +1193,15 @@ public class DiskToolsTabView extends BorderPane {
         resultsGrid.add(benchSeqReadLabel, 1, 1);
         resultsGrid.add(randomReadTitle, 0, 2);
         resultsGrid.add(benchRandomReadLabel, 1, 2);
+        resultsGrid.add(random4KTitle, 0, 3);
+        resultsGrid.add(benchRandom4KLabel, 1, 3);
+        resultsGrid.add(latencyTitle, 0, 4);
+        resultsGrid.add(benchLatencyLabel, 1, 4);
 
         VBox resultsCard = new VBox(resultsGrid);
         resultsCard.setPadding(new Insets(12));
         resultsCard.getStyleClass().add("sysinfo-card");
-        resultsCard.setPrefHeight(180);
+        resultsCard.setPrefHeight(220);
 
         VBox content = new VBox(4, toolbar, desc, resultsCard);
         content.setPadding(new Insets(0));
@@ -1229,6 +1281,10 @@ public class DiskToolsTabView extends BorderPane {
                         benchSeqWriteLabel.setText(String.format("%.1f MB/s", result.getSeqWriteMBps()));
                         benchSeqReadLabel.setText(String.format("%.1f MB/s", result.getSeqReadMBps()));
                         benchRandomReadLabel.setText(String.format("%.0f IOPS", result.getRandomReadIOPS()));
+                        benchRandom4KLabel.setText(result.getRandomRead4KIOPS() > 0
+                                ? String.format("%.0f IOPS", result.getRandomRead4KIOPS()) : "n/a");
+                        benchLatencyLabel.setText(result.getAvg4KLatencyMs() > 0
+                                ? String.format("%.3f ms", result.getAvg4KLatencyMs()) : "n/a");
                         benchStatus.setText("Benchmark completed for " + finalDriveLetter + ".");
                     } else {
                         benchStatus.setText("Benchmark failed: " + result.getMessage());
@@ -1387,6 +1443,15 @@ public class DiskToolsTabView extends BorderPane {
         deleteAllBtn.setOnAction(e -> startBatchDelete());
         deleteAllBtn.setTooltip(new Tooltip("Securely delete all pending files in the list"));
 
+        stopSecureBtn.getStyleClass().add("danger");
+        stopSecureBtn.setVisible(false);
+        stopSecureBtn.setOnAction(e -> {
+            secureCancelled.set(true);
+            stopSecureBtn.setDisable(true);
+            secureDeleteStatus.setText("Stopping...");
+        });
+        stopSecureBtn.setTooltip(new Tooltip("Stop the running secure-delete operation"));
+
         secureDeleteProgress.setVisible(false);
         secureDeleteProgress.setPrefWidth(150);
         secureDeleteStatus.getStyleClass().add("text-muted");
@@ -1397,7 +1462,7 @@ public class DiskToolsTabView extends BorderPane {
         HBox row = new HBox(8, filePathField, browseBtn, browseFolderBtn, addFilesBtn);
         row.setAlignment(Pos.CENTER_LEFT);
 
-        HBox actionRow = new HBox(8, secureDeleteBtn, deleteAllBtn);
+        HBox actionRow = new HBox(8, secureDeleteBtn, deleteAllBtn, stopSecureBtn);
         actionRow.setAlignment(Pos.CENTER_LEFT);
 
         HBox presetRow = new HBox(8, new Label("Overwrite:"), overwritePresetCombo);
@@ -1665,9 +1730,22 @@ public class DiskToolsTabView extends BorderPane {
         String filePath = filePathField.getText();
         if (filePath == null || filePath.isBlank()) return;
 
+        // Strict blocking: protected OS locations can never be shredded.
+        String blocked = ShredderSafety.validateFileForShred(filePath);
+        if (blocked != null) {
+            new Alert(Alert.AlertType.ERROR, "Secure delete blocked for safety:\n\n" + blocked).showAndWait();
+            return;
+        }
+
         File f = new File(filePath);
         if (!f.exists()) {
             new Alert(Alert.AlertType.ERROR, "File not found: " + filePath).showAndWait();
+            return;
+        }
+        if (f.isDirectory()) {
+            new Alert(Alert.AlertType.ERROR,
+                    "Selected path is a folder. Use \"Secure Delete Folder\" (Browse Folder) for directories.")
+                    .showAndWait();
             return;
         }
 
@@ -1690,6 +1768,7 @@ public class DiskToolsTabView extends BorderPane {
 
         secureBusy.set(true);
         secureDeleteBtn.setDisable(true);
+        deleteAllBtn.setDisable(true);
         secureDeleteProgress.setProgress(-1);
         secureDeleteProgress.setVisible(true);
         secureDeleteStatus.setText("Securely deleting file...");
@@ -1738,6 +1817,7 @@ public class DiskToolsTabView extends BorderPane {
                     secureBusy.set(false);
                     secureDeleteBtn.setDisable(false);
                     secureDeleteProgress.setVisible(false);
+                    stopSecureBtn.setVisible(false);
                     filePathField.clear();
                     updateDeleteButtons();
                 });
@@ -1748,6 +1828,13 @@ public class DiskToolsTabView extends BorderPane {
     private void startSecureDeleteFolder() {
         String folderPath = filePathField.getText();
         if (folderPath == null || folderPath.isBlank()) return;
+
+        // Strict blocking: system/junction/drive-root folders can never be shredded.
+        String blocked = ShredderSafety.validateFolderForShred(folderPath);
+        if (blocked != null) {
+            new Alert(Alert.AlertType.ERROR, "Secure folder delete blocked for safety:\n\n" + blocked).showAndWait();
+            return;
+        }
 
         File f = new File(folderPath);
         if (!f.exists() || !f.isDirectory()) {
@@ -1770,8 +1857,18 @@ public class DiskToolsTabView extends BorderPane {
         newDaemonThread(() -> {
             int fileCount = 0;
             try {
-                fileCount = (int) java.nio.file.Files.walk(f.toPath())
-                        .filter(java.nio.file.Files::isRegularFile).count();
+                // Default walk does NOT follow links unless FOLLOW_LINKS is passed,
+                // so junctions/symlinks are never descended into here.
+                try (var walk = java.nio.file.Files.walk(f.toPath(), 64)) {
+                    fileCount = (int) walk.filter(p -> {
+                        try {
+                            return java.nio.file.Files.isRegularFile(p,
+                                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                        } catch (Exception ex) {
+                            return false;
+                        }
+                    }).count();
+                }
             } catch (Exception ignored) {
                 fileCount = countFilesRecursive(f);
             }
@@ -1810,10 +1907,15 @@ public class DiskToolsTabView extends BorderPane {
 
     private void startSecureDeleteFolderInternal(String folderPath) {
 
+        secureCancelled.set(false);
+        stopSecureBtn.setVisible(true);
+        stopSecureBtn.setDisable(false);
         newDaemonThread(() -> {
             try {
                 int passCount = getSelectedPassCount();
-                FolderDeleteResult result = shredderService.secureDeleteFolder(folderPath, passCount);
+                FolderDeleteResult result = shredderService.secureDeleteFolder(folderPath, passCount,
+                        msg -> Platform.runLater(() -> secureDeleteStatus.setText(msg)),
+                        secureCancelled);
                 if (result.isSuccess() && !result.getScheduledForReboot().isEmpty()) {
                     for (String path : result.getScheduledForReboot()) {
                         try {
@@ -1824,7 +1926,9 @@ public class DiskToolsTabView extends BorderPane {
                     }
                 }
                 Platform.runLater(() -> {
-                    if (result.isSuccess()) {
+                    if (secureCancelled.get()) {
+                        secureDeleteStatus.setText("Folder deletion cancelled.");
+                    } else if (result.isSuccess()) {
                         String msg = "Folder securely deleted: " + result.getFilesDeleted() + " files, "
                                 + result.getFoldersDeleted() + " folders removed.";
                         secureDeleteStatus.setText(msg);
@@ -1850,6 +1954,7 @@ public class DiskToolsTabView extends BorderPane {
                     secureBusy.set(false);
                     secureDeleteBtn.setDisable(false);
                     secureDeleteProgress.setVisible(false);
+                    stopSecureBtn.setVisible(false);
                     filePathField.clear();
                     filePathField.setUserData(null);
                     secureDeleteBtn.setText("Secure Delete");
@@ -1864,6 +1969,19 @@ public class DiskToolsTabView extends BorderPane {
                 .filter(e -> e.getStatusEnum() == ShredderFileEntry.Status.PENDING)
                 .toList();
         if (pendingEntries.isEmpty()) return;
+
+        // Strict blocking: drop protected paths up-front, never shred them.
+        List<String> blockedPaths = pendingEntries.stream()
+                .map(ShredderFileEntry::getFilePath)
+                .filter(p -> ShredderSafety.validateFileForShred(p) != null)
+                .toList();
+        if (!blockedPaths.isEmpty()) {
+            new Alert(Alert.AlertType.ERROR,
+                    "Secure delete blocked for safety — protected system paths in the list:\n\n"
+                            + String.join("\n", blockedPaths)
+                            + "\n\nRemove them from the list to continue.").showAndWait();
+            return;
+        }
 
         List<String> criticalFiles = pendingEntries.stream()
                 .map(ShredderFileEntry::getFilePath)
@@ -1886,6 +2004,9 @@ public class DiskToolsTabView extends BorderPane {
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         secureBusy.set(true);
+        secureCancelled.set(false);
+        stopSecureBtn.setVisible(true);
+        stopSecureBtn.setDisable(false);
         secureDeleteBtn.setDisable(true);
         deleteAllBtn.setDisable(true);
         secureDeleteProgress.setProgress(-1);
@@ -1895,9 +2016,15 @@ public class DiskToolsTabView extends BorderPane {
         newDaemonThread(() -> {
             int deleted = 0;
             int failed = 0;
+            int cancelledCount = 0;
             int passCount = getSelectedPassCount();
             for (ShredderFileEntry entry : pendingEntries) {
+                if (secureCancelled.get()) {
+                    cancelledCount++;
+                    continue;
+                }
                 String filePath = entry.getFilePath();
+                Platform.runLater(() -> secureDeleteStatus.setText("Deleting: " + filePath));
                 try {
                     ShredderResult result = shredderService.secureDelete(filePath, passCount);
                     Platform.runLater(() -> {
@@ -1930,11 +2057,14 @@ public class DiskToolsTabView extends BorderPane {
             }
             int finalDeleted = deleted;
             int finalFailed = failed;
+            int finalCancelled = cancelledCount;
             Platform.runLater(() -> {
                 secureBusy.set(false);
                 secureDeleteBtn.setDisable(false);
                 secureDeleteProgress.setVisible(false);
-                String msg = "Batch delete completed: " + finalDeleted + " deleted, " + finalFailed + " failed.";
+                stopSecureBtn.setVisible(false);
+                String msg = "Batch delete completed: " + finalDeleted + " deleted, " + finalFailed + " failed."
+                        + (finalCancelled > 0 ? " " + finalCancelled + " skipped (cancelled)." : "");
                 secureDeleteStatus.setText(msg);
                 new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
                 updateDeleteButtons();
@@ -1997,6 +2127,13 @@ public class DiskToolsTabView extends BorderPane {
         File[] files = dir.listFiles();
         if (files != null) {
             for (File f : files) {
+                try {
+                    // Never descend into symlinks/junctions during counting.
+                    if (java.nio.file.Files.isSymbolicLink(f.toPath())) continue;
+                    Object reparse = java.nio.file.Files.getAttribute(f.toPath(),
+                            "dos:isReparsePoint", java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                    if (reparse instanceof Boolean && (Boolean) reparse && f.isDirectory()) continue;
+                } catch (Exception ignored) {}
                 if (f.isDirectory()) {
                     count += countFilesRecursive(f);
                 } else {
@@ -2049,8 +2186,8 @@ public class DiskToolsTabView extends BorderPane {
 
         Label capWarning = new Label("Note: Free space wiping will overwrite all free space (minus ~1 GB reserve) to securely remove remnants. "
                 + "This may take a long time and cause significant disk writes. Use Quick (1 pass) for fastest operation. "
-                + "Avoid wiping SSDs (causes wear and cannot guarantee erasure due to wear-leveling/over-provisioning — use the drive's Secure Erase instead) "
-                + "and avoid wiping the system drive while Windows is running (low free space can destabilize the OS).");
+                + "SSD / Unknown-type drives are BLOCKED (wear + no erasure guarantee — use the vendor's Secure Erase instead). "
+                + "System-drive wipe needs double confirmation and ample free space.");
         capWarning.getStyleClass().add("text-muted");
         capWarning.setWrapText(true);
         capWarning.setStyle("-fx-font-size: 11px;");
@@ -2182,20 +2319,36 @@ public class DiskToolsTabView extends BorderPane {
         long totalToWipe = 0;
         boolean anySsd = false;
         boolean anySystem = false;
+        boolean anyUnknown = false;
         for (DriveInfo d : selected) {
             long free = Math.max(0, d.getFreeBytes());
             long toWipe = Math.max(0, free - reserveBytes);
             totalToWipe += toWipe;
             boolean isSsd = d.isSsd();
             boolean isSystem = d.getDriveLetter().equalsIgnoreCase(systemDrive);
+            boolean isUnknown = d.isUnknownMedia();
             anySsd |= isSsd;
             anySystem |= isSystem;
+            anyUnknown |= isUnknown;
             drivesInfo.append(d.getDriveLetter()).append(" (free ").append(d.getFreeFormatted())
                     .append(", will overwrite ~").append(formatWipeBytes(toWipe))
                     .append(", ").append(d.getMediaType());
             if (isSystem) drivesInfo.append(", SYSTEM DRIVE");
             if (isSsd) drivesInfo.append(", SSD");
+            if (isUnknown) drivesInfo.append(", UNKNOWN TYPE");
             drivesInfo.append(")\n");
+        }
+        // Strict blocking: SSD free-space wipe is blocked outright (wear +
+        // no erasure guarantee). Unknown media is treated like SSD (likely flash).
+        if (anySsd || anyUnknown) {
+            new Alert(Alert.AlertType.ERROR,
+                    "Free-space wipe blocked on SSD / Unknown-type drives.\n\n"
+                            + "Overwriting free space on flash media causes significant wear and "
+                            + "CANNOT guarantee erasure (wear-leveling / over-provisioning / TRIM). "
+                            + "Use the SSD vendor's Secure Erase instead.\n\n"
+                            + "Deselect SSD/Unknown drives to continue with HDDs only.")
+                    .showAndWait();
+            return;
         }
         String passLabel = passCount <= 1 ? "Quick (1 pass)" : passCount >= 7 ? "Deep (7 passes)" : "Standard (3 passes)";
 
@@ -2205,11 +2358,6 @@ public class DiskToolsTabView extends BorderPane {
                 .append(" (1 GB reserve kept per drive)")
                 .append("\nOverwrite: ").append(passLabel)
                 .append("\n\nRecovery of wiped remnants will be impossible. This may take a very long time.");
-        if (anySsd) {
-            confirmText.append("\n\nWARNING: SSD selected. Free-space overwriting causes significant wear "
-                    + "and CANNOT guarantee erasure (wear-leveling / over-provisioning / TRIM). "
-                    + "Prefer the SSD vendor's Secure Erase.");
-        }
         if (anySystem) {
             confirmText.append("\n\nWARNING: System drive (").append(systemDrive).append(") selected. "
                     + "Filling free space while Windows is running can destabilize the OS, "
@@ -2218,6 +2366,18 @@ public class DiskToolsTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, confirmText.toString());
         confirm.setHeaderText("Confirm Free Space Wipe");
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+
+        // Strict: system-drive wipe needs a second explicit confirmation.
+        if (anySystem) {
+            Alert second = new Alert(Alert.AlertType.CONFIRMATION,
+                    "You selected the SYSTEM drive (" + systemDrive + ").\n\n"
+                            + "This is the strict-safety second confirmation.\n"
+                            + "Wiping free space on the running OS drive can cause instability, "
+                            + "failed updates, and app crashes if free space runs low.\n\n"
+                            + "Proceed with system-drive wipe?");
+            second.setHeaderText("Second confirmation — system drive");
+            if (second.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        }
 
         if (totalToWipe <= 0) {
             new Alert(Alert.AlertType.WARNING,
@@ -2312,6 +2472,7 @@ public class DiskToolsTabView extends BorderPane {
         defragCancelled.set(true);
         benchCancelled.set(true);
         recycleBinCancelled.set(true);
+        secureCancelled.set(true);
         if (currentDefragThread != null && currentDefragThread.isAlive()) currentDefragThread.interrupt();
         if (currentAnalyzeThread != null && currentAnalyzeThread.isAlive()) currentAnalyzeThread.interrupt();
         if (currentBenchThread != null && currentBenchThread.isAlive()) currentBenchThread.interrupt();

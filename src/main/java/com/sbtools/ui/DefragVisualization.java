@@ -99,7 +99,8 @@ public class DefragVisualization {
 
         String analysisText = "Analysis: " + drive.getDriveLetter() + " (" + drive.getVolumeLabel() + ")"
                 + "  \u2014  " + drive.getSizeFormatted() + " total, "
-                + formatBytes(used) + " used (" + (total > 0 ? (int)(used * 100 / total) : 0) + "%)";
+                + formatBytes(used) + " used (" + (total > 0 ? (int)(used * 100 / total) : 0) + "%)"
+                + "  [schematic — block layout is illustrative, not a cluster map]";
 
         String fragCountText = "Fragmented Space: " + drive.getFragmentsFormatted()
                 + "  |  Fragmented files: " + drive.getFragmentedFileCount()
@@ -181,8 +182,8 @@ public class DefragVisualization {
     }
 
     private static void renderSummaryBar(GraphicsContext gc, double canvasW, double canvasH,
-                                          int mftCells, int dirCells, int pageCells,
-                                          int freqCells, int normalCells, int fragCells) {
+                                           int mftCells, int dirCells, int pageCells,
+                                           int freqCells, int normalCells, int fragCells) {
         int barY = GRID_ROWS * (int) (canvasH / GRID_ROWS) + 8;
         int barH = 10;
         int barW = (int) canvasW;
@@ -194,20 +195,31 @@ public class DefragVisualization {
         int barFreqW  = cellCountToBarWidth(freqCells, barW);
         int barNormW  = cellCountToBarWidth(normalCells, barW);
         int barFragW  = cellCountToBarWidth(fragCells, barW);
-        int barFreeW  = barW - barFragW - barFreqW - barSysW - barDirW - barPageW - barNormW;
+        int drawnW = barSysW + barDirW + barPageW + barFreqW + barNormW + barFragW;
+        int barFreeW  = Math.max(0, barW - drawnW);
 
+        // Reliability fix: previously Math.max(1, w) painted a 1px sliver for every
+        // category even when its cell count was 0 (e.g. Directories always 0).
+        // Only paint segments with real width.
         int barOffset = 0;
-        gc.setFill(COL_SYS);  gc.fillRect(barX + barOffset, barY, Math.max(1, barSysW), barH);  barOffset += barSysW;
-        gc.setFill(COL_DIR);  gc.fillRect(barX + barOffset, barY, Math.max(1, barDirW), barH);  barOffset += barDirW;
-        gc.setFill(COL_PAGE); gc.fillRect(barX + barOffset, barY, Math.max(1, barPageW), barH); barOffset += barPageW;
-        gc.setFill(COL_FREQ); gc.fillRect(barX + barOffset, barY, Math.max(1, barFreqW), barH); barOffset += barFreqW;
-        gc.setFill(COL_NORMAL); gc.fillRect(barX + barOffset, barY, Math.max(1, barNormW), barH); barOffset += barNormW;
-        gc.setFill(COL_FRAG); gc.fillRect(barX + barOffset, barY, Math.max(1, barFragW), barH); barOffset += barFragW;
-        gc.setFill(COL_FREE); gc.fillRect(barX + barOffset, barY, Math.max(1, barFreeW), barH);
+        barOffset = fillBarSegment(gc, barX + barOffset, barY, barSysW, barH, COL_SYS);
+        barOffset = fillBarSegment(gc, barX + barOffset, barY, barDirW, barH, COL_DIR);
+        barOffset = fillBarSegment(gc, barX + barOffset, barY, barPageW, barH, COL_PAGE);
+        barOffset = fillBarSegment(gc, barX + barOffset, barY, barFreqW, barH, COL_FREQ);
+        barOffset = fillBarSegment(gc, barX + barOffset, barY, barNormW, barH, COL_NORMAL);
+        barOffset = fillBarSegment(gc, barX + barOffset, barY, barFragW, barH, COL_FRAG);
+        fillBarSegment(gc, barX + barOffset, barY, barFreeW, barH, COL_FREE);
 
         gc.setStroke(COL_BG);
         gc.setLineWidth(1);
         gc.strokeRect(barX, barY, barW, barH);
+    }
+
+    private static int fillBarSegment(GraphicsContext gc, int x, int y, int w, int h, Color color) {
+        if (w <= 0) return x;
+        gc.setFill(color);
+        gc.fillRect(x, y, w, h);
+        return x + w;
     }
 
     private static int cellCountToBarWidth(int cells, int barWidth) {
