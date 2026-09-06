@@ -14,6 +14,7 @@ public class StartupItem {
     private final StartupItemType type;
     private String serviceStartType;
     private String originalServiceStartType;
+    private String serviceState = "";
     private double estimatedBootImpactMs;
     private List<String> dependencies;
 
@@ -98,6 +99,14 @@ public class StartupItem {
 
     public void setOriginalServiceStartType(String originalServiceStartType) {
         this.originalServiceStartType = originalServiceStartType;
+    }
+
+    public String getServiceState() {
+        return serviceState == null ? "" : serviceState;
+    }
+
+    public void setServiceState(String serviceState) {
+        this.serviceState = serviceState == null ? "" : serviceState;
     }
 
     public double getEstimatedBootImpactMs() {

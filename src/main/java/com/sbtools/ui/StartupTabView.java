@@ -1,12 +1,16 @@
 package com.sbtools.ui;
 
+import com.sbtools.startup.BootTimeService;
+import com.sbtools.startup.StartupExport;
 import com.sbtools.startup.StartupItem;
 import com.sbtools.startup.StartupItemType;
 import com.sbtools.startup.StartupImpactService;
+import com.sbtools.startup.StartupSafety;
 import com.sbtools.startup.StartupService;
 import com.sbtools.startup.StartupService.StartupBackupEntry;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
+import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleStringProperty;
@@ -22,7 +26,9 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
+import javafx.stage.FileChooser;
 import javafx.stage.Modality;
+import javafx.util.Duration;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -46,13 +52,6 @@ public class StartupTabView extends BorderPane {
     private static final String TAB_TASKS = "Scheduled tasks";
     private static final String TAB_SERVICES = "Windows services";
 
-    private static final java.util.Set<String> CRITICAL_SERVICE_NAMES = java.util.Set.of(
-            "schedule", "eventlog", "rpcss", "rpceptmapper", "dcomlaunch",
-            "plugplay", "power", "brokerinfrastructure", "coremessagingregistrar",
-            "lsm", "samss", "winmgmt", "cryptsvc", "dhcp", "dnscache",
-            "mpssvc", "trustedinstaller", "gpsvc", "wcmsvc", "lanmanserver",
-            "lanmanworkstation", "profsvc", "sens", "themes", "windefend");
-
     private final StartupService service = new StartupService();
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
@@ -61,6 +60,8 @@ public class StartupTabView extends BorderPane {
         t.setDaemon(true);
         return t;
     });
+    private volatile java.util.concurrent.Future<?> scanFuture;
+    private final java.util.concurrent.atomic.AtomicBoolean scanCancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private final ObservableList<StartupItem> registryItems = FXCollections.observableArrayList();
     private final ObservableList<StartupItem> taskItems = FXCollections.observableArrayList();
@@ -76,12 +77,23 @@ public class StartupTabView extends BorderPane {
 
     private final Label statusLabel = new Label("Scan system to list startup items.");
     private final Label bootDelayLabel = new Label("");
+    private final Label bootBreakdownLabel = new Label("");
+    private final Label lastBootLabel = new Label("");
     private final ProgressIndicator progress = new ProgressIndicator();
 
     private final Button scanButton = new Button("Scan");
+    private final Button stopButton = new Button("Stop");
     private final Button toggleButton = new Button("Enable/Disable");
     private final Button deleteButton = new Button("Delete");
     private final Button backupsButton = new Button("Backups & Restore");
+    private final Button exportButton = new Button("Export CSV");
+
+    private final ComboBox<String> statusFilter = new ComboBox<>();
+    private final ComboBox<String> impactFilter = new ComboBox<>();
+
+    private Tab registryTab;
+    private Tab taskTab;
+    private Tab serviceTab;
 
     private final TextField registrySearch = new TextField();
     private final TextField taskSearch = new TextField();
@@ -101,6 +113,9 @@ public class StartupTabView extends BorderPane {
         progress.setMaxSize(24, 24);
 
         scanButton.setOnAction(e -> scan());
+        stopButton.setOnAction(e -> stopScan());
+        stopButton.setDisable(true);
+        stopButton.getStyleClass().add("button-outlined");
         toggleButton.setOnAction(e -> triggerToggle());
         toggleButton.setDisable(true);
         toggleButton.getStyleClass().add("button-outlined");
@@ -109,22 +124,38 @@ public class StartupTabView extends BorderPane {
         deleteButton.getStyleClass().add("danger");
         backupsButton.setOnAction(e -> showBackupsDialog());
         backupsButton.getStyleClass().add("button-outlined");
+        exportButton.setOnAction(e -> exportVisibleToCsv());
+        exportButton.getStyleClass().add("button-outlined");
+        exportButton.setTooltip(new Tooltip("Export the currently visible tab to CSV"));
+
+        statusFilter.setItems(FXCollections.observableArrayList("All statuses", "Enabled", "Disabled"));
+        statusFilter.getSelectionModel().selectFirst();
+        statusFilter.setPrefWidth(120);
+        statusFilter.setTooltip(new Tooltip("Filter by enabled/disabled status"));
+        statusFilter.valueProperty().addListener((obs, o, n) -> applyAllFilters());
+
+        impactFilter.setItems(FXCollections.observableArrayList("All impacts", "High", "Medium", "Low"));
+        impactFilter.getSelectionModel().selectFirst();
+        impactFilter.setPrefWidth(110);
+        impactFilter.setTooltip(new Tooltip("Filter by estimated boot impact"));
+        impactFilter.valueProperty().addListener((obs, o, n) -> applyAllFilters());
 
         registrySearch.setPromptText("Search startup apps...");
         registrySearch.setPrefWidth(200);
-        registrySearch.textProperty().addListener((obs, oldVal, newVal) -> applyRegistryFilter());
+        registrySearch.textProperty().addListener((obs, oldVal, newVal) -> debounce(registrySearch, this::applyRegistryFilter));
 
         taskSearch.setPromptText("Search scheduled tasks...");
         taskSearch.setPrefWidth(200);
-        taskSearch.textProperty().addListener((obs, oldVal, newVal) -> applyTaskFilter());
+        taskSearch.textProperty().addListener((obs, oldVal, newVal) -> debounce(taskSearch, this::applyTaskFilter));
 
         serviceSearch.setPromptText("Search services...");
         serviceSearch.setPrefWidth(200);
-        serviceSearch.textProperty().addListener((obs, oldVal, newVal) -> applyServiceFilter());
+        serviceSearch.textProperty().addListener((obs, oldVal, newVal) -> debounce(serviceSearch, this::applyServiceFilter));
 
         buildTable(registryTable, "Startup Item Name", "Publisher", "Location", "Command / Execution Path");
         buildTable(taskTable, "Task Name", "Publisher", "Location", "Actions / Command");
         buildTable(serviceTable, "Service Name", "Display Name", "Start Type", "Binary Path");
+        addServiceStateColumn();
 
         // Allow multi-selection for bulk operations
         registryTable.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
@@ -135,9 +166,9 @@ public class StartupTabView extends BorderPane {
         sortedTasks.comparatorProperty().bind(taskTable.comparatorProperty());
         sortedServices.comparatorProperty().bind(serviceTable.comparatorProperty());
 
-        Tab registryTab = createTab(TAB_REGISTRY, registryTable, registrySearch);
-        Tab taskTab = createTab(TAB_TASKS, taskTable, taskSearch);
-        Tab serviceTab = createTab(TAB_SERVICES, serviceTable, serviceSearch);
+        registryTab = createTab(TAB_REGISTRY, registryTable, registrySearch);
+        taskTab = createTab(TAB_TASKS, taskTable, taskSearch);
+        serviceTab = createTab(TAB_SERVICES, serviceTable, serviceSearch);
 
         tabPane.getTabs().addAll(registryTab, taskTab, serviceTab);
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
@@ -146,16 +177,30 @@ public class StartupTabView extends BorderPane {
             updateButtonStates();
         });
 
+        bootBreakdownLabel.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        lastBootLabel.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        bootBreakdownLabel.setTooltip(new Tooltip("Sum of estimated delays per category (enabled items only)"));
+        lastBootLabel.setTooltip(new Tooltip("Actual last boot time from Windows (informational)"));
+
         HBox top = new HBox(12,
-                scanButton, toggleButton, deleteButton, backupsButton,
+                scanButton, stopButton, toggleButton, deleteButton, backupsButton, exportButton,
                 new Separator(Orientation.VERTICAL),
-                progress, statusLabel, bootDelayLabel
+                progress, statusLabel
         );
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
 
-        setTop(top);
+        HBox filterBar = new HBox(8,
+                new Label("Status:"), statusFilter,
+                new Label("Impact:"), impactFilter,
+                new Separator(Orientation.VERTICAL),
+                bootDelayLabel, bootBreakdownLabel, lastBootLabel);
+        filterBar.setAlignment(Pos.CENTER_LEFT);
+        filterBar.setPadding(new Insets(0, 16, 8, 16));
+
+        VBox header = new VBox(top, filterBar);
+        setTop(header);
         setCenter(tabPane);
 
         busy.addListener((obs, oldVal, newVal) -> {
@@ -164,9 +209,12 @@ public class StartupTabView extends BorderPane {
             toggleButton.setDisable(newVal || !hasSelection);
             deleteButton.setDisable(newVal || !hasSelection);
             backupsButton.setDisable(newVal);
+            exportButton.setDisable(newVal);
             registrySearch.setDisable(newVal);
             taskSearch.setDisable(newVal);
             serviceSearch.setDisable(newVal);
+            statusFilter.setDisable(newVal);
+            impactFilter.setDisable(newVal);
             tabPane.setDisable(newVal);
         });
 
@@ -181,19 +229,55 @@ public class StartupTabView extends BorderPane {
                     case R -> scan();
                     case E -> triggerToggle();
                     case B -> showBackupsDialog();
+                    case S -> stopScan();
                 }
             } else if (event.getCode() == javafx.scene.input.KeyCode.DELETE) {
                 triggerDelete();
             }
         });
         setFocusTraversable(true);
+        loadLastBootAsync();
+    }
+
+    private final java.util.Map<TextField, PauseTransition> debounceMap = new java.util.HashMap<>();
+
+    private void debounce(TextField field, Runnable action) {
+        PauseTransition pt = debounceMap.get(field);
+        if (pt == null) {
+            pt = new PauseTransition(Duration.millis(250));
+            pt.setOnFinished(e -> action.run());
+            debounceMap.put(field, pt);
+        }
+        pt.playFromStart();
+    }
+
+    private void addServiceStateColumn() {
+        TableColumn<StartupItem, String> stateCol = new TableColumn<>("State");
+        stateCol.setCellValueFactory(c -> new SimpleStringProperty(
+                c.getValue().getServiceState() == null ? "" : c.getValue().getServiceState()));
+        stateCol.setPrefWidth(100);
+        // Insert before Boot Impact (which is last added in buildTable): find it and insert before
+        if (!serviceTable.getColumns().isEmpty()) {
+            int last = serviceTable.getColumns().size() - 1;
+            serviceTable.getColumns().add(last, stateCol);
+        } else {
+            serviceTable.getColumns().add(stateCol);
+        }
     }
 
     private Tab createTab(String title, TableView<StartupItem> table, TextField searchField) {
         Tab tab = new Tab(title);
-        HBox searchBar = new HBox(8, searchField);
+        Button selectHigh = new Button("Select high-impact");
+        selectHigh.setTooltip(new Tooltip("Select all visible high-impact enabled items"));
+        selectHigh.getStyleClass().add("button-outlined");
+        selectHigh.setOnAction(e -> selectHighImpact(table));
+        Button clearSel = new Button("Clear");
+        clearSel.setTooltip(new Tooltip("Clear selection in this tab"));
+        clearSel.getStyleClass().add("button-outlined");
+        clearSel.setOnAction(e -> table.getSelectionModel().clearSelection());
+        HBox searchBar = new HBox(8, selectHigh, clearSel, searchField);
         searchBar.setAlignment(Pos.CENTER_RIGHT);
-        searchBar.setPadding(new Insets(0, 8, 0, 0));
+        searchBar.setPadding(new Insets(4, 8, 4, 0));
 
         VBox content = new VBox(0, searchBar, table);
         VBox.setVgrow(table, Priority.ALWAYS);
@@ -401,13 +485,13 @@ public class StartupTabView extends BorderPane {
     private TableView<StartupItem> getSelectedTable() {
         Tab selectedTab = tabPane.getSelectionModel().getSelectedItem();
         if (selectedTab == null) return registryTable;
-        String title = selectedTab.getText();
-        return switch (title) {
-            case TAB_REGISTRY -> registryTable;
-            case TAB_TASKS -> taskTable;
-            case TAB_SERVICES -> serviceTable;
-            default -> registryTable;
-        };
+        if (selectedTab == serviceTab) return serviceTable;
+        if (selectedTab == taskTab) return taskTable;
+        return registryTable;
+    }
+
+    private boolean isServicesTabSelected() {
+        return tabPane.getSelectionModel().getSelectedItem() == serviceTab;
     }
 
     private void updateButtonStates() {
@@ -416,58 +500,114 @@ public class StartupTabView extends BorderPane {
         toggleButton.setDisable(!hasSelection || busy.get());
         deleteButton.setDisable(!hasSelection || busy.get());
 
-        Tab selectedTab = tabPane.getSelectionModel().getSelectedItem();
-        if (selectedTab != null && TAB_SERVICES.equals(selectedTab.getText())) {
+        if (isServicesTabSelected()) {
             deleteButton.setDisable(true);
         }
     }
 
+    private StartupExport.StatusFilter currentStatusFilter() {
+        String v = statusFilter.getValue();
+        if ("Enabled".equals(v)) return StartupExport.StatusFilter.ENABLED;
+        if ("Disabled".equals(v)) return StartupExport.StatusFilter.DISABLED;
+        return StartupExport.StatusFilter.ALL;
+    }
+
+    private StartupExport.ImpactFilter currentImpactFilter() {
+        String v = impactFilter.getValue();
+        if ("High".equals(v)) return StartupExport.ImpactFilter.HIGH;
+        if ("Medium".equals(v)) return StartupExport.ImpactFilter.MEDIUM;
+        if ("Low".equals(v)) return StartupExport.ImpactFilter.LOW;
+        return StartupExport.ImpactFilter.ALL;
+    }
+
+    private boolean matchesAll(StartupItem item, String textFilter) {
+        return StartupExport.matchesSearch(item, textFilter)
+                && StartupExport.matchesStatus(item, currentStatusFilter())
+                && StartupExport.matchesImpact(item, currentImpactFilter());
+    }
+
+    private void applyAllFilters() {
+        applyRegistryFilter();
+        applyTaskFilter();
+        applyServiceFilter();
+    }
+
     private void applyRegistryFilter() {
         String filter = registrySearch.getText();
-        filteredRegistry.setPredicate(item -> matchesSearch(item, filter));
+        filteredRegistry.setPredicate(item -> matchesAll(item, filter));
     }
 
     private void applyTaskFilter() {
         String filter = taskSearch.getText();
-        filteredTasks.setPredicate(item -> matchesSearch(item, filter));
+        filteredTasks.setPredicate(item -> matchesAll(item, filter));
     }
 
     private void applyServiceFilter() {
         String filter = serviceSearch.getText();
-        filteredServices.setPredicate(item -> matchesSearch(item, filter));
+        filteredServices.setPredicate(item -> matchesAll(item, filter));
     }
 
-    private boolean matchesSearch(StartupItem item, String filter) {
-        if (filter == null || filter.isBlank()) return true;
-        String lower = filter.toLowerCase();
-        return item.getName().toLowerCase().contains(lower) ||
-               item.getPublisher().toLowerCase().contains(lower) ||
-               item.getPath().toLowerCase().contains(lower) ||
-               item.getLocation().toLowerCase().contains(lower);
+    private void selectHighImpact(TableView<StartupItem> table) {
+        table.getSelectionModel().clearSelection();
+        for (int i = 0; i < table.getItems().size(); i++) {
+            StartupItem it = table.getItems().get(i);
+            if (it != null && it.isEnabled() && it.getEstimatedBootImpactMs() > 300) {
+                table.getSelectionModel().select(i);
+            }
+        }
+        if (table.getSelectionModel().getSelectedItems().isEmpty()) {
+            statusLabel.setText("No high-impact enabled items in this view.");
+        } else {
+            statusLabel.setText("Selected " + table.getSelectionModel().getSelectedItems().size()
+                    + " high-impact item(s). Review before disabling.");
+        }
+        updateButtonStates();
     }
 
-    private static boolean isSystemTask(StartupItem item) {
-        if (item == null || item.getType() != StartupItemType.TASK) return false;
-        String tp = item.getTaskPath();
-        if (tp == null) return false;
-        String lower = tp.toLowerCase();
-        return lower.startsWith("\\microsoft\\") || lower.startsWith("\\windows\\") || lower.contains("\\microsoft\\windows");
+    private void updateTabCounts() {
+        registryTab.setText(TAB_REGISTRY + " (" + registryItems.size() + ")");
+        taskTab.setText(TAB_TASKS + " (" + taskItems.size() + ")");
+        serviceTab.setText(TAB_SERVICES + " (" + serviceItems.size() + ")");
     }
 
     private void scan() {
         if (busy.get()) return;
         busy.set(true);
+        scanCancelled.set(false);
         progress.setVisible(true);
+        scanButton.setDisable(true);
+        stopButton.setDisable(false);
         statusLabel.setText("Scanning startup items...");
         registryItems.clear();
         taskItems.clear();
         serviceItems.clear();
+        updateTabCounts();
 
-        executor.execute(() -> {
+        scanFuture = executor.submit(() -> {
             try {
                 List<StartupItem> allItems = service.listAllParallel();
+                if (scanCancelled.get() || Thread.currentThread().isInterrupted()) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Scan stopped.");
+                        busy.set(false);
+                        progress.setVisible(false);
+                        scanButton.setDisable(false);
+                        stopButton.setDisable(true);
+                    });
+                    return;
+                }
 
                 for (StartupItem item : allItems) {
+                    if (scanCancelled.get() || Thread.currentThread().isInterrupted()) {
+                        Platform.runLater(() -> {
+                            statusLabel.setText("Scan stopped.");
+                            busy.set(false);
+                            progress.setVisible(false);
+                            scanButton.setDisable(false);
+                            stopButton.setDisable(true);
+                        });
+                        return;
+                    }
                     item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
                 }
 
@@ -478,15 +618,22 @@ public class StartupTabView extends BorderPane {
                 double totalMs = allItems.stream().filter(StartupItem::isEnabled).mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
                 final String formattedTotal = StartupImpactService.formatImpact(totalMs);
                 Platform.runLater(() -> {
+                    if (scanCancelled.get()) {
+                        statusLabel.setText("Scan stopped.");
+                        busy.set(false);
+                        progress.setVisible(false);
+                        scanButton.setDisable(false);
+                        stopButton.setDisable(true);
+                        return;
+                    }
                     registryItems.setAll(regItems);
                     taskItems.setAll(taskItemsResult);
                     serviceItems.setAll(svcItems);
-                    applyRegistryFilter();
-                    applyTaskFilter();
-                    applyServiceFilter();
+                    applyAllFilters();
+                    updateTabCounts();
                     int total = allItems.size();
                     statusLabel.setText("Found " + total + " startup item(s).");
-                    bootDelayLabel.setText("Total estimated boot delay: " + formattedTotal);
+                    updateBootDelayLabel();
 
                     List<String> errors = service.drainScanErrors();
                     if (!errors.isEmpty()) {
@@ -496,20 +643,72 @@ public class StartupTabView extends BorderPane {
                         }
                         new Alert(Alert.AlertType.WARNING, sb.toString()).showAndWait();
                     }
+                    loadLastBootAsync();
                 });
             } catch (Exception e) {
-                AppLogger.error("Failed to scan startup items", e);
-                Platform.runLater(() -> {
-                    statusLabel.setText("Scan failed.");
-                    new Alert(Alert.AlertType.ERROR, "Failed to scan startup items:\n" + e.getMessage()).showAndWait();
-                });
+                if (scanCancelled.get() || Thread.currentThread().isInterrupted()) {
+                    Platform.runLater(() -> statusLabel.setText("Scan stopped."));
+                } else {
+                    AppLogger.error("Failed to scan startup items", e);
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Scan failed.");
+                        new Alert(Alert.AlertType.ERROR, "Failed to scan startup items:\n" + e.getMessage()).showAndWait();
+                    });
+                }
             } finally {
                 Platform.runLater(() -> {
                     busy.set(false);
                     progress.setVisible(false);
+                    scanButton.setDisable(false);
+                    stopButton.setDisable(true);
                 });
             }
         });
+    }
+
+    private void stopScan() {
+        scanCancelled.set(true);
+        java.util.concurrent.Future<?> f = scanFuture;
+        if (f != null && !f.isDone()) {
+            f.cancel(true);
+        }
+        statusLabel.setText("Stopping scan...");
+        stopButton.setDisable(true);
+    }
+
+    private void loadLastBootAsync() {
+        executor.execute(() -> {
+            try {
+                BootTimeService.BootInfo info = BootTimeService.getBootInfo();
+                Platform.runLater(() -> lastBootLabel.setText(info == null ? "" : info.display()));
+            } catch (Exception e) {
+                AppLogger.warning("Failed to load boot time: " + e.getMessage());
+            }
+        });
+    }
+
+    private void exportVisibleToCsv() {
+        try {
+            TableView<StartupItem> table = getSelectedTable();
+            List<StartupItem> visible = new ArrayList<>(table.getItems());
+            if (visible.isEmpty()) {
+                new Alert(Alert.AlertType.INFORMATION, "Nothing to export — the current tab is empty.").showAndWait();
+                return;
+            }
+            String csv = StartupExport.toCsv(visible);
+            FileChooser chooser = new FileChooser();
+            chooser.setTitle("Export startup items to CSV");
+            chooser.setInitialFileName("startup-export.csv");
+            chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV files", "*.csv"));
+            java.io.File target = chooser.showSaveDialog(getScene() != null ? getScene().getWindow() : null);
+            if (target == null) return;
+            java.nio.file.Files.writeString(target.toPath(), csv, java.nio.charset.StandardCharsets.UTF_8);
+            statusLabel.setText("Exported " + visible.size() + " item(s) to " + target.getName());
+            new Alert(Alert.AlertType.INFORMATION, "Exported " + visible.size() + " item(s) to:\n" + target.getAbsolutePath()).showAndWait();
+        } catch (Exception e) {
+            AppLogger.error("Failed to export startup items", e);
+            new Alert(Alert.AlertType.ERROR, "Export failed:\n" + e.getMessage()).showAndWait();
+        }
     }
 
     private void triggerToggle() {
@@ -525,7 +724,7 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> commonFolderItems = selected.stream()
                 .filter(i -> i.getLocation() != null && i.getLocation().contains("Common")).toList();
         List<StartupItem> systemTaskItems = selected.stream()
-                .filter(i -> i.getType() == StartupItemType.TASK && isSystemTask(i)).toList();
+                .filter(i -> i.getType() == StartupItemType.TASK && StartupSafety.isSystemTask(i)).toList();
         List<StartupItem> nonServiceItems = selected.stream()
                 .filter(i -> i.getType() != StartupItemType.SERVICE).toList();
 
@@ -566,7 +765,7 @@ public class StartupTabView extends BorderPane {
                 for (StartupItem it : selected) {
                     if (it.getType() == StartupItemType.SERVICE) continue;
                     if (it.getLocation() != null && (it.getLocation().contains("HKLM") || it.getLocation().contains("Common"))) continue;
-                    if (isSystemTask(it)) continue;
+                    if (StartupSafety.isSystemTask(it)) continue;
                     allowed.add(it);
                 }
                 if (allowed.isEmpty()) return;
@@ -576,9 +775,8 @@ public class StartupTabView extends BorderPane {
 
         if (selected.size() == 1) {
             StartupItem item = selected.get(0);
-            // Guard critical system services even for single toggle
-            if (item.getType() == StartupItemType.SERVICE && item.isEnabled()
-                    && CRITICAL_SERVICE_NAMES.contains(item.getName().toLowerCase(java.util.Locale.ROOT))) {
+            // Guard critical system services even for single toggle (central policy)
+            if (StartupSafety.isCriticalDisable(item)) {
                 Alert critical = new Alert(Alert.AlertType.WARNING);
                 critical.setTitle("Critical System Service");
                 critical.setHeaderText("Disabling critical service: " + item.getName());
@@ -603,8 +801,7 @@ public class StartupTabView extends BorderPane {
         } else {
             // Bulk toggle always requires confirmation
             List<StartupItem> criticalToDisable = selected.stream()
-                    .filter(i -> i.getType() == StartupItemType.SERVICE && i.isEnabled()
-                            && CRITICAL_SERVICE_NAMES.contains(i.getName().toLowerCase(java.util.Locale.ROOT)))
+                    .filter(StartupSafety::isCriticalDisable)
                     .toList();
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
             confirm.setTitle("Confirm Bulk Toggle");
@@ -648,12 +845,10 @@ public class StartupTabView extends BorderPane {
                 for (StartupItem item : itemsToToggle) {
                     item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
                 }
-                filteredRegistry.setPredicate(null);
-                filteredTasks.setPredicate(null);
-                filteredServices.setPredicate(null);
-                applyRegistryFilter();
-                applyTaskFilter();
-                applyServiceFilter();
+                // Re-apply existing predicates (do NOT clear them — that loses
+                // search text and scroll position). Re-setting the same predicate
+                // object re-evaluates it against mutated items.
+                applyAllFilters();
                 getSelectedTable().refresh();
                 updateBootDelayLabel();
                 if (errors.isEmpty()) {
@@ -669,12 +864,17 @@ public class StartupTabView extends BorderPane {
     }
 
     private void updateBootDelayLabel() {
-        double totalMs = java.util.stream.Stream.of(registryItems, taskItems, serviceItems)
-                .flatMap(java.util.List::stream)
-                .filter(StartupItem::isEnabled)
-                .mapToDouble(StartupItem::getEstimatedBootImpactMs)
-                .sum();
+        double regMs = registryItems.stream().filter(StartupItem::isEnabled)
+                .mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
+        double taskMs = taskItems.stream().filter(StartupItem::isEnabled)
+                .mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
+        double svcMs = serviceItems.stream().filter(StartupItem::isEnabled)
+                .mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
+        double totalMs = regMs + taskMs + svcMs;
         bootDelayLabel.setText("Total estimated boot delay: " + StartupImpactService.formatImpact(totalMs));
+        bootBreakdownLabel.setText("(Apps: " + StartupImpactService.formatImpact(regMs)
+                + " + Tasks: " + StartupImpactService.formatImpact(taskMs)
+                + " + Services: " + StartupImpactService.formatImpact(svcMs) + ")");
     }
 
     private void triggerDelete() {
@@ -687,7 +887,7 @@ public class StartupTabView extends BorderPane {
 
         // Admin check for HKLM / Common items deletion + system tasks
         List<StartupItem> adminNeeded = selected.stream()
-                .filter(i -> (i.getLocation() != null && (i.getLocation().contains("HKLM") || i.getLocation().contains("Common"))) || isSystemTask(i))
+                .filter(i -> (i.getLocation() != null && (i.getLocation().contains("HKLM") || i.getLocation().contains("Common"))) || StartupSafety.isSystemTask(i))
                 .toList();
         if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
             Alert warn = new Alert(Alert.AlertType.WARNING);
@@ -700,7 +900,7 @@ public class StartupTabView extends BorderPane {
             List<StartupItem> allowed = new ArrayList<>();
             for (StartupItem it : selected) {
                 if (it.getLocation() != null && (it.getLocation().contains("HKLM") || it.getLocation().contains("Common"))) continue;
-                if (isSystemTask(it)) continue;
+                if (StartupSafety.isSystemTask(it)) continue;
                 allowed.add(it);
             }
             if (allowed.isEmpty()) return;
@@ -748,6 +948,7 @@ public class StartupTabView extends BorderPane {
                     applyRegistryFilter();
                     applyTaskFilter();
                     updateBootDelayLabel();
+                    updateTabCounts();
                     if (errors.isEmpty()) {
                         int removed = toRemoveRegistry.size() + toRemoveTask.size();
                         statusLabel.setText("Deleted " + removed + " item(s) successfully.");
@@ -778,22 +979,51 @@ public class StartupTabView extends BorderPane {
         VBox content = new VBox(8);
         content.setPadding(new Insets(10));
 
-        Label name = new Label("Name: " + item.getName());
-        Label publisher = new Label("Publisher: " + item.getPublisher());
-        Label location = new Label("Location: " + item.getLocation());
-        Label status = new Label("Status: " + (item.isEnabled() ? "Enabled" : "Disabled"));
-        Label impact = new Label("Estimated boot impact: " + StartupImpactService.formatImpact(item.getEstimatedBootImpactMs()));
+        TextArea summary = new TextArea(
+                "Name: " + item.getName() + "\n"
+                        + "Publisher: " + item.getPublisher() + "\n"
+                        + "Location: " + item.getLocation() + "\n"
+                        + "Status: " + (item.isEnabled() ? "Enabled" : "Disabled") + "\n"
+                        + "Type: " + item.getType() + "\n"
+                        + "Estimated boot impact: " + StartupImpactService.formatImpact(item.getEstimatedBootImpactMs())
+                        + (item.getType() == StartupItemType.SERVICE
+                                ? "\nStart type: " + item.getServiceStartType()
+                                + "\nOriginal start type: " + item.getOriginalServiceStartType()
+                                + "\nState: " + item.getServiceState()
+                                : "")
+                        + (item.getType() == StartupItemType.TASK ? "\nTask path: " + item.getTaskPath() : "")
+                        + (item.getType() == StartupItemType.REGISTRY && item.getFilePath() != null && !item.getFilePath().isBlank()
+                                ? "\nFile: " + item.getFilePath() : ""));
+        summary.setEditable(false);
+        summary.setWrapText(true);
+        summary.setPrefRowCount(8);
 
         TextArea cmd = new TextArea(item.getPath() == null ? "" : item.getPath());
         cmd.setEditable(false);
         cmd.setWrapText(true);
         cmd.setPrefRowCount(4);
 
-        content.getChildren().addAll(name, publisher, location, status, impact, new Label("Command / Path:"), cmd);
+        content.getChildren().addAll(new Label("Summary (selectable):"), summary,
+                new Label("Command / Path:"), cmd);
 
         if (item.getType() == StartupItemType.SERVICE && item.getDependencies() != null && !item.getDependencies().isEmpty()) {
-            content.getChildren().add(new Label("Dependencies: " + String.join(", ", item.getDependencies())));
+            TextArea deps = new TextArea(String.join(", ", item.getDependencies()));
+            deps.setEditable(false);
+            deps.setWrapText(true);
+            deps.setPrefRowCount(2);
+            content.getChildren().addAll(new Label("Dependencies:"), deps);
         }
+
+        Button copyAll = new Button("Copy all");
+        copyAll.setOnAction(e -> {
+            Clipboard cb = Clipboard.getSystemClipboard();
+            ClipboardContent cc = new ClipboardContent();
+            cc.putString(summary.getText() + "\nCommand: " + cmd.getText());
+            cb.setContent(cc);
+        });
+        HBox actions = new HBox(8, copyAll);
+        actions.setAlignment(Pos.CENTER_RIGHT);
+        content.getChildren().add(actions);
 
         dialog.getDialogPane().setContent(content);
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.CLOSE);
@@ -846,12 +1076,20 @@ public class StartupTabView extends BorderPane {
 
         TableColumn<StartupBackupEntry, String> commandCol = new TableColumn<>("Command");
         commandCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getCommand()));
-        commandCol.setPrefWidth(240);
+        commandCol.setPrefWidth(200);
 
-        backupTable.getColumns().addAll(nameCol, typeCol, dateCol, originalCol, commandCol);
+        TableColumn<StartupBackupEntry, String> enabledCol = new TableColumn<>("Was Enabled");
+        enabledCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().isEnabled() ? "Yes" : "No"));
+        enabledCol.setPrefWidth(90);
+
+        backupTable.getColumns().addAll(nameCol, typeCol, dateCol, originalCol, commandCol, enabledCol);
+        dateCol.setSortType(TableColumn.SortType.DESCENDING);
+        backupTable.getSortOrder().add(dateCol);
+        backupTable.sort();
 
         Button restoreBtn = new Button("Restore Selected");
         Button deleteBackupBtn = new Button("Delete Backup");
+        Button exportBackupsBtn = new Button("Export CSV");
 
         restoreBtn.setDisable(true);
         deleteBackupBtn.setDisable(true);
@@ -918,7 +1156,28 @@ public class StartupTabView extends BorderPane {
             }
         });
 
-        HBox dialogControls = new HBox(10, restoreBtn, deleteBackupBtn);
+        exportBackupsBtn.setOnAction(e -> {
+            if (backups.isEmpty()) {
+                new Alert(Alert.AlertType.INFORMATION, "No backups to export.").showAndWait();
+                return;
+            }
+            try {
+                String csv = StartupExport.toCsvBackups(new ArrayList<>(backups));
+                FileChooser chooser = new FileChooser();
+                chooser.setTitle("Export startup backups to CSV");
+                chooser.setInitialFileName("startup-backups.csv");
+                chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV files", "*.csv"));
+                java.io.File target = chooser.showSaveDialog(dialog.getDialogPane().getScene().getWindow());
+                if (target == null) return;
+                java.nio.file.Files.writeString(target.toPath(), csv, java.nio.charset.StandardCharsets.UTF_8);
+                new Alert(Alert.AlertType.INFORMATION, "Exported " + backups.size() + " backup(s).").showAndWait();
+            } catch (Exception ex) {
+                AppLogger.error("Failed to export backups", ex);
+                new Alert(Alert.AlertType.ERROR, "Export failed:\n" + ex.getMessage()).showAndWait();
+            }
+        });
+
+        HBox dialogControls = new HBox(10, restoreBtn, deleteBackupBtn, exportBackupsBtn);
         dialogControls.setAlignment(Pos.CENTER_RIGHT);
         dialogControls.setPadding(new Insets(10, 0, 0, 0));
 
@@ -933,6 +1192,11 @@ public class StartupTabView extends BorderPane {
     }
 
     public void dispose() {
+        scanCancelled.set(true);
+        java.util.concurrent.Future<?> f = scanFuture;
+        if (f != null && !f.isDone()) {
+            f.cancel(true);
+        }
         executor.shutdownNow();
     }
 }

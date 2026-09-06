@@ -66,4 +66,33 @@ public final class StartupConstants {
     public static boolean isDisabledByte(byte[] bytes) {
         return bytes != null && bytes.length > 0 && (bytes[0] & 0xFF) == 0x03;
     }
+
+    /**
+     * Builds the Approved byte array for the target state while preserving the
+     * timestamp tail (bytes 1..n) from the existing value.
+     *
+     * <p>Background: {@code StartupApproved\Run} values are 12 bytes where
+     * byte[0] is 0x02 (enabled) / 0x03 (disabled) and the remaining bytes carry
+     * FILETIME-ish data written by Explorer/Task Manager. Overwriting the full
+     * array with a zeroed template destroys that metadata and makes re-toggle
+     * lossy. This helper keeps the tail intact.</p>
+     *
+     * @param existing existing Approved bytes, may be null (fresh entry)
+     * @param enable   target state
+     * @return 12-byte array with byte[0] set and tail preserved when available
+     */
+    public static byte[] withStatePreservingTimestamp(byte[] existing, boolean enable) {
+        byte[] base;
+        if (existing != null && existing.length >= 12) {
+            base = existing.clone();
+        } else if (existing != null && existing.length > 0) {
+            base = new byte[12];
+            System.arraycopy(existing, 0, base, 0, existing.length);
+        } else {
+            base = enable ? enabledBytes() : disabledBytes();
+            return base;
+        }
+        base[0] = (byte) (enable ? 0x02 : 0x03);
+        return base;
+    }
 }

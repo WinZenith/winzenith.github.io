@@ -127,12 +127,14 @@ public class StartupService {
     /**
      * Parallelized version of listAll(). Scans registry, scheduled tasks, services and startup folder concurrently.
      * Uses shared scanPool to avoid per-scan thread creation; timeouts are applied per-future.
+     * Honors thread interruption so the UI Stop button can cancel promptly.
      */
     public List<StartupItem> listAllParallel() {
         if (!AppPaths.isWindows()) return Collections.emptyList();
 
         scanErrors.clear();
         loadOriginalStartTypes();
+        long startNanos = System.nanoTime();
         ExecutorService ex = AppExecutors.scanPool();
         try {
             List<Callable<List<StartupItem>>> tasks = Arrays.asList(
@@ -145,10 +147,14 @@ public class StartupService {
             // Submit all and wait with timeout 60s total
             List<Future<List<StartupItem>>> futures = new ArrayList<>();
             for (Callable<List<StartupItem>> t : tasks) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("Startup scan cancelled before submit");
+                }
                 futures.add(ex.submit(t));
             }
             List<StartupItem> items = new ArrayList<>();
             String[] scanNames = {"Registry", "Scheduled Tasks", "Windows Services", "Startup Folder"};
+            long[] phaseMs = new long[scanNames.length];
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
             for (int i = 0; i < futures.size(); i++) {
                 long remaining = deadline - System.nanoTime();
@@ -159,7 +165,9 @@ public class StartupService {
                 }
                 Future<List<StartupItem>> f = futures.get(i);
                 try {
+                    long phaseStart = System.nanoTime();
                     List<StartupItem> part = f.get(remaining, TimeUnit.NANOSECONDS);
+                    phaseMs[i] = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - phaseStart);
                     if (part != null) items.addAll(part);
                 } catch (TimeoutException e) {
                     f.cancel(true);
@@ -175,6 +183,9 @@ public class StartupService {
             }
 
             items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
+            long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+            AppLogger.info(String.format("Startup scan complete: %d items in %dms (Registry=%dms, Tasks=%dms, Services=%dms, Folder=%dms)",
+                    items.size(), totalMs, phaseMs[0], phaseMs[1], phaseMs[2], phaseMs[3]));
             return items;
         } catch (Exception e) {
             if (e instanceof InterruptedException) {
@@ -329,6 +340,70 @@ public class StartupService {
                 return new RegistryPaths(hive, REG_RUN, REG_STARTUP_APPROVED);
             }
         }
+    }
+
+    /**
+     * Pure, registry-free fallback mapping from a location label to key paths.
+     * Extracted for unit testing — mirrors the fallback branch of
+     * {@link #resolveRegistryPaths} without touching JNA.
+     *
+     * @return String[2] of {keyPath, approvedPath}
+     */
+    static String[] fallbackPathsForLocation(String location) {
+        String loc = location == null ? "" : location;
+        boolean is32bit = loc.contains("32-bit");
+        boolean isRunOnce = loc.contains("RunOnce");
+        boolean isDisabled = loc.contains("(Disabled)");
+        if (is32bit) {
+            if (isRunOnce) {
+                return new String[]{REG_WOW6432_RUN_ONCE, REG_WOW6432_APPROVED_RUNONCE};
+            } else if (isDisabled) {
+                return new String[]{REG_WOW6432_RUN_DISABLED, REG_WOW6432_APPROVED};
+            } else {
+                return new String[]{REG_WOW6432_RUN, REG_WOW6432_APPROVED};
+            }
+        } else {
+            if (isRunOnce) {
+                return new String[]{REG_RUN_ONCE, REG_STARTUP_APPROVED_RUNONCE};
+            } else if (isDisabled) {
+                return new String[]{REG_RUN_DISABLED, REG_STARTUP_APPROVED};
+            } else {
+                return new String[]{REG_RUN, REG_STARTUP_APPROVED};
+            }
+        }
+    }
+
+    /**
+     * Writes the StartupApproved state byte while preserving the timestamp tail.
+     * Falls back to the fixed 12-byte template when no prior value exists.
+     */
+    private static void writeApprovedState(HKEY hive, String approvedPath, String valueName, boolean enable) {
+        byte[] existing = null;
+        try {
+            if (Advapi32Util.registryValueExists(hive, approvedPath, valueName)) {
+                Object v = Advapi32Util.registryGetValue(hive, approvedPath, valueName);
+                if (v instanceof byte[] bytes) {
+                    existing = bytes;
+                }
+            }
+        } catch (Exception ignored) {
+            // read failure → use template below
+        }
+        byte[] next = StartupConstants.withStatePreservingTimestamp(existing, enable);
+        Advapi32Util.registrySetBinaryValue(hive, approvedPath, valueName, next);
+    }
+
+    private static byte[] readApprovedBytes(HKEY hive, String approvedPath, String valueName) {
+        try {
+            if (Advapi32Util.registryValueExists(hive, approvedPath, valueName)) {
+                Object v = Advapi32Util.registryGetValue(hive, approvedPath, valueName);
+                if (v instanceof byte[] bytes) {
+                    return bytes;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     public List<StartupItem> listRegistryApps() {
@@ -530,6 +605,7 @@ public class StartupService {
                     String displayName = node.path("DisplayName").asText("");
                     String binaryPath = node.path("BinaryPath").asText("");
                     String startType = node.path("StartType").asText("Manual");
+                    String state = node.path("State").asText("");
                     boolean enabled = !"Disabled".equals(startType);
 
                     List<String> deps = new ArrayList<>();
@@ -553,6 +629,7 @@ public class StartupService {
                             startType,
                             getOriginalServiceStartType(serviceName, startType)
                     );
+                    item.setServiceState(state);
                     if (!ORIGINAL_SERVICE_START_TYPES.containsKey(serviceName) && !"Disabled".equalsIgnoreCase(startType)) {
                         batchNewTypes.put(serviceName, startType);
                     }
@@ -582,6 +659,8 @@ public class StartupService {
     }
 
     public void toggleStatus(StartupItem item) throws Exception {
+        boolean wasEnabled = item.isEnabled();
+        String before = item.getType() + ":" + item.getName() + " enabled=" + wasEnabled;
         if (item.getType() == StartupItemType.TASK) {
             String cmd = item.isEnabled() ? "Disable-ScheduledTask" : "Enable-ScheduledTask";
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
@@ -665,6 +744,8 @@ public class StartupService {
             item.setEnabled(!item.isEnabled());
         }
         invalidateCache();
+        StartupAuditLog.record(StartupAuditLog.Action.TOGGLE, item,
+                "before: " + before + " -> after enabled=" + item.isEnabled());
     }
 
     public void deleteItem(StartupItem item) throws Exception {
@@ -754,6 +835,7 @@ public class StartupService {
         }
 
         invalidateCache();
+        StartupAuditLog.record(StartupAuditLog.Action.DELETE, item, "backup created automatically");
     }
 
     private boolean toggleRegularItem(StartupItem item, RegistryPaths paths) throws Exception {
@@ -771,11 +853,8 @@ public class StartupService {
         if (!Advapi32Util.registryKeyExists(paths.hive(), paths.approvedPath())) {
             Advapi32Util.registryCreateKey(paths.hive(), paths.approvedPath());
         }
-        if (item.isEnabled()) {
-            Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, StartupConstants.disabledBytes());
-        } else {
-            Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, StartupConstants.enabledBytes());
-        }
+        // Preserve Explorer timestamp tail (bytes 1..n); only flip byte[0] 02<->03.
+        writeApprovedState(paths.hive(), paths.approvedPath(), valName, !item.isEnabled());
         return true;
     }
 
@@ -790,7 +869,7 @@ public class StartupService {
             if (!Advapi32Util.registryKeyExists(paths.hive(), paths.approvedPath())) {
                 Advapi32Util.registryCreateKey(paths.hive(), paths.approvedPath());
             }
-            Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, StartupConstants.disabledBytes());
+            writeApprovedState(paths.hive(), paths.approvedPath(), valName, false);
             return true;
         }
 
@@ -823,7 +902,7 @@ public class StartupService {
         if (!Advapi32Util.registryKeyExists(paths.hive(), paths.approvedPath())) {
             Advapi32Util.registryCreateKey(paths.hive(), paths.approvedPath());
         }
-        Advapi32Util.registrySetBinaryValue(paths.hive(), paths.approvedPath(), valName, StartupConstants.enabledBytes());
+        writeApprovedState(paths.hive(), paths.approvedPath(), valName, true);
         return true;
     }
 
@@ -907,11 +986,7 @@ public class StartupService {
         if (!Advapi32Util.registryKeyExists(paths.hive(), approvedPath)) {
             Advapi32Util.registryCreateKey(paths.hive(), approvedPath);
         }
-        if (item.isEnabled()) {
-            Advapi32Util.registrySetBinaryValue(paths.hive(), approvedPath, valName, StartupConstants.disabledBytes());
-        } else {
-            Advapi32Util.registrySetBinaryValue(paths.hive(), approvedPath, valName, StartupConstants.enabledBytes());
-        }
+        writeApprovedState(paths.hive(), approvedPath, valName, !item.isEnabled());
         // Keep location stable (RunOnce), do not mutate to Run (Disabled)
         return true;
     }
@@ -1154,8 +1229,7 @@ public class StartupService {
                 if (!Advapi32Util.registryKeyExists(hive, approvedKeyPath)) {
                     Advapi32Util.registryCreateKey(hive, approvedKeyPath);
                 }
-                byte[] approvedBytes = entry.isEnabled() ? StartupConstants.enabledBytes() : StartupConstants.disabledBytes();
-                Advapi32Util.registrySetBinaryValue(hive, approvedKeyPath, entry.getValueName(), approvedBytes);
+                writeApprovedState(hive, approvedKeyPath, entry.getValueName(), entry.isEnabled());
             }
         } else if ("Folder".equals(entry.getType())) {
             // Restore startup folder file
@@ -1217,6 +1291,7 @@ public class StartupService {
         } catch (Exception ex) {
             AppLogger.warning("Failed to delete backup folder after restore: " + ex.getMessage());
         }
+        StartupAuditLog.record(StartupAuditLog.Action.RESTORE, entry, "restored successfully");
     }
 
     public void removeBackup(StartupBackupEntry entry) throws IOException {
@@ -1242,6 +1317,7 @@ public class StartupService {
         } catch (Exception ex) {
             AppLogger.warning("Failed to delete backup folder: " + ex.getMessage());
         }
+        StartupAuditLog.record(StartupAuditLog.Action.RESTORE_BACKUP_DELETED, entry, "backup entry deleted");
     }
 
     private void deleteDirectoryRecursively(Path path) throws IOException {
