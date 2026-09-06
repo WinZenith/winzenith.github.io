@@ -51,6 +51,19 @@ class DnsCachePanel extends VBox {
     private Button pingBtn;
     private Button tracerouteBtn;
     private Button cancelDiagBtn;
+    // PR3: benchmark / MTU / speed-test state (local flags, never global busy)
+    private final java.util.concurrent.atomic.AtomicBoolean benchRunning = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile Future<?> benchTask;
+    private final javafx.collections.ObservableList<NetworkOptimizerService.DnsBenchmarkRow> benchRows =
+            javafx.collections.FXCollections.observableArrayList();
+    private final java.util.concurrent.atomic.AtomicBoolean mtuRunning = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile Future<?> mtuTask;
+    private final java.util.concurrent.atomic.AtomicBoolean speedRunning = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean speedCancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile Future<?> speedTask;
+    private final javafx.scene.chart.XYChart.Series<Number, Number> pingSeries = new javafx.scene.chart.XYChart.Series<>();
+    private int pingSampleIndex = 0;
+    private javafx.scene.chart.LineChart<Number, Number> pingChart;
 
     DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel, BooleanSupplier adminCheck) {
         this.service = service;
@@ -108,6 +121,246 @@ class DnsCachePanel extends VBox {
         Future<?> g = diagTask;
         if (g != null) g.cancel(true);
         diagRunning.set(false);
+        Future<?> b = benchTask;
+        if (b != null) b.cancel(true);
+        benchRunning.set(false);
+        Future<?> m = mtuTask;
+        if (m != null) m.cancel(true);
+        mtuRunning.set(false);
+        Future<?> s = speedTask;
+        if (s != null) s.cancel(true);
+        speedRunning.set(false);
+        speedCancelled.set(true);
+    }
+
+    // ---------------- PR3 sections (opt-in, local flags, stdlib only) ----------------
+
+    private VBox buildPingHistorySection() {
+        VBox box = new VBox(6);
+        Label h = new Label("Ping History (avg ms per run, last 50)");
+        h.getStyleClass().addAll("label", "large");
+        box.getChildren().add(h);
+        javafx.scene.chart.NumberAxis x = new javafx.scene.chart.NumberAxis();
+        x.setLabel("Run");
+        x.setForceZeroInRange(false);
+        javafx.scene.chart.NumberAxis y = new javafx.scene.chart.NumberAxis();
+        y.setLabel("Avg ms");
+        pingChart = new javafx.scene.chart.LineChart<>(x, y);
+        pingChart.setPrefHeight(160);
+        pingChart.setCreateSymbols(false);
+        pingChart.setLegendVisible(false);
+        pingChart.setAnimated(false);
+        pingSeries.setName("ping avg");
+        pingChart.getData().add(pingSeries);
+        box.getChildren().add(pingChart);
+        return box;
+    }
+
+    private void recordPingHistory(double avgMs) {
+        try {
+            Platform.runLater(() -> {
+                pingSeries.getData().add(
+                        new javafx.scene.chart.XYChart.Data<>(pingSampleIndex++, avgMs));
+                while (pingSeries.getData().size() > 50) {
+                    pingSeries.getData().remove(0);
+                }
+            });
+        } catch (Exception ignored) {}
+    }
+
+    private VBox buildBenchmarkSection() {
+        VBox box = new VBox(6);
+        Label h = new Label("DNS Benchmark (opt-in internet: resolves google.com via each provider)");
+        h.getStyleClass().addAll("label", "large");
+        h.setPadding(new Insets(12, 0, 0, 0));
+        box.getChildren().add(h);
+        Label hint = new Label("Runs only when you click Benchmark. No background traffic.");
+        hint.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        box.getChildren().add(hint);
+
+        javafx.scene.control.TableView<NetworkOptimizerService.DnsBenchmarkRow> table =
+                new javafx.scene.control.TableView<>(benchRows);
+        table.setPrefHeight(150);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.DnsBenchmarkRow, String> pCol =
+                new javafx.scene.control.TableColumn<>("Provider");
+        pCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().provider()));
+        pCol.setPrefWidth(130);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.DnsBenchmarkRow, String> sCol =
+                new javafx.scene.control.TableColumn<>("Server");
+        sCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().servers()));
+        sCol.setPrefWidth(140);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.DnsBenchmarkRow, String> aCol =
+                new javafx.scene.control.TableColumn<>("Avg ms");
+        aCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                        c.getValue().avgMs() < 0 ? "-" : String.format("%.1f", c.getValue().avgMs())));
+        aCol.setPrefWidth(80);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.DnsBenchmarkRow, String> nCol =
+                new javafx.scene.control.TableColumn<>("Status");
+        nCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
+                c.getValue().ok() ? "OK" : ("FAIL" + (c.getValue().note() != null && !c.getValue().note().isBlank()
+                        ? ": " + c.getValue().note() : ""))));
+        nCol.setPrefWidth(260);
+        table.getColumns().addAll(pCol, sCol, aCol, nCol);
+        box.getChildren().add(table);
+
+        Button benchBtn = UIButton.secondary("Benchmark DNS Now");
+        Label benchStatus = new Label("Not run yet.");
+        benchStatus.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        benchBtn.setOnAction(e -> {
+            if (!benchRunning.compareAndSet(false, true)) {
+                benchStatus.setText("Benchmark already running...");
+                return;
+            }
+            benchStatus.setText("Benchmarking (resolves google.com 3x per provider)...");
+            benchTask = AppExecutors.ioPool().submit(() -> {
+                try {
+                    var rows = service.benchmarkDnsServers();
+                    Platform.runLater(() -> {
+                        benchRows.setAll(rows);
+                        rows.stream().filter(NetworkOptimizerService.DnsBenchmarkRow::ok)
+                                .min(java.util.Comparator.comparingDouble(NetworkOptimizerService.DnsBenchmarkRow::avgMs))
+                                .ifPresentOrElse(
+                                        best -> benchStatus.setText("Fastest: " + best.provider()
+                                                + " (" + best.servers() + ") " + String.format("%.1f ms", best.avgMs())
+                                                + ". Use Apply DNS above to switch (admin required)."),
+                                        () -> benchStatus.setText("All providers failed — check connectivity."));
+                    });
+                } catch (Exception ex) {
+                    Platform.runLater(() -> benchStatus.setText("Benchmark failed: " + ex.getMessage()));
+                } finally {
+                    benchRunning.set(false);
+                }
+            });
+        });
+        HBox row = new HBox(8, benchBtn, benchStatus);
+        row.setAlignment(Pos.CENTER_LEFT);
+        box.getChildren().add(row);
+        return box;
+    }
+
+    private VBox buildMtuSection() {
+        VBox box = new VBox(6);
+        Label h = new Label("MTU Discovery (read-only ping -f sweep, suggestion only)");
+        h.getStyleClass().addAll("label", "large");
+        h.setPadding(new Insets(12, 0, 0, 0));
+        box.getChildren().add(h);
+        TextField targetField = new TextField("8.8.8.8");
+        targetField.setPromptText("Target (gateway IP or 1.1.1.1)");
+        targetField.setPrefWidth(180);
+        Button mtuBtn = UIButton.secondary("Probe MTU");
+        Button mtuCancel = UIButton.secondary("Cancel");
+        mtuCancel.setDisable(true);
+        TextArea mtuOut = new TextArea();
+        mtuOut.setEditable(false);
+        mtuOut.setPrefRowCount(6);
+        mtuOut.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 11px;");
+        mtuOut.setPromptText("MTU probe output (no changes applied)...");
+        mtuBtn.setOnAction(e -> {
+            String target = targetField.getText() != null ? targetField.getText().trim() : "";
+            if (!NetworkOptimizerService.isValidHost(target)) {
+                new Alert(Alert.AlertType.WARNING, "Invalid target host.").showAndWait();
+                return;
+            }
+            if (!mtuRunning.compareAndSet(false, true)) return;
+            mtuBtn.setDisable(true);
+            mtuCancel.setDisable(false);
+            mtuOut.setText("Probing MTU to " + target + " ...\n");
+            statusLabel.setText("Probing MTU...");
+            java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+            mtuTask = AppExecutors.ioPool().submit(() -> {
+                try {
+                    var res = service.probeMtu(target, cancelled);
+                    Platform.runLater(() -> {
+                        mtuOut.setText(res.details() != null ? res.details() : "");
+                        statusLabel.setText(res.success() ? "MTU probe: " + res.optimalMtu() : "MTU probe failed.");
+                    });
+                } catch (java.util.concurrent.CancellationException ce) {
+                    Platform.runLater(() -> {
+                        mtuOut.setText("MTU probe cancelled.");
+                        statusLabel.setText("MTU probe cancelled.");
+                    });
+                } catch (Exception ex) {
+                    Platform.runLater(() -> mtuOut.setText("MTU probe error: " + ex.getMessage()));
+                } finally {
+                    mtuRunning.set(false);
+                    Platform.runLater(() -> {
+                        mtuBtn.setDisable(false);
+                        mtuCancel.setDisable(true);
+                    });
+                }
+            });
+            mtuCancel.setOnAction(ev -> {
+                cancelled.set(true);
+                Future<?> m = mtuTask;
+                if (m != null) m.cancel(true);
+            });
+        });
+        HBox r = new HBox(8, new Label("Target:"), targetField, mtuBtn, mtuCancel);
+        r.setAlignment(Pos.CENTER_LEFT);
+        box.getChildren().addAll(r, mtuOut);
+        return box;
+    }
+
+    private VBox buildSpeedSection() {
+        VBox box = new VBox(6);
+        Label h = new Label("Download Speed Test (opt-in internet, stdlib HttpClient)");
+        h.getStyleClass().addAll("label", "large");
+        h.setPadding(new Insets(12, 0, 0, 0));
+        box.getChildren().add(h);
+        Label hint = new Label("Downloads ~10 MB from the URL below. Runs only on click.");
+        hint.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        box.getChildren().add(hint);
+        TextField urlField = new TextField("https://speed.cloudflare.com/__down?bytes=10000000");
+        urlField.setPrefWidth(340);
+        javafx.scene.control.ProgressBar bar = new javafx.scene.control.ProgressBar(0);
+        bar.setPrefWidth(220);
+        bar.setVisible(false);
+        Label out = new Label("Not run yet.");
+        out.setStyle("-fx-text-fill: #8be9fd;");
+        Button go = UIButton.primary("Run Speed Test");
+        Button cancel = UIButton.secondary("Cancel");
+        cancel.setDisable(true);
+        com.sbtools.netoptimizer.SpeedTestService speedSvc = new com.sbtools.netoptimizer.SpeedTestService();
+        go.setOnAction(e -> {
+            if (!speedRunning.compareAndSet(false, true)) return;
+            speedCancelled.set(false);
+            String url = urlField.getText();
+            go.setDisable(true);
+            cancel.setDisable(false);
+            bar.setVisible(true);
+            bar.setProgress(-1);
+            out.setText("Testing...");
+            speedTask = AppExecutors.ioPool().submit(() -> {
+                try {
+                    var res = speedSvc.runDownload(url, speedCancelled, p ->
+                            Platform.runLater(() -> {
+                                bar.setVisible(true);
+                                if (p >= 0) bar.setProgress(p);
+                            }));
+                    Platform.runLater(() -> out.setText(res.success()
+                            ? String.format("Download: %.1f Mbps (%s)", res.mbps(), res.note())
+                            : "Speed test failed: " + res.note()));
+                } catch (Exception ex) {
+                    Platform.runLater(() -> out.setText("Speed test error: " + ex.getMessage()));
+                } finally {
+                    speedRunning.set(false);
+                    Platform.runLater(() -> {
+                        go.setDisable(false);
+                        cancel.setDisable(true);
+                        bar.setVisible(false);
+                    });
+                }
+            });
+        });
+        cancel.setOnAction(e -> {
+            speedCancelled.set(true);
+            Future<?> s = speedTask;
+            if (s != null) s.cancel(true);
+        });
+        HBox r = new HBox(8, urlField, go, cancel, bar);
+        r.setAlignment(Pos.CENTER_LEFT);
+        box.getChildren().addAll(r, out);
+        return box;
     }
 
     private VBox buildContent() {
@@ -166,6 +419,25 @@ class DnsCachePanel extends VBox {
         }
         content.getChildren().add(presetRow);
 
+        HBox presetRowV6 = new HBox(8);
+        presetRowV6.setAlignment(Pos.CENTER_LEFT);
+        Label v6Label = new Label("IPv6:");
+        v6Label.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        presetRowV6.getChildren().add(v6Label);
+        for (String[] preset : new String[][]{
+                {"Google v6", "2001:4860:4860::8888", "2001:4860:4860::8844"},
+                {"Cloudflare v6", "2606:4700:4700::1111", "2606:4700:4700::1001"},
+                {"Quad9 v6", "2620:fe::fe", "2620:fe::9"}
+        }) {
+            Button btn = UIButton.small(preset[0]);
+            btn.setOnAction(e -> {
+                primaryDnsField.setText(preset[1]);
+                secondaryDnsField.setText(preset[2]);
+            });
+            presetRowV6.getChildren().add(btn);
+        }
+        content.getChildren().add(presetRowV6);
+
         primaryDnsField.setPromptText("Primary DNS (e.g. 8.8.8.8)");
         primaryDnsField.setPrefWidth(200);
         secondaryDnsField.setPromptText("Secondary DNS (e.g. 8.8.4.4)");
@@ -214,11 +486,16 @@ class DnsCachePanel extends VBox {
         content.getChildren().add(pingRow);
 
         diagnosticOutput.setEditable(false);
-        diagnosticOutput.setPrefRowCount(12);
+        diagnosticOutput.setPrefRowCount(10);
         diagnosticOutput.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 11px; -fx-control-inner-background: #1e1f29;");
         diagnosticOutput.setPromptText("Ping/Traceroute results will appear here...");
         VBox.setVgrow(diagnosticOutput, Priority.ALWAYS);
         content.getChildren().add(diagnosticOutput);
+
+        content.getChildren().add(buildPingHistorySection());
+        content.getChildren().add(buildBenchmarkSection());
+        content.getChildren().add(buildMtuSection());
+        content.getChildren().add(buildSpeedSection());
 
         return content;
     }
@@ -268,7 +545,11 @@ class DnsCachePanel extends VBox {
         statusLabel.setText("Resetting network stack...");
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
+                try { service.captureSnapshot("before reset-network-stack"); } catch (Exception ignored) {}
                 var result = service.resetNetworkStack();
+                if (result.success()) {
+                    try { service.markRebootRequired("Network stack reset"); } catch (Exception ignored) {}
+                }
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "Network stack reset. Reboot required." : "Reset failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
@@ -303,7 +584,11 @@ class DnsCachePanel extends VBox {
         statusLabel.setText("Resetting Winsock...");
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
+                try { service.captureSnapshot("before reset-winsock"); } catch (Exception ignored) {}
                 var result = service.resetWinsock();
+                if (result.success()) {
+                    try { service.markRebootRequired("Winsock reset"); } catch (Exception ignored) {}
+                }
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "Winsock reset. Reboot recommended." : "Reset failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
@@ -495,6 +780,9 @@ class DnsCachePanel extends VBox {
                     sb.append("\n--- Raw Output ---\n");
                     sb.append(result.rawOutput() != null ? result.rawOutput() : "");
                     diagnosticOutput.setText(sb.toString());
+                    if (result.packetsReceived() > 0) {
+                        recordPingHistory(result.avgMs());
+                    }
                     // detect error string in raw for user hint
                     if (result.rawOutput() != null && result.rawOutput().toLowerCase().contains("error")) {
                         statusLabel.setText("Ping failed: " + result.rawOutput().substring(0, Math.min(80, result.rawOutput().length())));

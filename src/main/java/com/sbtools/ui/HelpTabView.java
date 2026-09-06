@@ -119,24 +119,28 @@ public class HelpTabView extends VBox {
                 "Both shredding and wiping are irreversible — make sure you have backups before proceeding."));
 
         getChildren().add(createFaqSection("Browser Extensions",
-                "This tab scans all major browsers installed on your system — Chrome, Edge, Firefox, Brave, Opera, and Vivaldi — for installed extensions. " +
-                "Use the browser filter dropdown at the top to show extensions from specific browsers only. " +
-                "Each extension shows its name, version, description, and current state (enabled or disabled). " +
-                "Select an extension and click \"Disable\" to turn it off without uninstalling, or \"Enable\" to reactivate it. " +
-                "If a browser is running, a warning will be shown; changes take effect after restarting the browser. " +
-                "Ignored extensions are hidden from toggle operations but can be managed via the \"Manage Ignored\" button."));
+                "This tab scans all major browsers installed on your system — Chrome, Edge, Firefox, Brave, Opera, and Vivaldi (plus extra browsers from browser-catalog.json) — for installed extensions. " +
+                "Click \"Scan All Browsers\" for a full parallel scan with determinate progress, or pick a browser in the Browser filter and click \"Rescan Browser\" for a fast single-browser refresh. Use \"Cancel\" to stop a running scan or toggle. " +
+                "Filter by Browser, Status (Enabled/Disabled/Ignored), Profile (Default, Profile 1, ...) and free-text search (name, description, ID, permissions, version). " +
+                "Each extension shows its name, version, profile, install date, description, and current state (enabled/disabled/ignored). Double-click a row (or right-click > View Details) for the full detail dialog. " +
+                "Select rows and click \"Enable\"/\"Disable\" to toggle without uninstalling (browsers must stay closed; the app blocks the toggle while they run and verifies the write). " +
+                "Right-click offers Open Extension Folder, Copy ID/Profile Path/Store URL, Open Store Page, and Ignore. " +
+                "Use \"Export...\" to save the filtered list as CSV/JSON, \"Restore Backup...\" to roll back a Preferences/extensions.json backup created during a toggle, and \"Manage Ignored\" to review ignored items. " +
+                "Tick \"Auto-scan on open\" to scan automatically. If a browser is running, a warning will be shown; changes take effect after restarting the browser. " +
+                "Only store-installed extensions are scanned; unpacked developer-mode extensions are not."));
 
         getChildren().add(createFaqSection("Network Optimizer",
-                "The Network Optimizer has seven sub-tabs. " +
-                "Network Adapters lists all network interfaces on your system with their status, speed, and IP configuration. " +
-                "Optimization applies TCP/IP tuning presets (Default, Maximum Performance, Maximum Stability, Gaming) to improve network performance. " +
-                "Select a preset and click \"Apply\" — changes are applied via PowerShell and take effect immediately. " +
-                "DNS & Cache lets you flush the DNS resolver cache, reset the network stack, and set custom DNS server addresses (e.g., Google 8.8.8.8 or Cloudflare 1.1.1.1). " +
-                "Adapter Settings displays advanced properties for a selected network adapter (read-only). " +
-                "Wi-Fi shows the current wireless connection details and saved profiles, with disconnect and forget options. " +
-                "Connection Overview provides the full ipconfig /all output for detailed network configuration. " +
-                "Change History tracks the last network operations performed. " +
-                "All network changes can be reverted to defaults using the \"Reset\" button."));
+                "The Network Optimizer has seven sub-tabs. "
+                + "Network Adapters lists all interfaces with status, speed, IP, DHCP, gateway and DNS; use Filter and Export CSV. "
+                + "Optimization applies TCP/IP presets (Default, Maximum Performance, Maximum Stability, Gaming). "
+                + "Use Preview Changes to diff current vs intended values; a snapshot is captured automatically before each Apply, "
+                + "and you can tick 'Create system restore point' for extra safety. Snapshots… shows guided restore info (read-only+ mode restores via Reset to Defaults). "
+                + "DNS & Cache: flush DNS, reset stack/Winsock (marks Reboot required banner), set IPv4/IPv6 DNS (presets incl. Google/Cloudflare/Quad9 v6), "
+                + "plus opt-in diagnostics that run only on click: DNS Benchmark, MTU Discovery (suggestion only), Download Speed Test, Ping/Traceroute with ping-history chart. "
+                + "Adapter Settings is a read-only enriched view (MTU, driver version, DNS) with filter + Export CSV. "
+                + "Wi-Fi shows current connection + signal history, read-only Nearby Networks survey (Scan), and saved profiles with disconnect/forget. "
+                + "Connection Overview offers ipconfig /all, route print, arp -a and netstat -ano with Copy + Save to File. "
+                + "Change History supports filter (text + OK/Failed), details pane, Export CSV and snapshot viewer."));
 
         Label contactTitle = new Label("Contact us");
         contactTitle.setStyle("-fx-font-size: 15px; -fx-font-weight: bold; -fx-text-fill: #8be9fd; -fx-padding: 0 0 6 0;");

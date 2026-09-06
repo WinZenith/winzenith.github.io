@@ -102,7 +102,16 @@ class AdapterSettingsPanel extends VBox {
         Button refreshPropsBtn = UIButton.primary("Refresh Properties");
         refreshPropsBtn.setOnAction(e -> loadProperties());
 
-        HBox adapterRow = new HBox(8, new Label("Adapter:"), adapterCombo, refreshAdaptersBtn, refreshPropsBtn, statusLabel);
+        Button exportBtn = UIButton.secondary("Export CSV");
+        exportBtn.setOnAction(e -> exportCsv());
+
+        javafx.scene.control.TextField filterField = new javafx.scene.control.TextField();
+        filterField.setPromptText("Filter properties…");
+        filterField.setPrefWidth(180);
+        filterField.textProperty().addListener((obs, o, n) -> applyFilter(n));
+
+        HBox adapterRow = new HBox(8, new Label("Adapter:"), adapterCombo, refreshAdaptersBtn, refreshPropsBtn,
+                exportBtn, filterField, statusLabel);
         adapterRow.setAlignment(Pos.CENTER_LEFT);
         adapterRow.setPadding(new Insets(0, 0, 8, 0));
         content.getChildren().add(adapterRow);
@@ -128,6 +137,56 @@ class AdapterSettingsPanel extends VBox {
         propTable.getColumns().addAll(nameCol, valueCol);
     }
 
+    private final List<Map.Entry<String, String>> allRows = new ArrayList<>();
+    private String filterText = "";
+
+    private void applyFilter(String q) {
+        filterText = q != null ? q.trim().toLowerCase() : "";
+        propertyRows.clear();
+        for (Map.Entry<String, String> e : allRows) {
+            if (filterText.isEmpty()
+                    || (e.getKey() != null && e.getKey().toLowerCase().contains(filterText))
+                    || (e.getValue() != null && e.getValue().toLowerCase().contains(filterText))) {
+                propertyRows.add(e);
+            }
+        }
+    }
+
+    private void exportCsv() {
+        if (propertyRows.isEmpty()) {
+            new Alert(Alert.AlertType.INFORMATION, "Nothing to export.").showAndWait();
+            return;
+        }
+        String adapter = adapterCombo.getSelectionModel().getSelectedItem();
+        AppExecutors.ioPool().submit(() -> {
+            try {
+                StringBuilder sb = new StringBuilder("Property,Value\n");
+                for (Map.Entry<String, String> e : propertyRows) {
+                    sb.append(csv(e.getKey())).append(",").append(csv(e.getValue())).append("\n");
+                }
+                java.nio.file.Path base = com.sbtools.util.AppPaths.portableBaseDir();
+                java.nio.file.Path dir = base != null
+                        ? base.resolve(".winzenith").resolve("exports")
+                        : java.nio.file.Path.of(System.getProperty("user.home"), ".winzenith", "exports");
+                java.nio.file.Files.createDirectories(dir);
+                String safe = adapter != null ? adapter.replaceAll("[^A-Za-z0-9]+", "-") : "adapter";
+                String stamp = java.time.LocalDateTime.now()
+                        .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                java.nio.file.Path out = dir.resolve("adapter-" + safe + "-" + stamp + ".csv");
+                java.nio.file.Files.writeString(out, sb.toString());
+                Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Saved to:\n" + out).showAndWait());
+            } catch (Exception ex) {
+                Platform.runLater(() -> new Alert(Alert.AlertType.ERROR, "Export failed: " + ex.getMessage()).showAndWait());
+            }
+        });
+    }
+
+    private static String csv(String v) {
+        if (v == null) return "";
+        String s = v.replace("\"", "\"\"");
+        return s.contains(",") || s.contains("\"") || s.contains("\n") ? "\"" + s + "\"" : s;
+    }
+
     private void loadProperties() {
         String adapter = adapterCombo.getSelectionModel().getSelectedItem();
         if (adapter == null) {
@@ -142,15 +201,15 @@ class AdapterSettingsPanel extends VBox {
             try {
                 AdapterProperties props = service.getAdapterProperties(adapter);
                 Platform.runLater(() -> {
+                    allRows.clear();
                     propertyRows.clear();
                     if (props.properties() != null && !props.properties().isEmpty()) {
                         // Copy entries to avoid live view issues
-                        List<Map.Entry<String, String>> copy = new ArrayList<>();
                         for (Map.Entry<String, String> e : props.properties().entrySet()) {
-                            copy.add(new AbstractMap.SimpleEntry<>(e.getKey(), e.getValue()));
+                            allRows.add(new AbstractMap.SimpleEntry<>(e.getKey(), e.getValue()));
                         }
-                        propertyRows.addAll(copy);
-                        statusLabel.setText("Loaded " + propertyRows.size() + " properties.");
+                        applyFilter(filterText);
+                        statusLabel.setText("Loaded " + allRows.size() + " properties.");
                     } else {
                         statusLabel.setText("No properties returned. Try 'Refresh Adapters' or run as Administrator.");
                     }

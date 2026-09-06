@@ -17,6 +17,7 @@ public class BrowserExtensionRow {
     private final BooleanProperty ignored = new SimpleBooleanProperty(false);
     private final StringProperty path = new SimpleStringProperty();
     private final StringProperty profilePath = new SimpleStringProperty();
+    private final StringProperty profileName = new SimpleStringProperty();
     private final StringProperty installDate = new SimpleStringProperty();
     private final StringProperty permissions = new SimpleStringProperty();
 
@@ -29,6 +30,12 @@ public class BrowserExtensionRow {
     public BrowserExtensionRow(String browser, String extensionId, String name, String version,
                                 String description, boolean enabled, String path, String profilePath,
                                 String installDate, String permissions) {
+        this(browser, extensionId, name, version, description, enabled, path, profilePath, "", installDate, permissions);
+    }
+
+    public BrowserExtensionRow(String browser, String extensionId, String name, String version,
+                                String description, boolean enabled, String path, String profilePath,
+                                String profileName, String installDate, String permissions) {
         this.browser.set(browser);
         this.extensionId.set(extensionId);
         this.name.set(name);
@@ -37,8 +44,20 @@ public class BrowserExtensionRow {
         this.enabled.set(enabled);
         this.path.set(path);
         this.profilePath.set(profilePath != null ? profilePath : "");
+        this.profileName.set(resolveProfileName(profileName, profilePath));
         this.installDate.set(installDate);
         this.permissions.set(permissions);
+    }
+
+    private static String resolveProfileName(String supplied, String profilePath) {
+        if (supplied != null && !supplied.isBlank()) return supplied;
+        if (profilePath == null || profilePath.isBlank()) return "";
+        try {
+            String leaf = java.nio.file.Paths.get(profilePath).getFileName().toString();
+            return leaf != null ? leaf : "";
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     public BooleanProperty selectedProperty() { return selected; }
@@ -73,6 +92,9 @@ public class BrowserExtensionRow {
 
     public StringProperty profilePathProperty() { return profilePath; }
     public String getProfilePath() { return profilePath.get(); }
+
+    public StringProperty profileNameProperty() { return profileName; }
+    public String getProfileName() { return profileName.get(); }
 
     public StringProperty installDateProperty() { return installDate; }
     public String getInstallDate() { return installDate.get(); }

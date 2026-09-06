@@ -30,10 +30,14 @@ class AdaptersPanel extends VBox {
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
     private final ObservableList<NetworkAdapterRow> adapterRows = FXCollections.observableArrayList();
-    private final TableView<NetworkAdapterRow> adapterTable = new TableView<>(adapterRows);
+    private final javafx.collections.transformation.FilteredList<NetworkAdapterRow> filteredRows =
+            new javafx.collections.transformation.FilteredList<>(adapterRows, r -> true);
+    private final TableView<NetworkAdapterRow> adapterTable = new TableView<>(filteredRows);
     private final Label statusLabel = new Label("Ready.");
+    private final javafx.scene.control.TextField filterField = new javafx.scene.control.TextField();
     private volatile Future<?> currentTask;
     private final java.util.concurrent.atomic.AtomicBoolean isLoading = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile long lastLoadMillis = 0;
 
     AdaptersPanel(NetworkOptimizerService service, BooleanProperty busy, BooleanSupplier adminCheck) {
         this.service = service;
@@ -50,6 +54,13 @@ class AdaptersPanel extends VBox {
     }
 
     void loadAdapters() {
+        // 5s TTL cache: tab switches within 5s reuse rows without spawning PowerShell.
+        long now = System.currentTimeMillis();
+        if (now - lastLoadMillis < 5000 && !adapterRows.isEmpty()) {
+            applyFilter();
+            statusLabel.setText("Found " + filteredRows.size() + " adapter(s) (cached).");
+            return;
+        }
         if (!isLoading.compareAndSet(false, true)) {
             statusLabel.setText("Please wait, loading...");
             return;
@@ -65,8 +76,10 @@ class AdaptersPanel extends VBox {
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 List<NetworkAdapterRow> adapters = service.listAdapters();
+                lastLoadMillis = System.currentTimeMillis();
                 Platform.runLater(() -> {
                     adapterRows.setAll(adapters);
+                    applyFilter();
                     statusLabel.setText("Found " + adapters.size() + " adapter(s).");
                 });
             } catch (Exception e) {
@@ -90,20 +103,42 @@ class AdaptersPanel extends VBox {
         isLoading.set(false);
     }
 
+    private void applyFilter() {
+        String q = filterField.getText() != null ? filterField.getText().trim().toLowerCase() : "";
+        if (q.isEmpty()) {
+            filteredRows.setPredicate(r -> true);
+        } else {
+            filteredRows.setPredicate(r ->
+                    (r.getName() != null && r.getName().toLowerCase().contains(q))
+                    || (r.getDescription() != null && r.getDescription().toLowerCase().contains(q))
+                    || (r.getStatus() != null && r.getStatus().toLowerCase().contains(q))
+                    || (r.getIpAddress() != null && r.getIpAddress().toLowerCase().contains(q)));
+        }
+    }
+
     private HBox buildToolbar() {
         Button refreshBtn = UIButton.primary("Refresh");
         Button enableBtn = UIButton.success("Enable");
         Button disableBtn = UIButton.secondary("Disable");
         Button renewIpBtn = UIButton.primary("Renew IP");
+        Button exportBtn = UIButton.secondary("Export CSV");
 
         enableBtn.setDisable(true);
         disableBtn.setDisable(true);
         renewIpBtn.setDisable(true);
 
-        refreshBtn.setOnAction(e -> loadAdapters());
+        filterField.setPromptText("Filter adapters…");
+        filterField.setPrefWidth(160);
+        filterField.textProperty().addListener((obs, o, n) -> applyFilter());
+
+        refreshBtn.setOnAction(e -> {
+            lastLoadMillis = 0;
+            loadAdapters();
+        });
         enableBtn.setOnAction(e -> setAdapterState(true));
         disableBtn.setOnAction(e -> setAdapterState(false));
         renewIpBtn.setOnAction(e -> renewSelectedIp());
+        exportBtn.setOnAction(e -> exportCsv());
 
         adapterTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             boolean hasSel = sel != null && !busy.get();
@@ -120,7 +155,7 @@ class AdaptersPanel extends VBox {
             renewIpBtn.setDisable(nv || !hasSelection);
         });
 
-        HBox toolbar = new HBox(12, refreshBtn, enableBtn, disableBtn, renewIpBtn, statusLabel);
+        HBox toolbar = new HBox(12, refreshBtn, enableBtn, disableBtn, renewIpBtn, exportBtn, filterField, statusLabel);
         toolbar.setAlignment(Pos.CENTER_LEFT);
         toolbar.setPadding(new Insets(12, 16, 12, 16));
         toolbar.getStyleClass().add("toolbar");
@@ -166,9 +201,21 @@ class AdaptersPanel extends VBox {
 
         TableColumn<NetworkAdapterRow, String> ipCol = new TableColumn<>("IP Address");
         ipCol.setCellValueFactory(c -> c.getValue().ipAddressProperty());
-        ipCol.setPrefWidth(130);
+        ipCol.setPrefWidth(110);
 
-        adapterTable.getColumns().addAll(nameCol, descCol, statusCol, speedCol, macCol, ipCol);
+        TableColumn<NetworkAdapterRow, String> dhcpCol = new TableColumn<>("DHCP");
+        dhcpCol.setCellValueFactory(c -> c.getValue().dhcpProperty());
+        dhcpCol.setPrefWidth(70);
+
+        TableColumn<NetworkAdapterRow, String> gwCol = new TableColumn<>("Gateway");
+        gwCol.setCellValueFactory(c -> c.getValue().gatewayProperty());
+        gwCol.setPrefWidth(110);
+
+        TableColumn<NetworkAdapterRow, String> dnsCol = new TableColumn<>("DNS");
+        dnsCol.setCellValueFactory(c -> c.getValue().dnsServersProperty());
+        dnsCol.setPrefWidth(140);
+
+        adapterTable.getColumns().addAll(nameCol, descCol, statusCol, speedCol, macCol, ipCol, dhcpCol, gwCol, dnsCol);
         return adapterTable;
     }
 
@@ -216,11 +263,51 @@ class AdaptersPanel extends VBox {
             } finally {
                 Platform.runLater(() -> {
                     busy.set(false);
+                    lastLoadMillis = 0;
                     // defer refresh after busy released
                     Platform.runLater(this::loadAdapters);
                 });
             }
         });
+    }
+
+    private void exportCsv() {
+        if (filteredRows.isEmpty()) {
+            new Alert(Alert.AlertType.INFORMATION, "Nothing to export.").showAndWait();
+            return;
+        }
+        AppExecutors.ioPool().submit(() -> {
+            try {
+                StringBuilder sb = new StringBuilder();
+                sb.append("Name,Description,Status,Speed,MAC,IP,DHCP,Gateway,DNS\n");
+                for (NetworkAdapterRow r : filteredRows) {
+                    sb.append(csv(r.getName())).append(",").append(csv(r.getDescription())).append(",")
+                            .append(csv(r.getStatus())).append(",").append(csv(r.getLinkSpeed())).append(",")
+                            .append(csv(r.getMacAddress())).append(",").append(csv(r.getIpAddress())).append(",")
+                            .append(csv(r.getDhcp())).append(",").append(csv(r.getGateway())).append(",")
+                            .append(csv(r.getDnsServers())).append("\n");
+                }
+                java.nio.file.Path base = com.sbtools.util.AppPaths.portableBaseDir();
+                java.nio.file.Path dir = base != null
+                        ? base.resolve(".winzenith").resolve("exports")
+                        : java.nio.file.Path.of(System.getProperty("user.home"), ".winzenith", "exports");
+                java.nio.file.Files.createDirectories(dir);
+                String stamp = java.time.LocalDateTime.now()
+                        .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                java.nio.file.Path out = dir.resolve("adapters-" + stamp + ".csv");
+                java.nio.file.Files.writeString(out, sb.toString());
+                Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Saved to:\n" + out).showAndWait());
+            } catch (Exception e) {
+                AppLogger.warning("Adapter export failed: " + e.getMessage());
+                Platform.runLater(() -> new Alert(Alert.AlertType.ERROR, "Export failed: " + e.getMessage()).showAndWait());
+            }
+        });
+    }
+
+    private static String csv(String v) {
+        if (v == null) return "";
+        String s = v.replace("\"", "\"\"");
+        return s.contains(",") || s.contains("\"") || s.contains("\n") ? "\"" + s + "\"" : s;
     }
 
     private void renewSelectedIp() {
@@ -249,7 +336,10 @@ class AdaptersPanel extends VBox {
                     new Alert(Alert.AlertType.ERROR, "Error: " + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                Platform.runLater(() -> {
+                    busy.set(false);
+                    lastLoadMillis = 0;
+                });
             }
         });
     }

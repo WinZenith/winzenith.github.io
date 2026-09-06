@@ -1,7 +1,10 @@
 package com.sbtools.ui;
 
+import com.sbtools.backup.SystemRestoreService;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
+import com.sbtools.netoptimizer.NetworkSnapshot;
 import com.sbtools.netoptimizer.OptimizationPreset;
+import com.sbtools.netoptimizer.PresetExpectations;
 import com.sbtools.netoptimizer.TcpSettings;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
@@ -37,6 +40,8 @@ class OptimizationPanel extends VBox {
     private final Consumer<AppSettings> onSettingsSaved;
     private ToggleGroup presetGroup;
     private Label descLabel;
+    private Label snapshotLabel;
+    private javafx.scene.control.CheckBox restorePointCheck;
     private volatile Future<?> currentTask;
 
     OptimizationPanel(NetworkOptimizerService service, BooleanProperty busy,
@@ -95,9 +100,28 @@ class OptimizationPanel extends VBox {
 
         box.getChildren().add(descLabel);
 
+        boolean restoreDefault = currentSettings != null && currentSettings.createSystemRestorePoint();
+        restorePointCheck = new javafx.scene.control.CheckBox("Create system restore point before applying");
+        restorePointCheck.setSelected(restoreDefault);
+        restorePointCheck.setWrapText(true);
+        box.getChildren().add(restorePointCheck);
+
+        snapshotLabel = new Label("No snapshot yet — one is captured automatically before each Apply.");
+        snapshotLabel.setWrapText(true);
+        snapshotLabel.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        snapshotLabel.setPrefWidth(520);
+        box.getChildren().add(snapshotLabel);
+        refreshSnapshotLabel();
+
         Button currentSettingsBtn = UIButton.secondary("Show Current TCP/IP Settings");
         currentSettingsBtn.setOnAction(e -> showCurrentSettings());
-        box.getChildren().add(currentSettingsBtn);
+        Button previewBtn = UIButton.secondary("Preview Changes");
+        previewBtn.setOnAction(e -> previewSelected(group));
+        Button snapshotsBtn = UIButton.secondary("Snapshots…");
+        snapshotsBtn.setOnAction(e -> showSnapshots());
+        HBox infoRow = new HBox(8, currentSettingsBtn, previewBtn, snapshotsBtn);
+        infoRow.setAlignment(Pos.CENTER_LEFT);
+        box.getChildren().add(infoRow);
 
         ProgressBar progressBar = new ProgressBar(0);
         progressBar.setVisible(false);
@@ -135,17 +159,40 @@ class OptimizationPanel extends VBox {
         if (!requireAdmin()) return;
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                "Apply " + preset.getDisplayName() + "?\n\n" + preset.getDescription());
+                "Apply " + preset.getDisplayName() + "?\n\n" + preset.getDescription()
+                        + "\n\nA snapshot of current TCP settings is captured first for guided restore.");
         confirm.setTitle("Confirm Optimization");
         confirm.setHeaderText("Apply Optimization Preset");
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
+        boolean wantRestorePoint = restorePointCheck != null && restorePointCheck.isSelected();
         busy.set(true);
         progressBar.setVisible(true);
         progressBar.setProgress(-1);
-        statusLabel.setText("Applying " + preset.getDisplayName() + "...");
+        statusLabel.setText("Capturing snapshot before " + preset.getDisplayName() + "...");
 
         currentTask = AppExecutors.ioPool().submit(() -> {
+            NetworkSnapshot preSnap = null;
+            try {
+                preSnap = service.captureSnapshot("before " + preset.name());
+            } catch (Exception e) {
+                AppLogger.warning("Pre-apply snapshot failed: " + e.getMessage());
+            }
+            if (wantRestorePoint) {
+                try {
+                    Platform.runLater(() -> statusLabel.setText("Creating system restore point..."));
+                    var rp = new SystemRestoreService().createRestorePoint("WinZenith network " + preset.name());
+                    if (!rp.success()) {
+                        final String err = rp.error() != null ? rp.error() : "unknown error";
+                        Platform.runLater(() -> new Alert(Alert.AlertType.WARNING,
+                                "Restore point could not be created:\n" + err
+                                        + "\n\nContinue with optimization anyway?").showAndWait());
+                    }
+                } catch (Exception e) {
+                    AppLogger.warning("Restore point before optimization failed: " + e.getMessage());
+                }
+            }
+            Platform.runLater(() -> statusLabel.setText("Applying " + preset.getDisplayName() + "..."));
             try {
                 var result = service.applyOptimization(preset);
                 String saveError = null;
@@ -190,6 +237,7 @@ class OptimizationPanel extends VBox {
                                 "Preset applied successfully, but failed to save preference:\n" + finalSaveError
                                         + "\n\nThe preset will revert on next launch.").showAndWait();
                     }
+                    refreshSnapshotLabel();
                     if (wasSuccess) {
                         // defer so busy is already false
                         Platform.runLater(this::showCurrentSettings);
@@ -253,6 +301,115 @@ class OptimizationPanel extends VBox {
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> statusLabel.setText("Failed to load TCP/IP settings."));
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
+        });
+    }
+
+    private void previewSelected(ToggleGroup group) {
+        RadioButton selected = (RadioButton) group.getSelectedToggle();
+        if (selected == null) return;
+        OptimizationPreset preset = (OptimizationPreset) selected.getUserData();
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
+        busy.set(true);
+        statusLabel.setText("Building preview for " + preset.getDisplayName() + "...");
+        currentTask = AppExecutors.ioPool().submit(() -> {
+            try {
+                var rows = service.buildPreview(preset);
+                Platform.runLater(() -> {
+                    javafx.scene.control.TableView<PresetExpectations.PreviewRow> table =
+                            new javafx.scene.control.TableView<>();
+                    table.setItems(javafx.collections.FXCollections.observableArrayList(rows));
+                    javafx.scene.control.TableColumn<PresetExpectations.PreviewRow, String> c1 =
+                            new javafx.scene.control.TableColumn<>("Setting");
+                    c1.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().setting()));
+                    c1.setPrefWidth(160);
+                    javafx.scene.control.TableColumn<PresetExpectations.PreviewRow, String> c2 =
+                            new javafx.scene.control.TableColumn<>("Current");
+                    c2.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().current()));
+                    c2.setPrefWidth(220);
+                    javafx.scene.control.TableColumn<PresetExpectations.PreviewRow, String> c3 =
+                            new javafx.scene.control.TableColumn<>("Will Set");
+                    c3.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().willSet()));
+                    c3.setPrefWidth(220);
+                    table.getColumns().addAll(c1, c2, c3);
+                    table.setPrefHeight(280);
+                    long changed = rows.stream().filter(PresetExpectations.PreviewRow::changes).count();
+                    Alert alert = new Alert(Alert.AlertType.INFORMATION);
+                    alert.setTitle("Preview — " + preset.getDisplayName());
+                    alert.setHeaderText(changed + " of " + rows.size() + " settings differ from current state."
+                            + " No changes applied.");
+                    alert.getDialogPane().setContent(table);
+                    alert.getDialogPane().setPrefWidth(640);
+                    alert.showAndWait();
+                    statusLabel.setText("Ready.");
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> statusLabel.setText("Preview failed: " + e.getMessage()));
+            } finally {
+                Platform.runLater(() -> busy.set(false));
+            }
+        });
+    }
+
+    private void refreshSnapshotLabel() {
+        if (snapshotLabel == null) return;
+        AppExecutors.ioPool().submit(() -> {
+            try {
+                var latest = service.latestSnapshot();
+                Platform.runLater(() -> {
+                    if (latest.isPresent()) {
+                        snapshotLabel.setText("Last snapshot: " + latest.get().summary());
+                    } else {
+                        snapshotLabel.setText("No snapshot yet — one is captured automatically before each Apply.");
+                    }
+                });
+            } catch (Exception ignored) {}
+        });
+    }
+
+    private void showSnapshots() {
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
+        busy.set(true);
+        statusLabel.setText("Loading snapshots...");
+        currentTask = AppExecutors.ioPool().submit(() -> {
+            try {
+                var snaps = service.listSnapshots();
+                Platform.runLater(() -> {
+                    if (snaps.isEmpty()) {
+                        new Alert(Alert.AlertType.INFORMATION,
+                                "No snapshots yet. Apply a preset (or it will be captured automatically).").showAndWait();
+                    } else {
+                        StringBuilder sb = new StringBuilder();
+                        sb.append("Snapshots (newest first, max 20). Read-only+ mode: restore = guided 'Reset to Defaults' + manual check.\n\n");
+                        for (NetworkSnapshot s : snaps) {
+                            sb.append("• ").append(s.summary()).append("\n");
+                        }
+                        var first = snaps.get(0);
+                        var info = service.describeRestore(first);
+                        if (info.details() != null) sb.append("\n--- Newest snapshot detail ---\n").append(info.details());
+                        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+                        alert.setTitle("Network Snapshots");
+                        alert.setHeaderText(snaps.size() + " snapshot(s) stored (portable .winzenith/network-snapshots.json)");
+                        javafx.scene.control.TextArea area = new javafx.scene.control.TextArea(sb.toString());
+                        area.setEditable(false);
+                        area.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 11px;");
+                        area.setPrefRowCount(20);
+                        area.setPrefColumnCount(70);
+                        alert.getDialogPane().setContent(area);
+                        alert.showAndWait();
+                    }
+                    statusLabel.setText("Ready.");
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> statusLabel.setText("Failed to load snapshots."));
             } finally {
                 Platform.runLater(() -> busy.set(false));
             }

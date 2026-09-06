@@ -69,7 +69,9 @@ public class SettingsStore {
                 || s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank()
                 || s.duplicateScanRoots() == null || s.duplicateKeeperStrategy() == null
                 || s.duplicateKeeperStrategy().isBlank() || s.duplicateIncludeFilter() == null
-                || s.duplicateMinSizeBytes() < 1;
+                || s.duplicateMinSizeBytes() < 1
+                || s.browserExtLastFilter() == null || s.browserExtLastFilter().isBlank()
+                || s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank();
         if (needsFix) {
             base = s.toBuilder()
                     .excludedDriverIds(s.excludedDriverIds() == null ? java.util.Collections.emptyList() : s.excludedDriverIds())
@@ -81,6 +83,8 @@ public class SettingsStore {
                     .duplicateMinSizeBytes(s.duplicateMinSizeBytes() < 1 ? 1L : s.duplicateMinSizeBytes())
                     .duplicateIncludeFilter(s.duplicateIncludeFilter() == null ? "" : s.duplicateIncludeFilter())
                     .duplicateKeeperStrategy(s.duplicateKeeperStrategy() == null || s.duplicateKeeperStrategy().isBlank() ? "NEWEST" : s.duplicateKeeperStrategy())
+                    .browserExtLastFilter(s.browserExtLastFilter() == null || s.browserExtLastFilter().isBlank() ? "All" : s.browserExtLastFilter())
+                    .browserExtLastStatusFilter(s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank() ? "All" : s.browserExtLastStatusFilter())
                     .build();
         }
         // Sanitize backupDirectory - reject dangerous roots like C:\ or Windows

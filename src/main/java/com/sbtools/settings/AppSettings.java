@@ -30,7 +30,10 @@ public record AppSettings(
         List<String> duplicateScanRoots,
         long duplicateMinSizeBytes,
         String duplicateIncludeFilter,
-        String duplicateKeeperStrategy
+        String duplicateKeeperStrategy,
+        String browserExtLastFilter,
+        String browserExtLastStatusFilter,
+        boolean browserExtAutoScan
 ) {
     public static AppSettings defaults() {
         return new AppSettings(true, true, false,
@@ -39,7 +42,8 @@ public record AppSettings(
                 false, false, false, true,
                 "", "powershell", 960, 600, true, true,
                 Collections.emptyList(), Collections.emptyList(), true,
-                Collections.emptyList(), 1L, "", "NEWEST");
+                Collections.emptyList(), 1L, "", "NEWEST",
+                "All", "All", false);
     }
 
     /**
@@ -79,6 +83,9 @@ public record AppSettings(
         private long duplicateMinSizeBytes;
         private String duplicateIncludeFilter;
         private String duplicateKeeperStrategy;
+        private String browserExtLastFilter;
+        private String browserExtLastStatusFilter;
+        private boolean browserExtAutoScan;
 
         private Builder(AppSettings s) {
             this.autoBackupDrivers = s.autoBackupDrivers;
@@ -105,6 +112,9 @@ public record AppSettings(
             this.duplicateMinSizeBytes = s.duplicateMinSizeBytes;
             this.duplicateIncludeFilter = s.duplicateIncludeFilter;
             this.duplicateKeeperStrategy = s.duplicateKeeperStrategy;
+            this.browserExtLastFilter = s.browserExtLastFilter;
+            this.browserExtLastStatusFilter = s.browserExtLastStatusFilter;
+            this.browserExtAutoScan = s.browserExtAutoScan;
         }
 
         public Builder autoBackupDrivers(boolean v) { this.autoBackupDrivers = v; return this; }
@@ -131,6 +141,9 @@ public record AppSettings(
         public Builder duplicateMinSizeBytes(long v) { this.duplicateMinSizeBytes = Math.max(1L, v); return this; }
         public Builder duplicateIncludeFilter(String v) { this.duplicateIncludeFilter = v; return this; }
         public Builder duplicateKeeperStrategy(String v) { this.duplicateKeeperStrategy = v; return this; }
+        public Builder browserExtLastFilter(String v) { this.browserExtLastFilter = v; return this; }
+        public Builder browserExtLastStatusFilter(String v) { this.browserExtLastStatusFilter = v; return this; }
+        public Builder browserExtAutoScan(boolean v) { this.browserExtAutoScan = v; return this; }
 
         public AppSettings build() {
             return new AppSettings(
@@ -157,7 +170,10 @@ public record AppSettings(
                     duplicateScanRoots,
                     duplicateMinSizeBytes,
                     duplicateIncludeFilter,
-                    duplicateKeeperStrategy);
+                    duplicateKeeperStrategy,
+                    browserExtLastFilter,
+                    browserExtLastStatusFilter,
+                    browserExtAutoScan);
         }
     }
 }

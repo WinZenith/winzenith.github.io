@@ -3,7 +3,10 @@ param(
     [string]$Action = "Scan",
     [string]$ProfilePath = "",
     [string]$ExtId = "",
-    [string]$Enable = ""
+    [string]$Enable = "",
+    [string]$UserDataPath = "",
+    [string]$Engine = "",
+    [string]$BrowserLabel = ""
 )
 $OutputEncoding = [System.Text.Encoding]::UTF8
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
@@ -194,6 +197,8 @@ function Scan-ChromiumExtensions {
 
                     $enabled = Get-ChromiumExtState -ProfileDir $profileDir -ExtensionId $extId
                     if ($null -eq $enabled) { $enabled = $true }
+                    $profName = ""
+                    try { $profName = Split-Path $profileDir -Leaf } catch { $profName = "" }
 
                     $entries += [PSCustomObject]@{
                         id = $extId
@@ -204,6 +209,7 @@ function Scan-ChromiumExtensions {
                         browser = $BrowserName
                         path = $ExtensionsDir
                         profilePath = $profileDir
+                        profileName = $profName
                         installTime = $_.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
                         permissions = Get-ChromiumManifestPermissions -Manifest $m
                     }
@@ -477,7 +483,8 @@ function Get-FirefoxAddonPermissions {
 
 function Scan-FirefoxExtensions {
     param(
-        [string]$ProfileDir
+        [string]$ProfileDir,
+        [string]$BrowserName = "Firefox"
     )
     $entries = @()
     $extJson = Join-Path $ProfileDir "extensions.json"
@@ -503,15 +510,18 @@ function Scan-FirefoxExtensions {
             if ($null -ne $addon.softDisabled -and $addon.softDisabled) { $isDisabled = $true }
             if ($null -ne $addon.embedderDisabled -and $addon.embedderDisabled) { $isDisabled = $true }
 
+            $ffProfName = ""
+            try { $ffProfName = Split-Path $ProfileDir -Leaf } catch { $ffProfName = "" }
             $entries += [PSCustomObject]@{
                 id = $addonId
                 name = if ($addon.defaultLocale -and $addon.defaultLocale.name) { $addon.defaultLocale.name } else { if ($addon.name) { $addon.name } else { $addonId } }
                 version = if ($addon.version) { $addon.version } else { "" }
                 description = if ($addon.defaultLocale -and $addon.defaultLocale.description) { $addon.defaultLocale.description } else { if ($addon.description) { $addon.description } else { "" } }
                 enabled = (-not $isDisabled) -and $isInstalled
-                browser = "Firefox"
+                browser = $BrowserName
                 path = $extensionsPath
                 profilePath = $ProfileDir
+                profileName = $ffProfName
                 installTime = if ($addon.installDate) {
                     try { [DateTimeOffset]::FromUnixTimeMilliseconds([long]$addon.installDate).ToString("yyyy-MM-dd HH:mm:ss") } catch { "$($addon.installDate)" }
                 } else { "" }
@@ -778,8 +788,61 @@ function Get-FirefoxProfileDirs {
 if ($Browser -eq "All" -or $Browser -eq "Firefox") {
     foreach ($profDir in (Get-FirefoxProfileDirs)) {
         try {
-            $result += Scan-FirefoxExtensions -ProfileDir $profDir
+            $result += Scan-FirefoxExtensions -ProfileDir $profDir -BrowserName "Firefox"
         } catch { }
+    }
+}
+
+# --- Pluggable override: explicit UserDataPath from browser-catalog.json ---
+# Additive only: when Java passes -UserDataPath (custom/extra browser not
+# hardcoded above), scan it with the requested engine. Built-in browsers keep
+# using the hardcoded paths above so existing behavior is unchanged.
+if (-not [string]::IsNullOrWhiteSpace($UserDataPath)) {
+    $customLabel = $BrowserLabel
+    if ([string]::IsNullOrWhiteSpace($customLabel)) { $customLabel = $Browser }
+    $customEngine = "$Engine".Trim().ToLowerInvariant()
+    try {
+        # Expand %ENV% tokens Java may have forwarded verbatim.
+        $expandedCustom = $UserDataPath
+        foreach ($ev in @("LOCALAPPDATA", "APPDATA", "ProgramFiles", "USERPROFILE")) {
+            try {
+                $val = [Environment]::GetEnvironmentVariable($ev)
+                if ($val) { $expandedCustom = $expandedCustom.Replace("%$ev%", $val) }
+            } catch { }
+        }
+        try {
+            $pf86 = ${env:ProgramFiles(x86)}
+            if ($pf86) { $expandedCustom = $expandedCustom.Replace("%ProgramFiles(x86)%", $pf86) }
+        } catch { }
+        if ($customEngine -eq "firefox") {
+            if (Test-Path -LiteralPath $expandedCustom -PathType Container) {
+                # UserData may point at Profiles dir or a single profile dir.
+                if (Test-Path -LiteralPath (Join-Path $expandedCustom "extensions.json")) {
+                    $result += Scan-FirefoxExtensions -ProfileDir $expandedCustom -BrowserName $customLabel
+                } else {
+                    Get-ChildItem -LiteralPath $expandedCustom -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                        $ej = Join-Path $_.FullName "extensions.json"
+                        if (Test-Path -LiteralPath $ej) {
+                            try { $result += Scan-FirefoxExtensions -ProfileDir $_.FullName -BrowserName $customLabel } catch { }
+                        }
+                    }
+                }
+            }
+        } elseif ($customEngine -eq "chromium-single") {
+            $extDir = Join-Path $expandedCustom "Extensions"
+            # userData may already be the profile dir (contains Extensions) or the Extensions dir itself.
+            if ($expandedCustom -like "*\Extensions" -and (Test-Path -LiteralPath $expandedCustom -PathType Container)) {
+                $extDir = $expandedCustom
+            }
+            $result += Scan-ChromiumSingleProfileBrowser -BrowserName $customLabel -ExtensionsPath $extDir
+        } else {
+            # Default: chromium-multi (User Data with *\Extensions per profile).
+            if (Test-Path -LiteralPath $expandedCustom -PathType Container) {
+                $result += Scan-ChromiumProfileBrowser -BrowserName $customLabel -UserDataPath $expandedCustom
+            }
+        }
+    } catch {
+        [Console]::Error.WriteLine("Custom UserDataPath scan failed for ${customLabel}: $($_.Exception.Message)")
     }
 }
 

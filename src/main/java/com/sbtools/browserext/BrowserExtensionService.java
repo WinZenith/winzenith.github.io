@@ -22,25 +22,59 @@ import java.util.function.Consumer;
 
 public class BrowserExtensionService {
 
-    public static final List<String> ALL_BROWSERS = List.of(
-            "Chrome", "Chrome Canary",
-            "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
-            "Firefox", "Brave", "Opera", "Opera GX", "Vivaldi"
-    );
+    /**
+     * Browser names in scan order. Derived from the pluggable
+     * {@link BrowserRegistry} (bundled {@code browser-catalog.json} + optional
+     * portable override). Falls back to the hard-coded 11 when the catalog
+     * cannot be loaded, so existing callers never break.
+     */
+    public static final List<String> ALL_BROWSERS = resolveAllBrowsers();
 
-    private static final Map<String, String> BROWSER_PATHS = Map.ofEntries(
-            Map.entry("Chrome",       "%LOCALAPPDATA%\\Google\\Chrome\\User Data"),
-            Map.entry("Chrome Canary", "%LOCALAPPDATA%\\Google\\Chrome SxS\\User Data"),
-            Map.entry("Edge",         "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data"),
-            Map.entry("Edge Beta",    "%LOCALAPPDATA%\\Microsoft\\Edge Beta\\User Data"),
-            Map.entry("Edge Dev",     "%LOCALAPPDATA%\\Microsoft\\Edge Dev\\User Data"),
-            Map.entry("Edge Canary",  "%LOCALAPPDATA%\\Microsoft\\Edge SxS\\User Data"),
-            Map.entry("Firefox",      "%APPDATA%\\Mozilla\\Firefox\\Profiles"),
-            Map.entry("Brave",        "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data"),
-            Map.entry("Opera",        "%APPDATA%\\Opera Software\\Opera Stable"),
-            Map.entry("Opera GX",     "%APPDATA%\\Opera Software\\Opera GX Stable"),
-            Map.entry("Vivaldi",      "%LOCALAPPDATA%\\Vivaldi\\User Data")
-    );
+    private static List<String> resolveAllBrowsers() {
+        try {
+            List<String> names = BrowserRegistry.browserNames();
+            if (names != null && !names.isEmpty()) return List.copyOf(names);
+        } catch (Exception ignored) {
+        }
+        return List.of(
+                "Chrome", "Chrome Canary",
+                "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
+                "Firefox", "Brave", "Opera", "Opera GX", "Vivaldi"
+        );
+    }
+
+    /** Browsers with hard-coded scan paths in the PS script (legacy path). Others use -UserDataPath. */
+    private static final java.util.Set<String> LEGACY_PS_BROWSERS = java.util.Set.of(
+            "Chrome", "Chrome Canary", "Edge", "Edge Beta", "Edge Dev", "Edge Canary",
+            "Firefox", "Brave", "Opera", "Opera GX", "Vivaldi");
+
+    private static final Map<String, String> BROWSER_PATHS = resolveBrowserPaths();
+
+    private static Map<String, String> resolveBrowserPaths() {
+        try {
+            Map<String, String> m = new LinkedHashMap<>();
+            for (BrowserDefinition d : BrowserRegistry.definitions()) {
+                if (d.name() != null && d.userDataOrEmpty() != null) {
+                    m.put(d.name(), d.userDataOrEmpty());
+                }
+            }
+            if (!m.isEmpty()) return Map.copyOf(m);
+        } catch (Exception ignored) {
+        }
+        return Map.ofEntries(
+                Map.entry("Chrome", "%LOCALAPPDATA%\\Google\\Chrome\\User Data"),
+                Map.entry("Chrome Canary", "%LOCALAPPDATA%\\Google\\Chrome SxS\\User Data"),
+                Map.entry("Edge", "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data"),
+                Map.entry("Edge Beta", "%LOCALAPPDATA%\\Microsoft\\Edge Beta\\User Data"),
+                Map.entry("Edge Dev", "%LOCALAPPDATA%\\Microsoft\\Edge Dev\\User Data"),
+                Map.entry("Edge Canary", "%LOCALAPPDATA%\\Microsoft\\Edge SxS\\User Data"),
+                Map.entry("Firefox", "%APPDATA%\\Mozilla\\Firefox\\Profiles"),
+                Map.entry("Brave", "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data"),
+                Map.entry("Opera", "%APPDATA%\\Opera Software\\Opera Stable"),
+                Map.entry("Opera GX", "%APPDATA%\\Opera Software\\Opera GX Stable"),
+                Map.entry("Vivaldi", "%LOCALAPPDATA%\\Vivaldi\\User Data")
+        );
+    }
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, String> lastScanErrors = new java.util.concurrent.ConcurrentHashMap<>();
@@ -62,6 +96,11 @@ public class BrowserExtensionService {
     }
 
     private static List<String> wellKnownExePaths(String browser) {
+        try {
+            BrowserDefinition def = BrowserRegistry.find(browser);
+            if (def != null && !def.exesOrEmpty().isEmpty()) return def.exesOrEmpty();
+        } catch (Exception ignored) {
+        }
         return switch (browser) {
             case "Chrome" -> List.of(
                     "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe",
@@ -178,6 +217,28 @@ public class BrowserExtensionService {
         return scanAllBrowsersParallel(pool, onProgress, null);
     }
 
+    /**
+     * Determinate-progress overload: reports (browser, done, total) after each
+     * browser completes so the UI can show a real progress bar. Additive only —
+     * the {@link Consumer} overload above delegates here.
+     */
+    public interface ScanProgress {
+        void onBrowserDone(String browser, int done, int total);
+    }
+
+    public List<BrowserExtensionRow> scanAllBrowsersParallel(
+            ExecutorService pool,
+            ScanProgress progress,
+            java.util.concurrent.atomic.AtomicBoolean cancelled) throws IOException {
+        Consumer<String> legacy = null;
+        if (progress != null) {
+            java.util.concurrent.atomic.AtomicInteger done = new java.util.concurrent.atomic.AtomicInteger(0);
+            int total = ALL_BROWSERS.size();
+            legacy = browser -> progress.onBrowserDone(browser, done.incrementAndGet(), total);
+        }
+        return scanAllBrowsersParallel(pool, legacy, cancelled);
+    }
+
     public List<BrowserExtensionRow> scanAllBrowsersParallel(
             ExecutorService pool,
             Consumer<String> onProgress,
@@ -290,10 +351,35 @@ public class BrowserExtensionService {
         try {
             Path script = PowerShellScripts.resolve("browser-extensions.ps1");
             List<String> cmd;
+            // Pluggable browsers not hardcoded in the PS script are scanned via
+            // explicit -UserDataPath/-Engine/-BrowserLabel (additive, legacy names unchanged).
+            BrowserDefinition def = null;
             try {
-                cmd = ProcessRunner.powershellScript(script.toString(), "-Browser", browser);
+                def = BrowserRegistry.find(browser);
+            } catch (Exception ignored) {
+            }
+            boolean useCustomPath = def != null && !LEGACY_PS_BROWSERS.contains(browser)
+                    && def.userDataOrEmpty() != null && !def.userDataOrEmpty().isBlank();
+            try {
+                if (useCustomPath) {
+                    cmd = ProcessRunner.powershellScript(script.toString(),
+                            "-Browser", browser,
+                            "-UserDataPath", def.userDataOrEmpty(),
+                            "-Engine", def.engineOrDefault(),
+                            "-BrowserLabel", browser);
+                } else {
+                    cmd = ProcessRunner.powershellScript(script.toString(), "-Browser", browser);
+                }
             } catch (Exception e) {
-                cmd = ProcessRunner.bestPowerShellScript(script.toString(), "-Browser", browser);
+                if (useCustomPath) {
+                    cmd = ProcessRunner.bestPowerShellScript(script.toString(),
+                            "-Browser", browser,
+                            "-UserDataPath", def.userDataOrEmpty(),
+                            "-Engine", def.engineOrDefault(),
+                            "-BrowserLabel", browser);
+                } else {
+                    cmd = ProcessRunner.bestPowerShellScript(script.toString(), "-Browser", browser);
+                }
             }
             // Try powershell.exe first, fallback to pwsh.exe if not found
             ProcessResult pr;
@@ -302,7 +388,17 @@ public class BrowserExtensionService {
             } catch (IOException ioe) {
                 if (cancelled != null && cancelled.get()) throw new java.util.concurrent.CancellationException("Cancelled");
                 if (cmd.get(0).equalsIgnoreCase("powershell.exe")) {
-                    cmd = ProcessRunner.pwshScript(script.toString(), "-Browser", browser);
+                    List<String> fallback;
+                    if (useCustomPath) {
+                        fallback = ProcessRunner.pwshScript(script.toString(),
+                                "-Browser", browser,
+                                "-UserDataPath", def.userDataOrEmpty(),
+                                "-Engine", def.engineOrDefault(),
+                                "-BrowserLabel", browser);
+                    } else {
+                        fallback = ProcessRunner.pwshScript(script.toString(), "-Browser", browser);
+                    }
+                    cmd = fallback;
                     pr = new ProcessRunner(60).run(cmd, 60, cancelled);
                 } else {
                     throw ioe;
@@ -356,15 +452,17 @@ public class BrowserExtensionService {
                     String version = str(entry, "version");
                     String description = str(entry, "description");
                     String extBrowser = str(entry, "browser");
+                    if (extBrowser == null || extBrowser.isBlank()) extBrowser = browser;
                     String extPath = str(entry, "path");
                     String profilePath = str(entry, "profilePath");
+                    String profileName = str(entry, "profileName");
                     String installTime = str(entry, "installTime");
                     String permissions = str(entry, "permissions");
                     boolean enabled = true;
                     Object en = entry.get("enabled");
                     if (en instanceof Boolean) enabled = (Boolean) en;
                     results.add(new BrowserExtensionRow(extBrowser, id, name, version,
-                            description, enabled, extPath, profilePath, installTime, permissions));
+                            description, enabled, extPath, profilePath, profileName, installTime, permissions));
                 } catch (Exception e) {
                     AppLogger.warning("Failed to parse extension entry: " + e.getMessage());
                 }
@@ -513,5 +611,103 @@ public class BrowserExtensionService {
             sb.append(String.format("%02x", b & 0xFF));
         }
         return sb.toString();
+    }
+
+    /**
+     * Expected process image for a browser (e.g. {@code chrome.exe}).
+     * Registry-driven; falls back to the legacy switch for built-ins.
+     */
+    public static String expectedExeFor(String browser) {
+        try {
+            BrowserDefinition def = BrowserRegistry.find(browser);
+            if (def != null && def.processNameOrEmpty() != null && !def.processNameOrEmpty().isBlank()) {
+                return def.processNameOrEmpty().toLowerCase();
+            }
+        } catch (Exception ignored) {
+        }
+        return switch (browser == null ? "" : browser) {
+            case "Chrome", "Chrome Canary" -> "chrome.exe";
+            case "Edge", "Edge Beta", "Edge Dev", "Edge Canary" -> "msedge.exe";
+            case "Firefox" -> "firefox.exe";
+            case "Brave" -> "brave.exe";
+            case "Opera", "Opera GX" -> "opera.exe";
+            case "Vivaldi" -> "vivaldi.exe";
+            default -> "";
+        };
+    }
+
+    /** Store URL for an extension id, or "" when the browser has no known store. */
+    public static String storeUrlFor(String browser, String extensionId) {
+        try {
+            BrowserDefinition def = BrowserRegistry.find(browser);
+            if (def != null) return def.storeUrlFor(extensionId);
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    /**
+     * Lists Preferences/extensions.json backups created by the PS toggle
+     * ({@code Preferences.bak.*}, {@code Secure Preferences.bak.*},
+     * {@code extensions.json.bak.*}) newest-first. Returns empty list when the
+     * profile dir is missing — never throws.
+     */
+    public static List<Path> listProfileBackups(String profilePath) {
+        List<Path> out = new ArrayList<>();
+        if (profilePath == null || profilePath.isBlank()) return out;
+        try {
+            Path dir = Paths.get(profilePath);
+            if (!Files.isDirectory(dir)) return out;
+            try (var stream = Files.list(dir)) {
+                stream.filter(p -> {
+                    String n = p.getFileName().toString();
+                    return n.startsWith("Preferences.bak.") || n.startsWith("Secure Preferences.bak.")
+                            || n.startsWith("extensions.json.bak.");
+                }).forEach(out::add);
+            }
+            out.sort((a, b) -> {
+                try {
+                    return Files.getLastModifiedTime(b).compareTo(Files.getLastModifiedTime(a));
+                } catch (Exception e) {
+                    return 0;
+                }
+            });
+        } catch (Exception e) {
+            AppLogger.warning("Failed to list profile backups: " + e.getMessage());
+        }
+        return out;
+    }
+
+    /**
+     * Restores a profile backup over its live file (atomic move). Returns true
+     * on success. Caller must ensure the browser is closed first.
+     */
+    public static boolean restoreProfileBackup(Path backupFile) {
+        if (backupFile == null || !Files.exists(backupFile)) return false;
+        try {
+            String name = backupFile.getFileName().toString();
+            String liveName = name;
+            int bakIdx = name.indexOf(".bak.");
+            if (bakIdx > 0) liveName = name.substring(0, bakIdx);
+            Path live = backupFile.getParent().resolve(liveName);
+            Path tmp = live.resolveSibling("." + liveName + ".restore.tmp");
+            Files.copy(backupFile, tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Files.move(tmp, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(tmp, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } finally {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (Exception ignored) {
+                }
+            }
+            AppLogger.info("Restored browser profile backup: " + backupFile + " -> " + live);
+            return true;
+        } catch (Exception e) {
+            AppLogger.warning("Failed to restore profile backup: " + e.getMessage());
+            return false;
+        }
     }
 }

@@ -26,6 +26,8 @@ public class NetworkOptimizerTabView extends BorderPane {
     private final ConnectionOverviewPanel connectionOverviewPanel;
     private final ChangeLogPanel changeLogPanel;
     private final Label adminWarningLabel = new Label("Not running as Administrator — network changes (optimize, DNS, adapter enable/disable, reset, WoWlan forget) will fail. Right-click WinZenith.exe → Run as administrator.");
+    private final Label rebootLabel = new Label();
+    private final javafx.scene.control.Button rebootClearBtn = new javafx.scene.control.Button("Dismiss");
 
     public NetworkOptimizerTabView(BooleanProperty busy, BooleanSupplier adminCheck,
                                    SettingsStore settingsStore, AppSettings currentSettings) {
@@ -43,6 +45,15 @@ public class NetworkOptimizerTabView extends BorderPane {
         adminWarningLabel.setStyle("-fx-padding: 6 16; -fx-background-color: #3d2e1a; -fx-text-fill: #ffb86c; -fx-font-size: 11px;");
         adminWarningLabel.getStyleClass().addAll("label", "text-muted");
         updateAdminWarning();
+
+        rebootLabel.setWrapText(true);
+        rebootLabel.setMaxWidth(Double.MAX_VALUE);
+        rebootLabel.setStyle("-fx-padding: 6 16; -fx-background-color: #44272a; -fx-text-fill: #ff9d9d; -fx-font-size: 11px;");
+        rebootClearBtn.setOnAction(e -> {
+            try { service.clearRebootRequired(); } catch (Exception ignored) {}
+            updateRebootBanner();
+        });
+        updateRebootBanner();
 
         TabPane tabPane = new TabPane();
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
@@ -70,6 +81,7 @@ public class NetworkOptimizerTabView extends BorderPane {
 
         tabPane.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             if (sel == null) return;
+            updateRebootBanner();
             if (sel == adaptersTab) {
                 adaptersPanel.loadAdapters();
             } else if (sel == optimizationTab) {
@@ -91,12 +103,20 @@ public class NetworkOptimizerTabView extends BorderPane {
             }
         });
 
-        VBox topContainer = new VBox(adminWarningLabel, tabPane);
+        javafx.scene.layout.HBox rebootBox = new javafx.scene.layout.HBox(8, rebootLabel, rebootClearBtn);
+        rebootBox.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+        rebootBox.setStyle("-fx-padding: 0 8 0 0; -fx-background-color: #44272a;");
+        rebootBox.managedProperty().bind(rebootLabel.managedProperty());
+        rebootBox.visibleProperty().bind(rebootLabel.visibleProperty());
+        VBox topContainer = new VBox(adminWarningLabel, rebootBox, tabPane);
         VBox.setVgrow(tabPane, javafx.scene.layout.Priority.ALWAYS);
         setCenter(topContainer);
 
         // Initial load after scene is ready
-        Platform.runLater(adaptersPanel::loadAdapters);
+        Platform.runLater(() -> {
+            adaptersPanel.loadAdapters();
+            updateRebootBanner();
+        });
     }
 
     private void updateAdminWarning() {
@@ -106,6 +126,31 @@ public class NetworkOptimizerTabView extends BorderPane {
         boolean show = isWin && !isAdmin;
         adminWarningLabel.setVisible(show);
         adminWarningLabel.setManaged(show);
+    }
+
+    private void updateRebootBanner() {
+        boolean required = false;
+        String reason = "";
+        try {
+            required = service.isRebootRequired();
+            reason = service.rebootReason();
+        } catch (Exception ignored) {}
+        final boolean show = required;
+        final String text = "Reboot required"
+                + (reason != null && !reason.isBlank() ? " — " + reason : "")
+                + ". TCP/Winsock changes may not fully apply until restart.";
+        Platform.runLater(() -> {
+            rebootLabel.setText(text);
+            rebootLabel.setVisible(show);
+            rebootLabel.setManaged(show);
+            rebootClearBtn.setVisible(show);
+            rebootClearBtn.setManaged(show);
+        });
+    }
+
+    /** Allows child panels to refresh the reboot banner after reset operations. */
+    public void refreshRebootBanner() {
+        updateRebootBanner();
     }
 
     public void dispose() {

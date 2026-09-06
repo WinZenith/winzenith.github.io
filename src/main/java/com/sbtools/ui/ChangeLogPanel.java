@@ -4,18 +4,23 @@ import com.sbtools.netoptimizer.NetworkChangeEntry;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
 import com.sbtools.util.AppExecutors;
 import com.sbtools.util.AppLogger;
+import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
+import javafx.collections.transformation.FilteredList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -23,6 +28,8 @@ import javafx.scene.layout.VBox;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Future;
 
 class ChangeLogPanel extends VBox {
@@ -35,7 +42,11 @@ class ChangeLogPanel extends VBox {
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
     private final ObservableList<NetworkChangeEntry> entries = FXCollections.observableArrayList();
-    private final TableView<NetworkChangeEntry> table = new TableView<>(entries);
+    private final FilteredList<NetworkChangeEntry> filtered = new FilteredList<>(entries, e -> true);
+    private final TableView<NetworkChangeEntry> table = new TableView<>(filtered);
+    private final TextArea detailsArea = new TextArea();
+    private final TextField filterField = new TextField();
+    private final ComboBox<String> resultFilter = new ComboBox<>();
     private volatile Future<?> currentTask;
 
     ChangeLogPanel(NetworkOptimizerService service, BooleanProperty busy) {
@@ -52,11 +63,14 @@ class ChangeLogPanel extends VBox {
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.getChangeLog();
-                javafx.application.Platform.runLater(() -> entries.setAll(result));
+                Platform.runLater(() -> {
+                    entries.setAll(result);
+                    applyFilter();
+                });
             } catch (Exception e) {
                 AppLogger.warning("Failed to load changelog: " + e.getMessage());
             } finally {
-                javafx.application.Platform.runLater(() -> busy.set(false));
+                Platform.runLater(() -> busy.set(false));
             }
         });
     }
@@ -66,6 +80,19 @@ class ChangeLogPanel extends VBox {
         if (t != null) t.cancel(true);
     }
 
+    private void applyFilter() {
+        String q = filterField.getText() != null ? filterField.getText().trim().toLowerCase() : "";
+        String res = resultFilter.getSelectionModel().getSelectedItem();
+        filtered.setPredicate(e -> {
+            if ("OK only".equals(res) && !e.success()) return false;
+            if ("Failed only".equals(res) && e.success()) return false;
+            if (q.isEmpty()) return true;
+            return (e.operation() != null && e.operation().toLowerCase().contains(q))
+                    || (e.target() != null && e.target().toLowerCase().contains(q))
+                    || (e.details() != null && e.details().toLowerCase().contains(q));
+        });
+    }
+
     private VBox buildContent() {
         VBox content = new VBox(8);
 
@@ -73,11 +100,27 @@ class ChangeLogPanel extends VBox {
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
 
-        Label sub = new Label("Shows the last " + DISPLAY_LIMIT + " network operations.");
+        Label sub = new Label("Shows the last " + DISPLAY_LIMIT
+                + " network operations. Snapshots are stored separately (Optimization → Snapshots…).");
         sub.setStyle("-fx-text-fill: #6272a4;");
+        sub.setWrapText(true);
         content.getChildren().add(sub);
 
         buildTable();
+        table.getSelectionModel().selectedItemProperty().addListener((obs, o, sel) -> {
+            if (sel != null) {
+                detailsArea.setText(sel.details() != null ? sel.details() : "");
+            } else {
+                detailsArea.clear();
+            }
+        });
+
+        filterField.setPromptText("Filter operation / target / details…");
+        filterField.setPrefWidth(220);
+        filterField.textProperty().addListener((obs, o, n) -> applyFilter());
+        resultFilter.getItems().addAll("All results", "OK only", "Failed only");
+        resultFilter.getSelectionModel().selectFirst();
+        resultFilter.setOnAction(e -> applyFilter());
 
         Button refreshBtn = UIButton.primary("Refresh");
         refreshBtn.setOnAction(e -> loadEntries());
@@ -91,17 +134,97 @@ class ChangeLogPanel extends VBox {
             if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
                 AppExecutors.ioPool().submit(() -> {
                     service.clearChangeLog();
-                    javafx.application.Platform.runLater(() -> entries.clear());
+                    Platform.runLater(() -> entries.clear());
                 });
             }
         });
 
-        HBox btnBox = new HBox(12, refreshBtn, clearBtn);
+        Button exportBtn = UIButton.secondary("Export CSV");
+        exportBtn.setOnAction(e -> exportCsv());
+
+        Button snapshotsBtn = UIButton.secondary("View Snapshots…");
+        snapshotsBtn.setOnAction(e -> showSnapshots());
+
+        HBox btnBox = new HBox(12, refreshBtn, clearBtn, exportBtn, snapshotsBtn, filterField, resultFilter);
         btnBox.setAlignment(Pos.CENTER_LEFT);
         btnBox.setPadding(new Insets(0, 0, 8, 0));
 
-        content.getChildren().addAll(btnBox, table);
+        detailsArea.setEditable(false);
+        detailsArea.setPrefRowCount(4);
+        detailsArea.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 11px;");
+        detailsArea.setPromptText("Select a row to see full details...");
+
+        content.getChildren().addAll(btnBox, table, new Label("Details:"), detailsArea);
         return content;
+    }
+
+    private void exportCsv() {
+        if (filtered.isEmpty()) {
+            new Alert(Alert.AlertType.INFORMATION, "Nothing to export.").showAndWait();
+            return;
+        }
+        AppExecutors.ioPool().submit(() -> {
+            try {
+                StringBuilder sb = new StringBuilder("Time,Operation,Target,Details,Result\n");
+                for (NetworkChangeEntry e : filtered) {
+                    String t = e.timestamp() != null ? e.timestamp() : "";
+                    try {
+                        t = FORMATTER.format(Instant.parse(e.timestamp()));
+                    } catch (Exception ignored) {}
+                    sb.append(csv(t)).append(",").append(csv(e.operation())).append(",")
+                            .append(csv(e.target())).append(",").append(csv(e.details())).append(",")
+                            .append(e.success() ? "OK" : "FAIL").append("\n");
+                }
+                java.nio.file.Path base = com.sbtools.util.AppPaths.portableBaseDir();
+                java.nio.file.Path dir = base != null
+                        ? base.resolve(".winzenith").resolve("exports")
+                        : java.nio.file.Path.of(System.getProperty("user.home"), ".winzenith", "exports");
+                java.nio.file.Files.createDirectories(dir);
+                String stamp = java.time.LocalDateTime.now()
+                        .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                java.nio.file.Path out = dir.resolve("network-history-" + stamp + ".csv");
+                java.nio.file.Files.writeString(out, sb.toString());
+                Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Saved to:\n" + out).showAndWait());
+            } catch (Exception ex) {
+                AppLogger.warning("History export failed: " + ex.getMessage());
+                Platform.runLater(() -> new Alert(Alert.AlertType.ERROR, "Export failed: " + ex.getMessage()).showAndWait());
+            }
+        });
+    }
+
+    private void showSnapshots() {
+        AppExecutors.ioPool().submit(() -> {
+            try {
+                var snaps = service.listSnapshots();
+                Platform.runLater(() -> {
+                    if (snaps.isEmpty()) {
+                        new Alert(Alert.AlertType.INFORMATION, "No snapshots yet.").showAndWait();
+                        return;
+                    }
+                    StringBuilder sb = new StringBuilder();
+                    for (var s : snaps) sb.append("• ").append(s.summary()).append("\n");
+                    var info = service.describeRestore(snaps.get(0));
+                    if (info.details() != null) sb.append("\n--- Newest ---\n").append(info.details());
+                    Alert a = new Alert(Alert.AlertType.INFORMATION);
+                    a.setTitle("Network Snapshots");
+                    a.setHeaderText(snaps.size() + " snapshot(s)");
+                    TextArea area = new TextArea(sb.toString());
+                    area.setEditable(false);
+                    area.setPrefRowCount(18);
+                    area.setPrefColumnCount(70);
+                    a.getDialogPane().setContent(area);
+                    a.showAndWait();
+                });
+            } catch (Exception ex) {
+                Platform.runLater(() -> new Alert(Alert.AlertType.ERROR, "Failed: " + ex.getMessage()).showAndWait());
+            }
+        });
+    }
+
+    private static String csv(String v) {
+        if (v == null) return "";
+        String s = v.replace("\"", "\"\"").replace("\r", " ").replace("\n", " | ");
+        return s.contains(",") || s.contains("\"") ? "\"" + s + "\"" : s;
     }
 
     private void buildTable() {

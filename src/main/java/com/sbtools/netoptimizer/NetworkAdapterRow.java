@@ -15,9 +15,18 @@ public class NetworkAdapterRow {
     private final StringProperty macAddress = new SimpleStringProperty();
     private final StringProperty ipAddress = new SimpleStringProperty();
     private final BooleanProperty enabled = new SimpleBooleanProperty();
+    private final StringProperty dhcp = new SimpleStringProperty("");
+    private final StringProperty gateway = new SimpleStringProperty("");
+    private final StringProperty dnsServers = new SimpleStringProperty("");
 
     public NetworkAdapterRow(String name, String description, String status, String linkSpeed,
                               String macAddress, String ipAddress, boolean enabled) {
+        this(name, description, status, linkSpeed, macAddress, ipAddress, enabled, "", "", "");
+    }
+
+    public NetworkAdapterRow(String name, String description, String status, String linkSpeed,
+                              String macAddress, String ipAddress, boolean enabled,
+                              String dhcp, String gateway, String dnsServers) {
         this.name.set(name);
         this.description.set(description);
         this.status.set(status);
@@ -25,6 +34,9 @@ public class NetworkAdapterRow {
         this.macAddress.set(macAddress);
         this.ipAddress.set(ipAddress);
         this.enabled.set(enabled);
+        this.dhcp.set(dhcp != null ? dhcp : "");
+        this.gateway.set(gateway != null ? gateway : "");
+        this.dnsServers.set(dnsServers != null ? dnsServers : "");
     }
 
     public BooleanProperty selectedProperty() { return selected; }
@@ -52,4 +64,13 @@ public class NetworkAdapterRow {
     public BooleanProperty enabledProperty() { return enabled; }
     public boolean isEnabled() { return enabled.get(); }
     public void setEnabled(boolean enabled) { this.enabled.set(enabled); }
+
+    public StringProperty dhcpProperty() { return dhcp; }
+    public String getDhcp() { return dhcp.get(); }
+
+    public StringProperty gatewayProperty() { return gateway; }
+    public String getGateway() { return gateway.get(); }
+
+    public StringProperty dnsServersProperty() { return dnsServers; }
+    public String getDnsServers() { return dnsServers.get(); }
 }

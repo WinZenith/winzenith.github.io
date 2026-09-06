@@ -19,6 +19,8 @@ public class NetworkOptimizerService {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final NetworkChangeLog changeLog = new NetworkChangeLog();
+    private final NetworkSnapshotStore snapshotStore = new NetworkSnapshotStore();
+    private final NetworkStateStore stateStore = new NetworkStateStore();
     // SAFE_NAME: allow Unicode letters/numbers for localized adapter names (e.g., Réseau, Łącze) plus common symbols; block injection chars "'\"`;|&<>\$%!+=\n
     private static final Pattern SAFE_NAME = Pattern.compile("^[\\p{L}\\p{N} _\\-().*#]+$");
     // SAFE_HOST: hostname, IPv4 or IPv6. Allow alnum, dot, hyphen, underscore, colon for IPv6.
@@ -73,7 +75,10 @@ public class NetworkOptimizerService {
                             boolean adminEnabled = "Up".equalsIgnoreCase(adminStatus) || "Enabled".equalsIgnoreCase(adminStatus);
                             // status reflects operational: Up/Disconnected/Disabled etc.
                             boolean enabled = adminEnabled;
-                            adapters.add(new NetworkAdapterRow(name, desc, status, speed, mac, ip, enabled));
+                            String dhcp = str(entry, "Dhcp");
+                            String gateway = str(entry, "Gateway");
+                            String dns = str(entry, "DnsServers");
+                            adapters.add(new NetworkAdapterRow(name, desc, status, speed, mac, ip, enabled, dhcp, gateway, dns));
                         } catch (Exception e) {
                             AppLogger.warning("Failed to parse adapter entry: " + e.getMessage());
                         }
@@ -683,6 +688,388 @@ public class NetworkOptimizerService {
             AppLogger.warning("Failed to traceroute: " + e.getMessage());
         }
         return List.of();
+    }
+
+    // ------------------------------------------------------------------
+    // PR1: snapshots (read-only capture), preview diff, reboot state
+    // ------------------------------------------------------------------
+
+    /**
+     * Captures current TCP global settings + registry tuning values without
+     * performing any writes. Never throws — returns best-effort snapshot.
+     */
+    public NetworkSnapshot captureSnapshot(String reason) {
+        Map<String, String> tcp = Map.of();
+        String ack = null;
+        String noDelay = null;
+        try {
+            tcp = new LinkedHashMap<>(getCurrentTcpSettings().settings());
+        } catch (Exception e) {
+            AppLogger.warning("Snapshot TCP read failed: " + e.getMessage());
+        }
+        try {
+            Path script = PowerShellScripts.resolve("net-tcp-snapshot.ps1");
+            ProcessResult pr = new ProcessRunner(30).run(
+                    ProcessRunner.powershellScript(script.toString()));
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+            if (!stdout.isEmpty()) {
+                Map<String, Object> data = mapper.readValue(stdout,
+                        new TypeReference<Map<String, Object>>() {});
+                Object a = data.get("TcpAckFrequency");
+                Object n = data.get("TCPNoDelay");
+                ack = a != null ? a.toString() : null;
+                noDelay = n != null ? n.toString() : null;
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Snapshot registry read failed: " + e.getMessage());
+        }
+        NetworkSnapshot snap = new NetworkSnapshot(
+                java.util.UUID.randomUUID().toString(),
+                Instant.now().toString(),
+                reason != null ? reason : "manual",
+                tcp, ack, noDelay);
+        try {
+            snapshotStore.append(snap);
+        } catch (Exception e) {
+            AppLogger.warning("Failed to persist snapshot: " + e.getMessage());
+        }
+        return snap;
+    }
+
+    public List<NetworkSnapshot> listSnapshots() {
+        try {
+            return snapshotStore.load();
+        } catch (Exception e) {
+            AppLogger.warning("Failed to list snapshots: " + e.getMessage());
+            return List.of();
+        }
+    }
+
+    public java.util.Optional<NetworkSnapshot> latestSnapshot() {
+        List<NetworkSnapshot> all = listSnapshots();
+        return all.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(all.get(0));
+    }
+
+    /**
+     * Builds a preview diff for a preset against live TCP state.
+     * Registry current values are rendered as "default (absent)" when null.
+     */
+    public List<PresetExpectations.PreviewRow> buildPreview(OptimizationPreset preset) {
+        Map<String, String> expected = PresetExpectations.expectedFor(preset);
+        NetworkSnapshot current = null;
+        try {
+            // Lightweight live read without persisting
+            Map<String, String> tcp = new LinkedHashMap<>(getCurrentTcpSettings().settings());
+            String ack = null;
+            String noDelay = null;
+            try {
+                Path script = PowerShellScripts.resolve("net-tcp-snapshot.ps1");
+                ProcessResult pr = new ProcessRunner(30).run(
+                        ProcessRunner.powershellScript(script.toString()));
+                String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+                if (!stdout.isEmpty()) {
+                    Map<String, Object> data = mapper.readValue(stdout,
+                            new TypeReference<Map<String, Object>>() {});
+                    Object a = data.get("TcpAckFrequency");
+                    Object n = data.get("TCPNoDelay");
+                    ack = a != null ? a.toString() : null;
+                    noDelay = n != null ? n.toString() : null;
+                }
+            } catch (Exception ignored) {}
+            current = new NetworkSnapshot("", Instant.now().toString(), "preview", tcp, ack, noDelay);
+        } catch (Exception e) {
+            AppLogger.warning("Preview read failed: " + e.getMessage());
+        }
+        List<PresetExpectations.PreviewRow> rows = new ArrayList<>();
+        for (Map.Entry<String, String> e : expected.entrySet()) {
+            String key = e.getKey();
+            String willSet = e.getValue();
+            String cur = resolveCurrentForPreview(key, current);
+            boolean changes = !normalizePreviewValue(cur).equalsIgnoreCase(normalizePreviewValue(willSet));
+            rows.add(new PresetExpectations.PreviewRow(key, cur, willSet, changes));
+        }
+        return rows;
+    }
+
+    private static String resolveCurrentForPreview(String key, NetworkSnapshot current) {
+        if (current == null) return "(unknown — run as Administrator?)";
+        if ("TCP Ack Frequency".equalsIgnoreCase(key)) {
+            return current.tcpAckFrequency() == null ? "default (absent)" : current.tcpAckFrequency();
+        }
+        if ("TCP No Delay".equalsIgnoreCase(key)) {
+            return current.tcpNoDelay() == null ? "default (absent)" : current.tcpNoDelay();
+        }
+        // TCP global keys: netsh uses names like "Receive-Side Scaling State", "ECN Capability", etc.
+        // Map our short names to likely netsh keys case-insensitively.
+        Map<String, String> tcp = current.tcpSettings() != null ? current.tcpSettings() : Map.of();
+        if (tcp.isEmpty()) return "(no data — not Windows or access denied)";
+        String lookup = switch (key) {
+            case "TCP AutoTuning" -> findTcpKey(tcp, "auto-tuning", "autotuning");
+            case "RSS" -> findTcpKey(tcp, "receive-side scaling", "rss");
+            case "RSC" -> findTcpKey(tcp, "receive segment coalescing", "rsc");
+            case "ECN" -> findTcpKey(tcp, "ecn capability", "ecn");
+            default -> null;
+        };
+        return lookup != null ? lookup : "(not reported by netsh)";
+    }
+
+    private static String findTcpKey(Map<String, String> tcp, String... hints) {
+        for (Map.Entry<String, String> e : tcp.entrySet()) {
+            String k = e.getKey() != null ? e.getKey().toLowerCase() : "";
+            for (String h : hints) {
+                if (k.contains(h)) return e.getValue();
+            }
+        }
+        return null;
+    }
+
+    private static String normalizePreviewValue(String v) {
+        if (v == null) return "";
+        return v.trim().toLowerCase();
+    }
+
+    /**
+     * Guided restore info for a snapshot. Read-only+ constraint: we do NOT
+     * re-apply arbitrary registry values — we point at the existing
+     * Default preset (which removes custom keys) and show snapshot detail
+     * for manual verification.
+     */
+    public OperationResult describeRestore(NetworkSnapshot snap) {
+        if (snap == null) return OperationResult.fail("No snapshot selected.");
+        StringBuilder sb = new StringBuilder();
+        sb.append("Snapshot: ").append(snap.summary()).append("\n\n");
+        if (snap.tcpSettings() != null && !snap.tcpSettings().isEmpty()) {
+            sb.append("TCP settings at capture:\n");
+            snap.tcpSettings().forEach((k, v) -> sb.append("  ").append(k).append(": ").append(v).append("\n"));
+            sb.append("\n");
+        }
+        sb.append("Registry at capture:\n");
+        sb.append("  TcpAckFrequency: ").append(snap.tcpAckFrequency() == null ? "absent (default)" : snap.tcpAckFrequency()).append("\n");
+        sb.append("  TCPNoDelay: ").append(snap.tcpNoDelay() == null ? "absent (default)" : snap.tcpNoDelay()).append("\n\n");
+        sb.append("Restore guidance (read-only+ mode):\n");
+        sb.append("- Click 'Reset to Defaults' to remove custom registry keys via the existing optimizer.\n");
+        sb.append("- netsh values return to Windows defaults (autotuning=normal, RSS/ECN/RSC=default).\n");
+        sb.append("- If the snapshot shows non-default custom values outside this set, re-apply them manually.\n");
+        sb.append("- A reboot may be required for TCP changes to fully take effect.");
+        return OperationResult.ok("Snapshot details ready.", sb.toString());
+    }
+
+    public boolean isRebootRequired() {
+        try {
+            return stateStore.isRebootRequired();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public String rebootReason() {
+        try {
+            return stateStore.rebootReason();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    public void markRebootRequired(String reason) {
+        try {
+            stateStore.setRebootRequired(true, reason != null ? reason : "");
+        } catch (Exception e) {
+            AppLogger.warning("Failed to mark reboot required: " + e.getMessage());
+        }
+    }
+
+    public void clearRebootRequired() {
+        try {
+            stateStore.clearRebootRequired();
+        } catch (Exception e) {
+            AppLogger.warning("Failed to clear reboot flag: " + e.getMessage());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // PR2: read-only network detail (route/arp/netstat/public-ip/export)
+    // ------------------------------------------------------------------
+
+    public String getRouteTable() {
+        try {
+            ProcessResult pr = new ProcessRunner(30).run(
+                    List.of("cmd.exe", "/c", "chcp 65001 >nul & route print"));
+            if (pr.exitCode() == 0 && pr.stdout() != null && !pr.stdout().isBlank()) {
+                return pr.stdout().replaceFirst("(?m)^Active code page:.*\\R", "");
+            }
+            return "Failed to retrieve route table:\n" + pr.combinedOutput();
+        } catch (Exception e) {
+            AppLogger.warning("Failed to get route table: " + e.getMessage());
+            return "Failed to retrieve route table: " + e.getMessage();
+        }
+    }
+
+    public String getArpTable() {
+        try {
+            ProcessResult pr = new ProcessRunner(30).run(List.of("arp", "-a"));
+            if (pr.exitCode() == 0 && pr.stdout() != null && !pr.stdout().isBlank()) return pr.stdout();
+            return "Failed to retrieve ARP table:\n" + pr.combinedOutput();
+        } catch (Exception e) {
+            AppLogger.warning("Failed to get ARP table: " + e.getMessage());
+            return "Failed to retrieve ARP table: " + e.getMessage();
+        }
+    }
+
+    public String getNetstatSummary() {
+        try {
+            ProcessResult pr = new ProcessRunner(30).run(List.of("cmd.exe", "/c", "chcp 65001 >nul & netstat -ano"));
+            if (pr.exitCode() == 0 && pr.stdout() != null && !pr.stdout().isBlank()) {
+                String out = pr.stdout().replaceFirst("(?m)^Active code page:.*\\R", "");
+                // Cap output to avoid huge UI freeze (first 400 lines)
+                String[] lines = out.split("\\R");
+                if (lines.length > 400) {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < 400; i++) sb.append(lines[i]).append(System.lineSeparator());
+                    sb.append("... truncated (").append(lines.length - 400).append(" more lines) ...");
+                    return sb.toString();
+                }
+                return out;
+            }
+            return "Failed to retrieve netstat:\n" + pr.combinedOutput();
+        } catch (Exception e) {
+            AppLogger.warning("Failed to get netstat: " + e.getMessage());
+            return "Failed to retrieve netstat: " + e.getMessage();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // PR3: DNS benchmark + MTU probe + speed test (opt-in internet)
+    // ------------------------------------------------------------------
+
+    public record DnsBenchmarkRow(String provider, String servers, double avgMs, double minMs, double maxMs, boolean ok, String note) {
+    }
+
+    public List<DnsBenchmarkRow> benchmarkDnsServers() {
+        // Opt-in only — caller shows explicit consent. Uses Resolve-DnsName timing (read-only).
+        List<String[]> targets = List.of(
+                new String[]{"Current (DHCP)", ""},
+                new String[]{"Google", "8.8.8.8"},
+                new String[]{"Cloudflare", "1.1.1.1"},
+                new String[]{"Quad9", "9.9.9.9"},
+                new String[]{"OpenDNS", "208.67.222.222"});
+        List<DnsBenchmarkRow> rows = new ArrayList<>();
+        for (String[] t : targets) {
+            String name = t[0];
+            String server = t[1];
+            try {
+                Path script = PowerShellScripts.resolve("net-dns-benchmark.ps1");
+                java.util.List<String> cmd;
+                if (server.isEmpty()) {
+                    cmd = ProcessRunner.powershellScript(script.toString(), "-Server", "");
+                } else {
+                    cmd = ProcessRunner.powershellScript(script.toString(), "-Server", server);
+                }
+                ProcessResult pr = new ProcessRunner(45).run(cmd);
+                String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+                if (!stdout.isEmpty()) {
+                    try {
+                        Map<String, Object> data = mapper.readValue(stdout,
+                                new TypeReference<Map<String, Object>>() {});
+                        double avg = toDouble(data.get("avgMs"));
+                        double min = toDouble(data.get("minMs"));
+                        double max = toDouble(data.get("maxMs"));
+                        boolean ok = Boolean.TRUE.equals(data.get("success"));
+                        String note = data.get("note") != null ? data.get("note").toString() : "";
+                        rows.add(new DnsBenchmarkRow(name, server.isEmpty() ? "(system)" : server, avg, min, max, ok, note));
+                        continue;
+                    } catch (Exception je) {
+                        AppLogger.warning("DNS benchmark parse failed for " + name + ": " + je.getMessage());
+                    }
+                }
+                rows.add(new DnsBenchmarkRow(name, server, -1, -1, -1, false, "No result"));
+            } catch (Exception e) {
+                AppLogger.warning("DNS benchmark failed for " + name + ": " + e.getMessage());
+                rows.add(new DnsBenchmarkRow(name, server, -1, -1, -1, false, e.getMessage()));
+            }
+        }
+        return rows;
+    }
+
+    private static double toDouble(Object o) {
+        if (o instanceof Number n) return n.doubleValue();
+        try {
+            return o != null ? Double.parseDouble(o.toString()) : -1;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    public record MtuProbeResult(boolean success, int optimalMtu, String details) {
+    }
+
+    public MtuProbeResult probeMtu(String targetHost, java.util.concurrent.atomic.AtomicBoolean cancelled) {
+        try {
+            sanitizeHost(targetHost);
+        } catch (IllegalArgumentException e) {
+            return new MtuProbeResult(false, -1, "Invalid host: " + e.getMessage());
+        }
+        try {
+            Path script = PowerShellScripts.resolve("net-mtu-probe.ps1");
+            ProcessResult pr = new ProcessRunner(120).run(
+                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", targetHost),
+                    cancelled);
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+            if (!stdout.isEmpty()) {
+                try {
+                    Map<String, Object> data = mapper.readValue(stdout,
+                            new TypeReference<Map<String, Object>>() {});
+                    boolean ok = Boolean.TRUE.equals(data.get("success"));
+                    int mtu = data.get("optimalMtu") instanceof Number n ? n.intValue() : -1;
+                    String details = data.get("details") != null ? data.get("details").toString() : stdout;
+                    return new MtuProbeResult(ok, mtu, details);
+                } catch (Exception je) {
+                    return new MtuProbeResult(false, -1, stdout);
+                }
+            }
+            return new MtuProbeResult(false, -1, "No output from MTU probe.");
+        } catch (java.util.concurrent.CancellationException e) {
+            throw e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new java.util.concurrent.CancellationException("Operation cancelled");
+        } catch (Exception e) {
+            AppLogger.warning("MTU probe failed: " + e.getMessage());
+            return new MtuProbeResult(false, -1, "Error: " + e.getMessage());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // PR4: Wi-Fi survey (read-only netsh scan)
+    // ------------------------------------------------------------------
+
+    public record WifiNetwork(String ssid, String bssid, int signalPercent, String auth, String channel, String radio) {
+    }
+
+    public List<WifiNetwork> scanWifiNetworks() {
+        try {
+            Path script = PowerShellScripts.resolve("net-wifi-scan.ps1");
+            ProcessResult pr = new ProcessRunner(45).run(
+                    ProcessRunner.powershellScript(script.toString()));
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+            if (stdout.isEmpty() || "[]".equals(stdout)) return List.of();
+            List<Map<String, Object>> raw = mapper.readValue(stdout,
+                    new TypeReference<List<Map<String, Object>>>() {});
+            List<WifiNetwork> out = new ArrayList<>();
+            for (Map<String, Object> e : raw) {
+                try {
+                    out.add(new WifiNetwork(
+                            str(e, "ssid"), str(e, "bssid"),
+                            e.get("signalPercent") instanceof Number n ? n.intValue() : 0,
+                            str(e, "auth"), str(e, "channel"), str(e, "radio")));
+                } catch (Exception ex) {
+                    AppLogger.warning("Failed to parse wifi network: " + ex.getMessage());
+                }
+            }
+            return out;
+        } catch (Exception e) {
+            AppLogger.warning("Wi-Fi scan failed: " + e.getMessage());
+            return List.of();
+        }
     }
 
 }

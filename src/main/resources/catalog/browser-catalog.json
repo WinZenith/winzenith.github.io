@@ -1,0 +1,119 @@
+[
+  {
+    "name": "Chrome",
+    "engine": "chromium-multi",
+    "userData": "%LOCALAPPDATA%\\Google\\Chrome\\User Data",
+    "processName": "chrome.exe",
+    "exes": [
+      "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe",
+      "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
+      "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"
+    ],
+    "storeUrlTemplate": "https://chromewebstore.google.com/detail/{id}"
+  },
+  {
+    "name": "Chrome Canary",
+    "engine": "chromium-multi",
+    "userData": "%LOCALAPPDATA%\\Google\\Chrome SxS\\User Data",
+    "processName": "chrome.exe",
+    "exes": ["%LOCALAPPDATA%\\Google\\Chrome SxS\\Application\\chrome.exe"],
+    "storeUrlTemplate": "https://chromewebstore.google.com/detail/{id}"
+  },
+  {
+    "name": "Edge",
+    "engine": "chromium-multi",
+    "userData": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data",
+    "processName": "msedge.exe",
+    "exes": [
+      "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe",
+      "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"
+    ],
+    "storeUrlTemplate": "https://microsoftedge.microsoft.com/addons/detail/{id}"
+  },
+  {
+    "name": "Edge Beta",
+    "engine": "chromium-multi",
+    "userData": "%LOCALAPPDATA%\\Microsoft\\Edge Beta\\User Data",
+    "processName": "msedge.exe",
+    "exes": [
+      "%ProgramFiles%\\Microsoft\\Edge Beta\\Application\\msedge.exe",
+      "%ProgramFiles(x86)%\\Microsoft\\Edge Beta\\Application\\msedge.exe"
+    ],
+    "storeUrlTemplate": "https://microsoftedge.microsoft.com/addons/detail/{id}"
+  },
+  {
+    "name": "Edge Dev",
+    "engine": "chromium-multi",
+    "userData": "%LOCALAPPDATA%\\Microsoft\\Edge Dev\\User Data",
+    "processName": "msedge.exe",
+    "exes": [
+      "%ProgramFiles%\\Microsoft\\Edge Dev\\Application\\msedge.exe",
+      "%ProgramFiles(x86)%\\Microsoft\\Edge Dev\\Application\\msedge.exe"
+    ],
+    "storeUrlTemplate": "https://microsoftedge.microsoft.com/addons/detail/{id}"
+  },
+  {
+    "name": "Edge Canary",
+    "engine": "chromium-multi",
+    "userData": "%LOCALAPPDATA%\\Microsoft\\Edge SxS\\User Data",
+    "processName": "msedge.exe",
+    "exes": ["%LOCALAPPDATA%\\Microsoft\\Edge SxS\\Application\\msedge.exe"],
+    "storeUrlTemplate": "https://microsoftedge.microsoft.com/addons/detail/{id}"
+  },
+  {
+    "name": "Firefox",
+    "engine": "firefox",
+    "userData": "%APPDATA%\\Mozilla\\Firefox\\Profiles",
+    "processName": "firefox.exe",
+    "exes": [
+      "%ProgramFiles%\\Mozilla Firefox\\firefox.exe",
+      "%ProgramFiles(x86)%\\Mozilla Firefox\\firefox.exe",
+      "%LOCALAPPDATA%\\Mozilla Firefox\\firefox.exe"
+    ],
+    "storeUrlTemplate": "https://addons.mozilla.org/firefox/addon/{id}/"
+  },
+  {
+    "name": "Brave",
+    "engine": "chromium-multi",
+    "userData": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data",
+    "processName": "brave.exe",
+    "exes": [
+      "%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      "%ProgramFiles(x86)%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+      "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+    ],
+    "storeUrlTemplate": "https://chromewebstore.google.com/detail/{id}"
+  },
+  {
+    "name": "Opera",
+    "engine": "chromium-single",
+    "userData": "%APPDATA%\\Opera Software\\Opera Stable",
+    "processName": "opera.exe",
+    "exes": [
+      "%LOCALAPPDATA%\\Programs\\Opera\\opera.exe",
+      "%APPDATA%\\Opera Software\\Opera Stable\\opera.exe"
+    ],
+    "extensionsSubdir": "Extensions",
+    "storeUrlTemplate": "https://addons.opera.com/extensions/details/{id}/"
+  },
+  {
+    "name": "Opera GX",
+    "engine": "chromium-single",
+    "userData": "%APPDATA%\\Opera Software\\Opera GX Stable",
+    "processName": "opera.exe",
+    "exes": ["%LOCALAPPDATA%\\Programs\\Opera GX\\opera.exe"],
+    "extensionsSubdir": "Extensions",
+    "storeUrlTemplate": "https://addons.opera.com/extensions/details/{id}/"
+  },
+  {
+    "name": "Vivaldi",
+    "engine": "chromium-multi",
+    "userData": "%LOCALAPPDATA%\\Vivaldi\\User Data",
+    "processName": "vivaldi.exe",
+    "exes": [
+      "%LOCALAPPDATA%\\Vivaldi\\Application\\vivaldi.exe",
+      "%ProgramFiles%\\Vivaldi\\Application\\vivaldi.exe"
+    ],
+    "storeUrlTemplate": "https://chromewebstore.google.com/detail/{id}"
+  }
+]

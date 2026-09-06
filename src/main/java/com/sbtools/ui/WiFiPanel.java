@@ -36,6 +36,13 @@ class WiFiPanel extends VBox {
     private volatile Future<?> currentTask;
     // Separate loading flag for profiles so it doesn't collide with currentInfo busy
     private final java.util.concurrent.atomic.AtomicBoolean profileLoading = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final javafx.collections.ObservableList<NetworkOptimizerService.WifiNetwork> scanRows =
+            javafx.collections.FXCollections.observableArrayList();
+    private final java.util.concurrent.atomic.AtomicBoolean scanRunning = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile Future<?> scanTask;
+    private final javafx.scene.chart.XYChart.Series<Number, Number> signalSeries = new javafx.scene.chart.XYChart.Series<>();
+    private int signalIndex = 0;
+    private final Label scanStatus = new Label("Not scanned yet.");
 
     WiFiPanel(NetworkOptimizerService service, BooleanProperty busy, BooleanSupplier adminCheck) {
         this.service = service;
@@ -60,6 +67,9 @@ class WiFiPanel extends VBox {
     void dispose() {
         Future<?> t = currentTask;
         if (t != null) t.cancel(true);
+        Future<?> s = scanTask;
+        if (s != null) s.cancel(true);
+        scanRunning.set(false);
     }
 
     private VBox buildContent() {
@@ -68,11 +78,102 @@ class WiFiPanel extends VBox {
         Label header = new Label("Wi-Fi");
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
+        Label sub = new Label("Survey is read-only (netsh scan). Forget/disable still require Admin.");
+        sub.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        content.getChildren().add(sub);
 
         content.getChildren().add(buildCurrentConnectionSection());
+        content.getChildren().add(buildSignalHistorySection());
+        content.getChildren().add(buildSurveySection());
         content.getChildren().add(buildSavedProfilesSection());
+        content.getChildren().add(statusLabel);
 
         return content;
+    }
+
+    private VBox buildSignalHistorySection() {
+        VBox section = new VBox(4);
+        section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
+        Label h = new Label("Signal History (%, sampled on each Refresh)");
+        h.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
+        section.getChildren().add(h);
+        javafx.scene.chart.NumberAxis x = new javafx.scene.chart.NumberAxis();
+        x.setLabel("Sample");
+        x.setForceZeroInRange(false);
+        javafx.scene.chart.NumberAxis y = new javafx.scene.chart.NumberAxis(0, 100, 10);
+        y.setLabel("Signal %");
+        javafx.scene.chart.LineChart<Number, Number> chart = new javafx.scene.chart.LineChart<>(x, y);
+        chart.setPrefHeight(150);
+        chart.setCreateSymbols(false);
+        chart.setLegendVisible(false);
+        chart.setAnimated(false);
+        signalSeries.setName("signal");
+        chart.getData().add(signalSeries);
+        section.getChildren().add(chart);
+        return section;
+    }
+
+    private VBox buildSurveySection() {
+        VBox section = new VBox(4);
+        section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
+        Label h = new Label("Nearby Networks (read-only survey)");
+        h.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
+        section.getChildren().add(h);
+
+        javafx.scene.control.TableView<NetworkOptimizerService.WifiNetwork> table =
+                new javafx.scene.control.TableView<>(scanRows);
+        table.setPrefHeight(160);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.WifiNetwork, String> ssidCol =
+                new javafx.scene.control.TableColumn<>("SSID");
+        ssidCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().ssid()));
+        ssidCol.setPrefWidth(160);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.WifiNetwork, String> sigCol =
+                new javafx.scene.control.TableColumn<>("Signal");
+        sigCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().signalPercent() + "%"));
+        sigCol.setPrefWidth(70);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.WifiNetwork, String> authCol =
+                new javafx.scene.control.TableColumn<>("Auth");
+        authCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().auth()));
+        authCol.setPrefWidth(140);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.WifiNetwork, String> chCol =
+                new javafx.scene.control.TableColumn<>("Ch");
+        chCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().channel()));
+        chCol.setPrefWidth(50);
+        javafx.scene.control.TableColumn<NetworkOptimizerService.WifiNetwork, String> bssidCol =
+                new javafx.scene.control.TableColumn<>("BSSID");
+        bssidCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().bssid()));
+        bssidCol.setPrefWidth(150);
+        table.getColumns().addAll(ssidCol, sigCol, authCol, chCol, bssidCol);
+        section.getChildren().add(table);
+
+        scanStatus.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
+        Button scanBtn = UIButton.secondary("Scan Nearby Networks");
+        scanBtn.setOnAction(e -> scanNearby());
+        HBox row = new HBox(8, scanBtn, scanStatus);
+        row.setAlignment(Pos.CENTER_LEFT);
+        section.getChildren().add(row);
+        return section;
+    }
+
+    void scanNearby() {
+        if (!scanRunning.compareAndSet(false, true)) return;
+        scanStatus.setText("Scanning (netsh, read-only)...");
+        scanTask = AppExecutors.ioPool().submit(() -> {
+            try {
+                var nets = service.scanWifiNetworks();
+                Platform.runLater(() -> {
+                    scanRows.setAll(nets);
+                    scanStatus.setText(nets.isEmpty()
+                            ? "No networks found. Is Wi-Fi enabled?"
+                            : "Found " + nets.size() + " network(s). Strongest first not guaranteed — sort by Signal.");
+                    scanRows.sort((a, b) -> Integer.compare(b.signalPercent(), a.signalPercent()));
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> scanStatus.setText("Scan failed: " + e.getMessage()));
+            } finally {
+                scanRunning.set(false);
+            }
+        });
     }
 
     private VBox buildCurrentConnectionSection() {
@@ -162,6 +263,15 @@ class WiFiPanel extends VBox {
                         }
                         rateLabel.setText("Rates: " + (rates.isEmpty() ? "-" : rates));
                         statusLabel.setText("Wi-Fi info loaded.");
+                        try {
+                            if (info.signalPercent() > 0) {
+                                signalSeries.getData().add(
+                                        new javafx.scene.chart.XYChart.Data<>(signalIndex++, info.signalPercent()));
+                                while (signalSeries.getData().size() > 50) {
+                                    signalSeries.getData().remove(0);
+                                }
+                            }
+                        } catch (Exception ignored) {}
                     }
                 });
             } catch (Exception e) {

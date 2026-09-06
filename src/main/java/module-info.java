@@ -35,7 +35,7 @@ module com.winzenith {
     opens com.sbtools.defrag to javafx.controls;
     opens com.sbtools.shredder to javafx.controls;
     opens com.sbtools.uninstaller to javafx.controls, com.fasterxml.jackson.databind;
-    opens com.sbtools.browserext to javafx.controls;
+    opens com.sbtools.browserext to javafx.controls, com.fasterxml.jackson.databind;
     opens com.sbtools.diskhealth to javafx.controls, com.fasterxml.jackson.databind;
     opens com.sbtools.license to javafx.controls;
     opens com.sbtools.update to javafx.controls;
