@@ -51,13 +51,6 @@ public final class BrowserProcessProbe {
         return lastProbeOk;
     }
 
-    /** For tests: clears the cache so the next call re-queries. */
-    static synchronized void resetForTest() {
-        cachedExes = Set.of();
-        cachedAt = 0;
-        lastProbeOk = false;
-    }
-
     private static Set<String> queryTasklist() {
         Set<String> out = new HashSet<>();
         lastProbeOk = false;

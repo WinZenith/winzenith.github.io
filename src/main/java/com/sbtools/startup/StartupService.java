@@ -400,19 +400,6 @@ public class StartupService {
         Advapi32Util.registrySetBinaryValue(hive, approvedPath, valueName, next);
     }
 
-    private static byte[] readApprovedBytes(HKEY hive, String approvedPath, String valueName) {
-        try {
-            if (Advapi32Util.registryValueExists(hive, approvedPath, valueName)) {
-                Object v = Advapi32Util.registryGetValue(hive, approvedPath, valueName);
-                if (v instanceof byte[] bytes) {
-                    return bytes;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
-    }
-
     public List<StartupItem> listRegistryApps() {
         List<StartupItem> items = new ArrayList<>();
         if (!AppPaths.isWindows()) return items;

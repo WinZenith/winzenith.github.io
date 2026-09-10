@@ -3,12 +3,7 @@ package com.sbtools.drivers.catalog;
 import com.sbtools.drivers.model.InstalledDriver;
 import com.sbtools.util.AppLogger;
 
-import java.util.regex.Pattern;
-
 public class OemBroadcomCatalogProvider extends AbstractOemCatalogProvider {
-
-    private static final Pattern VERSION = Pattern.compile(
-            "([0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?)", Pattern.CASE_INSENSITIVE);
 
     public OemBroadcomCatalogProvider() {
         super(OemVendorHelper.BROADCOM);

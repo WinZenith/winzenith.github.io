@@ -782,10 +782,6 @@ public class UninstallerService {
         return sb.toString();
     }
 
-    static List<String> parseUninstallCommandForTest(String uninstallCmd) {
-        return new UninstallerService().parseUninstallCommand(uninstallCmd);
-    }
-
     /**
      * Splits a command line string into tokens, respecting quoted segments.
      * For example: a quoted path with args gets properly separated.

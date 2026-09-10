@@ -13,8 +13,6 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
     private static final Pattern GBE_VERSION = Pattern.compile(
             "(?:GbE|RTL[0-9]+|Ethernet)[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
             Pattern.CASE_INSENSITIVE);
-    private static final Pattern GENERIC_VERSION = Pattern.compile(
-            "([0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?)", Pattern.CASE_INSENSITIVE);
 
     public OemRealtekCatalogProvider() {
         super(OemVendorHelper.REALTEK);

@@ -551,11 +551,6 @@ public class DriverBackupService {
         return BackupHealth.inspect(folder).infCount();
     }
 
-    private long directorySize(Path directory) throws IOException {
-        // Single-pass via shared helper; depth capped inside BackupHealth.
-        return BackupHealth.inspect(directory).bytes();
-    }
-
     private void deleteDirectory(Path directory) throws IOException {
         if (Files.exists(directory)) {
             try (var stream = Files.walk(directory)) {

@@ -28,8 +28,6 @@ import javafx.scene.layout.VBox;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.Future;
 
 class ChangeLogPanel extends VBox {

@@ -58,13 +58,6 @@ public final class BrowserRegistry {
         return null;
     }
 
-    /** For tests: resets the lazy cache. */
-    static void resetForTest() {
-        synchronized (BrowserRegistry.class) {
-            cached = null;
-        }
-    }
-
     private static List<BrowserDefinition> loadMerged() {
         List<BrowserDefinition> bundled = loadBundled();
         if (bundled.isEmpty()) {

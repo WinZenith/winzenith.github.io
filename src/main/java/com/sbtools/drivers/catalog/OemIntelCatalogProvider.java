@@ -35,7 +35,6 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
     private static final long CACHE_TTL_MS = 3600_000;
 
     private static final Map<String, String> CATEGORY_DSA_NAMES = new HashMap<>();
-    private static final Map<String, String> GRAPHICS_DOWNLOAD_PAGES = new HashMap<>();
     static {
         CATEGORY_DSA_NAMES.put("bluetooth", "Bluetooth");
         CATEGORY_DSA_NAMES.put("wifi", "Wi-Fi");

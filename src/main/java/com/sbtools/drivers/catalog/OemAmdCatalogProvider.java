@@ -3,16 +3,7 @@ package com.sbtools.drivers.catalog;
 import com.sbtools.drivers.model.InstalledDriver;
 import com.sbtools.util.AppLogger;
 
-import java.util.regex.Pattern;
-
 public class OemAmdCatalogProvider extends AbstractOemCatalogProvider {
-
-    private static final Pattern ADRENALIN_VERSION = Pattern.compile(
-            "Adrenalin[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern AMD_VERSION = Pattern.compile(
-            "(?:AMD|RADEON|Adrenalin|WHQL)[^0-9]*([0-9]{2}\\.[0-9]+\\.[0-9]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern GENERIC_VERSION = Pattern.compile(
-            "([0-9]{2}\\.[0-9]+\\.[0-9]+)", Pattern.CASE_INSENSITIVE);
 
     public OemAmdCatalogProvider() {
         super(OemVendorHelper.AMD);

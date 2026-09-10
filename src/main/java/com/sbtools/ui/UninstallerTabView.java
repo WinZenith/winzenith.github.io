@@ -528,10 +528,6 @@ public class UninstallerTabView extends BorderPane {
         }
     }
 
-    private static String iconCacheKey(InstalledApp app) {
-        return cheapIconCacheKey(app);
-    }
-
     private void cancelCurrentOperation() {
         try {
             scanCancellationToken.cancel();
