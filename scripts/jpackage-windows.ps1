@@ -13,7 +13,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$version = "1.2.8"
+$version = "1.3.0"
 $jarName = "win-zenith-$version-shaded.jar"
 $jar = Join-Path $root "target\$jarName"
 if (-not (Test-Path $jar)) {
@@ -133,7 +133,7 @@ java-options=--add-modules=javafx.controls
     # NOTE: the Launch4j WinZenith.exe must NOT ship inside app/: it lacks the JavaFX
     # module-path from WinZenith.cfg, so elevating/relaunching it dies instantly.
     $appDir = Join-Path $appImageRoot "app"
-    foreach ($junkDir in @("classes", "generated-sources", "maven-archiver", "maven-status", "test-classes")) {
+    foreach ($junkDir in @("classes", "generated-sources", "generated-test-sources", "maven-archiver", "maven-status", "surefire-reports", "test-classes")) {
         $junkPath = Join-Path $appDir $junkDir
         if (Test-Path $junkPath) { Remove-Item -Recurse -Force $junkPath -ErrorAction SilentlyContinue }
     }
