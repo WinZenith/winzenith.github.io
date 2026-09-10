@@ -37,8 +37,10 @@ public class DriverBackupService {
         ReentrantReadWriteLock lock = lockFor(idx);
         lock.readLock().lock();
         try {
+            // Null-safe: a single corrupt entry (createdAt=null) must never NPE the whole tab.
             return loadIndex().getEntries().stream()
-                    .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
+                    .sorted(Comparator.comparing(DriverBackupEntry::createdAt,
+                            Comparator.nullsLast(Comparator.reverseOrder())))
                     .collect(Collectors.toList());
         } finally {
             lock.readLock().unlock();
@@ -51,8 +53,9 @@ public class DriverBackupService {
         lock.readLock().lock();
         try {
             return loadIndex().getEntries().stream()
-                    .filter(e -> e.deviceId().equals(deviceId))
-                    .sorted(Comparator.comparing(DriverBackupEntry::createdAt).reversed())
+                    .filter(e -> deviceId != null && deviceId.equals(e.deviceId()))
+                    .sorted(Comparator.comparing(DriverBackupEntry::createdAt,
+                            Comparator.nullsLast(Comparator.reverseOrder())))
                     .collect(Collectors.toList());
         } finally {
             lock.readLock().unlock();
@@ -168,8 +171,11 @@ public class DriverBackupService {
                 + " from backup [" + entry.id() + "] (" + infCount + " INF file(s))");
 
         Path script = PowerShellScripts.resolve("pnputil-restore.ps1");
+        // deviceId may be null on corrupt index entries — script arg is optional, never pass null
+        // into ProcessBuilder (would NPE). Empty string means "stage only, skip device restart".
+        String deviceArg = entry.deviceId() != null ? entry.deviceId() : "";
         ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
-                script.toString(), folder.toString(), entry.deviceId()));
+                script.toString(), folder.toString(), deviceArg));
         RevertDetail detail = parseRevertOutput(result.stdout());
         if (!result.success()) {
             String msg = "Driver revert failed for " + entry.friendlyName()
@@ -190,14 +196,18 @@ public class DriverBackupService {
             throw new IOException(msg);
         }
 
-        AppLogger.info("Driver reverted successfully: " + entry.friendlyName()
-                + " (installed " + detail.installed() + "/" + infCount + ")");
+        AppLogger.info("Driver staged from backup: " + entry.friendlyName()
+                + " (installed " + detail.installed() + "/" + infCount
+                + ", restartAttempted=" + detail.restartAttempted()
+                + ", restartOk=" + detail.restartOk() + ")"
+                + " — active-driver bind still requires UI verification (downgrade may need reboot/manual Have-Disk).");
     }
 
-    private record RevertDetail(int installed, int failed, String details) {}
+    private record RevertDetail(int installed, int failed, String details,
+                                boolean restartAttempted, boolean restartOk) {}
 
     private static RevertDetail parseRevertOutput(String stdout) {
-        if (stdout == null || stdout.isBlank()) return new RevertDetail(-1, -1, "");
+        if (stdout == null || stdout.isBlank()) return new RevertDetail(-1, -1, "", false, false);
         try {
             // Script emits a single compressed JSON object; output may contain extra lines.
             String json = stdout.trim();
@@ -208,9 +218,11 @@ public class DriverBackupService {
             int installed = tree.path("installed").asInt(-1);
             int failed = tree.path("failed").asInt(-1);
             String details = tree.path("details").asText("");
-            return new RevertDetail(installed, failed, details);
+            boolean restartAttempted = tree.path("restartAttempted").asBoolean(false);
+            boolean restartOk = tree.path("restartOk").asBoolean(false);
+            return new RevertDetail(installed, failed, details, restartAttempted, restartOk);
         } catch (Exception ignored) {
-            return new RevertDetail(-1, -1, "");
+            return new RevertDetail(-1, -1, "", false, false);
         }
     }
 

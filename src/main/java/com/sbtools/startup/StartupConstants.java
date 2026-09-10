@@ -8,12 +8,27 @@ public final class StartupConstants {
     public static final String REG_RUN_ONCE = "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce";
     public static final String REG_RUN_DISABLED = "Software\\Microsoft\\Windows\\CurrentVersion\\RunDisabled";
     public static final String REG_STARTUP_APPROVED = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+    /**
+     * Windows does not consult {@code StartupApproved\RunOnce} for RunOnce keys —
+     * RunOnce values run once then auto-delete regardless of any Approved byte.
+     * Kept only to clean legacy orphans; never write here to "disable" RunOnce.
+     */
     public static final String REG_STARTUP_APPROVED_RUNONCE = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\RunOnce";
     public static final String REG_WOW6432_RUN = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run";
     public static final String REG_WOW6432_RUN_ONCE = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnce";
     public static final String REG_WOW6432_RUN_DISABLED = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\RunDisabled";
-    public static final String REG_WOW6432_APPROVED = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
-    public static final String REG_WOW6432_APPROVED_RUNONCE = "Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\RunOnce";
+    /**
+     * 32-bit Run Approved overlay. Task Manager stores 32-bit Run disabled state in
+     * {@code ...\Explorer\StartupApproved\Run32} (same hive, no Wow6432Node segment),
+     * not under Wow6432Node. The previous Wow6432Node Approved path was never consulted
+     * by Windows — writing there was a silent no-op.
+     */
+    public static final String REG_WOW6432_APPROVED = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run32";
+    /**
+     * RunOnce has no StartupApproved overlay consulted by Windows. Kept only to clean
+     * legacy orphans written by older versions; never write here for enable/disable.
+     */
+    public static final String REG_WOW6432_APPROVED_RUNONCE = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run32";
 
     public static String toApprovedPath(String keyPath) {
         if (keyPath == null) return REG_STARTUP_APPROVED;

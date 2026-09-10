@@ -773,18 +773,66 @@ public class StartupTabView extends BorderPane {
             }
         }
 
+        // RunOnce entries cannot be disabled via StartupApproved (Windows ignores it).
+        // Filter them out with an honest message instead of fake success.
+        List<StartupItem> runOnceItems = selected.stream()
+                .filter(i -> i.getType() == StartupItemType.REGISTRY
+                        && i.getLocation() != null && i.getLocation().contains("RunOnce"))
+                .toList();
+        if (!runOnceItems.isEmpty()) {
+            if (runOnceItems.size() == selected.size()) {
+                Alert info = new Alert(Alert.AlertType.INFORMATION);
+                info.setTitle("RunOnce cannot be disabled");
+                info.setHeaderText("RunOnce entries run once then auto-delete");
+                info.setContentText("Windows ignores disable flags for RunOnce. "
+                        + "Use Delete (a backup is created) to prevent "
+                        + (selected.size() == 1 ? "\"" + selected.get(0).getName() + "\" from running."
+                                : "these " + selected.size() + " item(s) from running."));
+                info.initModality(Modality.APPLICATION_MODAL);
+                info.showAndWait();
+                return;
+            } else {
+                Alert info = new Alert(Alert.AlertType.INFORMATION);
+                info.setTitle("RunOnce skipped");
+                info.setHeaderText("Some RunOnce entries were skipped");
+                info.setContentText(runOnceItems.size() + " RunOnce item(s) cannot be disabled (Windows ignores the flag) "
+                        + "and will be skipped. Only the remaining " + (selected.size() - runOnceItems.size())
+                        + " item(s) will be toggled. Use Delete to remove RunOnce entries.");
+                info.initModality(Modality.APPLICATION_MODAL);
+                info.showAndWait();
+                List<StartupItem> allowed = new ArrayList<>(selected);
+                allowed.removeAll(runOnceItems);
+                if (allowed.isEmpty()) return;
+                selected = allowed;
+            }
+        }
+
         if (selected.size() == 1) {
             StartupItem item = selected.get(0);
             // Guard critical system services even for single toggle (central policy)
             if (StartupSafety.isCriticalDisable(item)) {
-                Alert critical = new Alert(Alert.AlertType.WARNING);
+                Alert critical = new Alert(Alert.AlertType.CONFIRMATION);
                 critical.setTitle("Critical System Service");
                 critical.setHeaderText("Disabling critical service: " + item.getName());
                 critical.setContentText("This service is required for Windows stability/boot.\n"
                         + "Disabling it may render the system unbootable or unstable.\n\n"
                         + "Are you sure you want to disable \"" + item.getName() + "\"?");
                 critical.initModality(Modality.APPLICATION_MODAL);
-                if (critical.showAndWait().orElse(null) != ButtonType.OK) {
+                critical.getButtonTypes().setAll(ButtonType.OK, ButtonType.CANCEL);
+                // Safety: Cancel is default so Enter/Esc does not accidentally disable.
+                try {
+                    javafx.scene.control.Button okBtn =
+                            (javafx.scene.control.Button) critical.getDialogPane().lookupButton(ButtonType.OK);
+                    javafx.scene.control.Button cancelBtn =
+                            (javafx.scene.control.Button) critical.getDialogPane().lookupButton(ButtonType.CANCEL);
+                    if (okBtn != null) okBtn.setDefaultButton(false);
+                    if (cancelBtn != null) {
+                        cancelBtn.setDefaultButton(true);
+                        cancelBtn.setCancelButton(true);
+                    }
+                } catch (Exception ignored) {
+                }
+                if (critical.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
                     return;
                 }
             } else {
@@ -819,7 +867,22 @@ public class StartupTabView extends BorderPane {
             }
             confirm.setContentText(msg.toString());
             confirm.initModality(Modality.APPLICATION_MODAL);
-            if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
+            if (!criticalToDisable.isEmpty()) {
+                // Safety: when critical services are included, Cancel is default.
+                try {
+                    javafx.scene.control.Button okBtn =
+                            (javafx.scene.control.Button) confirm.getDialogPane().lookupButton(ButtonType.OK);
+                    javafx.scene.control.Button cancelBtn =
+                            (javafx.scene.control.Button) confirm.getDialogPane().lookupButton(ButtonType.CANCEL);
+                    if (okBtn != null) okBtn.setDefaultButton(false);
+                    if (cancelBtn != null) {
+                        cancelBtn.setDefaultButton(true);
+                        cancelBtn.setCancelButton(true);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
                 return;
             }
         }
@@ -834,7 +897,10 @@ public class StartupTabView extends BorderPane {
             List<String> errors = new ArrayList<>();
             for (StartupItem item : itemsToToggle) {
                 try {
-                    service.toggleStatus(item);
+                    // UI already showed explicit confirmation (including critical-service
+                    // warning with Cancel-default). Pass consent through so the
+                    // service-layer guard does not block the confirmed action.
+                    service.toggleStatus(item, true);
                 } catch (Exception e) {
                     AppLogger.error("Failed to toggle status for " + item.getName(), e);
                     errors.add(item.getName() + ": " + e.getMessage());

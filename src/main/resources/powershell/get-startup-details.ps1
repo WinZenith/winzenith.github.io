@@ -100,6 +100,8 @@ foreach ($task in $allTasks) {
         TaskName  = $task.TaskName
         TaskPath  = $task.TaskPath
         Enabled   = ($isEnabled -and $triggerEnabled)
+        TaskEnabled = $isEnabled
+        TriggerEnabled = $triggerEnabled
         Actions   = $actionStr
         Publisher = $publisher
     }

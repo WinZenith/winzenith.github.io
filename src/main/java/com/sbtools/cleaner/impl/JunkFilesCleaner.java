@@ -20,7 +20,12 @@ public class JunkFilesCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        CleanerUtils.scanDirectorySizesOlderThan(row, getJunkDirs(), Duration.ofDays(1));
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        CleanerUtils.scanDirectorySizesOlderThan(row, getJunkDirs(), Duration.ofDays(1), token);
     }
 
     @Override

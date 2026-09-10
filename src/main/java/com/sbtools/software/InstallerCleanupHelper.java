@@ -45,8 +45,9 @@ public final class InstallerCleanupHelper {
                     for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
                     Alert del = new Alert(Alert.AlertType.CONFIRMATION,
                             "The following installer files were detected in your Downloads folder:\n\n"
-                                    + sb + "\nDelete these files?");
+                                    + sb + "\nDelete these files?\n\n(Auto-declines after 90 seconds.)");
                     del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
+                    autoDeclineAfter(del, result, 90_000L);
                     boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
                     if (confirmed) {
                         service.deleteInstallerFiles(candidates);
@@ -72,11 +73,15 @@ public final class InstallerCleanupHelper {
      * Synchronously prompts the user to delete installer files detected in the Downloads folder.
      * Blocks until the user responds. Safe to call only from background threads.
      *
+     * @deprecated Prefer {@link #promptAndCleanupAsync} which never blocks a worker
+     * thread on a 60s latch. Kept for compatibility; bounded by a 60s latch.
+     *
      * @param service   the update service (for finding/deleting files)
      * @param entry     the update entry that was installed
      * @param since     timestamp to search for candidate files (typically install start time)
      * @return true if the user confirmed deletion and files were deleted
      */
+    @Deprecated
     public static boolean promptAndCleanup(SoftwareUpdateService service,
                                            SoftwareUpdateEntry entry,
                                            Instant since) {
@@ -180,8 +185,9 @@ public final class InstallerCleanupHelper {
                     }
                     Alert del = new Alert(Alert.AlertType.CONFIRMATION,
                             "The following installer files (" + totalFiles + " file(s)) were detected in your Downloads folder:\n\n"
-                                    + sb + "Delete these files?");
+                                    + sb + "Delete these files?\n\n(Auto-declines after 90 seconds.)");
                     del.setHeaderText("Clean up installer files");
+                    autoDeclineAfter(del, result, 90_000L);
                     boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
                     if (confirmed) {
                         for (List<Path> files : allCandidates.values()) {
@@ -202,5 +208,41 @@ public final class InstallerCleanupHelper {
                     com.sbtools.util.AppLogger.warning("promptAndCleanupBatchAsync timeout: " + ex.getMessage());
                     return false;
                 });
+    }
+
+    /**
+     * Auto-closes a modal cleanup dialog after {@code timeoutMs} (or immediately
+     * when its future already completed) so a walk-away can never hold FX --
+     * and therefore {@code globalBusy} -- indefinitely. The orTimeout() on the
+     * future alone is NOT enough because showAndWait() blocks the FX thread and
+     * queues all later runLater work behind the open dialog.
+     */
+    private static void autoDeclineAfter(Alert dialog, CompletableFuture<Boolean> future, long timeoutMs) {
+        Thread watcher = new Thread(() -> {
+            try {
+                long deadline = System.currentTimeMillis() + Math.max(5_000L, timeoutMs);
+                while (!future.isDone() && System.currentTimeMillis() < deadline) {
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+                if (!future.isDone()) {
+                    Platform.runLater(() -> {
+                        try {
+                            if (!future.isDone()) {
+                                com.sbtools.util.AppLogger.warning("Cleanup dialog auto-declined after timeout");
+                                dialog.setResult(ButtonType.CANCEL);
+                                dialog.hide();
+                            }
+                        } catch (Exception ignored) {}
+                    });
+                }
+            } catch (Exception ignored) {}
+        }, "installer-cleanup-watcher");
+        watcher.setDaemon(true);
+        watcher.start();
     }
 }

@@ -155,6 +155,7 @@ public class SoftwareUpdateService {
 
     List<SoftwareUpdateEntry> parseTextOutput(String stdout) {
         List<SoftwareUpdateEntry> out = new ArrayList<>();
+        int skippedNonWinget = 0;
         String trimmed = stdout == null ? "" : stdout.trim();
         if (trimmed.isEmpty()) return out;
         String lowerTrimmed = trimmed.toLowerCase();
@@ -298,9 +299,13 @@ public class SoftwareUpdateService {
                 // Normalize “unknown” available as blank
                 if (available != null && "unknown".equalsIgnoreCase(available.trim())) available = "";
 
-                // Source filter: only skip if source explicitly non-winget; blank means winget (since we passed --source winget)
+                // Source filter: this tab only manages the winget source (install runs
+                // with --source winget). Non-winget rows (e.g. msstore) are skipped
+                // explicitly and counted so the "up to date" status never silently
+                // hides them -- see ViewModel status wording ("Store apps not checked").
                 if (source != null && !source.isBlank() && !source.equalsIgnoreCase("winget")) {
                     // Allow empty source to pass (winget default), but skip msstore etc.
+                    skippedNonWinget++;
                     continue;
                 }
                 if (available == null || available.isBlank()) continue;
@@ -317,6 +322,9 @@ public class SoftwareUpdateService {
                 }
             } catch (Exception ignored) {
             }
+        }
+        if (skippedNonWinget > 0) {
+            AppLogger.info("Skipped " + skippedNonWinget + " non-winget (e.g. msstore) row(s): Store apps are not managed by this tab");
         }
         return out;
     }
@@ -377,6 +385,7 @@ public class SoftwareUpdateService {
 
     List<SoftwareUpdateEntry> parseJsonOutput(String stdout) {
         List<SoftwareUpdateEntry> results = new ArrayList<>();
+        int skippedNonWinget = 0;
         try {
             JsonNode root = JsonMapper.parseTree(stdout);
             JsonNode arrayNode = null;
@@ -482,8 +491,10 @@ public class SoftwareUpdateService {
                         name = id.contains(".") ? id.substring(id.lastIndexOf('.') + 1) : id;
                     }
                     if (source != null && !source.isBlank() && !source.equalsIgnoreCase("winget")) {
-                        // winget --source winget should still sometimes return source=winget, blank means winget
-                        // Keep strictly winget, but allow blank/null to pass
+                        // winget --source winget should still sometimes return source=winget, blank means winget.
+                        // Non-winget rows (msstore) are not managed by this tab: skip
+                        // explicitly (counted + logged below) instead of silently vanishing.
+                        skippedNonWinget++;
                         continue;
                     }
                     if (available == null || available.isBlank() || "unknown".equalsIgnoreCase(available)) {
@@ -504,6 +515,9 @@ public class SoftwareUpdateService {
                 }
             } else {
                 AppLogger.warning("parseJsonOutput: no array node found in JSON: " + stdout.substring(0, Math.min(500, stdout.length())));
+            }
+            if (skippedNonWinget > 0) {
+                AppLogger.info("Skipped " + skippedNonWinget + " non-winget JSON row(s): Store apps are not managed by this tab");
             }
         } catch (Exception ex) {
             AppLogger.warning("parseJsonOutput failed: " + ex.getMessage());
@@ -867,15 +881,58 @@ public class SoftwareUpdateService {
             }
         } catch (Exception ignored) {
         }
-        String lower = output.toLowerCase();
-        // Plain "rebootrequired"/"restartrequired" tokens (wu-install JSON compressed form).
-        if (lower.contains("rebootrequired") || lower.contains("restartrequired")) return true;
-        // Human-readable reboot phrasing from winget/MSI wrappers.
-        if (lower.contains("reboot required") || lower.contains("restart required")
-                || lower.contains("restart is required") || lower.contains("a restart")
-                || lower.contains("please reboot") || lower.contains("please restart")
-                || lower.contains("error_success_reboot_required")
-                || lower.contains("a reboot is required")) return true;
+        // Negation-aware fallback for non-JSON phrasing. "No reboot required",
+        // "reboot not required" and '"rebootRequired":false' must NOT trigger a
+        // batch abort + forced reboot prompt. JSON with an explicit boolean was
+        // already handled above; this covers free-text winget/MSI wrappers.
+        // Delegates to the same line-scoped logic as WingetRunner (duplicated
+        // to avoid a class cycle).
+        if (containsAffirmativeRebootPhrasing(output)) return true;
+        return false;
+    }
+
+    /**
+     * Line-scoped, negation-aware reboot phrasing check. Mirrors
+     * {@code WingetRunner.containsAffirmativeReboot}; duplicated to avoid a
+     * WingetRunner <-> SoftwareUpdateService class cycle.
+     */
+    static boolean containsAffirmativeRebootPhrasing(String output) {
+        if (output == null || output.isBlank()) return false;
+        for (String rawLine : output.toLowerCase().split("\\r?\\n")) {
+            String l = rawLine.trim();
+            if (l.isEmpty()) continue;
+            boolean hasCompact = l.contains("rebootrequired") || l.contains("restartrequired")
+                    || l.contains("error_success_reboot_required");
+            boolean hasPhrase = l.contains("reboot required") || l.contains("restart required")
+                    || l.contains("restart is required") || l.contains("a reboot is required")
+                    || l.contains("please reboot") || l.contains("please restart");
+            boolean hasBareRestart = !hasCompact && !hasPhrase
+                    && l.contains("a restart")
+                    && (l.contains("requir") || l.contains("needed") || l.contains("necessary"));
+            if (!hasCompact && !hasPhrase && !hasBareRestart) continue;
+            if (isNegatedRebootLine(l)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isNegatedRebootLine(String lowerLine) {
+        String l = lowerLine;
+        if (l.matches(".*rebootrequired\"?\\s*[:=]\\s*false.*")) return true;
+        if (l.matches(".*restartrequired\"?\\s*[:=]\\s*false.*")) return true;
+        if (l.matches(".*rebootrequired\"?\\s*[:=]\\s*0\\b.*")) return true;
+        if (l.matches(".*restartrequired\"?\\s*[:=]\\s*0\\b.*")) return true;
+        if (l.contains("rebootrequired") || l.contains("restartrequired")) {
+            if (l.contains("no ") || l.contains("not ") || l.contains("n't")
+                    || l.contains("without") || l.contains("never") || l.contains("false")
+                    || l.contains("none")) return true;
+            return false;
+        }
+        if (l.matches(".*\\bno\\s+(reboot|restart)\\b.*")) return true;
+        if (l.matches(".*\\b(reboot|restart)\\b[^\\n]*?\\bnot\\s+(required|needed|necessary)\\b.*")) return true;
+        if (l.matches(".*\\bnot\\s+requir[^\\n]*?\\b(reboot|restart)\\b.*")) return true;
+        if (l.matches(".*n['’]t\\s+requir[^\\n]*?\\b(reboot|restart)\\b.*")) return true;
+        if (l.matches(".*without\\s+[^\\n]*?\\b(reboot|restart)\\b.*")) return true;
         return false;
     }
 
@@ -1050,6 +1107,14 @@ public class SoftwareUpdateService {
             long timeout = Math.max(30, overallTimeoutSeconds);
             long deadlineNanos = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(timeout);
             while (!all.isDone()) {
+                if (Thread.currentThread().isInterrupted()) {
+                    AppLogger.info("Parallel scan interrupted; cancelling winget/WU workers");
+                    internalCancelled.set(true);
+                    wingetFuture.cancel(true);
+                    wuFuture.cancel(true);
+                    Thread.currentThread().interrupt();
+                    break;
+                }
                 if (cancelled != null && cancelled.get()) {
                     AppLogger.info("Parallel scan cancelled by user");
                     internalCancelled.set(true);
@@ -1098,7 +1163,17 @@ public class SoftwareUpdateService {
             }
         } catch (java.util.concurrent.CancellationException ex) {
             AppLogger.info("Parallel scan cancelled");
+            internalCancelled.set(true);
+            try { wingetFuture.cancel(true); } catch (Exception ignored) {}
+            try { wuFuture.cancel(true); } catch (Exception ignored) {}
         } catch (Exception ex) {
+            if (ex instanceof InterruptedException) Thread.currentThread().interrupt();
+            // An interrupt (e.g. Dashboard per-task timeout via Future.cancel(true))
+            // must also release the 2 scanExecutor workers; otherwise orphans hold
+            // the pool and the next scan/retry queues behind them.
+            internalCancelled.set(true);
+            try { wingetFuture.cancel(true); } catch (Exception ignored) {}
+            try { wuFuture.cancel(true); } catch (Exception ignored) {}
             AppLogger.warning("Parallel scan failed: " + ex.getMessage());
         } finally {
             if (cancelMonitor != null) cancelMonitor.interrupt();
@@ -1205,10 +1280,12 @@ public class SoftwareUpdateService {
     }
 
     static boolean isInstallTechnologyMismatch(ProcessResult result) {
+        if (result == null) return false;
         String combined = "";
         if (result.stdout() != null) combined += result.stdout();
         if (result.stderr() != null) combined += result.stderr();
-        return combined.contains("install technology is different")
+        String lower = combined.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("install technology is different")
                 || combined.contains("0x8A150011");
     }
 }

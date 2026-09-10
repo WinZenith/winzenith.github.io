@@ -86,6 +86,15 @@ public class UninstallerTabView extends BorderPane {
         return t;
     });
     private final ConcurrentHashMap<String, javafx.scene.image.Image> iconCache = new ConcurrentHashMap<>();
+    // B4 FIX: async leftover-size cache — computing Files.walk on the FX thread
+    // froze the review dialog for large dirs. Sizes resolve in background.
+    private final ConcurrentHashMap<String, Long> leftoverSizeCache = new ConcurrentHashMap<>();
+    private final java.util.Set<String> leftoverSizePending = ConcurrentHashMap.newKeySet();
+    private final ExecutorService leftoverSizeExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "uninstaller-size-loader");
+        t.setDaemon(true);
+        return t;
+    });
     private PauseTransition searchDebounce;
     private volatile boolean disposed = false;
     // Batch queue state (sequential with per-app prompts)
@@ -219,7 +228,10 @@ public class UninstallerTabView extends BorderPane {
             win32Toggle.setDisable(b);
             appxToggle.setDisable(b);
             cancelButton.setDisable(!b);
-            queueProgress.setVisible(false);
+            // SECOND-PASS FIX: do not hide the batch queue bar on every busy flip.
+            // Each queued app sets busy true->false; the old line erased queue
+            // progress after the first app. Queue code owns queueProgress
+            // visibility explicitly (shown at queue start, hidden at queue end).
             if (!b) {
                 progress.setVisible(false);
             }
@@ -279,7 +291,12 @@ public class UninstallerTabView extends BorderPane {
                     setGraphic(iconPane);
 
                     // Fast path: cached icon (avoids re-extraction on every scroll).
-                    String cacheKey = iconCacheKey(app);
+                    // BLOCKER FIX: never do filesystem I/O on the FX thread here.
+                    // The old key resolved the exe via listFiles() synchronously,
+                    // freezing scrolling on slow/network drives. Use a cheap
+                    // identity key on FX; the background task resolves + shares
+                    // by real exe path as well.
+                    String cacheKey = cheapIconCacheKey(app);
                     javafx.scene.image.Image cached = cacheKey == null ? null : iconCache.get(cacheKey);
                     if (cached != null) {
                         imageView.setImage(cached);
@@ -292,11 +309,22 @@ public class UninstallerTabView extends BorderPane {
                     try {
                         Future<?> f = iconExecutor.submit(() -> {
                             try {
+                                // Cheap-key recheck (another cell may have loaded it).
+                                javafx.scene.image.Image cheapHit = cacheKey == null ? null : iconCache.get(cacheKey);
+                                if (cheapHit != null) {
+                                    Platform.runLater(() -> {
+                                        if (getTableRow() != null && getTableRow().getItem() == app) {
+                                            imageView.setImage(cheapHit);
+                                        }
+                                    });
+                                    return;
+                                }
                                 String loc = AppIconResolver.resolveAppIconPath(app);
                                 if (loc != null && !loc.isBlank()) {
                                     String key = loc.toLowerCase();
                                     javafx.scene.image.Image hit = iconCache.get(key);
                                     if (hit != null) {
+                                        if (cacheKey != null) iconCache.putIfAbsent(cacheKey, hit);
                                         Platform.runLater(() -> {
                                             if (getTableRow() != null && getTableRow().getItem() == app) {
                                                 imageView.setImage(hit);
@@ -316,7 +344,11 @@ public class UninstallerTabView extends BorderPane {
                                                         javafx.scene.image.PixelFormat.getIntArgbInstance(), argb, 0, w);
                                                 if (key != null) {
                                                     iconCache.putIfAbsent(key, fxImg);
+                                                    if (cacheKey != null) iconCache.putIfAbsent(cacheKey, fxImg);
                                                     // Bound cache to avoid unbounded growth
+                                                    if (iconCache.size() > 500) iconCache.clear();
+                                                } else if (cacheKey != null) {
+                                                    iconCache.putIfAbsent(cacheKey, fxImg);
                                                     if (iconCache.size() > 500) iconCache.clear();
                                                 }
                                                 if (getTableRow() != null && getTableRow().getItem() == app) {
@@ -461,13 +493,43 @@ public class UninstallerTabView extends BorderPane {
         } catch (Exception ignored) {}
     }
 
-    private static String iconCacheKey(InstalledApp app) {
+    /**
+     * BLOCKER FIX: cheap identity key with zero filesystem I/O for the FX thread.
+     * The previous implementation resolved the exe via directory listing on every
+     * cell update, freezing the UI. Real exe-path sharing is still cached by the
+     * background loader under both keys.
+     */
+    private static String cheapIconCacheKey(InstalledApp app) {
         try {
-            String loc = AppIconResolver.resolveAppIconPath(app);
-            return loc == null ? null : loc.toLowerCase();
+            if (app == null) return null;
+            if (!app.isWin32()) {
+                String pkg = app.getAppxPackageFullName();
+                if (pkg != null && !pkg.isBlank()) return ("appx:" + pkg.trim().toLowerCase());
+            } else {
+                String reg = app.getRegistryKeyPath();
+                if (reg != null && !reg.isBlank()) {
+                    String hive = app.getRegistryHive() == null ? "" : app.getRegistryHive().trim().toLowerCase();
+                    return ("w32:" + hive + "\\" + reg.trim().toLowerCase());
+                }
+            }
+            String loc = app.getInstallLocation();
+            String un = app.getUninstallString();
+            String q = app.getQuietUninstallString();
+            String base = (loc == null ? "" : loc.trim().toLowerCase())
+                    + "||" + (un == null ? "" : un.trim().toLowerCase())
+                    + "||" + (q == null ? "" : q.trim().toLowerCase());
+            if (base.replace("|", "").isBlank()) {
+                String n = app.getName() == null ? "" : app.getName().trim().toLowerCase();
+                return n.isBlank() ? null : ("name:" + n);
+            }
+            return base;
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private static String iconCacheKey(InstalledApp app) {
+        return cheapIconCacheKey(app);
     }
 
     private void cancelCurrentOperation() {
@@ -477,6 +539,10 @@ public class UninstallerTabView extends BorderPane {
         try {
             leftoverCancel.set(true);
         } catch (Exception ignored) {}
+        // SECOND-PASS FIX: Cancel must also stop a running batch queue after the
+        // current app settles. Previously Cancel only aborted scans/leftover
+        // enumeration, so a 20-app queue could not be stopped mid-flight.
+        queueStopRequested = true;
         statusLabel.setText("Cancelling...");
     }
 
@@ -635,7 +701,9 @@ public class UninstallerTabView extends BorderPane {
                     apps = service.listWin32Apps();
                 } else {
                     // Fast list first for instant display; sizes enriched lazily below.
-                    apps = service.listAppxAppsFast();
+                    // BLOCKER FIX: forward the scan token so Cancel taskkills the
+                    // PowerShell child instead of waiting out the listing timeout.
+                    apps = service.listAppxAppsFast(ct.asAtomicBoolean());
                 }
 
                 if (ct.isCancelled()) return;
@@ -688,6 +756,10 @@ public class UninstallerTabView extends BorderPane {
                         if (!ct.isCancelled()) table.refresh();
                     });
                 }
+            } catch (java.util.concurrent.CancellationException ce) {
+                // User pressed Cancel (or tab disposed): exit quietly, no error dialog.
+                // busy/progress are cleared by the finally block below.
+                return;
             } catch (Exception e) {
                 if (ct.isCancelled()) return;
                 AppLogger.error("Failed to scan apps", e);
@@ -1569,14 +1641,52 @@ public class UninstallerTabView extends BorderPane {
                         } catch (Exception ignored) {}
                     }
                     currentItem = item;
+                    // B4 FIX: never block FX on Files.walk. Show cached size or
+                    // placeholder, resolve in background and refresh if cell reused.
+                    String basePath = item.getPath();
                     String suffix = "";
-                    if (!item.isRegistry()) {
-                        long sz = UninstallerService.computePathSizeBytes(item.getPath());
-                        if (sz >= 0) {
-                            suffix = "  (" + FormatUtils.formatBytes(sz) + ")";
+                    if (!item.isRegistry() && basePath != null) {
+                        Long cached = leftoverSizeCache.get(basePath);
+                        if (cached != null) {
+                            if (cached >= 0) suffix = "  (" + FormatUtils.formatBytes(cached) + ")";
+                        } else {
+                            if (leftoverSizePending.add(basePath)) {
+                                final LeftoverItem captured = item;
+                                final String capturedPath = basePath;
+                                final CheckBox capturedBox = checkBox;
+                                try {
+                                    leftoverSizeExecutor.submit(() -> {
+                                        try {
+                                            long sz = UninstallerService.computePathSizeBytes(capturedPath);
+                                            leftoverSizeCache.put(capturedPath, sz);
+                                            // SECOND-PASS FIX: bound the size cache like the icon
+                                            // cache. It previously grew across every uninstall
+                                            // without limit.
+                                            if (leftoverSizeCache.size() > 1000) leftoverSizeCache.clear();
+                                        } catch (Exception ignored) {
+                                            leftoverSizeCache.putIfAbsent(capturedPath, -1L);
+                                        } finally {
+                                            leftoverSizePending.remove(capturedPath);
+                                        }
+                                        javafx.application.Platform.runLater(() -> {
+                                            try {
+                                                // Only update if cell still shows the same item/path
+                                                if (getItem() == captured && capturedPath.equals(captured.getPath())) {
+                                                    Long v = leftoverSizeCache.get(capturedPath);
+                                                    String sfx = (v != null && v >= 0)
+                                                            ? "  (" + FormatUtils.formatBytes(v) + ")" : "";
+                                                    capturedBox.setText(capturedPath + sfx);
+                                                }
+                                            } catch (Exception ignored) {}
+                                        });
+                                    });
+                                } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                                    leftoverSizePending.remove(basePath);
+                                }
+                            }
                         }
                     }
-                    checkBox.setText(item.getPath() + suffix);
+                    checkBox.setText(basePath + suffix);
                     try {
                         checkBox.selectedProperty().unbindBidirectional(item.selectedProperty());
                     } catch (Exception ignored) {}
@@ -1704,9 +1814,12 @@ public class UninstallerTabView extends BorderPane {
     }
 
     /**
-     * High-confidence leftovers (pre-selected): the app's own install dir /
-     * primary uninstall registry key, or an exact app/publisher name match.
-     * Heuristic substring matches return false and are left unchecked.
+     * High-confidence leftovers (pre-selected): the app's primary uninstall registry
+     * key, or the app's own install dir ONLY when its leaf matches the app name,
+     * or an exact app-name match. Publisher-only and heuristic substring matches
+     * return false and are left unchecked. B1/B2 FIX: a shared vendor root
+     * (e.g. "...\Adobe" as InstallLocation for one Adobe app) must never be
+     * pre-checked — it would wipe sibling apps on one click.
      */
     private static boolean isHighConfidenceLeftover(String path, InstalledApp app, boolean isRegistry) {
         if (path == null || app == null) return false;
@@ -1724,7 +1837,12 @@ public class UninstallerTabView extends BorderPane {
                     String b = path.trim().replace('/', '\\');
                     while (a.endsWith("\\") && a.length() > 3) a = a.substring(0, a.length() - 1);
                     while (b.endsWith("\\") && b.length() > 3) b = b.substring(0, b.length() - 1);
-                    if (a.equalsIgnoreCase(b)) return true;
+                    if (a.equalsIgnoreCase(b)) {
+                        // Primary dir is high-confidence only when it looks
+                        // app-specific (leaf == app name) and not OS-protected/shared.
+                        if (com.sbtools.uninstaller.UninstallerService.isProtectedPath(b)) return false;
+                        return com.sbtools.uninstaller.UninstallerService.isExactMatch(leafOf(b), app);
+                    }
                 }
             }
             return com.sbtools.uninstaller.UninstallerService.isExactMatch(leafOf(path), app);
@@ -1744,5 +1862,8 @@ public class UninstallerTabView extends BorderPane {
         leftoverCancel.set(true);
         queueStopRequested = true;
         iconExecutor.shutdownNow();
+        try {
+            leftoverSizeExecutor.shutdownNow();
+        } catch (Exception ignored) {}
     }
 }

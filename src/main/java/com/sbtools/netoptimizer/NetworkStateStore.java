@@ -22,7 +22,18 @@ public class NetworkStateStore {
             .enable(SerializationFeature.INDENT_OUTPUT);
 
     public synchronized boolean isRebootRequired() {
-        return Boolean.parseBoolean(read().getOrDefault("rebootRequired", "false"));
+        Map<String, String> m = read();
+        if (!Boolean.parseBoolean(m.getOrDefault("rebootRequired", "false"))) return false;
+        // The flag is only clearable by an actual reboot (the banner Hide is
+        // session-only). Detect a reboot since the mark via the monotonic tick
+        // counter, which resets on boot but survives sleep/hibernate.
+        if (hasRebootedSinceMark(m)) {
+            m.put("rebootRequired", "false");
+            m.put("rebootReason", "");
+            write(m);
+            return false;
+        }
+        return true;
     }
 
     public synchronized String rebootReason() {
@@ -33,11 +44,54 @@ public class NetworkStateStore {
         Map<String, String> m = read();
         m.put("rebootRequired", Boolean.toString(required));
         m.put("rebootReason", reason != null ? reason : "");
+        if (required) {
+            // Wall clock + monotonic tick pair for reboot-since-mark detection.
+            m.put("rebootMarkedAtWall", Long.toString(System.currentTimeMillis()));
+            long tick = tickMillis();
+            if (tick >= 0) m.put("rebootMarkedTick", Long.toString(tick));
+        } else {
+            m.remove("rebootMarkedAtWall");
+            m.remove("rebootMarkedTick");
+        }
         write(m);
     }
 
     public synchronized void clearRebootRequired() {
         setRebootRequired(false, "");
+    }
+
+    /**
+     * True when the OS has rebooted since the reboot flag was marked: the
+     * monotonic tick counter ({@code GetTickCount64}) resets on boot. Sleep /
+     * hibernate do not reset it, so they cannot cause a false clear. Missing
+     * timestamps (flags written by older versions) never auto-clear.
+     */
+    private static boolean hasRebootedSinceMark(Map<String, String> m) {
+        long markedWall;
+        long markedTick;
+        try {
+            markedWall = Long.parseLong(m.getOrDefault("rebootMarkedAtWall", "-1"));
+            markedTick = Long.parseLong(m.getOrDefault("rebootMarkedTick", "-1"));
+        } catch (NumberFormatException e) {
+            return false;
+        }
+        if (markedWall < 0 || markedTick < 0) return false;
+        long wallElapsed = System.currentTimeMillis() - markedWall;
+        // Too soon to tell, or past the 49.7-day tick wraparound horizon.
+        if (wallElapsed < 60_000 || wallElapsed > 45L * 24 * 3600 * 1000) return false;
+        long nowTick = tickMillis();
+        if (nowTick < 0) return false;
+        return nowTick < markedTick;
+    }
+
+    /** Monotonic milliseconds since boot, or -1 when unavailable / non-Windows. */
+    private static long tickMillis() {
+        try {
+            if (!com.sbtools.util.AppPaths.isWindows()) return -1;
+            return com.sun.jna.platform.win32.Kernel32.INSTANCE.GetTickCount64();
+        } catch (Throwable t) {
+            return -1;
+        }
     }
 
     private Map<String, String> read() {

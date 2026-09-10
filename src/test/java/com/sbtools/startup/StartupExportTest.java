@@ -114,4 +114,12 @@ class StartupExportTest {
                 "Start Type: Automatic", "", "", "", StartupItemType.SERVICE, "Automatic");
         assertTrue(StartupImpactService.estimateBootImpactMs(svc) > 0);
     }
+
+    @Test
+    void impact_manualServicesDoNotInflateBootTotal() {
+        StartupItem manual = new StartupItem("SomeSvc", "Microsoft", "C:\\x", true,
+                "Start Type: Manual", "", "", "", StartupItemType.SERVICE, "Manual");
+        assertEquals(0, StartupImpactService.estimateBootImpactMs(manual),
+                "Manual services do not auto-start at boot and must contribute 0");
+    }
 }

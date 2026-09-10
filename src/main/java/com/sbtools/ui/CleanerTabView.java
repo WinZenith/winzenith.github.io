@@ -196,6 +196,11 @@ import java.util.concurrent.atomic.AtomicInteger;
         });
     }
 
+    private static String formatDuration(long ms) {
+        if (ms <= 0) return "-";
+        return ms >= 1000 ? String.format("%.1fs", ms / 1000.0) : ms + " ms";
+    }
+
     private void exportScanCsv() {
         if (sessionRows.isEmpty()) return;
         javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
@@ -397,10 +402,14 @@ import java.util.concurrent.atomic.AtomicInteger;
         statusCol.setPrefWidth(90);
 
         TableColumn<CleanupRow, String> durationCol = new TableColumn<>("Took");
+        // Bound to the row's duration property so Refresh / post-clean rescan
+        // updates are reflected. A snapshot string here would stay stale ("-")
+        // forever because the cell value would never re-evaluate.
         durationCol.setCellValueFactory(c -> {
-            long ms = c.getValue().getScanDurationMs();
-            String text = ms > 0 ? (ms >= 1000 ? String.format("%.1fs", ms / 1000.0) : ms + " ms") : "-";
-            return new javafx.beans.property.SimpleStringProperty(text);
+            CleanupRow row = c.getValue();
+            return javafx.beans.binding.Bindings.createStringBinding(
+                    () -> formatDuration(row.getScanDurationMs()),
+                    row.scanDurationMsProperty());
         });
         durationCol.setPrefWidth(70);
 
@@ -748,24 +757,25 @@ import java.util.concurrent.atomic.AtomicInteger;
             }
         }
 
-        boolean registryBackupRaw = false;
+        // Registry backup is mandatory: the .reg export is cheap and the delete
+        // path refuses to proceed when the backup fails (fail-safe in
+        // RegistryCleaner). There is intentionally no "delete without backup".
         if (registrySelected) {
             Alert backupPrompt = new Alert(Alert.AlertType.CONFIRMATION);
             backupPrompt.setTitle("Registry Backup");
-            backupPrompt.setHeaderText("Backup registry entries before cleanup?");
+            backupPrompt.setHeaderText("Registry backup will be created automatically");
             backupPrompt.setContentText("Invalid registry entries will be exported to a .reg file before deletion.\n\n"
-                    + "Choose Yes to create a backup, or No to delete entries directly.");
-            ButtonType yesBtn = new ButtonType("Yes, create backup");
-            ButtonType noBtn = new ButtonType("No, delete directly");
-            backupPrompt.getButtonTypes().setAll(yesBtn, noBtn, ButtonType.CANCEL);
+                    + "If the backup cannot be created, registry deletion is skipped for safety.\n\n"
+                    + "Continue with automatic backup?");
+            ButtonType continueBtn = new ButtonType("Continue with backup");
+            backupPrompt.getButtonTypes().setAll(continueBtn, ButtonType.CANCEL);
             var result = backupPrompt.showAndWait().orElse(ButtonType.CANCEL);
-            if (result == ButtonType.CANCEL) {
+            if (result != continueBtn) {
                 busy.set(false);
                 return;
             }
-            registryBackupRaw = result == yesBtn;
         }
-        final boolean registryBackup = registryBackupRaw;
+        final boolean registryBackup = registrySelected;
 
         AppSettings settings = settingsStore.load();
         final boolean createRestorePoint = settings.autoCreateRestoreBeforeCleanup();
@@ -907,6 +917,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             progressBar.setVisible(true);
             cancelButton.setDisable(false);
 
+            final java.util.concurrent.atomic.AtomicBoolean restoreTimedOut = new java.util.concurrent.atomic.AtomicBoolean(false);
             activeRestoreFuture = CompletableFuture.runAsync(() -> {
                 try {
                     ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
@@ -934,6 +945,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                     }
                     if (!finished) {
                         p.destroyForcibly();
+                        restoreTimedOut.set(true);
                         AppLogger.warning("System Restore point creation timed out");
                     } else if (p.exitValue() != 0) {
                         String err = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
@@ -964,6 +976,23 @@ import java.util.concurrent.atomic.AtomicInteger;
                     cancelling.set(false);
                     busy.set(false);
                     return;
+                }
+                if (restoreTimedOut.get()) {
+                    Alert timeoutAlert = new Alert(Alert.AlertType.WARNING,
+                            "System Restore point creation timed out after 120 seconds.\n\n"
+                                    + "Cleanup will continue WITHOUT a restore point.\n"
+                                    + "Consider enabling System Protection or retrying later.\n\n"
+                                    + "Do you want to continue without a restore point?",
+                            ButtonType.OK, ButtonType.CANCEL);
+                    timeoutAlert.setHeaderText("Restore Point Timed Out");
+                    if (timeoutAlert.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                        statusLabel.setText("Cleanup canceled (no restore point).");
+                        progressBar.setVisible(false);
+                        cancelButton.setDisable(true);
+                        cancelling.set(false);
+                        busy.set(false);
+                        return;
+                    }
                 }
                 doClean.run();
             }));

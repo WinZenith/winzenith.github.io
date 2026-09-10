@@ -136,6 +136,39 @@ class SoftwareUpdateServiceTest {
     }
 
     @Test
+    void isRebootRequired_negatedPhrasingDoesNotTrigger() {
+        assertFalse(SoftwareUpdateService.isRebootRequired(
+                new ProcessResult(0, "No reboot required.", "")));
+        assertFalse(SoftwareUpdateService.isRebootRequired(
+                new ProcessResult(0, "No restart required.", "")));
+        assertFalse(SoftwareUpdateService.isRebootRequired(
+                new ProcessResult(0, "Reboot not required.", "")));
+        assertFalse(SoftwareUpdateService.isRebootRequired(
+                new ProcessResult(0, "{\"rebootRequired\":false}", "")));
+        assertFalse(SoftwareUpdateService.isRebootRequired(
+                new ProcessResult(1, "Install finished. No reboot required.\nDone.", "")));
+        // Affirmative still triggers.
+        assertTrue(SoftwareUpdateService.isRebootRequired(
+                new ProcessResult(1, "A reboot is required to finish installation.", "")));
+        assertTrue(SoftwareUpdateService.isRebootRequired(
+                new ProcessResult(1, "Please restart your computer.", "")));
+    }
+
+    @Test
+    void launcherFailure_onlyOnMissingBinary() {
+        // Launcher missing -> fallback allowed.
+        assertTrue(WingetRunner.isLauncherFailure(
+                new ProcessResult(1, "'winget' is not recognized as an internal or external command", "")));
+        assertTrue(WingetRunner.isLauncherFailure(
+                new ProcessResult(9009, "", "")));
+        // winget ran and failed on its own terms -> must NOT fallback (no triple-run).
+        assertFalse(WingetRunner.isLauncherFailure(
+                new ProcessResult(1, "No applicable update found.\nName  Id  Version", "")));
+        assertFalse(WingetRunner.isLauncherFailure(
+                new ProcessResult(-1978335189, "Failed to install: hash mismatch", "")));
+    }
+
+    @Test
     void isSuccessOrRebootRequired_counts3010AsSuccess() {
         assertTrue(SoftwareUpdateService.isSuccessOrRebootRequired(new ProcessResult(0, "ok", "")));
         assertTrue(SoftwareUpdateService.isSuccessOrRebootRequired(new ProcessResult(3010, "ok", "")));

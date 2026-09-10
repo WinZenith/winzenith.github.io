@@ -9,13 +9,11 @@ import java.io.IOException;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 public final class CleanerUtils {
 
@@ -172,12 +170,17 @@ public final class CleanerUtils {
             }
         }
         if (!path.contains("\\") && !path.contains("/")) {
-            if (path.toLowerCase().endsWith(".dll") || path.toLowerCase().endsWith(".cpl")) {
-                return path;
-            }
+            // Bare filenames (no directory) are LoadLibrary/search-path references,
+            // not concrete file paths. Treating "foo.dll" as missing (CWD lookup)
+            // would create false "invalid entry" positives — never report them.
             return null;
         }
         path = expandEnvironmentVariables(path);
+        if (path != null && path.contains("%")) {
+            // Unexpanded variable (unknown/missing env): the target cannot be
+            // evaluated confidently — skip rather than flag as invalid.
+            return null;
+        }
         return path;
     }
 
@@ -198,55 +201,110 @@ public final class CleanerUtils {
     }
 
     public static void scanDirectorySizes(CleanupRow row, List<Path> dirs, int maxDepth) {
-        long totalSize = 0;
-        int itemCount = 0;
+        scanDirectorySizes(row, dirs, maxDepth, null);
+    }
+
+    public static void scanDirectorySizes(CleanupRow row, List<Path> dirs, int maxDepth, CancellationToken token) {
+        java.util.concurrent.atomic.AtomicLong totalSize = new java.util.concurrent.atomic.AtomicLong(0);
+        java.util.concurrent.atomic.AtomicLong itemCount = new java.util.concurrent.atomic.AtomicLong(0);
+        int depth = maxDepth > 0 ? maxDepth : DEFAULT_SCAN_MAX_DEPTH;
         for (Path dir : dirs) {
+            if (token != null && token.isCancelled()) break;
             if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> walk = maxDepth > 0 ? Files.walk(dir, maxDepth) : Files.walk(dir)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> {
-                                try { return Files.size(p); } catch (Exception e) { return p.toFile().length(); }
-                            }));
-                    totalSize += stats.getSum();
-                    itemCount += (int) stats.getCount();
+                try {
+                    Files.walkFileTree(dir, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class),
+                            depth, new SimpleFileVisitor<>() {
+                        @Override
+                        public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
+                            if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                            if (attrs.isSymbolicLink() || attrs.isOther()) return FileVisitResult.SKIP_SUBTREE;
+                            try {
+                                if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
+                            } catch (Exception ignored) {}
+                            return FileVisitResult.CONTINUE;
+                        }
+
+                        @Override
+                        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                            if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                            if (attrs.isRegularFile()) {
+                                totalSize.addAndGet(attrs.size());
+                                itemCount.incrementAndGet();
+                            }
+                            return FileVisitResult.CONTINUE;
+                        }
+
+                        @Override
+                        public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                            return FileVisitResult.CONTINUE;
+                        }
+                    });
                 } catch (Exception ignored) {
                 }
             }
         }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+        row.setTotalBytes(totalSize.get());
+        row.setItemCount((int) itemCount.get());
+        row.setSizeOrCountText(formatBytes(totalSize.get())
+                + (itemCount.get() > 0 ? " (" + itemCount.get() + " files)" : ""));
     }
 
     public static void scanDirectorySizesOlderThan(CleanupRow row, List<Path> dirs, java.time.Duration maxAge) {
-        long totalSize = 0;
-        int itemCount = 0;
+        scanDirectorySizesOlderThan(row, dirs, maxAge, null);
+    }
+
+    public static void scanDirectorySizesOlderThan(CleanupRow row, List<Path> dirs,
+            java.time.Duration maxAge, CancellationToken token) {
+        java.util.concurrent.atomic.AtomicLong totalSize = new java.util.concurrent.atomic.AtomicLong(0);
+        java.util.concurrent.atomic.AtomicLong itemCount = new java.util.concurrent.atomic.AtomicLong(0);
         long cutoff = System.currentTimeMillis() - maxAge.toMillis();
         for (Path dir : dirs) {
+            if (token != null && token.isCancelled()) break;
             if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> walk = Files.walk(dir, DEFAULT_SCAN_MAX_DEPTH)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .filter(p -> {
-                                try {
-                                    if (Files.isHidden(p)) return false;
-                                    long lastModified = p.toFile().lastModified();
-                                    return lastModified > 0 && lastModified < cutoff;
-                                } catch (Exception e) {
-                                    return false;
+                if (!isSafeToCleanDirectory(dir)) {
+                    AppLogger.warning("Skipping unsafe scan directory: " + dir);
+                    continue;
+                }
+                try {
+                    Files.walkFileTree(dir, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class),
+                            DEFAULT_SCAN_MAX_DEPTH, new SimpleFileVisitor<>() {
+                        @Override
+                        public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
+                            if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                            if (attrs.isSymbolicLink() || attrs.isOther()) return FileVisitResult.SKIP_SUBTREE;
+                            return FileVisitResult.CONTINUE;
+                        }
+
+                        @Override
+                        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                            if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                            try {
+                                if (!attrs.isRegularFile()) return FileVisitResult.CONTINUE;
+                                if (Files.isHidden(file)) return FileVisitResult.CONTINUE;
+                                long lastModified = attrs.lastModifiedTime() != null
+                                        ? attrs.lastModifiedTime().toMillis() : 0L;
+                                if (lastModified > 0 && lastModified < cutoff) {
+                                    totalSize.addAndGet(attrs.size());
+                                    itemCount.incrementAndGet();
                                 }
-                            })
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> {
-                                try { return Files.size(p); } catch (Exception e) { return p.toFile().length(); }
-                            }));
-                    totalSize += stats.getSum();
-                    itemCount += (int) stats.getCount();
+                            } catch (Exception ignored) {
+                            }
+                            return FileVisitResult.CONTINUE;
+                        }
+
+                        @Override
+                        public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                            return FileVisitResult.CONTINUE;
+                        }
+                    });
                 } catch (Exception ignored) {
                 }
             }
         }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+        row.setTotalBytes(totalSize.get());
+        row.setItemCount((int) itemCount.get());
+        row.setSizeOrCountText(formatBytes(totalSize.get())
+                + (itemCount.get() > 0 ? " (" + itemCount.get() + " files)" : ""));
     }
 
     public static long cleanDirectoryPattern(List<Path> dirs) {
@@ -257,8 +315,13 @@ public final class CleanerUtils {
         long cleaned = 0;
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
+                if (!isSafeToCleanDirectory(dir)) {
+                    AppLogger.warning("Skipping unsafe clean directory: " + dir);
+                    continue;
+                }
                 cleaned += deleteDirectoryContents(dir, token);
             }
+            if (token != null && token.isCancelled()) break;
         }
         return cleaned;
     }
@@ -272,15 +335,23 @@ public final class CleanerUtils {
         long cutoff = System.currentTimeMillis() - maxAge.toMillis();
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
+                if (!isSafeToCleanDirectory(dir)) {
+                    AppLogger.warning("Skipping unsafe clean directory: " + dir);
+                    continue;
+                }
                 cleaned += deleteDirectoryContentsOlderThan(dir, cutoff, token);
             }
+            if (token != null && token.isCancelled()) break;
         }
         return cleaned;
     }
 
     /**
      * Conservative safety check: target must exist, must not be a protected OS path,
-     * and must not be a filesystem root. New cleaners should call this before deleting.
+     * must not be a filesystem root, and must not be an ancestor of (or equal to)
+     * sensitive roots (user profile, Windows dir, AppData locations). Guards against
+     * hijacked/misconfigured env vars (e.g. TEMP=C:\) redirecting a clean at the
+     * whole drive or profile.
      */
     public static boolean isSafeToCleanDirectory(Path dir) {
         if (dir == null) return false;
@@ -291,16 +362,42 @@ public final class CleanerUtils {
             if (abs.getParent() == null) return false;
             Path root = abs.getRoot();
             if (root != null && abs.equals(root)) return false;
+            if (abs.getNameCount() <= 1) return false;
             // Never allow cleaning the whole user profile, Windows dir, or drive root content.
             String absStr = abs.toString().toLowerCase().replace('/', '\\');
             String userProfile = safeEnv("USERPROFILE");
-            if (userProfile != null && absStr.equals(userProfile.toLowerCase().replace('/', '\\'))) return false;
+            if (userProfile != null && isSameOrAncestor(absStr, userProfile.toLowerCase().replace('/', '\\'))) return false;
             String windir = safeEnv("WINDIR");
-            if (windir != null && absStr.equals(windir.toLowerCase().replace('/', '\\'))) return false;
+            if (windir != null && isSameOrAncestor(absStr, windir.toLowerCase().replace('/', '\\'))) return false;
+            String localAppData = safeEnv("LOCALAPPDATA");
+            if (localAppData != null && isSameOrAncestor(absStr, localAppData.toLowerCase().replace('/', '\\'))) return false;
+            String appData = safeEnv("APPDATA");
+            if (appData != null && isSameOrAncestor(absStr, appData.toLowerCase().replace('/', '\\'))) return false;
+            String systemDrive = safeEnv("SYSTEMDRIVE");
+            if (systemDrive != null) {
+                String sd = systemDrive.toLowerCase().replace('/', '\\');
+                if (!sd.endsWith("\\")) sd = sd + "\\";
+                // Bare drive root itself (e.g. "c:\") is never a safe target.
+                if (absStr.equals(sd.substring(0, sd.length() - 1)) || absStr.equals(sd)) return false;
+            }
+            try {
+                if (Files.isSymbolicLink(dir)) return false;
+                Object reparse = Files.getAttribute(dir, "dos:isReparsePoint",
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                if (Boolean.TRUE.equals(reparse)) return false;
+            } catch (Exception ignored) {}
             return true;
         } catch (Exception e) {
             return false;
         }
+    }
+
+    private static boolean isSameOrAncestor(String candidateDir, String sensitivePath) {
+        String c = candidateDir.endsWith("\\") ? candidateDir.substring(0, candidateDir.length() - 1) : candidateDir;
+        String s = sensitivePath.endsWith("\\") ? sensitivePath.substring(0, sensitivePath.length() - 1) : sensitivePath;
+        if (c.equals(s)) return true;
+        // Candidate is an ancestor of the sensitive path (e.g. C:\Users vs C:\Users\name).
+        return s.startsWith(c + "\\");
     }
 
     /**
@@ -417,31 +514,78 @@ public final class CleanerUtils {
     }
 
     public static long deleteDirectoryContentsOlderThan(Path dir, long cutoffMillis, CancellationToken token) {
-        long cleaned = 0;
-        try (Stream<Path> walk = Files.walk(dir)) {
-            List<Path> sorted = walk.sorted(Comparator.comparingInt(Path::getNameCount).reversed()
-                    .thenComparing(Comparator.reverseOrder())).toList();
-            for (Path f : sorted) {
-                if (token != null && token.isCancelled()) break;
-                if (f.equals(dir)) continue;
-                    try {
-                        long lastModified = f.toFile().lastModified();
-                        if (lastModified > 0 && lastModified >= cutoffMillis) continue;
-                        if (Files.isHidden(f)) continue;
-                        if (isProtectedPath(f)) continue;
-                        if (Files.isRegularFile(f) || Files.isSymbolicLink(f)) {
-                        long size = Files.size(f);
-                        deletePermanently(f, token);
-                        if (!Files.exists(f)) cleaned += size;
-                    } else if (Files.isDirectory(f)) {
-                        deletePermanently(f, token);
+        // Defense in depth: never run an age-based recursive delete against an
+        // unsafe root (hijacked env var, drive root, profile ancestor, link).
+        if (!isSafeToCleanDirectory(dir)) {
+            AppLogger.warning("Skipping unsafe age-based clean directory: " + dir);
+            return 0;
+        }
+        java.util.concurrent.atomic.AtomicLong cleaned = new java.util.concurrent.atomic.AtomicLong(0);
+        try {
+            // Bounded depth (matches scan cap) + streaming visitor: no full-path
+            // materialization, so huge trees cannot OOM. Directories are removed
+            // deepest-first via postVisitDirectory, only when empty.
+            Files.walkFileTree(dir, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class),
+                    DEFAULT_SCAN_MAX_DEPTH, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                    if (!d.equals(dir) && isProtectedPath(d)) return FileVisitResult.SKIP_SUBTREE;
+                    if (!d.equals(dir) && (attrs.isSymbolicLink() || attrs.isOther())) return FileVisitResult.SKIP_SUBTREE;
+                    if (!d.equals(dir)) {
+                        try {
+                            if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
+                            Object reparse = Files.getAttribute(d, "dos:isReparsePoint",
+                                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                            if (Boolean.TRUE.equals(reparse)) return FileVisitResult.SKIP_SUBTREE;
+                        } catch (Exception ignored) {}
                     }
-                } catch (Exception ignored) {
+                    return FileVisitResult.CONTINUE;
                 }
-            }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                    try {
+                        if (isProtectedPath(file)) return FileVisitResult.CONTINUE;
+                        try {
+                            if (Files.isHidden(file)) return FileVisitResult.CONTINUE;
+                        } catch (Exception ignored) {}
+                        long lastModified = attrs.lastModifiedTime() != null
+                                ? attrs.lastModifiedTime().toMillis() : 0L;
+                        if (lastModified > 0 && lastModified >= cutoffMillis) return FileVisitResult.CONTINUE;
+                        // Zero/unknown mtime: keep (fail-safe, avoids deleting
+                        // files the age check cannot evaluate).
+                        if (lastModified <= 0) return FileVisitResult.CONTINUE;
+                        long size = attrs.size();
+                        deletePermanently(file, token);
+                        if (!Files.exists(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) cleaned.addAndGet(size);
+                    } catch (Exception ignored) {
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path d, IOException exc) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                    if (d.equals(dir) || isProtectedPath(d)) return FileVisitResult.CONTINUE;
+                    try {
+                        // Only removes the dir when it became empty; silently keeps
+                        // non-empty (recent files, hidden files) parents.
+                        deleteDirectoryIfEmptySafe(d, token);
+                    } catch (Exception ignored) {
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE;
+                }
+            });
         } catch (Exception ignored) {
         }
-        return cleaned;
+        return cleaned.get();
     }
 
     public static void deletePermanently(Path source) {

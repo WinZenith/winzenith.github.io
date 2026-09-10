@@ -1,9 +1,11 @@
 package com.sbtools.drivers;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sbtools.util.AppLogger;
 
 import java.io.IOException;
@@ -18,7 +20,14 @@ public class UpdateHistoryStore {
 
     private static final String DIR = ".winzenith";
     private static final String FILE = "update-history.json";
+    // JavaTimeModule is mandatory: UpdateEntry carries an Instant timestamp and a
+    // plain ObjectMapper throws InvalidDefinitionException on every save, which
+    // silently discarded all driver update history. ISO strings (timestamps
+    // disabled) keep the manual Instant.parse in nodeToEntry working.
     private static final ObjectMapper mapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(SerializationFeature.INDENT_OUTPUT);
 
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -42,6 +51,8 @@ public class UpdateHistoryStore {
 
     public List<UpdateEntry> listAll() throws IOException {
         return loadHistory().stream()
+                // Null-safe: a corrupt/legacy entry must never NPE the History dialog.
+                .filter(e -> e != null && e.timestamp() != null)
                 .sorted(Comparator.comparing(UpdateEntry::timestamp).reversed())
                 .toList();
     }
@@ -88,7 +99,7 @@ public class UpdateHistoryStore {
             Instant ts;
             try {
                 String raw = text(n, "timestamp");
-                ts = raw.isBlank() ? Instant.now() : Instant.parse(raw);
+                ts = parseTimestamp(raw);
             } catch (Exception ex) {
                 ts = Instant.now();
             }
@@ -106,6 +117,25 @@ public class UpdateHistoryStore {
     private static String text(JsonNode n, String key) {
         JsonNode v = n.get(key);
         return v != null && !v.isNull() ? v.asText("") : "";
+    }
+
+    /**
+     * Parses ISO-8601 timestamps plus legacy numeric epoch seconds (with or
+     * without fractional part) so files written with timestamps-as-numbers
+     * still load with their real time instead of "now".
+     */
+    private static Instant parseTimestamp(String raw) {
+        if (raw == null || raw.isBlank()) return Instant.now();
+        String t = raw.trim();
+        try {
+            return Instant.parse(t);
+        } catch (Exception ignored) {
+        }
+        try {
+            return Instant.ofEpochSecond((long) Double.parseDouble(t));
+        } catch (Exception ignored) {
+        }
+        return Instant.now();
     }
 
     private static List<UpdateEntry> parseArray(JsonNode root) {

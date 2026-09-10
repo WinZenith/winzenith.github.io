@@ -65,6 +65,9 @@ public class StartupService {
         // Task specific
         private String taskPath;
         private String backupXmlName;
+        // Captured from exported task XML so restore can warn when credentials are required.
+        private String taskPrincipalUserId;
+        private String taskLogonType;
 
         private boolean enabled;
         private long backupTime;
@@ -102,6 +105,10 @@ public class StartupService {
         public void setTaskPath(String taskPath) { this.taskPath = taskPath; }
         public String getBackupXmlName() { return backupXmlName; }
         public void setBackupXmlName(String backupXmlName) { this.backupXmlName = backupXmlName; }
+        public String getTaskPrincipalUserId() { return taskPrincipalUserId; }
+        public void setTaskPrincipalUserId(String v) { this.taskPrincipalUserId = v; }
+        public String getTaskLogonType() { return taskLogonType; }
+        public void setTaskLogonType(String v) { this.taskLogonType = v; }
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public long getBackupTime() { return backupTime; }
@@ -428,15 +435,13 @@ public class StartupService {
         scanRegistryUnified(WinReg.HKEY_CURRENT_USER, "HKCU (32-bit) RunOnce", REG_WOW6432_RUN_ONCE, REG_WOW6432_APPROVED_RUNONCE, true, items);
         scanRegistryUnified(WinReg.HKEY_CURRENT_USER, "HKCU (32-bit) Run (Disabled)", REG_WOW6432_RUN_DISABLED, REG_WOW6432_APPROVED, false, items);
 
-        // Orphaned Approved entries – regular and 32-bit, Run and RunOnce
+        // Orphaned Approved entries – Run only. RunOnce has no Approved overlay
+        // consulted by Windows; RunOnce Approved orphans (including legacy writes
+        // from older versions) are ignored to avoid ghost Disabled rows.
         scanOrphanedApprovedUnified(WinReg.HKEY_CURRENT_USER, "HKCU Run", REG_RUN, REG_STARTUP_APPROVED, items);
         scanOrphanedApprovedUnified(WinReg.HKEY_LOCAL_MACHINE, "HKLM Run", REG_RUN, REG_STARTUP_APPROVED, items);
-        scanOrphanedApprovedUnified(WinReg.HKEY_CURRENT_USER, "HKCU RunOnce", REG_RUN_ONCE, REG_STARTUP_APPROVED_RUNONCE, items);
-        scanOrphanedApprovedUnified(WinReg.HKEY_LOCAL_MACHINE, "HKLM RunOnce", REG_RUN_ONCE, REG_STARTUP_APPROVED_RUNONCE, items);
         scanOrphanedApprovedUnified(WinReg.HKEY_LOCAL_MACHINE, "HKLM (32-bit) Run", REG_WOW6432_RUN, REG_WOW6432_APPROVED, items);
-        scanOrphanedApprovedUnified(WinReg.HKEY_LOCAL_MACHINE, "HKLM (32-bit) RunOnce", REG_WOW6432_RUN_ONCE, REG_WOW6432_APPROVED_RUNONCE, items);
         scanOrphanedApprovedUnified(WinReg.HKEY_CURRENT_USER, "HKCU (32-bit) Run", REG_WOW6432_RUN, REG_WOW6432_APPROVED, items);
-        scanOrphanedApprovedUnified(WinReg.HKEY_CURRENT_USER, "HKCU (32-bit) RunOnce", REG_WOW6432_RUN_ONCE, REG_WOW6432_APPROVED_RUNONCE, items);
 
         for (StartupItem item : items) {
             String key = item.getName() + "|" + item.getLocation();
@@ -455,12 +460,18 @@ public class StartupService {
             if (!Advapi32Util.registryKeyExists(hive, keyPath)) {
                 return;
             }
+            // RunOnce has no StartupApproved overlay consulted by Windows — Approved
+            // bytes under RunOnce (including legacy orphans from older versions) must
+            // be ignored, otherwise we show false "Disabled" while Windows still runs it.
+            boolean isRunOnce = StartupConstants.isRunOnceKey(keyPath);
             Map<String, Object> approvedValues = new HashMap<>();
-            try {
-                if (Advapi32Util.registryKeyExists(hive, approvedPath)) {
-                    approvedValues.putAll(Advapi32Util.registryGetValues(hive, approvedPath));
-                }
-            } catch (Exception ignored) {}
+            if (!isRunOnce) {
+                try {
+                    if (Advapi32Util.registryKeyExists(hive, approvedPath)) {
+                        approvedValues.putAll(Advapi32Util.registryGetValues(hive, approvedPath));
+                    }
+                } catch (Exception ignored) {}
+            }
 
             Map<String, Object> values = Advapi32Util.registryGetValues(hive, keyPath);
             for (Map.Entry<String, Object> entry : values.entrySet()) {
@@ -474,9 +485,15 @@ public class StartupService {
                     } else continue;
                 }
                 boolean enabled = activeDefault;
-                Object approvedData = approvedValues.get(valName);
-                if (approvedData instanceof byte[] bytes && bytes.length > 0) {
-                    enabled = StartupConstants.isEnabledByte(bytes);
+                if (!isRunOnce) {
+                    Object approvedData = approvedValues.get(valName);
+                    if (approvedData instanceof byte[] bytes && bytes.length > 0) {
+                        enabled = StartupConstants.isEnabledByte(bytes);
+                    }
+                } else {
+                    // RunOnce always runs once then auto-deletes; cannot be "disabled"
+                    // via Approved. Show Enabled so toggle/delete logic stays honest.
+                    enabled = true;
                 }
                 String exePath = extractExecutablePath(cmd);
                 String publisher = getCompanyName(exePath);
@@ -606,7 +623,11 @@ public class StartupService {
                     String binaryPath = node.path("BinaryPath").asText("");
                     String startType = node.path("StartType").asText("Manual");
                     String state = node.path("State").asText("");
-                    boolean enabled = !"Disabled".equals(startType);
+                    // Enabled means "not Disabled" (Automatic* + Manual). Manual is kept
+                    // Enabled to preserve toggle semantics (Manual->Disabled on disable,
+                    // Disabled->original on enable). Boot impact for Manual is 0 (see
+                    // StartupImpactService) so the total is not inflated.
+                    boolean enabled = !"Disabled".equalsIgnoreCase(startType);
 
                     List<String> deps = new ArrayList<>();
                     JsonNode depsNode = node.path("Dependencies");
@@ -659,12 +680,36 @@ public class StartupService {
     }
 
     public void toggleStatus(StartupItem item) throws Exception {
+        toggleStatus(item, false);
+    }
+
+    /**
+     * Toggles an item with explicit critical-service consent.
+     *
+     * <p>Defense-in-depth: disabling a boot-critical service via
+     * {@link StartupSafety#isCriticalDisable} is refused unless
+     * {@code allowCriticalDisable} is true. UI must only pass true after an
+     * explicit user confirmation (single + bulk dialogs). Future callers using
+     * {@link #toggleStatus(StartupItem)} remain safe by default.</p>
+     */
+    public void toggleStatus(StartupItem item, boolean allowCriticalDisable) throws Exception {
+        if (item == null) throw new IllegalArgumentException("Startup item must not be null.");
+        if (!allowCriticalDisable && StartupSafety.isCriticalDisable(item)) {
+            String risk = StartupSafety.describeRisk(item);
+            throw new SecurityException(risk != null ? risk
+                    : "Refusing to disable boot-critical service \"" + item.getName() + "\" without explicit confirmation.");
+        }
+        if (item.getType() == null) throw new IllegalArgumentException("Startup item type must not be null.");
         boolean wasEnabled = item.isEnabled();
         String before = item.getType() + ":" + item.getName() + " enabled=" + wasEnabled;
         if (item.getType() == StartupItemType.TASK) {
-            String cmd = item.isEnabled() ? "Disable-ScheduledTask" : "Enable-ScheduledTask";
-            ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
-                    cmd + " -TaskName " + ProcessRunner.psQuote(item.getName()) + " -TaskPath " + ProcessRunner.psQuote(item.getTaskPath())));
+            String taskName = item.getName();
+            String taskPath = item.getTaskPath();
+            if (taskPath == null || taskPath.isBlank()) taskPath = "\\";
+            boolean disabling = item.isEnabled();
+            String cmd = disabling ? "Disable-ScheduledTask" : "Enable-ScheduledTask";
+            ProcessResult result = processRunner.run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    cmd + " -TaskName " + ProcessRunner.psQuote(taskName) + " -TaskPath " + ProcessRunner.psQuote(taskPath)));
             if (!result.success()) {
                 String err = result.combinedOutput();
                 String lower = err.toLowerCase(java.util.Locale.ROOT);
@@ -672,6 +717,30 @@ public class StartupService {
                     throw new IOException("Access denied. Please run as administrator to modify scheduled tasks. Details: " + err);
                 }
                 throw new IOException("Failed to toggle Scheduled Task: " + err);
+            }
+            if (!disabling) {
+                // Enable path must also re-enable startup triggers. The scan reports
+                // Enabled = taskEnabled && triggerEnabled, but Enable-ScheduledTask only
+                // flips the task flag — a trigger-disabled task would otherwise appear
+                // to toggle successfully yet still show Disabled (silent no-op).
+                String triggerScript =
+                        "$t = Get-ScheduledTask -TaskName " + ProcessRunner.psQuote(taskName)
+                                + " -TaskPath " + ProcessRunner.psQuote(taskPath) + " -ErrorAction Stop; "
+                                + "$c=$false; foreach ($tr in $t.Triggers) { try { if (-not $tr.Enabled) { $tr.Enabled=$true; $c=$true } } catch {} }; "
+                                + "if ($c) { $t | Set-ScheduledTask -ErrorAction Stop }";
+                ProcessResult trResult = processRunner.run(
+                        List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", triggerScript));
+                if (!trResult.success()) {
+                    String err = trResult.combinedOutput();
+                    String lower = err.toLowerCase(java.util.Locale.ROOT);
+                    if (lower.contains("access") || lower.contains("denied") || lower.contains("privileg")
+                            || err.contains("740") || err.contains("577")) {
+                        throw new IOException("Task enabled but triggers require administrator. "
+                                + "Re-run as administrator to fully enable \"" + taskName + "\". Details: " + err);
+                    }
+                    throw new IOException("Task enabled but failed to enable its triggers for \""
+                            + taskName + "\" (it may still show Disabled). Details: " + err);
+                }
             }
             item.setEnabled(!item.isEnabled());
         } else if (item.getType() == StartupItemType.REGISTRY) {
@@ -691,11 +760,12 @@ public class StartupService {
             } else {
                 RegistryPaths paths = resolveRegistryPaths(item);
                 String valName = item.getRegistryValueName();
+                String loc = location == null ? "" : location;
 
                 boolean success = false;
-                if (location.contains("RunOnce")) {
+                if (loc.contains("RunOnce")) {
                     success = toggleRunOnceItem(item, paths);
-                } else if (location.contains("(Disabled)")) {
+                } else if (loc.contains("(Disabled)")) {
                     success = toggleDisabledItem(item, paths);
                 } else {
                     success = toggleRegularItem(item, paths);
@@ -749,6 +819,8 @@ public class StartupService {
     }
 
     public void deleteItem(StartupItem item) throws Exception {
+        if (item == null) throw new IllegalArgumentException("Startup item must not be null.");
+        if (item.getType() == null) throw new IllegalArgumentException("Startup item type must not be null.");
         if (item.getType() == StartupItemType.SERVICE) {
             throw new UnsupportedOperationException("Windows services cannot be deleted.");
         }
@@ -756,8 +828,10 @@ public class StartupService {
         createBackup(item);
 
         if (item.getType() == StartupItemType.TASK) {
-            ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
-                    "Unregister-ScheduledTask -TaskName " + ProcessRunner.psQuote(item.getName()) + " -TaskPath " + ProcessRunner.psQuote(item.getTaskPath()) + " -Confirm:$false"));
+            String tp = item.getTaskPath();
+            if (tp == null || tp.isBlank()) tp = "\\";
+            ProcessResult result = processRunner.run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    "Unregister-ScheduledTask -TaskName " + ProcessRunner.psQuote(item.getName()) + " -TaskPath " + ProcessRunner.psQuote(tp) + " -Confirm:$false"));
             if (!result.success()) {
                 throw new IOException("Failed to delete Scheduled Task: " + result.combinedOutput());
             }
@@ -773,9 +847,14 @@ public class StartupService {
                     } else if (Files.exists(disabled)) {
                         Files.deleteIfExists(disabled);
                     } else {
-                        // Try alternative name without extension handling
-                        Path alt = Path.of(item.getPath());
-                        if (alt != null && Files.exists(alt)) Files.deleteIfExists(alt);
+                        // Try alternative path when filePath is stale (guard null/blank).
+                        try {
+                            String altRaw = item.getPath();
+                            if (altRaw != null && !altRaw.isBlank()) {
+                                Path alt = Path.of(altRaw);
+                                if (Files.exists(alt)) Files.deleteIfExists(alt);
+                            }
+                        } catch (Exception ignored) {}
                     }
                 }
                 // Clear approved entry if any (should not exist for folder)
@@ -783,41 +862,39 @@ public class StartupService {
                 RegistryPaths paths = resolveRegistryPaths(item);
                 String valName = item.getRegistryValueName();
 
-                // A disabled item can live in RunDisabled or Run (RunOnce disabled); check all relevant keys
-                if (location.contains("(Disabled)")) {
-                    List<String> valueKeys;
-                    boolean is32 = location.contains("32-bit");
-                    boolean isRunOnceDisabled = location.contains("Run (Disabled)") && item.getPath() != null && !item.getPath().isBlank() && location.contains("Run (Disabled)");
-                    // For simplicity check all possible locations for this hive
-                    if (is32) {
-                        valueKeys = List.of(REG_WOW6432_RUN_DISABLED, REG_WOW6432_RUN, REG_WOW6432_RUN_ONCE);
-                    } else {
-                        valueKeys = List.of(REG_RUN_DISABLED, REG_RUN, REG_RUN_ONCE);
-                    }
-                    for (String keyPath : valueKeys) {
+                // A disabled item lives in exactly one value key. Delete only that key
+                // plus its matching Approved entry. Never sweep Run/RunOnce/Disabled
+                // together: the same value name can exist in Run and RunOnce as two
+                // distinct entries, and sweeping would destroy the unselected one
+                // while the backup only captures one.
+                String loc = location == null ? "" : location;
+                if (loc.contains("(Disabled)")) {
+                    String[] expected = fallbackPathsForLocation(loc);
+                    String expectedKey = expected[0];
+                    String deletedKey = null;
+                    try {
+                        if (Advapi32Util.registryValueExists(paths.hive(), expectedKey, valName)) {
+                            Advapi32Util.registryDeleteValue(paths.hive(), expectedKey, valName);
+                            deletedKey = expectedKey;
+                        }
+                    } catch (Exception ignored) {}
+                    if (deletedKey == null && !paths.keyPath().equals(expectedKey)) {
+                        // Legacy-moved value: label stale, actual value elsewhere.
+                        // Delete only the probed actual location, not every candidate.
                         try {
-                            if (Advapi32Util.registryValueExists(paths.hive(), keyPath, valName)) {
-                                Advapi32Util.registryDeleteValue(paths.hive(), keyPath, valName);
+                            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
+                                Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
+                                deletedKey = paths.keyPath();
                             }
                         } catch (Exception ignored) {}
                     }
-                    // Clean only the approved paths matching this item's bitness to avoid
-                    // corrupting an unrelated entry with the same value name in the other view
-                    List<String> approvedPaths;
-                    if (is32) {
-                        approvedPaths = List.of(StartupConstants.REG_WOW6432_APPROVED,
-                                StartupConstants.REG_WOW6432_APPROVED_RUNONCE);
-                    } else {
-                        approvedPaths = List.of(StartupConstants.REG_STARTUP_APPROVED,
-                                StartupConstants.REG_STARTUP_APPROVED_RUNONCE);
-                    }
-                    for (String ap : approvedPaths) {
-                        try {
-                            if (Advapi32Util.registryValueExists(paths.hive(), ap, valName)) {
-                                Advapi32Util.registryDeleteValue(paths.hive(), ap, valName);
-                            }
-                        } catch (Exception ignored) {}
-                    }
+                    String approvedToClean = StartupConstants.toApprovedPath(
+                            deletedKey != null ? deletedKey : expectedKey);
+                    try {
+                        if (Advapi32Util.registryValueExists(paths.hive(), approvedToClean, valName)) {
+                            Advapi32Util.registryDeleteValue(paths.hive(), approvedToClean, valName);
+                        }
+                    } catch (Exception ignored) {}
                 } else {
                     try {
                         if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
@@ -907,47 +984,15 @@ public class StartupService {
     }
 
     private boolean toggleRunOnceItem(StartupItem item, RegistryPaths paths) throws Exception {
+        // Windows does not consult StartupApproved for RunOnce keys — writing an
+        // Approved byte is a silent no-op (item still runs once, UI falsely shows
+        // Disabled). Fail honest instead of fake success. Users must Delete (with
+        // automatic backup) to prevent a RunOnce entry from running.
         String valName = item.getRegistryValueName();
-        String location = item.getLocation();
+        String location = item.getLocation() == null ? "" : item.getLocation();
         boolean is32bit = location.contains("32-bit");
         String runKeyPath = is32bit ? REG_WOW6432_RUN : REG_RUN;
         String runOnceKeyPath = is32bit ? REG_WOW6432_RUN_ONCE : REG_RUN_ONCE;
-        String runApprovedPath = is32bit ? REG_WOW6432_APPROVED : REG_STARTUP_APPROVED;
-        String runOnceApprovedPath = is32bit ? REG_WOW6432_APPROVED_RUNONCE : REG_STARTUP_APPROVED_RUNONCE;
-
-        // Fix B1: Do not move values between Run and RunOnce. Use StartupApproved\RunOnce bytes only.
-        // This preserves RunOnce semantics (run once vs every logon). Legacy corrupted entries that were
-        // previously moved to Run are healed: if value is in Run but location indicates RunOnce, move back.
-        String cmdInRun = getRegistryString(paths.hive(), runKeyPath, valName);
-        String cmdInRunOnce = getRegistryString(paths.hive(), runOnceKeyPath, valName);
-        // Heal legacy: value in Run but not in RunOnce and location is RunOnce (should be RunOnce)
-        if (cmdInRun != null && cmdInRunOnce == null && location.contains("RunOnce")) {
-            // Check if approved indicates disabled RunOnce that was moved
-            boolean legacyMoved = false;
-            try {
-                if (Advapi32Util.registryValueExists(paths.hive(), runApprovedPath, valName)) {
-                    Object v = Advapi32Util.registryGetValue(paths.hive(), runApprovedPath, valName);
-                    if (v instanceof byte[] b && StartupConstants.isDisabledByte(b)) legacyMoved = true;
-                }
-            } catch (Exception ignored) {}
-            if (legacyMoved) {
-                if (!Advapi32Util.registryKeyExists(paths.hive(), runOnceKeyPath)) {
-                    Advapi32Util.registryCreateKey(paths.hive(), runOnceKeyPath);
-                }
-                boolean expandSz = isRegistryExpandSz(paths.hive(), runKeyPath, valName);
-                setRegistryStringPreservingType(paths.hive(), runOnceKeyPath, valName, cmdInRun, expandSz);
-                Advapi32Util.registryDeleteValue(paths.hive(), runKeyPath, valName);
-                if (Advapi32Util.registryValueExists(paths.hive(), runApprovedPath, valName)) {
-                    Advapi32Util.registryDeleteValue(paths.hive(), runApprovedPath, valName);
-                }
-                // After heal, the approved path to toggle is RunOnce
-                paths = new RegistryPaths(paths.hive(), runOnceKeyPath, runOnceApprovedPath);
-                cmdInRunOnce = cmdInRun;
-            }
-        }
-
-        // Determine correct approved path: prefer the one matching actual key existence, fallback to RunOnce
-        String approvedPath;
         boolean runExists = false;
         boolean runOnceExists = false;
         try {
@@ -956,39 +1001,11 @@ public class StartupService {
         try {
             runExists = Advapi32Util.registryValueExists(paths.hive(), runKeyPath, valName);
         } catch (Exception ignored) {}
-        // Fail fast if neither Run nor RunOnce contains the value (deleted externally)
-        // Exception: legacy-healed case already moved value above, re-check after heal
         if (!runExists && !runOnceExists) {
-            // Re-read after potential heal (cmdInRunOnce may have been set)
-            String recheck = getRegistryString(paths.hive(), runOnceKeyPath, valName);
-            if (recheck == null) {
-                recheck = getRegistryString(paths.hive(), runKeyPath, valName);
-            }
-            if (recheck == null) {
-                return false;
-            }
-            runOnceExists = getRegistryString(paths.hive(), runOnceKeyPath, valName) != null;
-            runExists = !runOnceExists && getRegistryString(paths.hive(), runKeyPath, valName) != null;
+            return false;
         }
-        if (runOnceExists) {
-            approvedPath = runOnceApprovedPath;
-        } else if (Advapi32Util.registryValueExists(paths.hive(), runKeyPath, valName) && !location.contains("RunOnce")) {
-            approvedPath = runApprovedPath;
-        } else {
-            approvedPath = paths.approvedPath();
-            // Ensure it's RunOnce approved for RunOnce locations
-            if (location.contains("RunOnce")) approvedPath = runOnceApprovedPath;
-            else if (is32bit) approvedPath = runOnceApprovedPath.contains("Wow6432Node") ? runOnceApprovedPath : runApprovedPath;
-        }
-        // Normalize to RunOnce approved if location indicates RunOnce
-        if (location.contains("RunOnce")) approvedPath = runOnceApprovedPath;
-
-        if (!Advapi32Util.registryKeyExists(paths.hive(), approvedPath)) {
-            Advapi32Util.registryCreateKey(paths.hive(), approvedPath);
-        }
-        writeApprovedState(paths.hive(), approvedPath, valName, !item.isEnabled());
-        // Keep location stable (RunOnce), do not mutate to Run (Disabled)
-        return true;
+        throw new IOException("RunOnce entry \"" + valName + "\" runs once at next logon then auto-deletes; "
+                + "Windows ignores disable flags for RunOnce. Use Delete (a backup is created) to prevent it from running.");
     }
 
     private boolean toggleStartupFolderItem(StartupItem item) throws Exception {
@@ -1057,6 +1074,33 @@ public class StartupService {
             }
         }
         Advapi32Util.registrySetStringValue(hive, keyPath, valueName, data);
+    }
+
+    /**
+     * Extracts {@code [UserId, LogonType]} from an exported Scheduled-Task XML.
+     * Best-effort regex over the {@code <Principals>} block; returns empty strings
+     * when absent. Never throws.
+     */
+    static String[] parseTaskPrincipal(String xml) {
+        String userId = "";
+        String logonType = "";
+        if (xml == null || xml.isBlank()) return new String[]{"", ""};
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                    "<Principals>(.*?)</Principals>",
+                    java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.DOTALL).matcher(xml);
+            String block = m.find() ? m.group(1) : xml;
+            java.util.regex.Matcher u = java.util.regex.Pattern.compile(
+                    "<UserId>(.*?)</UserId>",
+                    java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.DOTALL).matcher(block);
+            if (u.find()) userId = u.group(1).trim();
+            java.util.regex.Matcher l = java.util.regex.Pattern.compile(
+                    "<LogonType>(.*?)</LogonType>",
+                    java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.DOTALL).matcher(block);
+            if (l.find()) logonType = l.group(1).trim();
+        } catch (Exception ignored) {
+        }
+        return new String[]{userId, logonType};
     }
 
     // ── Backup / Restore Mechanism ────────────────────────────────────────────
@@ -1128,14 +1172,26 @@ public class StartupService {
 
             if (item.getType() == StartupItemType.TASK) {
                 entry.setType("Task");
-                entry.setTaskPath(item.getTaskPath());
+                String tp = item.getTaskPath();
+                if (tp == null || tp.isBlank()) tp = "\\";
+                entry.setTaskPath(tp);
                 entry.setBackupXmlName("task.xml");
 
                 Path xmlPath = backupFolder.resolve("task.xml");
                 ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
-                        "Export-ScheduledTask -TaskName " + ProcessRunner.psQuote(item.getName()) + " -TaskPath " + ProcessRunner.psQuote(item.getTaskPath()) + " | Out-File -FilePath " + ProcessRunner.psQuote(xmlPath.toAbsolutePath().toString()) + " -Encoding utf8"));
+                        "Export-ScheduledTask -TaskName " + ProcessRunner.psQuote(item.getName()) + " -TaskPath " + ProcessRunner.psQuote(tp) + " | Out-File -FilePath " + ProcessRunner.psQuote(xmlPath.toAbsolutePath().toString()) + " -Encoding utf8"));
                 if (!result.success()) {
                     throw new IOException("Failed to export Scheduled Task configuration: " + result.combinedOutput());
+                }
+                // Capture principal/logon-type so restore can give an actionable error
+                // when a password is required (export strips passwords by design).
+                try {
+                    String xml = Files.readString(xmlPath);
+                    String[] principal = parseTaskPrincipal(xml);
+                    entry.setTaskPrincipalUserId(principal[0]);
+                    entry.setTaskLogonType(principal[1]);
+                } catch (Exception ignored) {
+                    // principal capture is best-effort; restore still attempted
                 }
         } else if (item.getType() == StartupItemType.REGISTRY) {
             String location = item.getLocation();
@@ -1214,9 +1270,19 @@ public class StartupService {
     }
 
     public void restoreBackup(StartupBackupEntry entry) throws Exception {
+        if (entry == null || entry.getId() == null || entry.getId().isBlank()) {
+            throw new IllegalArgumentException("Backup entry must not be null.");
+        }
         Path backupFolder = getBackupsDir().resolve(entry.getId());
 
         if ("Registry".equals(entry.getType())) {
+            if (entry.getKeyPath() == null || entry.getKeyPath().isBlank()
+                    || entry.getValueName() == null || entry.getValueName().isBlank()) {
+                throw new IOException("Backup entry is corrupt (missing registry key/value). Backup kept.");
+            }
+            if (entry.getCommand() == null) {
+                throw new IOException("Backup entry is corrupt (missing command). Backup kept.");
+            }
             HKEY hive = "HKCU".equals(entry.getHive()) ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
             if (!Advapi32Util.registryKeyExists(hive, entry.getKeyPath())) {
                 Advapi32Util.registryCreateKey(hive, entry.getKeyPath());
@@ -1244,7 +1310,18 @@ public class StartupService {
                 }
             }
             if (src != null && Files.exists(src)) {
-                Path dest = Path.of(entry.getKeyPath());
+                if (entry.getKeyPath() == null || entry.getKeyPath().isBlank()) {
+                    throw new IOException("Backup entry is corrupt (missing original file path). Backup kept.");
+                }
+                Path dest;
+                try {
+                    dest = Path.of(entry.getKeyPath());
+                } catch (Exception e) {
+                    throw new IOException("Backup entry has invalid file path. Backup kept: " + e.getMessage());
+                }
+                if (dest.getParent() == null) {
+                    throw new IOException("Backup entry has invalid file path (no parent). Backup kept.");
+                }
                 // dest is original file path (maybe without .disabled)
                 Files.createDirectories(dest.getParent());
                 Files.copy(src, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -1258,15 +1335,48 @@ public class StartupService {
                 throw new FileNotFoundException("Backup file missing for startup folder item: " + backupXml);
             }
         } else if ("Task".equals(entry.getType())) {
-            Path xmlPath = backupFolder.resolve(entry.getBackupXmlName());
+            Path xmlName = entry.getBackupXmlName() == null || entry.getBackupXmlName().isBlank()
+                    ? Path.of("task.xml") : Path.of(entry.getBackupXmlName());
+            Path xmlPath = backupFolder.resolve(xmlName.getFileName().toString());
             if (!Files.exists(xmlPath)) {
                 throw new FileNotFoundException("Backup XML file missing: " + xmlPath);
             }
+            String tp = entry.getTaskPath();
+            if (tp == null || tp.isBlank()) tp = "\\";
 
-            ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
-                    "Register-ScheduledTask -Xml (Get-Content " + ProcessRunner.psQuote(xmlPath.toAbsolutePath().toString()) + " -Raw) -TaskName " + ProcessRunner.psQuote(entry.getName()) + " -TaskPath " + ProcessRunner.psQuote(entry.getTaskPath()) + " -Force"));
+            // Export strips passwords by design. A Password-logon task cannot be
+            // restored without re-entering credentials — fail fast with an actionable
+            // message instead of a cryptic Register error, and keep the backup.
+            String logonType = entry.getTaskLogonType();
+            String principalUser = entry.getTaskPrincipalUserId();
+            if (logonType == null || logonType.isBlank()) {
+                try {
+                    String[] parsed = parseTaskPrincipal(Files.readString(xmlPath));
+                    if (!parsed[0].isBlank()) principalUser = parsed[0];
+                    if (!parsed[1].isBlank()) logonType = parsed[1];
+                } catch (Exception ignored) {
+                }
+            }
+            if (logonType != null && logonType.toLowerCase(java.util.Locale.ROOT).contains("password")) {
+                throw new IOException("Cannot restore task \"" + entry.getName() + "\" automatically: "
+                        + "it runs as \"" + (principalUser == null || principalUser.isBlank() ? "a user account" : principalUser)
+                        + "\" with password logon (export strips passwords). "
+                        + "Re-create it manually in Task Scheduler (import " + xmlPath.getFileName()
+                        + " and re-enter credentials). Backup kept.");
+            }
+
+            ProcessResult result = processRunner.run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    "Register-ScheduledTask -Xml (Get-Content " + ProcessRunner.psQuote(xmlPath.toAbsolutePath().toString()) + " -Raw) -TaskName " + ProcessRunner.psQuote(entry.getName()) + " -TaskPath " + ProcessRunner.psQuote(tp) + " -Force"));
             if (!result.success()) {
-                throw new IOException("Failed to restore Scheduled Task: " + result.combinedOutput());
+                String out = result.combinedOutput();
+                String lower = out.toLowerCase(java.util.Locale.ROOT);
+                if (lower.contains("password") || lower.contains("logon") || lower.contains("account")
+                        || lower.contains("credentials") || lower.contains("no mapping")) {
+                    throw new IOException("Failed to restore task \"" + entry.getName()
+                            + "\": stored credentials are required. Re-import the XML manually in Task Scheduler "
+                            + "and re-enter the password. Backup kept. Details: " + out);
+                }
+                throw new IOException("Failed to restore Scheduled Task: " + out);
             }
         }
 

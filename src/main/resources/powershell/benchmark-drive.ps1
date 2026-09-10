@@ -146,6 +146,7 @@ try {
         }
     }
     $stream.Close()
+    $stream = $null
     $sw.Stop()
 
     $randomSeconds = $sw.Elapsed.TotalSeconds
@@ -155,19 +156,26 @@ try {
 
     # Additive 4K random-read (QD1): 400 x 4KB seeks. Small, bounded (~1.6MB IO)
     # so total runtime stays predictable. Reports IOPS + avg latency.
+    # NOTE: the 1MB random phase above closes $stream, so open a fresh handle here.
+    # Reusing the closed handle throws ObjectDisposedException and silently skips
+    # the entire 4K phase (always reported n/a).
     Write-Output ('{"progress":96,"phase":"random_read_4k"}')
+    $stream4k = $null
     try {
         $fourK = 4096
         $fourKBuf = New-Object byte[] $fourK
         $fourKOpts = 400
+        $stream4k = New-Object System.IO.FileStream($testFile, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read,
+            65536, [System.IO.FileOptions]::RandomAccess)
         $fourKSw = [System.Diagnostics.Stopwatch]::StartNew()
         for ($i = 0; $i -lt $fourKOpts; $i++) {
             Check-Stop
             $rngForSeek.GetBytes($seekBuf)
             $maxOff = [math]::Max(1, $totalBytes - $fourK)
             $off = [long]([BitConverter]::ToUInt64($seekBuf, 0) % $maxOff)
-            $stream.Seek($off, [System.IO.SeekOrigin]::Begin) | Out-Null
-            $stream.Read($fourKBuf, 0, $fourK) | Out-Null
+            $stream4k.Seek($off, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $stream4k.Read($fourKBuf, 0, $fourK) | Out-Null
         }
         $fourKSw.Stop()
         $secs4k = $fourKSw.Elapsed.TotalSeconds
@@ -178,6 +186,8 @@ try {
     } catch {
         # 4K phase is additive; 1MB results above remain valid even if this fails.
         Write-Output ("{`"progress`":96,`"phase`":`"random_read_4k`",`"message`":`"4K phase skipped: " + $_.Exception.Message.Replace('"','\"') + "`"}")
+    } finally {
+        if ($stream4k) { try { $stream4k.Close() } catch {} }
     }
 
     $result.success = $true

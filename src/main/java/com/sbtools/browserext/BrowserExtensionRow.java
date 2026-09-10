@@ -15,6 +15,8 @@ public class BrowserExtensionRow {
     private final StringProperty description = new SimpleStringProperty();
     private final BooleanProperty enabled = new SimpleBooleanProperty();
     private final BooleanProperty ignored = new SimpleBooleanProperty(false);
+    private final BooleanProperty managed = new SimpleBooleanProperty(false);
+    private final StringProperty installSource = new SimpleStringProperty();
     private final StringProperty path = new SimpleStringProperty();
     private final StringProperty profilePath = new SimpleStringProperty();
     private final StringProperty profileName = new SimpleStringProperty();
@@ -36,12 +38,22 @@ public class BrowserExtensionRow {
     public BrowserExtensionRow(String browser, String extensionId, String name, String version,
                                 String description, boolean enabled, String path, String profilePath,
                                 String profileName, String installDate, String permissions) {
+        this(browser, extensionId, name, version, description, enabled, path, profilePath,
+                profileName, installDate, permissions, false, "");
+    }
+
+    public BrowserExtensionRow(String browser, String extensionId, String name, String version,
+                                String description, boolean enabled, String path, String profilePath,
+                                String profileName, String installDate, String permissions,
+                                boolean managed, String installSource) {
         this.browser.set(browser);
         this.extensionId.set(extensionId);
         this.name.set(name);
         this.version.set(version);
         this.description.set(description);
         this.enabled.set(enabled);
+        this.managed.set(managed);
+        this.installSource.set(installSource != null ? installSource : "");
         this.path.set(path);
         this.profilePath.set(profilePath != null ? profilePath : "");
         this.profileName.set(resolveProfileName(profileName, profilePath));
@@ -86,6 +98,12 @@ public class BrowserExtensionRow {
     public BooleanProperty ignoredProperty() { return ignored; }
     public boolean isIgnored() { return ignored.get(); }
     public void setIgnored(boolean ignored) { this.ignored.set(ignored); }
+
+    public BooleanProperty managedProperty() { return managed; }
+    public boolean isManaged() { return managed.get(); }
+
+    public StringProperty installSourceProperty() { return installSource; }
+    public String getInstallSource() { return installSource.get(); }
 
     public StringProperty pathProperty() { return path; }
     public String getPath() { return path.get(); }

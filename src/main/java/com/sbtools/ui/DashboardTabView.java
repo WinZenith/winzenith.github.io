@@ -112,6 +112,9 @@ public class DashboardTabView extends BorderPane {
     private volatile Future<?> cleanupTask;
     private volatile int scanGeneration;
     private volatile CancellationToken scanCancellationToken;
+    private volatile CancellationToken driverChildToken;
+    private volatile CancellationToken softwareChildToken;
+    private volatile CancellationToken cleanupChildToken;
     private volatile boolean disposed;
     private volatile Instant lastScanTime;
 
@@ -258,6 +261,7 @@ public class DashboardTabView extends BorderPane {
         scanGeneration++;
         CancellationToken token = scanCancellationToken;
         if (token != null) token.cancel();
+        cancelChildTokens();
         cancelSubScans();
         Future<?> f = scanFuture;
         if (f != null) {
@@ -302,15 +306,57 @@ public class DashboardTabView extends BorderPane {
 
     private void cancelSubScans() {
         for (Future<?> f : new Future<?>[]{driverTask, softwareTask, cleanupTask}) {
-            if (f != null && !f.isDone()) {
-                try {
-                    f.cancel(true);
-                } catch (Exception ignored) {}
-            }
+            cancelFuture(f);
         }
         driverTask = null;
         softwareTask = null;
         cleanupTask = null;
+    }
+
+    private static void cancelFuture(Future<?> f) {
+        if (f != null && !f.isDone()) {
+            try {
+                f.cancel(true);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private static void cancelToken(CancellationToken t) {
+        if (t != null) {
+            try {
+                t.cancel();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private void cancelChildTokens() {
+        cancelToken(driverChildToken);
+        cancelToken(softwareChildToken);
+        cancelToken(cleanupChildToken);
+        driverChildToken = null;
+        softwareChildToken = null;
+        cleanupChildToken = null;
+    }
+
+    /**
+     * Teardown for a finished scan generation: cancels only this generation's
+     * handles and clears a field only when it still references ours, so a slow
+     * teardown can never kill a newer scan started via Stop -> Scan.
+     */
+    private void teardownGeneration(Future<?> driverScan, Future<?> softwareScan, Future<?> cleanupScan,
+            CancellationToken driverChild, CancellationToken softwareChild, CancellationToken cleanupChild) {
+        cancelFuture(driverScan);
+        cancelFuture(softwareScan);
+        cancelFuture(cleanupScan);
+        cancelToken(driverChild);
+        cancelToken(softwareChild);
+        cancelToken(cleanupChild);
+        if (driverTask == driverScan) driverTask = null;
+        if (softwareTask == softwareScan) softwareTask = null;
+        if (cleanupTask == cleanupScan) cleanupTask = null;
+        if (driverChildToken == driverChild) driverChildToken = null;
+        if (softwareChildToken == softwareChild) softwareChildToken = null;
+        if (cleanupChildToken == cleanupChild) cleanupChildToken = null;
     }
 
     // ── Welcome Screen ────────────────────────────────────────────────────
@@ -1001,18 +1047,31 @@ public class DashboardTabView extends BorderPane {
                 lastScanTime = Instant.now();
                 AtomicInteger scansComplete = new AtomicInteger();
                 int totalScans = 3;
+                // Per-category child tokens: a soft-budget timeout cancels only the
+                // slow category (cooperative abort for token-polling inner services)
+                // without poisoning its siblings' shared parent token.
+                CancellationToken driverChild = new CancellationToken();
+                CancellationToken softwareChild = new CancellationToken();
+                CancellationToken cleanupChild = new CancellationToken();
+                driverChildToken = driverChild;
+                softwareChildToken = softwareChild;
+                cleanupChildToken = cleanupChild;
+                Future<?> driverScan = null;
+                Future<?> softwareScan = null;
+                Future<?> cleanupScan = null;
                 try {
                     // Sub-scan workers run on the dedicated dashboardPool so the
                     // inner services can safely use ioPool (catalog providers)
-                    // and cleanPool (cleanup categories) without self-starvation.
+                    // without self-starvation. Cleanup uses its own isolated pool
+                    // per scan (see scanCleanup) so orphans never starve the next scan.
                     // dashboardPool.submit (not runAsync) is used so cancel(true)
                     // truly interrupts PowerShell/file-walk workers.
-                    Future<?> driverScan = dashboardPool.submit(
-                            () -> scanDrivers(generation, token, scansComplete, totalScans));
-                    Future<?> softwareScan = dashboardPool.submit(
-                            () -> scanSoftware(generation, token, scansComplete, totalScans));
-                    Future<?> cleanupScan = dashboardPool.submit(
-                            () -> scanCleanup(generation, token, scansComplete, totalScans));
+                    driverScan = dashboardPool.submit(
+                            () -> scanDrivers(generation, token, driverChild, scansComplete, totalScans));
+                    softwareScan = dashboardPool.submit(
+                            () -> scanSoftware(generation, token, softwareChild, scansComplete, totalScans));
+                    cleanupScan = dashboardPool.submit(
+                            () -> scanCleanup(generation, token, cleanupChild, scansComplete, totalScans));
                     driverTask = driverScan;
                     softwareTask = softwareScan;
                     cleanupTask = cleanupScan;
@@ -1025,7 +1084,8 @@ public class DashboardTabView extends BorderPane {
                                 () -> isScanStale(generation),
                                 token,
                                 () -> disposed,
-                                DASHBOARD_SCAN_TIMEOUT_SECONDS);
+                                DASHBOARD_SCAN_TIMEOUT_SECONDS,
+                                List.of(driverChild, softwareChild, cleanupChild));
                     } catch (TimeoutException te) {
                         // Overall budget: partial results kept (same contract as before).
                         throw te;
@@ -1155,7 +1215,8 @@ public class DashboardTabView extends BorderPane {
                     if (!isScanStale(generation)) {
                         scanFuture = null;
                     }
-                    cancelSubScans();
+                    teardownGeneration(driverScan, softwareScan, cleanupScan,
+                            driverChild, softwareChild, cleanupChild);
                     scanning.set(false);
                     Platform.runLater(() -> {
                         if (isScanStale(generation)) return;
@@ -1170,6 +1231,7 @@ public class DashboardTabView extends BorderPane {
         } catch (java.util.concurrent.RejectedExecutionException ex) {
             AppLogger.error("Scan executor rejected task", ex);
             scanning.set(false);
+            cancelChildTokens();
             cancelSubScans();
             progressBar.setVisible(false);
             stopButton.setVisible(false);
@@ -1227,8 +1289,20 @@ public class DashboardTabView extends BorderPane {
                 || Thread.currentThread().isInterrupted();
     }
 
-    private void scanDrivers(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
-        if (isCancelled(generation, token)) return;
+    /**
+     * Parent + per-category child cancellation. The shared parent covers Stop /
+     * new-scan / overall-timeout; the child covers this category's soft-budget
+     * timeout in isolation so one slow category never poisons its siblings.
+     */
+    private boolean isCancelledAny(int generation, CancellationToken parent, CancellationToken child) {
+        if (disposed || isScanStale(generation) || Thread.currentThread().isInterrupted()) return true;
+        if (parent != null && parent.isCancelled()) return true;
+        return child != null && child.isCancelled();
+    }
+
+    private void scanDrivers(int generation, CancellationToken parent, CancellationToken child,
+            AtomicInteger scansComplete, int totalScans) {
+        if (isCancelledAny(generation, parent, child)) return;
         updateCategoryProgress(0, "scanning", generation);
         Platform.runLater(() -> {
             if (isScanStale(generation)) return;
@@ -1236,24 +1310,85 @@ public class DashboardTabView extends BorderPane {
         });
         IssueCategory success = null;
         IssueCategory failure = null;
+        CancellationToken effectiveChild = child != null ? child : parent;
         try {
             List<InstalledDriver> installed = driverScanServices().scanInstalled();
-            if (isCancelled(generation, token)) return;
-            List<DriverUpdateCandidate> candidates = catalogs().findUpdates(installed, token);
-            if (isCancelled(generation, token)) return;
+            if (isCancelledAny(generation, parent, child)) return;
+            // Purge reboot-pending completed by a reboot so Dashboard does not
+            // report stale REBOOT entries forever (same logic as Drivers tab).
+            try {
+                var rebootStore = new com.sbtools.drivers.RebootPendingStore();
+                rebootStore.purgeAfterReboot();
+                if (installed != null) {
+                    Set<String> installedIds = new HashSet<>();
+                    for (InstalledDriver d : installed) {
+                        if (d != null && d.deviceId() != null && !d.deviceId().isBlank()) {
+                            installedIds.add(d.deviceId());
+                        }
+                    }
+                    rebootStore.purgeMissingDevices(installedIds);
+                }
+            } catch (Exception purgeEx) {
+                AppLogger.warning("Dashboard reboot purge failed: " + purgeEx.getMessage());
+            }
+            List<DriverUpdateCandidate> candidates = catalogs().findUpdates(installed, effectiveChild);
+            if (isCancelledAny(generation, parent, child)) return;
             // Filter ignored drivers so Dashboard count matches Drivers tab
             try {
                 Set<String> excluded = loadExcludedDriverIdSet();
                 if (!excluded.isEmpty()) {
                     candidates = candidates.stream()
-                            .filter(c -> c.installed() == null || !excluded.contains(c.installed().deviceId()))
+                            .filter(c -> c.installed() == null || c.installed().deviceId() == null
+                                    || !excluded.contains(c.installed().deviceId()))
                             .collect(java.util.stream.Collectors.toList());
                 }
             } catch (Exception ex) {
                 AppLogger.warning("Dashboard excluded filter failed: " + ex.getMessage());
             }
-            if (isCancelled(generation, token)) return;
-            if (!candidates.isEmpty()) {
+            // Reboot-pending: keep drivers awaiting restart in Outdated so the
+            // Dashboard stays in sync with the Drivers tab (which badges them
+            // REBOOT until reboot). Excluded ids still win over pending.
+            try {
+                Set<String> pendingIds = new com.sbtools.drivers.RebootPendingStore().loadPendingIds();
+                if (pendingIds != null && !pendingIds.isEmpty() && installed != null) {
+                    Set<String> excludedCheck = loadExcludedDriverIdSet();
+                    Set<String> have = new HashSet<>();
+                    for (DriverUpdateCandidate c : candidates) {
+                        if (c != null && c.installed() != null && c.installed().deviceId() != null) {
+                            have.add(c.installed().deviceId());
+                        }
+                    }
+                    Set<String> installedIds = new HashSet<>();
+                    java.util.Map<String, String> names = new java.util.HashMap<>();
+                    for (InstalledDriver d : installed) {
+                        if (d != null && d.deviceId() != null) {
+                            installedIds.add(d.deviceId());
+                            if (!names.containsKey(d.deviceId())) {
+                                names.put(d.deviceId(), d.friendlyName() != null && !d.friendlyName().isBlank()
+                                        ? d.friendlyName() : d.deviceId());
+                            }
+                        }
+                    }
+                    List<String> pendingDetails = new ArrayList<>();
+                    for (String pid : pendingIds) {
+                        if (pid == null || pid.isBlank() || have.contains(pid)) continue;
+                        if (!excludedCheck.isEmpty() && excludedCheck.contains(pid)) continue;
+                        if (!installedIds.contains(pid)) continue;
+                        pendingDetails.add(names.getOrDefault(pid, pid) + " — reboot pending");
+                    }
+                    if (!pendingDetails.isEmpty()) {
+                        List<String> combined = new ArrayList<>(topDriverDetails(candidates));
+                        combined.addAll(pendingDetails);
+                        success = new IssueCategory(
+                                "Outdated Drivers", candidates.size() + pendingDetails.size(), 0, "Drivers",
+                                combined.stream().limit(MAX_DETAIL_LINES).toList());
+                    }
+                }
+            } catch (Exception ex) {
+                AppLogger.warning("Dashboard reboot-pending filter failed: " + ex.getMessage());
+            }
+            if (isCancelledAny(generation, parent, child)) return;
+            if (success == null && !candidates.isEmpty()) {
                 success = new IssueCategory(
                         "Outdated Drivers", candidates.size(), 0, "Drivers",
                         topDriverDetails(candidates));
@@ -1264,7 +1399,7 @@ public class DashboardTabView extends BorderPane {
             AppLogger.info("Dashboard driver scan cancelled");
             updateCategoryProgress(0, "failed", generation);
         } catch (Exception ex) {
-            if (isCancelled(generation, token)) {
+            if (isCancelledAny(generation, parent, child)) {
                 AppLogger.info("Dashboard driver scan cancelled");
                 updateCategoryProgress(0, "failed", generation);
                 return;
@@ -1309,11 +1444,14 @@ public class DashboardTabView extends BorderPane {
     private Set<String> loadExcludedDriverIdSet() {
         try {
             com.sbtools.settings.AppSettings settings = settingsStore.load();
+            if (settings == null || settings.excludedDriverIds() == null) return Set.of();
             Set<String> ids = new HashSet<>();
             for (String e : settings.excludedDriverIds()) {
+                if (e == null || e.isBlank()) continue;
                 int t = e.lastIndexOf('\t');
                 if (t < 0) t = e.lastIndexOf('\u001F');
-                ids.add(t >= 0 ? e.substring(t + 1) : e);
+                String id = t >= 0 ? e.substring(t + 1).trim() : e.trim();
+                if (!id.isBlank()) ids.add(id);
             }
             return ids;
         } catch (Exception ex) {
@@ -1322,8 +1460,9 @@ public class DashboardTabView extends BorderPane {
         }
     }
 
-    private void scanSoftware(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
-        if (isCancelled(generation, token)) return;
+    private void scanSoftware(int generation, CancellationToken parent, CancellationToken child,
+            AtomicInteger scansComplete, int totalScans) {
+        if (isCancelledAny(generation, parent, child)) return;
         updateCategoryProgress(1, "scanning", generation);
         Platform.runLater(() -> {
             if (isScanStale(generation)) return;
@@ -1331,28 +1470,18 @@ public class DashboardTabView extends BorderPane {
         });
         IssueCategory toAdd = null;
         try {
-            // Honour both Stop (token) and generation-staleness so Stop truly aborts winget/WU.
+            // Honour Stop (parent), per-category timeout (child) and
+            // generation-staleness so Stop truly aborts winget/WU.
             List<SoftwareUpdateEntry> updates = softwareServices().scanAllConcurrent(
-                    () -> isScanStale(generation) || (token != null && token.isCancelled()),
+                    () -> isScanStale(generation)
+                            || (parent != null && parent.isCancelled())
+                            || (child != null && child.isCancelled()),
                     w -> {}, wu -> {});
-            if (isCancelled(generation, token)) return;
-            // Filter ignored software ids (same logic as SoftwareUpdateViewModel) so dashboard count matches Software tab
-            List<SoftwareUpdateEntry> filteredUpdates = updates;
-            try {
-                com.sbtools.settings.AppSettings settings = new com.sbtools.settings.SettingsStore().load();
-                List<String> skipped = settings.skippedSoftwareIds();
-                if (skipped != null && !skipped.isEmpty()) {
-                    java.util.Set<String> skippedSet = skipped.stream()
-                            .map(s -> { int t = s.lastIndexOf('\t'); return t >= 0 ? s.substring(t + 1) : s; })
-                            .collect(java.util.stream.Collectors.toSet());
-                    filteredUpdates = updates.stream()
-                            .filter(e -> e.id() == null || !skippedSet.contains(e.id()))
-                            .collect(java.util.stream.Collectors.toList());
-                }
-            } catch (Exception ex) {
-                AppLogger.warning("Dashboard skipped filter failed: " + ex.getMessage());
-            }
-            if (isCancelled(generation, token)) return;
+            if (isCancelledAny(generation, parent, child)) return;
+            // Filter ignored software ids + phantom/WU validation + dedupe,
+            // mirroring SoftwareUpdateViewModel so dashboard counts match the Software tab.
+            List<SoftwareUpdateEntry> filteredUpdates = filterSoftwareLikeViewModel(updates);
+            if (isCancelledAny(generation, parent, child)) return;
             if (!filteredUpdates.isEmpty()) {
                 long totalSize = filteredUpdates.stream().mapToLong(SoftwareUpdateEntry::sizeBytes).sum();
                 toAdd = new IssueCategory(
@@ -1364,7 +1493,7 @@ public class DashboardTabView extends BorderPane {
             AppLogger.info("Dashboard software scan cancelled");
             updateCategoryProgress(1, "failed", generation);
         } catch (Exception ex) {
-            if (isCancelled(generation, token)) {
+            if (isCancelledAny(generation, parent, child)) {
                 AppLogger.info("Dashboard software scan cancelled");
                 updateCategoryProgress(1, "failed", generation);
                 return;
@@ -1387,39 +1516,114 @@ public class DashboardTabView extends BorderPane {
         });
     }
 
+    /**
+     * Mirrors {@code SoftwareUpdateViewModel} filtering so Dashboard counts match
+     * the Software tab: drops null/blank ids, drops Windows Update rows without
+     * an actionable updateId, applies the skipped-ids filter, then dedupes by id
+     * case-insensitively (winget first, so winget wins ties).
+     */
+    private List<SoftwareUpdateEntry> filterSoftwareLikeViewModel(List<SoftwareUpdateEntry> updates) {
+        try {
+            if (updates == null || updates.isEmpty()) return List.of();
+            java.util.Set<String> skippedSet;
+            try {
+                com.sbtools.settings.AppSettings settings =
+                        new com.sbtools.settings.SettingsStore().load();
+                List<String> skipped = settings == null ? null : settings.skippedSoftwareIds();
+                if (skipped == null || skipped.isEmpty()) {
+                    skippedSet = Set.of();
+                } else {
+                    skippedSet = new HashSet<>();
+                    for (String s : skipped) {
+                        if (s == null || s.isBlank()) continue;
+                        int t = s.lastIndexOf('	');
+                        String id = t >= 0 ? s.substring(t + 1) : s;
+                        if (id != null && !id.isBlank()) skippedSet.add(id.trim().toLowerCase(java.util.Locale.ROOT));
+                    }
+                }
+            } catch (Exception ex) {
+                AppLogger.warning("Dashboard skipped filter failed: " + ex.getMessage());
+                skippedSet = Set.of();
+            }
+            final java.util.Set<String> skip = skippedSet;
+            List<SoftwareUpdateEntry> filtered = updates.stream()
+                    .filter(e -> {
+                        if (e == null) return false;
+                        if (e.id() == null || e.id().isBlank()) return false;
+                        String key = e.id().trim().toLowerCase(java.util.Locale.ROOT);
+                        if ("WindowsUpdate".equals(e.source())) {
+                            if (e.updateId() == null || e.updateId().isBlank()) return false;
+                            return !skip.contains(key);
+                        }
+                        return !skip.contains(key);
+                    })
+                    .collect(java.util.stream.Collectors.toList());
+            return dedupeSoftwareById(filtered);
+        } catch (Exception ex) {
+            AppLogger.warning("Dashboard software filter failed: " + ex.getMessage());
+            return updates == null ? List.of() : updates;
+        }
+    }
+
+    private static List<SoftwareUpdateEntry> dedupeSoftwareById(List<SoftwareUpdateEntry> entries) {
+        if (entries == null || entries.size() < 2) return entries == null ? List.of() : entries;
+        java.util.LinkedHashMap<String, SoftwareUpdateEntry> byId = new java.util.LinkedHashMap<>();
+        for (SoftwareUpdateEntry e : entries) {
+            if (e == null || e.id() == null) continue;
+            String key = e.id().toLowerCase(java.util.Locale.ROOT);
+            byId.putIfAbsent(key, e);
+        }
+        return new ArrayList<>(byId.values());
+    }
+
     private List<String> topSoftwareDetails(List<SoftwareUpdateEntry> updates) {
         try {
-            return updates.stream()
-                    .limit(MAX_DETAIL_LINES)
+            List<String> rows = updates.stream()
+                    .limit(Math.max(1, MAX_DETAIL_LINES - 1))
                     .map(e -> {
                         String n = e.getName() != null && !e.getName().isBlank() ? e.getName() : e.id();
                         String cur = e.getCurrentVersion() != null ? e.getCurrentVersion() : "?";
                         String avail = e.getAvailableVersion() != null ? e.getAvailableVersion() : "?";
                         return n + " " + cur + " → " + avail;
                     })
-                    .toList();
+                    .collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new));
+            // Scope disclosure (mirrors Software tab): this scan covers winget +
+            // Windows Update only, so a clean bill here never implies Store apps
+            // are current. Kept inside details (not the category key) so existing
+            // "Outdated Software" navigation/equality checks keep working.
+            rows.add("(winget + Windows Update only; Store apps not checked)");
+            return List.copyOf(rows);
         } catch (Exception e) {
             return List.of();
         }
     }
 
-    private void scanCleanup(int generation, CancellationToken token, AtomicInteger scansComplete, int totalScans) {
-        if (isCancelled(generation, token)) return;
+    private void scanCleanup(int generation, CancellationToken parent, CancellationToken child,
+            AtomicInteger scansComplete, int totalScans) {
+        if (isCancelledAny(generation, parent, child)) return;
         updateCategoryProgress(2, "scanning", generation);
         Platform.runLater(() -> {
             if (isScanStale(generation)) return;
             statusLabel.setText("Scanning for system cleanup opportunities\u2026");
         });
         List<IssueCategory> batch = new ArrayList<>();
+        // Isolated pool: a lingering walk after Stop/timeout must never occupy the
+        // shared cleanPool and starve the next scan. Shut down in finally below.
+        ExecutorService cleanupExec = Executors.newFixedThreadPool(4, r -> {
+            Thread t = new Thread(r, "dashboard-cleanup");
+            t.setDaemon(true);
+            return t;
+        });
+        CancellationToken effectiveCleanupToken = child != null ? child : parent;
         try {
             int totalCategories = CleanupCategory.values().length;
             AtomicInteger cleanupDone = new AtomicInteger();
             List<CleanupRow> results = cleanupServices().scan(
                     () -> updateCleanupProgress(cleanupDone.incrementAndGet(), totalCategories, generation),
-                    com.sbtools.util.AppExecutors.cleanPool(), token);
-            if (isCancelled(generation, token)) return;
+                    cleanupExec, effectiveCleanupToken);
+            if (isCancelledAny(generation, parent, child)) return;
             for (CleanupRow row : results) {
-                if (isCancelled(generation, token)) return;
+                if (isCancelledAny(generation, parent, child)) return;
                 if (row.getScanStatus() == CleanupRow.ScanStatus.ERROR) {
                     String detailText = row.getErrorMessage() != null ? row.getErrorMessage() : "Scan error";
                     batch.add(IssueCategory.error(
@@ -1454,7 +1658,7 @@ public class DashboardTabView extends BorderPane {
             AppLogger.info("Dashboard cleanup scan cancelled");
             updateCategoryProgress(2, "failed", generation);
         } catch (Exception ex) {
-            if (isCancelled(generation, token)) {
+            if (isCancelledAny(generation, parent, child)) {
                 AppLogger.info("Dashboard cleanup scan cancelled");
                 updateCategoryProgress(2, "failed", generation);
                 return;
@@ -1462,9 +1666,13 @@ public class DashboardTabView extends BorderPane {
             AppLogger.warning("Dashboard cleanup scan failed: " + ex.getMessage());
             updateCategoryProgress(2, "failed", generation);
             batch.add(IssueCategory.error("System Cleanup", "Error: " + ex.getMessage(), "", "Cleanup", 0));
+        } finally {
+            try {
+                cleanupExec.shutdownNow();
+            } catch (Exception ignored) {}
         }
         // Single batched FX mutation for all cleanup rows (P1).
-        if (!batch.isEmpty() && !isCancelled(generation, token)) {
+        if (!batch.isEmpty() && !isCancelledAny(generation, parent, child)) {
             final List<IssueCategory> toAdd = List.copyOf(batch);
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
@@ -1493,67 +1701,116 @@ public class DashboardTabView extends BorderPane {
             statusLabel.setText("Another operation is in progress — please wait.");
             return;
         }
-        boolean isAdmin;
-        try {
-            isAdmin = adminCheck.getAsBoolean();
-        } catch (Exception ex) {
-            isAdmin = false;
-        }
-        if (!isAdmin) {
-            scanning.set(false);
-            statusLabel.setText("Run as Administrator to scan for issues.");
-            return;
-        }
         final int generation = ++scanGeneration;
         final CancellationToken token = new CancellationToken();
         scanCancellationToken = token;
+        cancelChildTokens();
+        statusLabel.setText("Checking privileges\u2026");
         progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
         progressBar.setVisible(true);
         stopButton.setVisible(true);
         stopButton.setDisable(false);
         scanButton.setDisable(true);
-        progressRow.setVisible(true);
-        progressRow.setManaged(true);
-        updateCategoryProgress(categoryIndex, "scanning", generation);
-        String retryName = switch (categoryIndex) {
-            case 0 -> "Outdated Drivers";
-            case 1 -> "Outdated Software";
-            default -> "System Cleanup";
-        };
-        statusLabel.setText("Retrying " + retryName + "\u2026");
-
-        // Remove prior rows for this category on the FX thread (we are on FX here).
-        if (categoryIndex == 0) {
-            issues.removeIf(ic -> "Outdated Drivers".equals(ic.categoryProperty().get()));
-        } else if (categoryIndex == 1) {
-            issues.removeIf(ic -> "Outdated Software".equals(ic.categoryProperty().get()));
-        } else {
-            issues.removeIf(ic -> "Cleanup".equals(ic.sourceProperty().get()));
-        }
-        updateDetailsLabel(null);
-        if (issues.isEmpty()) {
-            hideHealthyState();
-            showResultsView();
-        }
-
-        AtomicInteger done = new AtomicInteger();
+        hideRetryButtons();
+        final int retryIndex = Math.min(2, Math.max(0, categoryIndex));
         try {
             scanFuture = dashboardPool.submit(() -> {
-                Future<?> single;
-                long budget;
-                if (categoryIndex == 0) {
-                    single = dashboardPool.submit(() -> scanDrivers(generation, token, done, 1));
-                    driverTask = single;
-                    budget = DashboardScanCoordinator.DRIVER_TIMEOUT_SECONDS;
-                } else if (categoryIndex == 1) {
-                    single = dashboardPool.submit(() -> scanSoftware(generation, token, done, 1));
-                    softwareTask = single;
-                    budget = DashboardScanCoordinator.SOFTWARE_TIMEOUT_SECONDS;
-                } else {
-                    single = dashboardPool.submit(() -> scanCleanup(generation, token, done, 1));
-                    cleanupTask = single;
-                    budget = DashboardScanCoordinator.CLEANUP_TIMEOUT_SECONDS;
+                boolean isAdmin;
+                try {
+                    // Off the FX thread: AdminCheck spawns PowerShell (up to ~5s).
+                    isAdmin = adminCheck.getAsBoolean();
+                } catch (Exception ex) {
+                    isAdmin = false;
                 }
+                if (!isAdmin) {
+                    if (!isScanStale(generation)) {
+                        scanning.set(false);
+                        Platform.runLater(() -> {
+                            if (isScanStale(generation)) return;
+                            statusLabel.setText("Run as Administrator to scan for issues.");
+                            progressBar.setVisible(false);
+                            stopButton.setVisible(false);
+                            stopButton.setDisable(true);
+                            scanButton.setDisable(busy.get());
+                        });
+                    }
+                    return;
+                }
+                if (isScanStale(generation) || token.isCancelled() || disposed) {
+                    scanning.set(false);
+                    return;
+                }
+                final CancellationToken retryChild = new CancellationToken();
+                if (retryIndex == 0) driverChildToken = retryChild;
+                else if (retryIndex == 1) softwareChildToken = retryChild;
+                else cleanupChildToken = retryChild;
+                Platform.runLater(() -> {
+                    if (isScanStale(generation)) return;
+                    progressRow.setVisible(true);
+                    progressRow.setManaged(true);
+                    updateCategoryProgress(retryIndex, "scanning", generation);
+                    String retryName = switch (retryIndex) {
+                        case 0 -> "Outdated Drivers";
+                        case 1 -> "Outdated Software";
+                        default -> "System Cleanup";
+                    };
+                    statusLabel.setText("Retrying " + retryName + "\u2026");
+                    // Remove prior rows for this category only after admin is
+                    // confirmed so a non-admin retry never wipes existing data.
+                    if (retryIndex == 0) {
+                        issues.removeIf(ic -> "Outdated Drivers".equals(ic.categoryProperty().get()));
+                    } else if (retryIndex == 1) {
+                        issues.removeIf(ic -> "Outdated Software".equals(ic.categoryProperty().get()));
+                    } else {
+                        issues.removeIf(ic -> "Cleanup".equals(ic.sourceProperty().get()));
+                    }
+                    updateDetailsLabel(null);
+                    if (issues.isEmpty()) {
+                        hideHealthyState();
+                        showResultsView();
+                    }
+                });
+                runRetryScan(retryIndex, generation, token, retryChild);
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ex) {
+            scanning.set(false);
+            cancelChildTokens();
+            cancelSubScans();
+            progressBar.setVisible(false);
+            stopButton.setVisible(false);
+            stopButton.setDisable(true);
+            scanButton.setDisable(busy.get());
+            statusLabel.setText("Scan unavailable \u2014 try again later.");
+        }
+    }
+
+    /**
+     * Retry worker body: runs the single failed category with its own child
+     * token (isolated soft-budget timeout) on the dashboard pool.
+     */
+    private void runRetryScan(int categoryIndex, int generation, CancellationToken token,
+            CancellationToken retryChild) {
+        AtomicInteger done = new AtomicInteger();
+        Future<?> single = null;
+        long budget;
+        if (categoryIndex == 0) {
+            budget = DashboardScanCoordinator.DRIVER_TIMEOUT_SECONDS;
+        } else if (categoryIndex == 1) {
+            budget = DashboardScanCoordinator.SOFTWARE_TIMEOUT_SECONDS;
+        } else {
+            budget = DashboardScanCoordinator.CLEANUP_TIMEOUT_SECONDS;
+        }
+        try {
+            if (categoryIndex == 0) {
+                single = dashboardPool.submit(() -> scanDrivers(generation, token, retryChild, done, 1));
+                driverTask = single;
+            } else if (categoryIndex == 1) {
+                single = dashboardPool.submit(() -> scanSoftware(generation, token, retryChild, done, 1));
+                softwareTask = single;
+            } else {
+                single = dashboardPool.submit(() -> scanCleanup(generation, token, retryChild, done, 1));
+                cleanupTask = single;
+            }
                 try {
                     DashboardScanCoordinator.awaitAllInterruptible(
                             List.of(single),
@@ -1561,8 +1818,10 @@ public class DashboardTabView extends BorderPane {
                             () -> isScanStale(generation),
                             token,
                             () -> disposed,
-                            Math.max(60, budget + 30));
-                    if (isScanStale(generation) || token.isCancelled() || disposed) {
+                            Math.max(60, budget + 30),
+                            List.of(retryChild));
+                    if (isScanStale(generation) || token.isCancelled()
+                            || (retryChild != null && retryChild.isCancelled()) || disposed) {
                         Platform.runLater(() -> {
                             progressBar.setVisible(false);
                             stopButton.setVisible(false);
@@ -1618,7 +1877,10 @@ public class DashboardTabView extends BorderPane {
                     updateCategoryProgress(categoryIndex, "failed", generation);
                 } finally {
                     if (!isScanStale(generation)) scanFuture = null;
-                    cancelSubScans();
+                    teardownGeneration(single, null, null,
+                            categoryIndex == 0 ? retryChild : null,
+                            categoryIndex == 1 ? retryChild : null,
+                            categoryIndex == 2 ? retryChild : null);
                     scanning.set(false);
                     Platform.runLater(() -> {
                         if (isScanStale(generation)) return;
@@ -1629,15 +1891,17 @@ public class DashboardTabView extends BorderPane {
                         revealRetryForErrors();
                     });
                 }
-            });
         } catch (java.util.concurrent.RejectedExecutionException ex) {
+            cancelToken(retryChild);
+            cancelFuture(single);
             scanning.set(false);
-            cancelSubScans();
-            progressBar.setVisible(false);
-            stopButton.setVisible(false);
-            stopButton.setDisable(true);
-            scanButton.setDisable(busy.get());
-            statusLabel.setText("Scan unavailable \u2014 try again later.");
+            Platform.runLater(() -> {
+                progressBar.setVisible(false);
+                stopButton.setVisible(false);
+                stopButton.setDisable(true);
+                scanButton.setDisable(busy.get());
+                statusLabel.setText("Scan unavailable \u2014 try again later.");
+            });
         }
     }
 
@@ -1648,6 +1912,9 @@ public class DashboardTabView extends BorderPane {
         scanGeneration++;
         CancellationToken token = scanCancellationToken;
         if (token != null) token.cancel();
+        // Cancel per-category children too so token-polling inner services
+        // (winget/WU, catalog providers, cleanup walks) abort promptly.
+        cancelChildTokens();
         // Cancel inner workers first so the interruptible outer wait unblocks;
         // cancelling only the outer Future never interrupted join().
         cancelSubScans();

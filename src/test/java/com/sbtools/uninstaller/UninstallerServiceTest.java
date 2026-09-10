@@ -52,7 +52,8 @@ class UninstallerServiceTest {
     void isExactMatch_onlyExactNames() {
         InstalledApp a = app("MyApp", "MyVendor");
         assertTrue(UninstallerService.isExactMatch("MyApp", a));
-        assertTrue(UninstallerService.isExactMatch("myvendor", a));
+        // B1 FIX: publisher-only match is NOT high-confidence (shared vendor root).
+        assertFalse(UninstallerService.isExactMatch("myvendor", a));
         // Heuristic substring is NOT exact
         assertFalse(UninstallerService.isExactMatch("MyApp Pro", a));
         assertFalse(UninstallerService.isExactMatch("MyAppPro", a));

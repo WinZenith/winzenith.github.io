@@ -47,10 +47,15 @@ public class WingetRunner {
 
     /**
      * Returns true if winget is available on this system.
-     * Caches the result for the lifetime of this instance.
+     * A positive result is cached for the JVM lifetime; a negative result is
+     * NOT cached forever — it is retried on every call so installing
+     * "App Installer" (or fixing PATH / execution aliases) is picked up
+     * without restarting the app. Previously a single early false poisoned
+     * every later scan.
      */
     public boolean isAvailable() {
-        if (resolved) return available;
+        if (resolved && available) return true;
+        // Retry negatives: fall through and re-probe every time until success.
         try {
             String p = resolvePath();
             if (p != null) {
@@ -60,34 +65,35 @@ public class WingetRunner {
             }
             ProcessResult r = runner.run(buildCommand("winget", "--version"), 10);
             available = r.success();
-            resolved = true;
+            // Only latch resolved=true on success; negatives stay retryable.
+            if (available) resolved = true;
             return available;
         } catch (Exception e) {
             AppLogger.info("winget not available: " + e.getMessage());
             available = false;
-            resolved = true;
             return false;
         }
     }
 
     /**
      * Returns the cached winget version string (e.g. "v1.9.2831").
-     * Runs {@code winget --version} only once per JVM; subsequent calls return the cached value.
+     * Successful lookups are cached per JVM; empty (failure) results are NOT
+     * latched — they are retried so a later winget install/upgrade is picked up.
      */
     public String getVersion() {
-        if (cachedVersion != null) return cachedVersion;
+        if (cachedVersion != null && !cachedVersion.isEmpty()) return cachedVersion;
         synchronized (WingetRunner.class) {
-            if (cachedVersion != null) return cachedVersion;
+            if (cachedVersion != null && !cachedVersion.isEmpty()) return cachedVersion;
             try {
                 ProcessResult r = runner.run(buildCommand("winget", "--version"), 10);
-                if (r.success() && r.stdout() != null) {
+                if (r.success() && r.stdout() != null && !r.stdout().trim().isEmpty()) {
                     cachedVersion = r.stdout().trim();
-                } else {
+                } else if (cachedVersion == null) {
                     cachedVersion = "";
                 }
             } catch (Exception e) {
                 AppLogger.info("Failed to get winget version: " + e.getMessage());
-                cachedVersion = "";
+                if (cachedVersion == null) cachedVersion = "";
             }
             return cachedVersion;
         }
@@ -96,15 +102,22 @@ public class WingetRunner {
     /**
      * Returns true if the installed winget version supports {@code --output json}.
      * JSON output was introduced in winget v1.4.x. This is determined by parsing the
-     * version string cached by {@link #getVersion()}.
+     * version string cached by {@link #getVersion()}. Unknown/empty versions are
+     * treated as "no JSON" but are NOT latched forever — the next call re-probes
+     * once winget becomes available.
      */
     public boolean supportsJsonOutput() {
-        if (cachedJsonSupported != null) return cachedJsonSupported;
+        if (cachedJsonSupported != null && cachedJsonSupported) return true;
         synchronized (WingetRunner.class) {
-            if (cachedJsonSupported != null) return cachedJsonSupported;
+            if (cachedJsonSupported != null && cachedJsonSupported) return cachedJsonSupported;
             String ver = getVersion();
-            cachedJsonSupported = parseMajorMinorVersion(ver) >= 1.4;
-            return cachedJsonSupported;
+            boolean supported = parseMajorMinorVersion(ver) >= 1.4;
+            // Latch positives forever; negatives only when we actually know the version.
+            // Empty version (winget missing) stays retryable.
+            if (supported || (ver != null && !ver.isBlank())) {
+                cachedJsonSupported = supported;
+            }
+            return supported;
         }
     }
 
@@ -234,8 +247,12 @@ public class WingetRunner {
 
     /**
      * Runs a winget command with automatic fallback across all candidates.
-     * Returns the first successful result, or the last failed result.
-     * Caches which candidate form succeeded so the next call tries it first.
+     * Fallback applies ONLY when the launcher itself could not start winget
+     * (missing exe, "not recognized", exit 9009, IOException). Once winget
+     * actually runs, its result is returned immediately -- even on failure --
+     * so a failed install/scan is never re-executed via the next shell
+     * (previously a failed upgrade ran up to 3x: direct, cmd, powershell).
+     * Caches which candidate form launched winget so the next call tries it first.
      */
     public ProcessResult runWithFallback(long timeoutSeconds, String... args) {
         List<List<String>> candidates = buildCandidates(args);
@@ -252,6 +269,12 @@ public class WingetRunner {
                     workingCandidateIndex = idx;
                     return r;
                 }
+                if (!isLauncherFailure(r)) {
+                    // winget ran and reported its own failure: remember the
+                    // working launcher but do NOT re-run via another shell.
+                    workingCandidateIndex = idx;
+                    return r;
+                }
                 lastResult = r;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -260,7 +283,10 @@ public class WingetRunner {
                 lastEx = ex;
             }
         }
-        return lastResult;
+        if (lastResult != null) return lastResult;
+        if (lastEx instanceof RuntimeException re) throw re;
+        if (lastEx != null) throw new RuntimeException("winget fallback failed", lastEx);
+        return null;
     }
 
     public ProcessResult runWithFallback(long timeoutSeconds, java.util.concurrent.atomic.AtomicBoolean cancelled, String... args) throws java.io.IOException, InterruptedException {
@@ -279,6 +305,11 @@ public class WingetRunner {
                     workingCandidateIndex = idx;
                     return r;
                 }
+                if (!isLauncherFailure(r)) {
+                    // winget ran: cache launcher, return installer/scan failure as-is.
+                    workingCandidateIndex = idx;
+                    return r;
+                }
                 lastResult = r;
             } catch (java.util.concurrent.CancellationException ce) {
                 throw ce;
@@ -290,9 +321,12 @@ public class WingetRunner {
                 if (cancelled != null && cancelled.get()) throw new java.util.concurrent.CancellationException("Cancelled");
             }
         }
+        if (lastResult != null) return lastResult;
         if (lastEx instanceof java.io.IOException) throw (java.io.IOException) lastEx;
         if (lastEx instanceof InterruptedException) throw (InterruptedException) lastEx;
-        return lastResult;
+        if (lastEx instanceof RuntimeException re) throw re;
+        if (lastEx != null) throw new java.io.IOException("winget fallback failed", lastEx);
+        return null;
     }
 
     public ProcessResult runWithFallback(long timeoutSeconds, java.util.function.BooleanSupplier cancelledSupplier, String... args) {
@@ -314,9 +348,11 @@ public class WingetRunner {
 
     /**
      * Runs a winget command in streaming mode with automatic fallback across candidates.
+     * Fallback applies ONLY when the launcher could not start winget. Once winget
+     * runs (including reboot-required and installer-failure results), the result
+     * is returned immediately without re-executing via the next shell.
      * Calls lineCallback for each output line and progressCallback for progress updates.
-     * Returns the first successful result, or the last failed result.
-     * Caches which candidate form succeeded so the next call tries it first.
+     * Caches which candidate form launched winget so the next call tries it first.
      */
     public ProcessResult runWithFallbackStreaming(Consumer<String> lineCallback,
                                                    Consumer<Double> progressCallback,
@@ -345,10 +381,24 @@ public class WingetRunner {
                     workingCandidateIndex = idx;
                     return r;
                 }
+                if (!isLauncherFailure(r)) {
+                    // winget ran and failed on its own terms (package failure,
+                    // hash mismatch, no update): do NOT retry via another shell.
+                    workingCandidateIndex = idx;
+                    return r;
+                }
                 lastResult = r;
             } catch (java.util.concurrent.CancellationException cex) {
                 throw cex;
             } catch (Exception ex) {
+                // Timeouts mean the installer hung and was killed: do not
+                // re-run it via another shell (would triple a 1200s hang).
+                // Only IOExceptions from process startup ("file not found")
+                // justify trying the next launcher.
+                if (isTimeoutException(ex)) {
+                    if (ex instanceof java.io.IOException ioe) throw ioe;
+                    throw new java.io.IOException("winget streaming timed out", ex);
+                }
                 lastEx = ex;
             }
         }
@@ -358,9 +408,44 @@ public class WingetRunner {
     }
 
     /**
+     * True only when the launcher itself could not start winget (missing exe,
+     * PATH miss, cmd/PowerShell "not recognized"). Any output proving winget
+     * ran returns false so callers never re-execute a failed install/scan.
+     */
+    static boolean isLauncherFailure(ProcessResult r) {
+        if (r == null) return true;
+        if (r.exitCode() == 9009) return true;
+        String out = r.combinedOutput();
+        if (out == null || out.isBlank()) {
+            // winget almost always prints something when it runs; blank with
+            // non-zero is treated as launcher failure to preserve fallback for
+            // truly missing binaries, at most trying the next shell once.
+            return true;
+        }
+        String lower = out.toLowerCase();
+        if (lower.contains("not recognized")
+                || lower.contains("not recognised")
+                || lower.contains("command not found")
+                || lower.contains("is not recognized as an internal")
+                || lower.contains("the term 'winget' is not recognized")
+                || lower.contains("cannot find") && lower.contains("winget")
+                || lower.contains("file not found") && lower.contains("winget")) {
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isTimeoutException(Throwable ex) {
+        if (ex == null) return false;
+        String msg = ex.getMessage() == null ? "" : ex.getMessage().toLowerCase();
+        return msg.contains("timed out");
+    }
+
+    /**
      * Minimal reboot-required check for fallback control (see SoftwareUpdateService.isRebootRequired
      * for the canonical, JSON-aware version). Kept local to avoid a WingetRunner ↔
-     * SoftwareUpdateService class cycle.
+     * SoftwareUpdateService class cycle. Negation-aware: "No reboot required",
+     * "reboot not required" and "rebootRequired":false do NOT count.
      */
     private static boolean isRebootRequiredResult(ProcessResult r) {
         if (r == null) return false;
@@ -368,10 +453,67 @@ public class WingetRunner {
                 || r.exitCode() == ProcessResult.MSI_SUCCESS_REBOOT_INITIATED) return true;
         String out = r.combinedOutput();
         if (out == null || out.isBlank()) return false;
-        String lower = out.toLowerCase();
-        return lower.contains("rebootrequired") || lower.contains("restartrequired")
-                || lower.contains("reboot required") || lower.contains("restart required")
-                || lower.contains("error_success_reboot_required");
+        return containsAffirmativeReboot(out);
+    }
+
+    /**
+     * Shared negation-aware reboot phrasing check. Each line carrying a reboot
+     * token is ignored when the same line carries an explicit negation
+     * ({@code no / not / n't / without / false / :false}).
+     */
+    static boolean containsAffirmativeReboot(String output) {
+        if (output == null || output.isBlank()) return false;
+        String lower = output.toLowerCase();
+        // Fast path for compact JSON tokens: must rule out explicit false first,
+        // otherwise '{"rebootRequired":false}' would false-positive.
+        for (String line : lower.split("\\r?\\n")) {
+            String l = line.trim();
+            if (l.isEmpty()) continue;
+            boolean hasCompact = l.contains("rebootrequired") || l.contains("restartrequired")
+                    || l.contains("error_success_reboot_required");
+            boolean hasPhrase = l.contains("reboot required") || l.contains("restart required")
+                    || l.contains("restart is required") || l.contains("a reboot is required")
+                    || l.contains("please reboot") || l.contains("please restart");
+            // "a restart" alone is too broad ("a restart from scratch"); only
+            // count it with a requirement verb nearby.
+            boolean hasBareRestart = !hasCompact && !hasPhrase
+                    && l.contains("a restart")
+                    && (l.contains("requir") || l.contains("needed") || l.contains("necessary"));
+            if (!hasCompact && !hasPhrase && !hasBareRestart) continue;
+            if (isNegatedRebootLine(l)) continue;
+            if (hasCompact) {
+                // Compact token without negation on the same line is affirmative
+                // (covers wu-install JSON compressed form).
+                return true;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isNegatedRebootLine(String lowerLine) {
+        String l = lowerLine;
+        // Explicit JSON false: "rebootRequired":false, 'rebootRequired'=false, = 0
+        if (l.matches(".*rebootrequired\"?\\s*[:=]\\s*false.*")) return true;
+        if (l.matches(".*restartrequired\"?\\s*[:=]\\s*false.*")) return true;
+        if (l.matches(".*rebootrequired\"?\\s*[:=]\\s*0\\b.*")) return true;
+        if (l.matches(".*restartrequired\"?\\s*[:=]\\s*0\\b.*")) return true;
+        if (l.contains("rebootrequired") || l.contains("restartrequired")) {
+            // Compact token with a nearby negation word on the same line.
+            if (l.contains("no ") || l.contains("not ") || l.contains("n't")
+                    || l.contains("without") || l.contains("never") || l.contains("false")
+                    || l.contains("none")) return true;
+            return false;
+        }
+        // Human-readable phrasing negations.
+        if (l.matches(".*\\bno\\s+(reboot|restart)\\b.*")) return true;
+        if (l.matches(".*\\b(reboot|restart)\\b[^\\n]*?\\bnot\\s+(required|needed|necessary)\\b.*")) return true;
+        if (l.matches(".*\\bnot\\s+requir[^\\n]*?\\b(reboot|restart)\\b.*")) return true;
+        if (l.matches(".*n['’]t\\s+requir[^\\n]*?\\b(reboot|restart)\\b.*")) return true;
+        if (l.matches(".*without\\s+[^\\n]*?\\b(reboot|restart)\\b.*")) return true;
+        if (l.matches(".*\\b(reboot|restart)\\b[^\\n]*?\\bno\\s+(reboot|restart)?\\s*(required|needed|necessary)\\b.*")
+                && l.contains("no ")) return true;
+        return false;
     }
 
     /**
@@ -437,11 +579,15 @@ public class WingetRunner {
         for (String a : args) {
             if (a == null) continue;
             if (sb.length() > 0) sb.append(' ');
-            String safe = a.replace("\"", "\\\"");
-            if (safe.contains(" ") || safe.contains("\"")) {
-                sb.append('"').append(safe).append('"');
+            // B3 FIX: use PowerShell single-quote escaping ('' for ') — the old
+            // double-quote + backslash scheme ("\"") is NOT a PowerShell escape and
+            // allowed a registry-controlled app name containing '"' to break out of
+            // the "& { ... }" wrapper and inject commands. Strip CR/LF as well.
+            String noLines = a.replace('\r', ' ').replace('\n', ' ');
+            if (noLines.isEmpty() || noLines.matches("[A-Za-z0-9_\\-\\./:=]+")) {
+                sb.append(noLines);
             } else {
-                sb.append(safe);
+                sb.append('\'').append(noLines.replace("'", "''")).append('\'');
             }
         }
         return sb.toString();

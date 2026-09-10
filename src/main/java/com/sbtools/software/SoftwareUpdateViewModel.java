@@ -47,7 +47,7 @@ public class SoftwareUpdateViewModel {
     private final BooleanSupplier adminCheck;
 
     private final ObservableList<SoftwareUpdateEntry> rows = FXCollections.observableArrayList();
-    private final StringProperty statusText = new SimpleStringProperty("Scan for available app updates via winget.");
+    private final StringProperty statusText = new SimpleStringProperty("Scan for winget app + Windows updates (Store apps not checked).");
     private final DoubleProperty batchProgress = new SimpleDoubleProperty(0);
     private final StringProperty batchProgressText = new SimpleStringProperty();
     private final BooleanProperty showRetryFailed = new SimpleBooleanProperty(false);
@@ -116,6 +116,11 @@ public class SoftwareUpdateViewModel {
         if (busy.get() || installRunning.get()) return;
         scanCancelled.set(false);
         restorePointCreatedThisBatch.set(false);
+        // A fresh scan invalidates any previous failure state. Without this, Retry Failed
+        // after a re-scan would reinstall orphaned entries from the old scan (wrong versions,
+        // rows no longer displayed) and a maxed-out retryCount would block retries forever.
+        synchronized (failedEntries) { failedEntries.clear(); }
+        retryCount.set(0);
         // Set busy synchronously when already on FX thread to close the race where a second
         // Scan click arrives before the async runLater from the first click executes.
         if (Platform.isFxApplicationThread()) {
@@ -165,11 +170,16 @@ public class SoftwareUpdateViewModel {
             AppSettings settings = settingsStore.load();
             List<String> skippedIds = settings.skippedSoftwareIds();
             if (skippedIds == null) skippedIds = List.of();
+            // Winget ids (and WU GUIDs) are case-insensitive, and dedupeById is
+            // case-insensitive — the ignore filter must match that or an ignored
+            // "Google.Chrome" reappears as "google.chrome" on the next scan.
             Set<String> skippedIdSet = skippedIds.stream()
                     .map(s -> {
                         int t = s.lastIndexOf('\t');
-                        return t >= 0 ? s.substring(t + 1) : s;
+                        String id = t >= 0 ? s.substring(t + 1) : s;
+                        return id == null ? "" : id.trim().toLowerCase();
                     })
+                    .filter(s -> !s.isEmpty())
                     .collect(Collectors.toSet());
             List<SoftwareUpdateEntry> filteredUpdates = allUpdates.stream()
                     .filter(e -> {
@@ -180,14 +190,14 @@ public class SoftwareUpdateViewModel {
                         if ("WindowsUpdate".equals(e.source())) {
                             if (e.updateId() == null || e.updateId().isBlank()) return false;
                             if (e.id() == null || e.id().isBlank()) return false;
-                            return !skippedIdSet.contains(e.id());
+                            return !skippedIdSet.contains(e.id().trim().toLowerCase());
                         }
                         // winget rows: entries with blank id were already filtered in
                         // SoftwareUpdateService, but guard here as defense-in-depth.
                         if (e.id() == null || e.id().isBlank()) {
                             return false;
                         }
-                        return !skippedIdSet.contains(e.id());
+                        return !skippedIdSet.contains(e.id().trim().toLowerCase());
                     })
                     .collect(Collectors.toList());
             // Deduplicate by id (case-insensitive, keep-first = winget wins since winget
@@ -219,11 +229,12 @@ public class SoftwareUpdateViewModel {
                         List<SoftwareUpdateEntry> cachedFiltered = cachedOpt.get().entries().stream()
                                 .filter(e -> {
                                     if (e == null || e.id() == null || e.id().isBlank()) return false;
+                                    String key = e.id().trim().toLowerCase();
                                     if ("WindowsUpdate".equals(e.source())) {
                                         return e.updateId() != null && !e.updateId().isBlank()
-                                                && !skippedIdSet.contains(e.id());
+                                                && !skippedIdSet.contains(key);
                                     }
-                                    return !skippedIdSet.contains(e.id());
+                                    return !skippedIdSet.contains(key);
                                 })
                                 .collect(Collectors.toList());
                         cachedFiltered = dedupeById(cachedFiltered);
@@ -251,23 +262,23 @@ public class SoftwareUpdateViewModel {
                     return;
                 }
                 if (filteredWc > 0 && filteredWu > 0) {
-                    statusText.set(dedupedUpdates.size() + " outdated item(s) found (" + filteredWc + " app(s), " + filteredWu + " Windows Update(s)).");
+                    statusText.set(dedupedUpdates.size() + " outdated item(s) found (" + filteredWc + " winget app(s), " + filteredWu + " Windows Update(s)). Store apps are not checked.");
                 } else if (filteredWc > 0) {
                     if (wuFailed) {
-                        statusText.set(filteredWc + " outdated app(s) found. (Windows Update check failed)");
+                        statusText.set(filteredWc + " outdated winget app(s) found. (Windows Update check failed; Store apps not checked)");
                         AppLogger.warning("WU error surfaced to UI: " + wuError);
                     } else {
-                        statusText.set(filteredWc + " outdated app(s) found.");
+                        statusText.set(filteredWc + " outdated winget app(s) found. (Store apps not checked)");
                     }
                 } else if (filteredWu > 0) {
                     if (wingetFailed) {
-                        statusText.set(filteredWu + " Windows Update(s) found. (winget check had errors)");
+                        statusText.set(filteredWu + " Windows Update(s) found. (winget check had errors; Store apps not checked)");
                     } else {
-                        statusText.set(filteredWu + " Windows Update(s) found.");
+                        statusText.set(filteredWu + " Windows Update(s) found. (Store apps not checked)");
                     }
                 } else if (wc > 0 || wuc > 0) {
                     // All found were ignored
-                    statusText.set("Everything is up to date. (" + (wc + wuc - dedupedUpdates.size()) + " ignored)");
+                    statusText.set("No updates to install. (" + (wc + wuc - dedupedUpdates.size()) + " ignored; Store apps not checked)");
                 } else {
                     if (wuFailed || wingetFailed) {
                         String err = wuFailed ? wuError : wingetError;
@@ -275,7 +286,7 @@ public class SoftwareUpdateViewModel {
                         statusText.set("Scan completed with warnings: " + shortErr);
                         AppLogger.warning("Scan warning surfaced: " + err);
                     } else {
-                        statusText.set("Everything is up to date.");
+                        statusText.set("No winget app or Windows updates found. (Microsoft Store apps are not checked here)");
                     }
                 }
                 // If WU failed but winget succeeded with 0 results, surface as warning not false "up to date"
@@ -347,9 +358,24 @@ public class SoftwareUpdateViewModel {
             });
             return;
         }
-        if (!adminCheck.getAsBoolean()) {
-            Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait());
-            return;
+        // Non-admin users can still update per-user winget packages. Do NOT hard-block:
+        // show a one-shot notice and let the install attempt run; system-level and
+        // Windows Update items will fail gracefully with access-denied if elevated
+        // rights are truly required.
+        try {
+            boolean isAdmin = adminCheck.getAsBoolean();
+            if (!isAdmin) {
+                boolean hasWu = selected != null && selected.stream().anyMatch(e -> e != null && "WindowsUpdate".equals(e.source()));
+                String notice = hasWu
+                        ? "Running without administrator rights. Per-user apps can still update, but Windows Update / system items will likely fail with access denied."
+                        : "Running without administrator rights. Per-user apps can still update; system-level apps may fail with access denied.";
+                AppLogger.info("Non-admin batch update attempt (" + (selected == null ? 0 : selected.size()) + " item(s))");
+                Platform.runLater(() -> {
+                    if (!disposed) new Alert(Alert.AlertType.INFORMATION, notice).showAndWait();
+                });
+            }
+        } catch (Exception ex) {
+            AppLogger.warning("Admin check failed, proceeding as non-admin: " + ex.getMessage());
         }
         if (selected == null || selected.isEmpty()) {
             Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Select at least one program to update.").showAndWait());
@@ -534,9 +560,21 @@ public class SoftwareUpdateViewModel {
             });
             return;
         }
-        if (!adminCheck.getAsBoolean()) {
-            Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, "Installing updates may require administrator rights.").showAndWait());
-            return;
+        // Same non-blocking policy as batch: warn but allow per-user installs.
+        try {
+            boolean isAdmin = adminCheck.getAsBoolean();
+            if (!isAdmin) {
+                boolean isWu = "WindowsUpdate".equals(entry.source());
+                String notice = isWu
+                        ? "Running without administrator rights. This Windows Update will likely fail with access denied."
+                        : "Running without administrator rights. Per-user apps can still update; system-level apps may fail with access denied.";
+                AppLogger.info("Non-admin single update attempt for " + entry.id());
+                Platform.runLater(() -> {
+                    if (!disposed) new Alert(Alert.AlertType.INFORMATION, notice).showAndWait();
+                });
+            }
+        } catch (Exception ex) {
+            AppLogger.warning("Admin check failed, proceeding as non-admin: " + ex.getMessage());
         }
         if (!installRunning.compareAndSet(false, true)) {
             Platform.runLater(() -> {
@@ -650,7 +688,21 @@ public class SoftwareUpdateViewModel {
             // Exit 0 or reboot-required (3010/1641, reboot phrasing) counts as installed; a 3010 must
             // not be reported as Failed.
             if (SoftwareUpdateService.isSuccessOrRebootRequired(res)) {
-                InstallerCleanupHelper.promptAndCleanup(service, entry, start);
+                // Non-blocking cleanup: the old synchronous promptAndCleanup() held the
+                // single install worker on a 60s latch while busy/installRunning stayed
+                // true (app appeared hung, Stop/shutdown delayed). Fire-and-forget async
+                // lets the install finish immediately; the dialog appears while UI is free.
+                if (!disposed) {
+                    try {
+                        InstallerCleanupHelper.promptAndCleanupAsync(service, entry, start)
+                                .exceptionally(ex -> {
+                                    AppLogger.warning("Single cleanup failed: " + ex.getMessage());
+                                    return false;
+                                });
+                    } catch (Exception ex) {
+                        AppLogger.warning("Single cleanup scheduling failed: " + ex.getMessage());
+                    }
+                }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), true, null);
                 try { SoftwareUpdateScanCache.invalidate(); } catch (Exception ignored) {}
                 Platform.runLater(() -> {
@@ -672,7 +724,9 @@ public class SoftwareUpdateViewModel {
                 String safeError = errorMsg;
                 // Must set FX property on FX thread
                 Platform.runLater(() -> entry.setLastError(safeError));
-                synchronized (failedEntries) { failedEntries.add(entry); }
+                synchronized (failedEntries) {
+                    if (!failedEntries.contains(entry)) failedEntries.add(entry);
+                }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, errorMsg);
                 if (isMsiCorruptionError(errorMsg)) {
                     errorMsg = "Windows Installer corruption detected.\n\n"
@@ -690,6 +744,9 @@ public class SoftwareUpdateViewModel {
                     new Alert(Alert.AlertType.ERROR, "Install failed:\n" + finalMsg).showAndWait();
                     entry.setStatus("Failed");
                     entry.setProgress(0.0);
+                    // Single failures must also arm Retry Failed — previously only batch
+                    // failures did, leaving single-failure users with no retry path.
+                    showRetryFailed.set(true);
                 });
             }
         } catch (Exception ex) {
@@ -697,10 +754,13 @@ public class SoftwareUpdateViewModel {
             String safeMsg = msg;
             Platform.runLater(() -> entry.setLastError(safeMsg));
             if (msg != null && msg.contains("INSTALL_TECHNOLOGY_MISMATCH")) {
-                synchronized (failedEntries) { failedEntries.add(entry); }
+                synchronized (failedEntries) {
+                    if (!failedEntries.contains(entry)) failedEntries.add(entry);
+                }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, msg);
                 Platform.runLater(() -> {
                     if (disposed) return;
+                    showRetryFailed.set(true);
                     Alert a = new Alert(Alert.AlertType.WARNING);
                     a.setTitle(AppInfo.DISPLAY_NAME);
                     a.setHeaderText("Cannot update " + entry.getName());
@@ -714,11 +774,14 @@ public class SoftwareUpdateViewModel {
                     }
                 });
             } else {
-                synchronized (failedEntries) { failedEntries.add(entry); }
+                synchronized (failedEntries) {
+                    if (!failedEntries.contains(entry)) failedEntries.add(entry);
+                }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, msg);
                 Platform.runLater(() -> {
                     if (!disposed) {
                         new Alert(Alert.AlertType.ERROR, "Install failed:\n" + msg).showAndWait();
+                        showRetryFailed.set(true);
                     }
                 });
             }
@@ -775,20 +838,45 @@ public class SoftwareUpdateViewModel {
     }
 
     public void skipEntry(SoftwareUpdateEntry entry) {
+        if (entry == null) return;
         try {
-            AppSettings current = settingsStore.load();
-            List<String> currentSkipped = current.skippedSoftwareIds();
-            List<String> skipped = currentSkipped == null ? new ArrayList<>() : new ArrayList<>(currentSkipped);
-            String id = entry.id() == null ? "" : entry.id();
-            if (skipped.stream().noneMatch(s -> s.endsWith("\t" + id))) {
+            String id = entry.id() == null ? "" : entry.id().trim();
+            if (id.isEmpty()) {
+                AppLogger.warning("skipEntry with blank id ignored");
+            } else {
                 String safeName = entry.getName() == null ? id : entry.getName().replace("\t", " ").replace("\n", " ").replace("\r", " ");
-                skipped.add(safeName + "\t" + id);
+                String stored = safeName + "\t" + id;
+                String idLower = id.toLowerCase();
+                // Atomic RMW so concurrent saves from other tabs cannot lose updates.
+                settingsStore.update(curr -> {
+                    List<String> cur = curr.skippedSoftwareIds();
+                    List<String> skipped = cur == null ? new ArrayList<>() : new ArrayList<>(cur);
+                    boolean already = skipped.stream().anyMatch(s -> {
+                        if (s == null) return false;
+                        int t = s.lastIndexOf('\t');
+                        String existing = t >= 0 ? s.substring(t + 1) : s;
+                        return existing != null && existing.trim().equalsIgnoreCase(idLower);
+                    });
+                    if (!already) skipped.add(stored);
+                    return curr.toBuilder().skippedSoftwareIds(skipped).build();
+                });
             }
-            settingsStore.save(current.toBuilder().skippedSoftwareIds(skipped).build());
         } catch (Exception ex) {
             AppLogger.warning("Failed to skip software entry: " + ex.getMessage());
         }
-        Platform.runLater(() -> rows.remove(entry));
+        // An ignored entry must never be retried: drop it (and any case-variant
+        // duplicate) from the failure list, otherwise Retry Failed reinstalls it.
+        boolean nowEmpty;
+        synchronized (failedEntries) {
+            failedEntries.removeIf(e -> e == entry
+                    || (e != null && e.id() != null && entry.id() != null
+                        && e.id().equalsIgnoreCase(entry.id())));
+            nowEmpty = failedEntries.isEmpty();
+        }
+        Platform.runLater(() -> {
+            rows.remove(entry);
+            if (nowEmpty) showRetryFailed.set(false);
+        });
     }
 
     public List<SoftwareUpdateEntry> getFailedEntries() {
@@ -807,7 +895,7 @@ public class SoftwareUpdateViewModel {
         java.util.LinkedHashMap<String, SoftwareUpdateEntry> byId = new java.util.LinkedHashMap<>();
         for (SoftwareUpdateEntry e : entries) {
             if (e == null || e.id() == null) continue;
-            String key = e.id().toLowerCase();
+            String key = e.id().toLowerCase(java.util.Locale.ROOT);
             if (!byId.containsKey(key)) {
                 byId.put(key, e);
             } else {
@@ -1044,6 +1132,8 @@ public class SoftwareUpdateViewModel {
         }
         // Stage 1 (FX thread only): ask the user. Stage 2 (background): run the blocking
         // restore-point creation. Never run ProcessRunner on the FX thread (UI freeze, #2).
+        // Bounded: auto-declines after 120s and immediately on Stop/dispose so a
+        // walk-away never holds globalBusy (+ installRunning) indefinitely.
         CompletableFuture<Boolean> confirmed = new CompletableFuture<>();
         try {
             Platform.runLater(() -> {
@@ -1053,13 +1143,54 @@ public class SoftwareUpdateViewModel {
                         return;
                     }
                     Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                            "Would you like to create a System Restore Point before proceeding with the updates?");
+                            "Would you like to create a System Restore Point before proceeding with the updates?\n\n"
+                                    + "(Auto-declines after 2 minutes. You can press Stop to cancel.)");
                     confirm.setHeaderText(AppInfo.DISPLAY_NAME);
+                    // Watcher: auto-close on timeout or Stop/dispose so the install
+                    // chain can never hang forever on an unanswered modal.
+                    Thread watcher = new Thread(() -> {
+                        try {
+                            long deadline = System.currentTimeMillis() + 120_000L;
+                            while (!confirmed.isDone() && System.currentTimeMillis() < deadline) {
+                                if (disposed || installCancelled.get() || scanCancelled.get()) {
+                                    Platform.runLater(() -> {
+                                        try {
+                                            if (!confirmed.isDone()) {
+                                                AppLogger.info("Restore prompt auto-declined (cancel/dispose)");
+                                                confirm.setResult(ButtonType.CANCEL);
+                                                confirm.hide();
+                                            }
+                                        } catch (Exception ignored) {}
+                                    });
+                                    return;
+                                }
+                                try {
+                                    Thread.sleep(500);
+                                } catch (InterruptedException ie) {
+                                    Thread.currentThread().interrupt();
+                                    return;
+                                }
+                            }
+                            if (!confirmed.isDone()) {
+                                Platform.runLater(() -> {
+                                    try {
+                                        if (!confirmed.isDone()) {
+                                            AppLogger.warning("Restore point prompt timed out after 120s - auto-declining");
+                                            confirm.setResult(ButtonType.CANCEL);
+                                            confirm.hide();
+                                        }
+                                    } catch (Exception ignored) {}
+                                });
+                            }
+                        } catch (Exception ignored) {}
+                    }, "restore-prompt-watcher");
+                    watcher.setDaemon(true);
+                    watcher.start();
                     confirm.showAndWait().ifPresent(result -> {
                         confirmed.complete(result == ButtonType.OK);
                     });
                     if (!confirmed.isDone()) {
-                        // Dialog closed without a button (window X): treat as decline, not hang.
+                        // Dialog closed without a button (window X / timeout hide): decline, not hang.
                         confirmed.complete(false);
                     }
                 } catch (Exception ex) {
@@ -1073,6 +1204,11 @@ public class SoftwareUpdateViewModel {
         }
         try {
             return confirmed.thenApplyAsync(wantsRestore -> {
+                // Stop pressed while the dialog was open: skip restore AND skip install.
+                if (installCancelled.get() || disposed) {
+                    AppLogger.info("Restore skipped: install was cancelled during prompt");
+                    return null;
+                }
                 if (Boolean.TRUE.equals(wantsRestore) && !disposed) {
                     try {
                         boolean created = restoreService.createRestorePoint("WinZenith software update").success();

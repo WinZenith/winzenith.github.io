@@ -13,8 +13,19 @@ try {
     } catch {}
     $dnsMap = @{}
     try {
-        foreach ($d in @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object InterfaceAlias, ServerAddresses)) {
-            if ($d.InterfaceAlias) { $dnsMap[$d.InterfaceAlias] = (($d.ServerAddresses | Where-Object { $_ }) -join ", ") }
+        # All address families (IPv4 + IPv6), merged per alias so applied IPv6
+        # DNS stays visible instead of being overwritten by the last family.
+        foreach ($d in @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Select-Object InterfaceAlias, ServerAddresses)) {
+            if ($d.InterfaceAlias) {
+                $addrs = @($d.ServerAddresses | Where-Object { $_ })
+                if ($addrs.Count -gt 0) {
+                    if ($dnsMap.ContainsKey($d.InterfaceAlias)) {
+                        $dnsMap[$d.InterfaceAlias] = $dnsMap[$d.InterfaceAlias] + ", " + ($addrs -join ", ")
+                    } else {
+                        $dnsMap[$d.InterfaceAlias] = ($addrs -join ", ")
+                    }
+                }
+            }
         }
     } catch {}
 
@@ -24,7 +35,10 @@ try {
         $ip = if ($ipRow) { $ipRow.IPAddress } else { "" }
         $dhcp = ""
         try {
-            $cfg = Get-NetIPInterface -InterfaceAlias $adapter.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
+            # -InterfaceAlias accepts wildcards: escape so a literal "*" in a
+            # name cannot match the wrong interface (read-only DHCP flag).
+            $escapedIf = [WildcardPattern]::Escape($adapter.Name)
+            $cfg = Get-NetIPInterface -InterfaceAlias $escapedIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($cfg) { $dhcp = $cfg.Dhcp }
         } catch {}
         $gw = if ($gateways.ContainsKey($adapter.Name)) { $gateways[$adapter.Name] } else { "" }

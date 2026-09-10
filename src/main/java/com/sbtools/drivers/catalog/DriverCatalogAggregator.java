@@ -249,7 +249,7 @@ public class DriverCatalogAggregator {
                     }))
                     .toList();
             for (var future : futures) {
-                if (token.isCancelled()) {
+                if (token.isCancelled() || Thread.currentThread().isInterrupted()) {
                     future.cancel(true);
                     continue;
                 }
@@ -258,9 +258,26 @@ public class DriverCatalogAggregator {
                 } catch (java.util.concurrent.TimeoutException e) {
                     future.cancel(true);
                     AppLogger.warning("CatalogAggregator: Provider timed out after " + PROVIDER_TIMEOUT_SECONDS + "s");
+                } catch (InterruptedException e) {
+                    // Caller (e.g. Dashboard per-task timeout) interrupted us:
+                    // release every queued provider so ioPool threads are not
+                    // held by orphans that would starve the next scan.
+                    Thread.currentThread().interrupt();
+                    for (var f : futures) {
+                        if (f != null && !f.isDone()) {
+                            try { f.cancel(true); } catch (Exception ignored) {}
+                        }
+                    }
+                    break;
                 } catch (Exception e) {
                     if (e.getCause() instanceof InterruptedException) {
                         Thread.currentThread().interrupt();
+                        for (var f : futures) {
+                            if (f != null && !f.isDone()) {
+                                try { f.cancel(true); } catch (Exception ignored) {}
+                            }
+                        }
+                        break;
                     }
                 }
             }

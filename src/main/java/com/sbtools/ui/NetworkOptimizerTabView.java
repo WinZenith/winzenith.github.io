@@ -27,7 +27,11 @@ public class NetworkOptimizerTabView extends BorderPane {
     private final ChangeLogPanel changeLogPanel;
     private final Label adminWarningLabel = new Label("Not running as Administrator — network changes (optimize, DNS, adapter enable/disable, reset, WoWlan forget) will fail. Right-click WinZenith.exe → Run as administrator.");
     private final Label rebootLabel = new Label();
-    private final javafx.scene.control.Button rebootClearBtn = new javafx.scene.control.Button("Dismiss");
+    private final javafx.scene.control.Button rebootClearBtn = new javafx.scene.control.Button("Hide");
+    // Session-only snooze: hiding the banner must NOT clear the persistent
+    // reboot flag (network-state.json) — the system still needs a reboot and
+    // the banner must return on next launch. A new reason re-arms the banner.
+    private volatile String rebootDismissedReason;
 
     public NetworkOptimizerTabView(BooleanProperty busy, BooleanSupplier adminCheck,
                                    SettingsStore settingsStore, AppSettings currentSettings) {
@@ -49,8 +53,10 @@ public class NetworkOptimizerTabView extends BorderPane {
         rebootLabel.setWrapText(true);
         rebootLabel.setMaxWidth(Double.MAX_VALUE);
         rebootLabel.setStyle("-fx-padding: 6 16; -fx-background-color: #44272a; -fx-text-fill: #ff9d9d; -fx-font-size: 11px;");
+        rebootClearBtn.setTooltip(new javafx.scene.control.Tooltip(
+                "Hides this banner for the current session only. The reboot flag is kept and the banner returns on next launch until you reboot."));
         rebootClearBtn.setOnAction(e -> {
-            try { service.clearRebootRequired(); } catch (Exception ignored) {}
+            try { rebootDismissedReason = service.rebootReason(); } catch (Exception ignored) {}
             updateRebootBanner();
         });
         updateRebootBanner();
@@ -135,7 +141,11 @@ public class NetworkOptimizerTabView extends BorderPane {
             required = service.isRebootRequired();
             reason = service.rebootReason();
         } catch (Exception ignored) {}
-        final boolean show = required;
+        // Session snooze: hide only if the reason is unchanged since Hide was
+        // clicked. A newly marked reason (e.g. another reset) re-arms the banner.
+        String dismissed = rebootDismissedReason;
+        final boolean show = required
+                && !(dismissed != null && dismissed.equals(reason == null ? "" : reason));
         final String text = "Reboot required"
                 + (reason != null && !reason.isBlank() ? " — " + reason : "")
                 + ". TCP/Winsock changes may not fully apply until restart.";

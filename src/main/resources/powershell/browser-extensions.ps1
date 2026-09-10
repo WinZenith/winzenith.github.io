@@ -137,6 +137,64 @@ function Get-ChromiumManifestPermissions {
     return ($collected -join ", ")
 }
 
+function Get-ChromiumPolicyKey {
+    param([string]$BrowserName)
+    # Registry policy location for ExtensionInstallForcelist per browser.
+    # Returns "" when unknown (caller falls back to Preferences markers only).
+    switch -Wildcard ($BrowserName) {
+        "Chrome*" { return "Google\Chrome" }
+        "Edge*"   { return "Microsoft\Edge" }
+        "Brave*"  { return "BraveSoftware\Brave" }
+        default   { return "" }
+    }
+}
+
+function Get-ChromiumManagedInfo {
+    param(
+        [string]$BrowserName,
+        [string]$ProfileDir
+    )
+    # Collects force-installed (policy) ids from HKLM/HKCU ExtensionInstallForcelist
+    # plus default-installed markers from Preferences, once per profile scan.
+    $forced = @{}
+    $defaultInstalled = @{}
+    $policyKey = Get-ChromiumPolicyKey -BrowserName $BrowserName
+    if ($policyKey -ne "") {
+        foreach ($hive in @("HKLM:", "HKCU:")) {
+            $key = Join-Path $hive ("SOFTWARE\Policies\" + $policyKey + "\ExtensionInstallForcelist")
+            try {
+                $props = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
+                foreach ($pn in @($props.PSObject.Properties.Name)) {
+                    if ($pn -eq "PSPath" -or $pn -eq "PSParentPath" -or $pn -eq "PSChildName" -or $pn -eq "PSDrive" -or $pn -eq "PSProvider") { continue }
+                    try {
+                        $val = [string]$props.$pn
+                        if ([string]::IsNullOrWhiteSpace($val)) { continue }
+                        $idPart = ($val -split ';')[0].Trim().ToLowerInvariant()
+                        if ($idPart -ne "") { $forced[$idPart] = $true }
+                    } catch { }
+                }
+            } catch { }
+        }
+    }
+    foreach ($prefsFile in @((Join-Path $ProfileDir "Secure Preferences"), (Join-Path $ProfileDir "Preferences"))) {
+        if (-not (Test-Path -LiteralPath $prefsFile)) { continue }
+        try {
+            $prefs = Get-Content -LiteralPath $prefsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($prefs.extensions -and $prefs.extensions.settings) {
+                foreach ($pp in @($prefs.extensions.settings.PSObject.Properties)) {
+                    try {
+                        $v = $pp.Value
+                        if ($null -ne $v -and $v.PSObject.Properties['was_installed_by_default'] -and [bool]$v.was_installed_by_default) {
+                            $defaultInstalled[$pp.Name.ToLowerInvariant()] = $true
+                        }
+                    } catch { }
+                }
+            }
+        } catch { }
+    }
+    return [PSCustomObject]@{ ForcedIds = $forced; DefaultIds = $defaultInstalled }
+}
+
 function Scan-ChromiumExtensions {
     param(
         [string]$BrowserName,
@@ -146,6 +204,7 @@ function Scan-ChromiumExtensions {
     if (-not (Test-Path $ExtensionsDir)) { return $entries }
 
     $profileDir = Split-Path $ExtensionsDir -Parent
+    $managedInfo = Get-ChromiumManagedInfo -BrowserName $BrowserName -ProfileDir $profileDir
 
     Get-ChildItem $ExtensionsDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $extId = $_.Name
@@ -200,12 +259,30 @@ function Scan-ChromiumExtensions {
                     $profName = ""
                     try { $profName = Split-Path $profileDir -Leaf } catch { $profName = "" }
 
+                    # Policy/default-installed extensions cannot be disabled via
+                    # Preferences edits (browser re-enforces on launch), so flag
+                    # them instead of letting the UI report false success.
+                    $isManaged = $false
+                    $installSource = ""
+                    try {
+                        $idKey = $extId.ToLowerInvariant()
+                        if ($managedInfo.ForcedIds.ContainsKey($idKey)) {
+                            $isManaged = $true
+                            $installSource = "policy"
+                        } elseif ($managedInfo.DefaultIds.ContainsKey($idKey)) {
+                            $isManaged = $true
+                            $installSource = "default"
+                        }
+                    } catch { }
+
                     $entries += [PSCustomObject]@{
                         id = $extId
                         name = $resolvedName
                         version = if ($m.version) { $m.version } else { "" }
                         description = $resolvedDesc
                         enabled = $enabled
+                        managed = $isManaged
+                        installSource = $installSource
                         browser = $BrowserName
                         path = $ExtensionsDir
                         profilePath = $profileDir
@@ -267,8 +344,25 @@ function Toggle-ChromiumExtension {
     param(
         [string]$ProfileDir,
         [string]$ExtensionId,
-        [bool]$Enable
+        [bool]$Enable,
+        [string]$BrowserName = ""
     )
+    # Refuse policy/default-installed extensions: the browser re-enforces them
+    # on launch, so writing would only produce false success.
+    if ($BrowserName -ne "") {
+        try {
+            $mi = Get-ChromiumManagedInfo -BrowserName $BrowserName -ProfileDir $ProfileDir
+            $idKey = $ExtensionId.ToLowerInvariant()
+            if ($mi.ForcedIds.ContainsKey($idKey)) {
+                [Console]::Error.WriteLine("Extension $ExtensionId is force-installed by policy and cannot be toggled.")
+                return $false
+            }
+            if ($mi.DefaultIds.ContainsKey($idKey)) {
+                [Console]::Error.WriteLine("Extension $ExtensionId was installed by default and cannot be toggled.")
+                return $false
+            }
+        } catch { }
+    }
     $secureFile = Join-Path $ProfileDir "Secure Preferences"
     $prefsFile = Join-Path $ProfileDir "Preferences"
     $candidateFiles = @()
@@ -375,8 +469,19 @@ function Toggle-ChromiumExtension {
                             $null = $macs.PSObject.Properties.Remove($ExtensionId)
                         }
                     }
-                    # Also clear protection for super_mac if present (some versions)
-                    # Keep other macs intact
+                    # Also drop the file-level super_mac when present (some
+                    # builds validate it over the whole file): any edit
+                    # invalidates it, and a stale super_mac triggers a full
+                    # Secure Preferences reset wiping all extensions' settings.
+                    # Other extensions' per-id MACs stay intact.
+                    try {
+                        if ($prefs.protection -and $prefs.protection.PSObject.Properties['super_mac']) {
+                            $null = $prefs.protection.PSObject.Properties.Remove('super_mac')
+                        }
+                        if ($prefs.protection -and $prefs.protection.PSObject.Properties['superMac']) {
+                            $null = $prefs.protection.PSObject.Properties.Remove('superMac')
+                        }
+                    } catch { }
                 } catch { }
             }
 
@@ -512,12 +617,32 @@ function Scan-FirefoxExtensions {
 
             $ffProfName = ""
             try { $ffProfName = Split-Path $ProfileDir -Leaf } catch { $ffProfName = "" }
+            # System/built-in add-ons (resource://, distribution-bundled) cannot
+            # be disabled via extensions.json edits — flag instead of false success.
+            $ffManaged = $false
+            $ffSource = ""
+            try {
+                if (($null -ne $addon.isSystem -and [bool]$addon.isSystem) -or ($null -ne $addon.isBuiltin -and [bool]$addon.isBuiltin)) {
+                    $ffManaged = $true
+                    $ffSource = "system"
+                } else {
+                    $rootUri = ""
+                    try { if ($null -ne $addon.rootURI) { $rootUri = [string]$addon.rootURI } } catch { }
+                    if ($rootUri.StartsWith("resource://", [StringComparison]::OrdinalIgnoreCase) `
+                        -or $rootUri.StartsWith("chrome://", [StringComparison]::OrdinalIgnoreCase)) {
+                        $ffManaged = $true
+                        $ffSource = "system"
+                    }
+                }
+            } catch { }
             $entries += [PSCustomObject]@{
                 id = $addonId
                 name = if ($addon.defaultLocale -and $addon.defaultLocale.name) { $addon.defaultLocale.name } else { if ($addon.name) { $addon.name } else { $addonId } }
                 version = if ($addon.version) { $addon.version } else { "" }
                 description = if ($addon.defaultLocale -and $addon.defaultLocale.description) { $addon.defaultLocale.description } else { if ($addon.description) { $addon.description } else { "" } }
                 enabled = (-not $isDisabled) -and $isInstalled
+                managed = $ffManaged
+                installSource = $ffSource
                 browser = $BrowserName
                 path = $extensionsPath
                 profilePath = $ProfileDir
@@ -544,6 +669,31 @@ function Toggle-FirefoxExtension {
     if (-not (Test-Path $extJson)) {
         [Console]::Error.WriteLine("extensions.json not found: $extJson")
         return $false
+    }
+    # Refuse system/built-in add-ons: Firefox restores them, so writing would
+    # only produce false success.
+    try {
+        $preRaw = Get-Content $extJson -Raw -ErrorAction Stop
+        $preJson = $preRaw | ConvertFrom-Json -ErrorAction Stop
+        foreach ($pa in @($preJson.addons)) {
+            if ($pa.id -and ($pa.id -replace $illegalFilenameChars, '_') -eq $ExtensionId) {
+                if (($null -ne $pa.isSystem -and [bool]$pa.isSystem) `
+                    -or ($null -ne $pa.isBuiltin -and [bool]$pa.isBuiltin)) {
+                    [Console]::Error.WriteLine("Extension $ExtensionId is a system/built-in add-on and cannot be toggled.")
+                    return $false
+                }
+                $preRoot = ""
+                try { if ($null -ne $pa.rootURI) { $preRoot = [string]$pa.rootURI } } catch { }
+                if ($preRoot.StartsWith("resource://", [StringComparison]::OrdinalIgnoreCase) `
+                    -or $preRoot.StartsWith("chrome://", [StringComparison]::OrdinalIgnoreCase)) {
+                    [Console]::Error.WriteLine("Extension $ExtensionId is a system add-on and cannot be toggled.")
+                    return $false
+                }
+                break
+            }
+        }
+    } catch {
+        if ($_.Exception.Message -like "*cannot be toggled*") { return $false }
     }
     # Check for file lock (Firefox running)
     $lockedRetries = 3
@@ -682,7 +832,7 @@ if ($Action -eq "Toggle") {
         $ok = Toggle-FirefoxExtension -ProfileDir $ProfilePath -ExtensionId $ExtId -Enable $enableFlag
         if ($ok) { Write-Output "true" } else { Write-Output "false" }
     } else {
-        $ok = Toggle-ChromiumExtension -ProfileDir $ProfilePath -ExtensionId $ExtId -Enable $enableFlag
+        $ok = Toggle-ChromiumExtension -ProfileDir $ProfilePath -ExtensionId $ExtId -Enable $enableFlag -BrowserName $Browser
         if ($ok) { Write-Output "true" } else { Write-Output "false" }
     }
     exit 0

@@ -62,7 +62,9 @@ public class SoftwareUpdateHistoryDialog {
                 String id = e.packageId() == null ? "" : e.packageId().toLowerCase();
                 return name.contains(q) || id.contains(q);
             });
-            countLabel.setText(filtered.size() + " of " + entries.size() + " entr(ies)");
+            // Use the live source size (not the pre-dialog snapshot) so Clear + search
+            // cannot show a stale "0 of 5" total.
+            countLabel.setText(filtered.size() + " of " + filtered.getSource().size() + " entr(ies)");
         });
 
         TableView<SoftwareUpdateHistoryEntry> table = new TableView<>(filtered);
@@ -177,7 +179,10 @@ public class SoftwareUpdateHistoryDialog {
 
     private static String csv(String v) {
         if (v == null) return "";
+        // Quote when the value contains a delimiter, quote, or any line break.
+        // Missing \r previously produced corrupt single-column-spanning rows when an
+        // installer error contained CRLF.
         String s = v.replace("\"", "\"\"");
-        return s.contains(",") || s.contains("\"") || s.contains("\n") ? "\"" + s + "\"" : s;
+        return s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r") ? "\"" + s + "\"" : s;
     }
 }

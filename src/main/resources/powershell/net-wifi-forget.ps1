@@ -5,14 +5,17 @@ if (-not $SSID) {
     exit 1
 }
 
-# Safe handling: avoid double-quoted interpolation; use argument list with proper escaping
-# netsh expects name="SSID" with quotes only if SSID contains spaces. PowerShell will
-# handle quoting of the argument value automatically when passed as a single token.
+# Safe handling: the SSID is concatenated into a netsh name="..." argument, so a
+# double quote would break out and inject extra netsh arguments (deleting the
+# wrong profile). Defense in depth with the Java-side sanitizeSsid: reject
+# quote/control characters here too, since netsh has no escape sequence for
+# an embedded quote. Spaces are legal in SSIDs and handled by the quotes.
 try {
-    # Properly quote SSID for netsh: name="SSID with spaces". Escape embedded double quotes.
-    # Passing as single token with quotes ensures netsh parses spaced SSIDs correctly.
-    $escapedSsid = $SSID.Replace('"', '""')
-    $argName = 'name="' + $escapedSsid + '"'
+    if ($SSID -match '["`$;\|&<>\r\n]') {
+        ConvertTo-Json -Compress @{ success = $false; message = "SSID contains an unsupported character and was rejected for safety." }
+        exit 1
+    }
+    $argName = 'name="' + $SSID + '"'
     $result = & netsh wlan delete profile $argName 2>&1
     if ($LASTEXITCODE -eq 0) {
         ConvertTo-Json -Compress @{ success = $true; message = "Profile '$SSID' forgotten." }

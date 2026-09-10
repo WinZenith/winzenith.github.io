@@ -313,6 +313,12 @@ public class DuplicateFilesTabView extends BorderPane {
             minSizeCombo.setDisable(newVal);
             extFilterField.setDisable(newVal);
             keeperCombo.setDisable(newVal || rows.isEmpty());
+            // Blocker fix: freeze group/copy selection while a scan or clean runs.
+            // The clean operation snapshots the selection up front; letting ticks
+            // change mid-clean left the post-clean reconciliation reading a
+            // different selection than what was actually deleted.
+            table.setDisable(newVal);
+            deletableListView.setDisable(newVal);
         });
 
         rows.addListener((ListChangeListener<DuplicateFileRow>) c -> {
@@ -365,10 +371,7 @@ public class DuplicateFilesTabView extends BorderPane {
 
         table.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             if (sel != null) updateDeletableDetail(sel);
-            else {
-                detailTitle.setText("Select a group to see copies to delete");
-                deletableListView.getItems().clear();
-            }
+            else clearDeletableDetail();
         });
     }
 
@@ -528,10 +531,7 @@ public class DuplicateFilesTabView extends BorderPane {
         table.refresh();
         DuplicateFileRow sel = table.getSelectionModel().getSelectedItem();
         if (sel != null && rows.contains(sel)) updateDeletableDetail(sel);
-        else {
-            deletableListView.getItems().clear();
-            detailTitle.setText("Select a group to see copies to delete");
-        }
+        else clearDeletableDetail();
         updateCleanButtonState();
         if (changed > 0) statusLabel.setText("Keeper strategy: " + strategy.getDisplayName() + " — updated " + changed + " group(s). Review before cleaning.");
         else statusLabel.setText("Keeper strategy: " + strategy.getDisplayName() + " — no changes.");
@@ -591,7 +591,42 @@ public class DuplicateFilesTabView extends BorderPane {
         }
     }
 
+    /**
+     * Blocker fix: every detail-pane refresh used to abandon the old CheckBoxes while
+     * they were still bidirectionally bound to the (long-lived) per-file selection
+     * properties and to {@code row.selectedProperty()}. Those dead bindings pinned
+     * discarded UI nodes in memory and piled extra listeners onto live properties on
+     * each group click. Always unbind before dropping the items.
+     */
+    private void unbindDeletableDetailItems() {
+        try {
+            for (HBox box : deletableListView.getItems()) {
+                try {
+                    Object cbObj = box.getProperties().get("dup-cb");
+                    Object propObj = box.getProperties().get("dup-prop");
+                    if (cbObj instanceof CheckBox cb) {
+                        if (propObj instanceof BooleanProperty prop) {
+                            try { cb.selectedProperty().unbindBidirectional(prop); } catch (Exception ignored) {}
+                        }
+                        try { cb.disableProperty().unbind(); } catch (Exception ignored) {}
+                    }
+                    Object keepObj = box.getProperties().get("dup-keep");
+                    if (keepObj instanceof Button keepBtn) {
+                        try { keepBtn.disableProperty().unbind(); } catch (Exception ignored) {}
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void clearDeletableDetail() {
+        unbindDeletableDetailItems();
+        deletableListView.getItems().clear();
+        detailTitle.setText("Select a group to see copies to delete");
+    }
+
     private void updateDeletableDetail(DuplicateFileRow row) {
+        unbindDeletableDetailItems();
         deletableListView.getItems().clear();
         if (row == null || row.getDeletablePaths() == null || row.getDeletablePaths().isEmpty()) {
             detailTitle.setText("No deletable copies");
@@ -640,6 +675,9 @@ public class DuplicateFilesTabView extends BorderPane {
             meta.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
             HBox box = new HBox(6, cb, meta, keepBtn, openBtn);
             box.setAlignment(Pos.CENTER_LEFT);
+            box.getProperties().put("dup-cb", cb);
+            box.getProperties().put("dup-prop", prop);
+            box.getProperties().put("dup-keep", keepBtn);
             deletableListView.getItems().add(box);
         }
     }
@@ -693,7 +731,9 @@ public class DuplicateFilesTabView extends BorderPane {
 
     private void selectAllCopies() {
         if (busy.get() || rows.isEmpty()) return;
-        for (DuplicateFileRow row : rows) {
+        // Blocker fix: like Select All, Auto-select only touches the currently
+        // shown (search-filtered) groups so hidden groups are never armed by surprise.
+        for (DuplicateFileRow row : new ArrayList<>(filteredRows)) {
             row.setSelected(true);
             Map<String, BooleanProperty> fileMap = perFileSelection.get(row);
             if (fileMap != null) {
@@ -716,6 +756,16 @@ public class DuplicateFilesTabView extends BorderPane {
         fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV", "*.csv"));
         File target = fc.showSaveDialog(getScene() != null ? getScene().getWindow() : null);
         if (target == null) return;
+        // Blocker fix: JavaFX native save dialogs do not reliably prompt before
+        // overwriting — confirm explicitly so an export can never silently destroy
+        // an existing user file.
+        if (target.exists()) {
+            Alert overwrite = new Alert(Alert.AlertType.CONFIRMATION,
+                    "File already exists:\n" + target + "\n\nOverwrite it?");
+            overwrite.setTitle("Confirm Overwrite");
+            overwrite.setHeaderText("File Exists");
+            if (overwrite.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        }
         try {
             StringBuilder sb = new StringBuilder();
             sb.append("File Name,Keeper Path,Size Bytes,Size,SHA-256,Total Copies,Deletable Paths\n");
@@ -979,8 +1029,7 @@ public class DuplicateFilesTabView extends BorderPane {
         rows.clear();
         groupColorMap.clear();
         perFileSelection.clear();
-        deletableListView.getItems().clear();
-        detailTitle.setText("Select a group to see copies to delete");
+        clearDeletableDetail();
         searchField.clear();
         filteredRows.setPredicate(r -> true);
         progressBar.setProgress(0);
@@ -1032,6 +1081,9 @@ public class DuplicateFilesTabView extends BorderPane {
                         if (scan.getSkippedFiltered() > 0) {
                             extra.append(" Filtered out ").append(scan.getSkippedFiltered()).append(" file(s).");
                         }
+                        if (scan.getFailedRoots() != null && !scan.getFailedRoots().isEmpty()) {
+                            extra.append(" Skipped unreadable folder(s): ").append(String.join("; ", scan.getFailedRoots())).append(".");
+                        }
                         if (results.isEmpty()) {
                             statusLabel.setText("No duplicates found in selected folders. System and app folders were excluded." + extra);
                         } else {
@@ -1065,10 +1117,15 @@ public class DuplicateFilesTabView extends BorderPane {
     }
 
     private void toggleSelectAll() {
-        boolean allSelected = !rows.isEmpty() && rows.stream().allMatch(r -> r.isSelected()
+        // Blocker fix: operate on the currently SHOWN (search-filtered) groups, not
+        // every scanned group. The old code selected hidden groups too, so a user who
+        // searched for "vacation" and hit Select All would silently mark unrelated
+        // hidden groups for deletion — a one-click data-loss path.
+        List<DuplicateFileRow> visible = new ArrayList<>(filteredRows);
+        boolean allSelected = !visible.isEmpty() && visible.stream().allMatch(r -> r.isSelected()
                 && r.getDeletablePaths() != null
                 && getSelectedDeletablesForRow(r).size() == r.getDeletablePaths().size());
-        for (DuplicateFileRow row : rows) {
+        for (DuplicateFileRow row : visible) {
             row.setSelected(!allSelected);
             Map<String, BooleanProperty> fileMap = perFileSelection.get(row);
             if (fileMap != null) {
@@ -1081,6 +1138,8 @@ public class DuplicateFilesTabView extends BorderPane {
     }
 
     private void deselectAll() {
+        // Deselecting is non-destructive, so it always clears everything —
+        // including groups hidden by the search filter — leaving no stale selection.
         for (DuplicateFileRow row : rows) {
             row.setSelected(false);
             Map<String, BooleanProperty> fileMap = perFileSelection.get(row);
@@ -1103,10 +1162,12 @@ public class DuplicateFilesTabView extends BorderPane {
 
     private void startClean() {
         if (busy.get()) return;
-        if (!adminCheck.getAsBoolean()) {
-            new Alert(Alert.AlertType.WARNING, "Administrator privileges are required to delete files.").showAndWait();
-            return;
-        }
+        // Blocker fix: do NOT require admin to delete duplicates. Scan roots are
+        // restricted to non-system user folders, whose files the current user can
+        // normally delete without elevation. The old hard gate made Clean Selected
+        // entirely unusable for standard users of this portable app. Files that
+        // really need elevation (another user's ACLs, locked files) fail per-file
+        // inside the service and are reported as skipped/failed — nothing is lost.
         // Build filtered selection respecting per-file checkboxes
         List<DuplicateFileRow> filteredSelected = new ArrayList<>();
         Map<DuplicateFileRow, DuplicateFileRow> filteredToOriginal = new HashMap<>();
@@ -1261,10 +1322,12 @@ public class DuplicateFilesTabView extends BorderPane {
                         for (DuplicateFileRow filtered : filteredSelected) {
                             DuplicateFileRow orig = filteredToOriginal.get(filtered);
                             if (orig == null) {
-                                // fallback by checksum+keeper
+                                // fallback by checksum+keeper (null-safe: checksums should never
+                                // be null post-scan, but a single NPE here would break the whole
+                                // post-clean UI refresh for every group).
                                 for (DuplicateFileRow o : rows) {
-                                    if (o.getChecksumSha256().equals(filtered.getChecksumSha256())
-                                            && o.getFullPath().equals(filtered.getFullPath())) {
+                                    if (java.util.Objects.equals(o.getChecksumSha256(), filtered.getChecksumSha256())
+                                            && java.util.Objects.equals(o.getFullPath(), filtered.getFullPath())) {
                                         orig = o; break;
                                     }
                                 }
@@ -1290,6 +1353,13 @@ public class DuplicateFilesTabView extends BorderPane {
                             } else {
                                 orig.setDeletablePaths(remaining);
                                 orig.setTotalDuplicates(remaining.size() + 1);
+                                // Keep full membership in sync — otherwise recomputeKeeper /
+                                // reassignKeeper would resurrect already-deleted paths and
+                                // could elect a missing file as keeper on next strategy change.
+                                List<String> updatedMembers = new ArrayList<>(remaining.size() + 1);
+                                if (orig.getFullPath() != null) updatedMembers.add(orig.getFullPath());
+                                updatedMembers.addAll(remaining);
+                                orig.setAllMemberPaths(updatedMembers);
                                 // If all remaining files are now unselected, deselect row
                                 if (fileMap != null) {
                                     boolean anySelected = false;
@@ -1312,15 +1382,11 @@ public class DuplicateFilesTabView extends BorderPane {
                         // Refresh detail pane for currently selected row if it still exists
                         DuplicateFileRow sel = table.getSelectionModel().getSelectedItem();
                         if (sel != null && rows.contains(sel)) updateDeletableDetail(sel);
-                        else {
-                            deletableListView.getItems().clear();
-                            detailTitle.setText("Select a group to see copies to delete");
-                        }
+                        else clearDeletableDetail();
                         updateCleanButtonState();
                         // If table selection cleared, ensure detail pane cleared
                         if (table.getSelectionModel().getSelectedItem() == null) {
-                            deletableListView.getItems().clear();
-                            detailTitle.setText("Select a group to see copies to delete");
+                            clearDeletableDetail();
                         }
                         progressBar.setVisible(false);
                         progressLabel.setVisible(false);

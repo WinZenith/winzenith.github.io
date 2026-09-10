@@ -290,7 +290,7 @@ public class App extends Application {
             case 6 -> new StartupTabView(busy, AdminCheck::isRunningAsAdmin);
             case 7 -> new CleanerTabView(busy, AdminCheck::isRunningAsAdminFresh, settingsStore);
             case 8 -> new DuplicateFilesTabView(busy, AdminCheck::isRunningAsAdmin);
-            case 9 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin);
+            case 9 -> new DiskToolsTabView(AdminCheck::isRunningAsAdmin, busy);
             case 10 -> new BrowserExtensionsTabView(AdminCheck::isRunningAsAdmin, settingsStore);
             case 11 -> new NetworkOptimizerTabView(busy, AdminCheck::isRunningAsAdmin, settingsStore, appSettings,
                     updatedSettings -> this.appSettings = updatedSettings);

@@ -63,7 +63,7 @@ public class OneDriveSyncLogsCleaner implements CleanerExtension {
         for (Path dir : getDirs()) {
             if (token != null && token.isCancelled()) break;
             if (dir == null || !Files.isDirectory(dir) || !CleanerUtils.isSafeToCleanDirectory(dir)) continue;
-            try (Stream<Path> walk = Files.walk(dir)) {
+            try (Stream<Path> walk = Files.walk(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
                 List<Path> sorted = walk.filter(Files::isRegularFile)
                         .filter(OneDriveSyncLogsCleaner::isLogFile)
                         .sorted(java.util.Comparator.comparingInt(Path::getNameCount).reversed())

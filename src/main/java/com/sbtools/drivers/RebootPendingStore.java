@@ -1,8 +1,10 @@
 package com.sbtools.drivers;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sbtools.util.AppLogger;
 
 import java.io.IOException;
@@ -22,7 +24,14 @@ import java.util.Set;
 public class RebootPendingStore {
 
     private static final String FILE = "pending-reboot.json";
+    // JavaTimeModule is mandatory: PendingEntry carries an Instant timestamp and a
+    // plain ObjectMapper throws InvalidDefinitionException on every save, which
+    // silently discarded all reboot-pending state (REBOOT badges never survived
+    // a rescan/restart and Dashboard/Drivers drifted apart).
     private static final ObjectMapper MAPPER = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
             .enable(SerializationFeature.INDENT_OUTPUT);
 
     public record PendingEntry(String deviceId, String friendlyName, Instant timestamp) {}
@@ -87,6 +96,61 @@ public class RebootPendingStore {
     public synchronized boolean isPending(String deviceId) {
         if (deviceId == null) return false;
         return loadPendingIds().contains(deviceId);
+    }
+
+    /**
+     * Clears entries that predate the last system boot. If the machine rebooted
+     * after an entry was recorded, the pending restart is complete (or the install
+     * failed and will be re-detected as a fresh update without the REBOOT badge).
+     * Never throws. Returns number of entries purged.
+     */
+    public synchronized int purgeAfterReboot() {
+        try {
+            java.time.Instant bootTime = null;
+            try {
+                var info = com.sbtools.startup.BootTimeService.getBootInfo();
+                if (info != null) bootTime = info.bootTime();
+            } catch (Exception ignored) {
+            }
+            if (bootTime == null) return 0;
+            List<PendingEntry> entries = loadAll();
+            if (entries.isEmpty()) return 0;
+            final java.time.Instant boot = bootTime;
+            int before = entries.size();
+            entries.removeIf(e -> e == null || e.timestamp() == null || e.timestamp().isBefore(boot));
+            int purged = before - entries.size();
+            if (purged > 0) {
+                save(entries);
+                AppLogger.info("RebootPendingStore: purged " + purged + " entries completed by reboot (boot=" + boot + ")");
+            }
+            return purged;
+        } catch (Exception ex) {
+            AppLogger.warning("RebootPendingStore purgeAfterReboot failed: " + ex.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * Removes entries for devices no longer present. Prevents ghost REBOOT badges
+     * for removed/disconnected hardware. Never throws.
+     */
+    public synchronized int purgeMissingDevices(java.util.Set<String> installedIds) {
+        try {
+            if (installedIds == null) return 0;
+            List<PendingEntry> entries = loadAll();
+            if (entries.isEmpty()) return 0;
+            int before = entries.size();
+            entries.removeIf(e -> e == null || e.deviceId() == null || !installedIds.contains(e.deviceId()));
+            int purged = before - entries.size();
+            if (purged > 0) {
+                save(entries);
+                AppLogger.info("RebootPendingStore: purged " + purged + " entries for missing devices");
+            }
+            return purged;
+        } catch (Exception ex) {
+            AppLogger.warning("RebootPendingStore purgeMissingDevices failed: " + ex.getMessage());
+            return 0;
+        }
     }
 
     public synchronized void clearAll() {

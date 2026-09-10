@@ -67,6 +67,45 @@ public class RegistryCleaner implements CleanerExtension {
         return 0;
     }
 
+    /**
+     * Fail-safe missing check: returns true only when the target drive is ready
+     * and the file is definitely absent. Offline/removable/network drives,
+     * unready roots, relative paths and unexpanded variables return false
+     * (entry is kept) so transiently unavailable targets are never flagged.
+     */
+    static boolean isConfidentlyMissing(String cleanPath) {
+        if (cleanPath == null || cleanPath.isBlank() || cleanPath.contains("%")) return false;
+        Path p;
+        try {
+            p = Paths.get(cleanPath);
+        } catch (Exception e) {
+            return false;
+        }
+        try {
+            if (!p.isAbsolute()) return false;
+            Path root = p.getRoot();
+            if (root == null) return false;
+            java.io.File rootFile = root.toFile();
+            try {
+                if (!rootFile.exists()) return false;
+                // Unready/offline drive (no media, disconnected network): keep entry.
+                if (rootFile.getTotalSpace() <= 0) return false;
+            } catch (Exception e) {
+                return false;
+            }
+            try {
+                // Throws when the volume is unavailable — treat as "cannot tell".
+                java.nio.file.FileStore store = Files.getFileStore(root);
+                if (store == null) return false;
+            } catch (Exception e) {
+                return false;
+            }
+            return !Files.exists(p);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private int countInvalidRegistryValues(WinReg.HKEY hive, String keyPath) {
         int count = 0;
         try {
@@ -77,7 +116,7 @@ public class RegistryCleaner implements CleanerExtension {
                     if (value.startsWith("\"") && value.endsWith("\""))
                         value = value.substring(1, value.length() - 1);
                     String cleanPath = CleanerUtils.extractPathFromRegistryValue(value);
-                    if (cleanPath != null && !Files.exists(Paths.get(cleanPath))) count++;
+                    if (isConfidentlyMissing(cleanPath)) count++;
                 }
             }
         } catch (Exception ignored) {}
@@ -100,22 +139,20 @@ public class RegistryCleaner implements CleanerExtension {
                     if (value.startsWith("\"") && value.endsWith("\""))
                         value = value.substring(1, value.length() - 1);
                     String cleanPath = CleanerUtils.extractPathFromRegistryValue(value);
-                    if (cleanPath != null && !Files.exists(Paths.get(cleanPath))) toDelete.add(entry.getKey());
+                    if (isConfidentlyMissing(cleanPath)) toDelete.add(entry.getKey());
                 }
                 if (!toDelete.isEmpty() && (token == null || !token.isCancelled())) {
                     if (backupRootOrNull != null) {
                         String hiveName = hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU";
                         Path regBackup = backupRootOrNull.resolve("registry-" + hiveName + "-" + keyPath.replace("\\", "_") + ".reg");
-                        try { java.nio.file.Files.createDirectories(regBackup.getParent()); } catch (Exception ignored) {}
-                        try {
-                            ProcessBuilder exportPb = new ProcessBuilder("reg", "export",
-                                    (hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") + "\\" + keyPath,
-                                    regBackup.toString(), "/y");
-                            exportPb.redirectErrorStream(true);
-                            Process exportProcess = com.sbtools.util.ProcessManager.start(exportPb);
-                            boolean ok = exportProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-                            if (!ok) exportProcess.destroyForcibly();
-                        } catch (Exception ignored) {}
+                        boolean backedUp = exportRegKey(
+                                (hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") + "\\" + keyPath, regBackup);
+                        if (!backedUp) {
+                            com.sbtools.util.AppLogger.warning(
+                                    "Registry backup failed for " + hiveName + "\\" + keyPath
+                                            + " — skipping delete for safety");
+                            return 0;
+                        }
                     }
                     for (String valName : toDelete) {
                         if (token != null && token.isCancelled()) break;
@@ -125,6 +162,23 @@ public class RegistryCleaner implements CleanerExtension {
             }
         } catch (Exception ignored) {}
         return count;
+    }
+
+    private boolean exportRegKey(String fullKey, Path regBackup) {
+        try {
+            java.nio.file.Files.createDirectories(regBackup.getParent());
+            ProcessBuilder exportPb = new ProcessBuilder("reg", "export", fullKey, regBackup.toString(), "/y");
+            exportPb.redirectErrorStream(true);
+            Process exportProcess = com.sbtools.util.ProcessManager.start(exportPb);
+            boolean ok = exportProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+            if (!ok) {
+                exportProcess.destroyForcibly();
+                return false;
+            }
+            return exportProcess.exitValue() == 0 && java.nio.file.Files.isRegularFile(regBackup);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private int countOrphanedSharedDLLs() {
@@ -144,7 +198,7 @@ public class RegistryCleaner implements CleanerExtension {
                             try { refCount = Integer.parseInt(valObj.toString()); } catch (Exception ignored) {}
                         }
                         String expanded = CleanerUtils.expandEnvironmentVariables(rawPath);
-                        if (refCount <= 1 && expanded != null && !Files.exists(Paths.get(expanded))) count++;
+                        if (refCount <= 1 && isConfidentlyMissing(expanded)) count++;
                     } catch (Exception ignored) {}
                 }
             }
@@ -175,10 +229,17 @@ public class RegistryCleaner implements CleanerExtension {
                             try { refCount = Integer.parseInt(valObj.toString()); } catch (Exception ignored) {}
                         }
                         String expanded = CleanerUtils.expandEnvironmentVariables(rawPath);
-                        if (refCount <= 1 && expanded != null && !Files.exists(Paths.get(expanded))) toDelete.add(rawPath);
+                        if (refCount <= 1 && isConfidentlyMissing(expanded)) toDelete.add(rawPath);
                     } catch (Exception ignored) {}
                 }
-                if (!toDelete.isEmpty() && (token == null || !token.isCancelled())) backupRegKey(backupRootOrNull, "shareddlls", "HKLM", keyPath);
+                if (!toDelete.isEmpty() && (token == null || !token.isCancelled())) {
+                    if (backupRootOrNull != null
+                            && !backupRegKey(backupRootOrNull, "shareddlls", "HKLM", keyPath)) {
+                        com.sbtools.util.AppLogger.warning(
+                                "Registry backup failed for HKLM\\" + keyPath + " — skipping delete for safety");
+                        return 0;
+                    }
+                }
                 for (String valName : toDelete) {
                     if (token != null && token.isCancelled()) break;
                     try { Advapi32Util.registryDeleteValue(WinReg.HKEY_LOCAL_MACHINE, keyPath, valName); count++; } catch (Exception ignored) {}
@@ -188,8 +249,8 @@ public class RegistryCleaner implements CleanerExtension {
         return count;
     }
 
-    private void backupRegKey(Path backupRootOrNull, String description, String hiveName, String keyPath) {
-        if (backupRootOrNull == null) return;
+    private boolean backupRegKey(Path backupRootOrNull, String description, String hiveName, String keyPath) {
+        if (backupRootOrNull == null) return true;
         try {
             Path regBackup = backupRootOrNull.resolve("registry-" + description + ".reg");
             java.nio.file.Files.createDirectories(regBackup.getParent());
@@ -197,7 +258,13 @@ public class RegistryCleaner implements CleanerExtension {
             pb.redirectErrorStream(true);
             Process p = com.sbtools.util.ProcessManager.start(pb);
             boolean ok = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-            if (!ok) p.destroyForcibly();
-        } catch (Exception ignored) {}
+            if (!ok) {
+                p.destroyForcibly();
+                return false;
+            }
+            return p.exitValue() == 0 && java.nio.file.Files.isRegularFile(regBackup);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 }

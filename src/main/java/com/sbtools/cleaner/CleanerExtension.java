@@ -8,6 +8,22 @@ public interface CleanerExtension {
 
     void scan(CleanupRow row);
 
+    /**
+     * Cooperative-cancel scan. Defaults to the legacy {@link #scan(CleanupRow)}
+     * so existing cleaners keep working; long-running cleaners override this to
+     * honor the token mid-walk / mid-process. The service routes all async scans
+     * through this method.
+     */
+    default void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) {
+            row.setSizeOrCountText("Canceled");
+            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+            row.setErrorMessage("Scan canceled by user");
+            return;
+        }
+        scan(row);
+    }
+
     long clean(Path backupRootOrNull) throws Exception;
 
     default long clean(Path backupRootOrNull, com.sbtools.util.CancellationToken token) throws Exception {

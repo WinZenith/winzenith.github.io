@@ -184,9 +184,38 @@ class OptimizationPanel extends VBox {
                     var rp = new SystemRestoreService().createRestorePoint("WinZenith network " + preset.name());
                     if (!rp.success()) {
                         final String err = rp.error() != null ? rp.error() : "unknown error";
-                        Platform.runLater(() -> new Alert(Alert.AlertType.WARNING,
-                                "Restore point could not be created:\n" + err
-                                        + "\n\nContinue with optimization anyway?").showAndWait());
+                        AppLogger.warning("Restore point before optimization failed: " + err);
+                        // Blocking gate: ask on the FX thread and WAIT for the answer.
+                        // A fire-and-forget runLater alert would let the background thread
+                        // proceed with system-wide TCP/registry writes without protection.
+                        java.util.concurrent.FutureTask<ButtonType> gateTask = new java.util.concurrent.FutureTask<>(
+                                () -> new Alert(Alert.AlertType.CONFIRMATION,
+                                        "Restore point could not be created:\n" + err
+                                                + "\n\nThe safety net is missing. Continue with optimization anyway?",
+                                        ButtonType.YES, ButtonType.NO).showAndWait().orElse(ButtonType.NO));
+                        Platform.runLater(gateTask);
+                        ButtonType choice;
+                        try {
+                            choice = gateTask.get();
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            choice = ButtonType.NO;
+                        } catch (Exception ex) {
+                            choice = ButtonType.NO;
+                        }
+                        if (choice != ButtonType.YES) {
+                            final NetworkSnapshot finalSnap = preSnap;
+                            Platform.runLater(() -> {
+                                progressBar.setVisible(false);
+                                busy.set(false);
+                                statusLabel.setText("Optimization cancelled — no changes applied (restore point failed).");
+                                refreshSnapshotLabel();
+                            });
+                            AppLogger.info("Optimization of " + preset.name() + " aborted by user after restore-point failure."
+                                    + (finalSnap != null ? " Pre-change snapshot: " + finalSnap.id() : ""));
+                            return;
+                        }
+                        AppLogger.warning("User accepted optimization of " + preset.name() + " without restore point.");
                     }
                 } catch (Exception e) {
                     AppLogger.warning("Restore point before optimization failed: " + e.getMessage());

@@ -28,6 +28,19 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Canceled");
+            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+            row.setErrorMessage("Scan canceled by user");
+            return;
+        }
         if (com.sbtools.util.WindowsServicingSafety.isServicingPending()) {
             String reasons = String.join("; ", com.sbtools.util.WindowsServicingSafety.getPendingReasons());
             row.setTotalBytes(0);
@@ -42,16 +55,21 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
             row.setSizeOrCountText("Not found");
             return;
         }
-        scanWithWalkFileTree(row, windowsOld);
+        scanWithWalkFileTree(row, windowsOld, token);
     }
 
     private void scanWithWalkFileTree(CleanupRow row, Path root) {
+        scanWithWalkFileTree(row, root, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    private void scanWithWalkFileTree(CleanupRow row, Path root, com.sbtools.util.CancellationToken token) {
         AtomicLong totalBytes = new AtomicLong(0);
         AtomicLong itemCount = new AtomicLong(0);
         try {
             Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
                     if (isSymlinkOrJunction(dir, attrs)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
@@ -60,16 +78,26 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
                     totalBytes.addAndGet(attrs.size());
                     itemCount.incrementAndGet();
                     return FileVisitResult.CONTINUE;
                 }
                 @Override
                 public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
                     return FileVisitResult.CONTINUE;
                 }
             });
         } catch (Exception ignored) {}
+        if (token != null && token.isCancelled()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Canceled");
+            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+            row.setErrorMessage("Scan canceled by user");
+            return;
+        }
         row.setTotalBytes(totalBytes.get());
         row.setItemCount((int) itemCount.get());
         row.setSizeOrCountText(CleanerUtils.formatBytes(totalBytes.get()) + " (" + itemCount.get() + " files)");
@@ -96,6 +124,15 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
         if (removeWithRd(windowsOld, token)) return size;
 
         if (token != null && token.isCancelled()) return 0L;
+        // Re-validate before takeown/icacls: ownership changes must never run
+        // against a path that stopped being the validated Windows.old.
+        Path revalidated = getValidWindowsOldPath();
+        if (revalidated == null || !revalidated.toAbsolutePath().normalize().equals(
+                windowsOld.toAbsolutePath().normalize())) {
+            AppLogger.warning("Windows.old validation changed, aborting takeown for safety");
+            return 0;
+        }
+        windowsOld = revalidated;
         AppLogger.warning("rd /s /q failed for Windows.old, attempting takeown/icacls");
         try {
             ProcessBuilder takeown = new ProcessBuilder("takeown", "/F", windowsOld.toString(), "/R", "/D", "Y");
@@ -120,8 +157,21 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
     private Path getWindowsOldPath() {
         String drive = CleanerUtils.safeEnv("SYSTEMDRIVE");
-        if (drive == null || drive.isEmpty()) drive = "C:";
+        // Sanitize SYSTEMDRIVE: must be a bare drive designator (e.g. "C:" or "C:\").
+        // Anything else (path traversal, UNC, empty) falls back to C: so the
+        // resolved target is always "<drive>:\Windows.old" and nothing broader.
+        if (drive == null || !(drive.matches("(?i)^[a-z]:\\\\?$"))) drive = "C:";
         return Paths.get(drive.endsWith("\\") ? drive : drive + "\\", "Windows.old");
+    }
+
+    private static boolean isReparsePoint(Path p) {
+        try {
+            Object reparse = Files.getAttribute(p, "dos:isReparsePoint",
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            return Boolean.TRUE.equals(reparse);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private Path getValidWindowsOldPath() {
@@ -129,15 +179,37 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
         if (windowsOld == null || !Files.isDirectory(windowsOld)) return null;
 
         try {
-            if (Files.isSymbolicLink(windowsOld)) {
-                AppLogger.warning("Windows.old is a symbolic link, skipping for safety");
+            if (Files.isSymbolicLink(windowsOld) || isReparsePoint(windowsOld)) {
+                AppLogger.warning("Windows.old is a link/junction, skipping for safety");
                 return null;
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+            return null;
+        }
+
+        // Constrain to exactly "<drive>:\Windows.old" so a hijacked SYSTEMDRIVE
+        // can never redirect deletion elsewhere.
+        try {
+            Path abs = windowsOld.toAbsolutePath().normalize();
+            if (abs.getFileName() == null || !"windows.old".equalsIgnoreCase(abs.getFileName().toString())) return null;
+            Path parent = abs.getParent();
+            if (parent == null || !parent.equals(abs.getRoot())) return null;
+        } catch (Exception ignored) {
+            return null;
+        }
 
         Path windowsSubdir = windowsOld.resolve("Windows");
         if (!Files.isDirectory(windowsSubdir)) {
             AppLogger.warning("Windows.old does not contain a Windows subdirectory, skipping");
+            return null;
+        }
+        try {
+            // The sentinel must itself be real (not a link); otherwise rd would follow it.
+            if (Files.isSymbolicLink(windowsSubdir) || isReparsePoint(windowsSubdir)) {
+                AppLogger.warning("Windows.old\\Windows is a link, skipping for safety");
+                return null;
+            }
+        } catch (Exception ignored) {
             return null;
         }
 
@@ -146,6 +218,18 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
 
     private boolean removeWithRd(Path target, com.sbtools.util.CancellationToken token) {
         try {
+            // Re-validate immediately before the destructive step (TOCTOU): the
+            // target must still be the validated Windows.old and not a link.
+            Path valid = getValidWindowsOldPath();
+            if (valid == null || !valid.toAbsolutePath().normalize().equals(
+                    target.toAbsolutePath().normalize())) {
+                AppLogger.warning("Windows.old validation changed, aborting removal for safety");
+                return false;
+            }
+            if (Files.isSymbolicLink(target) || isReparsePoint(target)) {
+                AppLogger.warning("Windows.old became a link, aborting removal for safety");
+                return false;
+            }
             ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "rd /s /q \"" + target + "\"");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
@@ -199,11 +283,12 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
     }
 
     private boolean isSymlinkOrJunction(Path path, BasicFileAttributes attrs) {
-        if (attrs.isSymbolicLink()) return true;
+        if (attrs.isSymbolicLink() || attrs.isOther()) return true;
         try {
-            return Files.isSymbolicLink(path);
+            if (Files.isSymbolicLink(path)) return true;
         } catch (Exception e) {
-            return false;
+            return true;
         }
+        return isReparsePoint(path);
     }
 }

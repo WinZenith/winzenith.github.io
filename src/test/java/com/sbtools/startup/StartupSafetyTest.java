@@ -140,4 +140,39 @@ class StartupSafetyTest {
         assertEquals(StartupConstants.REG_WOW6432_APPROVED_RUNONCE,
                 StartupConstants.toApprovedPath(StartupConstants.REG_WOW6432_RUN_ONCE));
     }
+
+    @Test
+    void wow6432Approved_isRun32Overlay() {
+        // 32-bit Run disabled state lives in ...\StartupApproved\Run32 (no Wow6432Node).
+        // Writing to a Wow6432Node Approved key was a silent no-op ignored by Windows.
+        assertTrue(StartupConstants.REG_WOW6432_APPROVED.endsWith("\\Run32"),
+                "32-bit Approved must be Run32 overlay, was: " + StartupConstants.REG_WOW6432_APPROVED);
+        assertFalse(StartupConstants.REG_WOW6432_APPROVED.contains("Wow6432Node"),
+                "Approved overlay must not contain Wow6432Node");
+    }
+
+    @Test
+    void toggleStatus_blocksCriticalByDefault() {
+        StartupService svc = new StartupService();
+        StartupItem critical = new StartupItem("RpcSs", "Microsoft", "C:\\x.exe", true,
+                "Start Type: Automatic", "", "", "", StartupItemType.SERVICE, "Automatic");
+        assertThrows(SecurityException.class, () -> svc.toggleStatus(critical));
+        // Explicit consent overload exists (UI passes true after confirmation); default must stay safe.
+        assertThrows(SecurityException.class, () -> svc.toggleStatus(critical, false));
+    }
+
+    @Test
+    void parseTaskPrincipal_extractsUserAndLogon() {
+        String xml = "<Task><Principals><Principal><UserId>S-1-5-18</UserId>"
+                + "<LogonType>ServiceAccount</LogonType></Principal></Principals></Task>";
+        String[] p = StartupService.parseTaskPrincipal(xml);
+        assertEquals("S-1-5-18", p[0]);
+        assertEquals("ServiceAccount", p[1]);
+
+        String pwd = "<Principals><Principal><UserId>PC\\Bob</UserId><LogonType>Password</LogonType></Principal></Principals>";
+        assertEquals("Password", StartupService.parseTaskPrincipal(pwd)[1]);
+
+        assertArrayEquals(new String[]{"", ""}, StartupService.parseTaskPrincipal(null));
+        assertArrayEquals(new String[]{"", ""}, StartupService.parseTaskPrincipal("  "));
+    }
 }

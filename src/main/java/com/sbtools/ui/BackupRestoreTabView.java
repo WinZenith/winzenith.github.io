@@ -398,7 +398,9 @@ public class BackupRestoreTabView extends BorderPane {
                 "Revert driver for:\n" + row.entry().friendlyName()
                         + "\n\nTo version: " + row.entry().version()
                         + "\n\nBacked up: " + row.backedUpAtProperty().get()
-                        + "\nHealth: " + row.statusProperty().get() + " (" + row.getInfCount() + " INF file(s))");
+                        + "\nHealth: " + row.statusProperty().get() + " (" + row.getInfCount() + " INF file(s))"
+                        + "\n\nThis stages the backed-up INF and attempts a non-destructive device restart."
+                        + " Windows may still keep the newer driver active until reboot/manual Have-Disk install.");
         confirm.setHeaderText("Revert driver?");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
             return;
@@ -414,12 +416,14 @@ public class BackupRestoreTabView extends BorderPane {
                 Platform.runLater(() -> {
                     if (verifyMsg == null) {
                         new Alert(Alert.AlertType.INFORMATION,
-                                "Driver reverted to " + row.entry().version() + ". Restart if devices do not work correctly.").showAndWait();
+                                "Driver reverted to " + row.entry().version() + " and verified active."
+                                        + " Restart if devices do not work correctly.").showAndWait();
                     } else {
                         new Alert(Alert.AlertType.WARNING,
                                 "Backup staged, but the active driver does not yet match "
                                 + row.entry().version() + ".\n\n" + verifyMsg
-                                + "\n\nRestart, then use Device Manager → Rollback if needed.").showAndWait();
+                                + "\n\nRestart, then use Device Manager → Update driver → Browse → Let me pick → Have Disk"
+                                + "\nand point at:\n" + row.entry().backupFolder()).showAndWait();
                     }
                     refreshRollback();
                 });
@@ -439,9 +443,13 @@ public class BackupRestoreTabView extends BorderPane {
      */
     private String verifyRevertedVersion(RestoreRow row) {
         try {
+            String deviceId = row.entry().deviceId();
+            if (deviceId == null || deviceId.isBlank()) {
+                return "Device ID not recorded for this backup — staged only, verify manually in Device Manager.";
+            }
             com.sbtools.drivers.DriverScanService scanner = new com.sbtools.drivers.DriverScanService();
             com.sbtools.drivers.model.InstalledDriver fresh =
-                    scanner.scanSingleDriver(row.entry().deviceId());
+                    scanner.scanSingleDriver(deviceId);
             if (fresh == null) return "Device no longer found after restore.";
             String active = fresh.driverVersion() == null ? "" : fresh.driverVersion().trim();
             String expected = row.entry().version() == null ? "" : row.entry().version().trim();
@@ -632,7 +640,9 @@ public class BackupRestoreTabView extends BorderPane {
                         new Alert(Alert.AlertType.INFORMATION,
                                 "All " + totalFinal + " backup(s) verified healthy.").showAndWait();
                     }
-                    refreshRollback();
+                    // No refreshRollback() here: verify already rebuilt rows from disk.
+                    // A refresh would triple disk I/O and instantly overwrite the
+                    // "Verified x/y" status with "Loading backups...".
                 });
             } catch (Exception ex) {
                 AppLogger.error("Verify backups failed", ex);
@@ -654,6 +664,10 @@ public class BackupRestoreTabView extends BorderPane {
         if (rollbackStatusLabel != null) {
             rollbackStatusLabel.setText("Checking for stale backups...");
         }
+        // Ownership flag: once the confirm dialog is queued, the inner purge task
+        // owns busy + refresh. The outer finally must not clear/refresh early,
+        // otherwise purge runs with busy=false and refresh races the purge.
+        java.util.concurrent.atomic.AtomicBoolean handoff = new java.util.concurrent.atomic.AtomicBoolean(false);
         AppExecutors.ioPool().execute(() -> {
             try {
                 List<com.sbtools.backup.DriverBackupEntry> stale = rollbackBackupService.findStaleEntries();
@@ -674,6 +688,7 @@ public class BackupRestoreTabView extends BorderPane {
                 }
                 final String list = sb.toString();
                 final int count = stale.size();
+                handoff.set(true);
                 Platform.runLater(() -> {
                     Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
                     confirm.setTitle("Repair stale backups");
@@ -681,9 +696,11 @@ public class BackupRestoreTabView extends BorderPane {
                     confirm.setContentText("These backups are missing, empty or unreadable on disk:\n\n" + list
                             + "\nRemove their index entries? Folders (if any) are left untouched.\nNothing else will be deleted.");
                     if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
+                        // Cancelled: inner task owns cleanup from here.
+                        busy.set(false);
+                        refreshRollback();
                         return;
                     }
-                    busy.set(true);
                     AppExecutors.ioPool().execute(() -> {
                         try {
                             rollbackBackupService.purgeStaleIndexEntries(stale);
@@ -705,13 +722,14 @@ public class BackupRestoreTabView extends BorderPane {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
                         "Repair check failed:\n" + ex.getMessage()).showAndWait());
             } finally {
-                Platform.runLater(() -> {
-                    if (busy.get()) {
-                        // Outer task done; inner purge task re-sets busy if confirmed.
+                // Only the non-handoff paths (empty / error) clean up here.
+                // Handoff path is owned by the confirm/purge chain above.
+                if (!handoff.get()) {
+                    Platform.runLater(() -> {
                         busy.set(false);
-                    }
-                    refreshRollback();
-                });
+                        refreshRollback();
+                    });
+                }
             }
         });
     }
@@ -768,7 +786,9 @@ public class BackupRestoreTabView extends BorderPane {
         });
 
         if (AppPaths.isWindows()) {
-            scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
+            // Silent initial scan: status label only, never a modal at startup
+            // (standard users / protection-disabled would otherwise get a blocking error on launch).
+            scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, true);
         } else {
             statusLabel.setText("System Restore is available on Windows only.");
             scanButton.setDisable(true);
@@ -807,6 +827,13 @@ public class BackupRestoreTabView extends BorderPane {
                                     ObservableList<SystemRestoreRow> rows, Label statusLabel,
                                     ProgressIndicator spinner, Button scanButton, Button createButton,
                                     Button launchButton) {
+        scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton, false);
+    }
+
+    private void scanSystemRestore(SystemRestoreService service, BooleanProperty localBusy,
+                                    ObservableList<SystemRestoreRow> rows, Label statusLabel,
+                                    ProgressIndicator spinner, Button scanButton, Button createButton,
+                                    Button launchButton, boolean silent) {
         if (localBusy.get()) return;
         localBusy.set(true);
         statusLabel.setText("Scanning restore points...");
@@ -832,13 +859,16 @@ public class BackupRestoreTabView extends BorderPane {
                     rows.setAll(snapshot);
                     String msg = e.getMessage() != null ? e.getMessage() : "Unknown error";
                     if (msg.toLowerCase().contains("access denied") || msg.toLowerCase().contains("administrator")) {
-                        statusLabel.setText("Scan failed: Access denied (run as Administrator).");
+                        statusLabel.setText("Scan failed: Access denied (run as Administrator). Click Scan to retry as admin.");
                     } else if (msg.toLowerCase().contains("protection")) {
                         statusLabel.setText("Scan failed: System Protection disabled.");
                     } else {
                         statusLabel.setText("Scan failed: " + msg);
                     }
-                    new Alert(Alert.AlertType.ERROR, "Failed to scan restore points:\n" + msg).showAndWait();
+                    // Silent (initial) scans never pop a modal — status label only.
+                    if (!silent) {
+                        new Alert(Alert.AlertType.ERROR, "Failed to scan restore points:\n" + msg).showAndWait();
+                    }
                 });
             } finally {
                 Platform.runLater(() -> localBusy.set(false));
@@ -1343,18 +1373,8 @@ public class BackupRestoreTabView extends BorderPane {
         AppExecutors.ioPool().execute(() -> {
             Path safetyDir = null;
             try {
-                // Pre-restore safety net: export current state before merging,
-                // so a bad restore can be undone. Best-effort, never blocks.
-                try {
-                    Path base = registryBackupsBaseForWrite();
-                    Files.createDirectories(base);
-                    safetyDir = newUniqueRegistryBackupDir(base, "registry_backup_pre-restore_");
-                    Files.createDirectories(safetyDir);
-                    exportCurrentRegistryForSafety(safetyDir);
-                } catch (Exception safetyEx) {
-                    AppLogger.warning("Pre-restore safety backup failed: " + safetyEx.getMessage());
-                    safetyDir = null;
-                }
+                // Validate the selected session BEFORE creating the safety net:
+                // a missing/.hiv-only session must not leave an orphan pre-restore dir.
                 Path dirPath = resolveRegistryBackupPath(selected.getFilename());
                 List<Path> regFiles;
                 long hivCount = 0;
@@ -1381,6 +1401,18 @@ public class BackupRestoreTabView extends BorderPane {
                         new Alert(Alert.AlertType.WARNING, msg).showAndWait();
                     });
                     return;
+                }
+                // Pre-restore safety net: export current state before merging,
+                // so a bad restore can be undone. Best-effort, never blocks.
+                try {
+                    Path base = registryBackupsBaseForWrite();
+                    Files.createDirectories(base);
+                    safetyDir = newUniqueRegistryBackupDir(base, "registry_backup_pre-restore_");
+                    Files.createDirectories(safetyDir);
+                    exportCurrentRegistryForSafety(safetyDir);
+                } catch (Exception safetyEx) {
+                    AppLogger.warning("Pre-restore safety backup failed: " + safetyEx.getMessage());
+                    safetyDir = null;
                 }
                 int regFailed = 0;
                 for (Path regFile : regFiles) {

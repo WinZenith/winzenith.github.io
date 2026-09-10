@@ -89,11 +89,11 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
         if (root.isArray()) {
             for (JsonNode n : root) {
                 WuDriverOffer o = parseOffer(n);
-                if (o != null && o.version() != null && !o.version().isBlank()) offers.add(o);
+                if (o != null && isPlausibleVersion(o.version())) offers.add(o);
             }
         } else if (root.isObject()) {
             WuDriverOffer o = parseOffer(root);
-            if (o != null && o.version() != null && !o.version().isBlank()) offers.add(o);
+            if (o != null && isPlausibleVersion(o.version())) offers.add(o);
         }
 
         List<DriverUpdateCandidate> candidates = new ArrayList<>();
@@ -214,6 +214,21 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
     private static String text(JsonNode n, String key) {
         JsonNode v = n.get(key);
         return v != null && !v.isNull() ? v.asText("") : "";
+    }
+
+    /**
+     * Rejects fabricated versions (raw titles / DriverModel strings). Mirrors
+     * {@code AbstractOemCatalogProvider.isPlausibleVersion}: requires numeric
+     * major.minor form so a title like "NVIDIA - Display" never becomes an
+     * Available version and never flips outdated detection via lexicographic
+     * fallback in {@code VersionCompare}.
+     */
+    static boolean isPlausibleVersion(String v) {
+        if (v == null || v.isBlank()) return false;
+        String t = v.trim();
+        if (!t.matches("(?i).*\\d+\\.\\d+.*")) return false;
+        if (t.length() > 64) return false;
+        return true;
     }
 
     private record WuDriverOffer(String updateId, String title, String description, String version, UpdateSeverity severity) {

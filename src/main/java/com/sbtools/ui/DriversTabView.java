@@ -1,7 +1,6 @@
 package com.sbtools.ui;
 
 import com.sbtools.backup.DriverBackupService;
-import com.sbtools.drivers.catalog.CatalogUpdateService;
 import com.sbtools.drivers.catalog.DriverCatalogAggregator;
 import com.sbtools.drivers.catalog.DriverCatalogDatabase;
 import com.sbtools.drivers.DriverHealthService;
@@ -191,8 +190,6 @@ public class DriversTabView extends BorderPane {
         ignoredListButton.setOnAction(e -> showIgnoredListDialog());
         Button historyButton = new Button("History");
         historyButton.setOnAction(e -> showUpdateHistory());
-        Button catalogButton = new Button("Refresh Catalog");
-        catalogButton.setOnAction(e -> refreshDriverCatalog());
         Button detailsButton = new Button("Details");
         detailsButton.setOnAction(e -> {
             DriverRow row = getSelectedRow();
@@ -211,11 +208,10 @@ public class DriversTabView extends BorderPane {
         stopInstallButton.setTooltip(new Tooltip("Cancel the running install / batch update"));
         ignoredListButton.setTooltip(new Tooltip("Manage ignored/excluded drivers"));
         historyButton.setTooltip(new Tooltip("View past driver update history"));
-        catalogButton.setTooltip(new Tooltip("Download the latest driver catalog (falls back to bundled when offline)"));
         detailsButton.setTooltip(new Tooltip("View details of the selected driver"));
 
         HBox row1 = new HBox(8, scanButton, stopScanButton, updateAllButton, updateSelectedButton,
-                stopInstallButton, backupButton, stopBackupButton, ignoredListButton, historyButton, catalogButton, detailsButton);
+                stopInstallButton, backupButton, stopBackupButton, ignoredListButton, historyButton, detailsButton);
         row1.setAlignment(Pos.CENTER_LEFT);
         row1.setPadding(new Insets(8, 16, 0, 16));
         row1.getStyleClass().add("toolbar");
@@ -689,6 +685,23 @@ public class DriversTabView extends BorderPane {
                 if (token.isCancelled()) return;
                 List<InstalledDriver> installed = scanService.scanInstalled();
                 if (token.isCancelled()) return;
+                // Clear reboot-pending entries completed by a reboot since they were
+                // recorded, plus entries for devices no longer present. Prevents
+                // drivers staying in Outdated/REBOOT forever after rebooting.
+                try {
+                    rebootStore.purgeAfterReboot();
+                    if (installed != null) {
+                        Set<String> installedIds = new HashSet<>();
+                        for (InstalledDriver d : installed) {
+                            if (d != null && d.deviceId() != null && !d.deviceId().isBlank()) {
+                                installedIds.add(d.deviceId());
+                            }
+                        }
+                        rebootStore.purgeMissingDevices(installedIds);
+                    }
+                } catch (Exception purgeEx) {
+                    AppLogger.warning("Failed to purge reboot-pending: " + purgeEx.getMessage());
+                }
                 Map<String, DriverRow> rowByDevice = new HashMap<>();
                 if (installed != null) {
                     for (InstalledDriver d : installed) {
@@ -1194,33 +1207,6 @@ public class DriversTabView extends BorderPane {
         confirm.setTitle("Pre-install Warnings");
         confirm.setHeaderText("Proceed with driver update?");
         return confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
-    }
-
-    /**
-     * Online catalog refresh with bundled fallback. Runs off the FX thread;
-     * any failure keeps the current catalog and only updates the status label.
-     */
-    private void refreshDriverCatalog() {
-        String configured = CatalogUpdateService.configuredCatalogUrl();
-        if (configured.isBlank()) {
-            new Alert(Alert.AlertType.INFORMATION,
-                    "No catalog URL configured.\n\nSet -Dwinzenith.catalog.url=https://.../driver-catalog.json "
-                    + "or WINZENITH_CATALOG_URL to enable online refresh.\n\n"
-                    + "A refreshed catalog can also be placed at:\n"
-                    + CatalogUpdateService.refreshedCatalogPath()).showAndWait();
-            return;
-        }
-        setStatus("Refreshing driver catalog…");
-        scanExecutor.submit(() -> {
-            CatalogUpdateService.RefreshResult r = CatalogUpdateService.refresh(configured);
-            Platform.runLater(() -> {
-                setStatus(r.message());
-                Alert info = new Alert(r.refreshed() ? Alert.AlertType.INFORMATION : Alert.AlertType.WARNING, r.message());
-                info.setTitle("Driver Catalog");
-                info.setHeaderText(r.refreshed() ? "Catalog refreshed" : "Catalog refresh skipped");
-                info.showAndWait();
-            });
-        });
     }
 
     private void showErrorWithFallback(String message, String vendorPageUrl) {
@@ -1917,14 +1903,39 @@ public class DriversTabView extends BorderPane {
                                 cell.setIdle();
                             }
                         });
+                    } catch (Throwable t) {
+                        // Isolate per-driver Errors (e.g. StackOverflow from a bad
+                        // package) so one driver cannot wedge the whole batch busy.
+                        failed++;
+                        failureDetails.add(row.installed().friendlyName() + ": error " + t);
+                        AppLogger.warning("Batch install error for " + row.installed().friendlyName() + ": " + t);
+                        Platform.runLater(() -> {
+                            DriverActionCell cell = installCells.remove(row);
+                            if (cell != null) {
+                                cell.setIdle();
+                            }
+                        });
                     }
                 }
             } catch (Exception ex) {
                 AppLogger.warning("Batch install initialization failed: " + ex.getMessage());
                 failed += rows.size() - succeeded - skipped;
+            } catch (Throwable t) {
+                AppLogger.warning("Batch install failed with error: " + t);
+                failureDetails.add("Batch aborted: " + t);
+                failed += rows.size() - succeeded - skipped;
             } finally {
                 installService.setProgressCallback(null);
                 installService.setStatusCallback(null);
+                // Guarantee busy release even if a Throwable escapes the loop or the
+                // summary below never runs (e.g. StackOverflowError, OOM). Double
+                // release is safe: releaseBusy checks owner.
+                try {
+                    if (isBusyOwnedBy(BusyOwner.INSTALL)) {
+                        Platform.runLater(() -> releaseBusy(BusyOwner.INSTALL));
+                    }
+                } catch (Exception ignored) {
+                }
             }
             if (succeeded > 0) {
                 Platform.runLater(() -> statusLabel.setText("Verifying installed versions\u2026"));
@@ -1948,8 +1959,8 @@ public class DriversTabView extends BorderPane {
                         outdatedTable.refresh();
                         upToDateTable.refresh();
                     });
-                } catch (Exception e) {
-                    AppLogger.debug("Post-batch re-scan failed: " + e.getMessage());
+                } catch (Throwable e) {
+                    AppLogger.debug("Post-batch re-scan failed: " + e);
                 }
             }
             final int s = succeeded;

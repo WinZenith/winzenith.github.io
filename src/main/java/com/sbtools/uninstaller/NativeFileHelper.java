@@ -32,6 +32,30 @@ public class NativeFileHelper {
      * @return true if deleted immediately, false if scheduled for reboot.
      */
     public static boolean deleteOrQueue(File file) {
+        if (file == null) return false;
+        // B5 FIX: never follow symlinks/junctions — delete the link itself.
+        // File.isDirectory() follows links, so recursing into a junction (e.g.
+        // AppData junctions) would wipe the link TARGET outside the intended tree.
+        try {
+            Path p = file.toPath();
+            if (Files.isSymbolicLink(p) || isReparsePoint(p)) {
+                try {
+                    Files.deleteIfExists(p);
+                    AppLogger.info("Deleted link (not followed): " + file.getAbsolutePath());
+                    return true;
+                } catch (Exception e) {
+                    AppLogger.debug("Link deletion failed for: " + file.getAbsolutePath()
+                            + " (" + e.getMessage() + "). Scheduling for reboot...");
+                    boolean scheduled = queueForReboot(file.getAbsolutePath());
+                    if (!scheduled) {
+                        AppLogger.warning("Failed to queue link for reboot deletion: " + file.getAbsolutePath());
+                    }
+                    return false;
+                }
+            }
+        } catch (Exception ignored) {
+            // Fall through to normal handling if attribute read fails
+        }
         if (!file.exists()) {
             return true;
         }
@@ -157,12 +181,37 @@ public class NativeFileHelper {
     }
 
     /**
+     * B5 FIX: detects Windows junctions / reparse points without following them.
+     * Files.isSymbolicLink misses junctions; DosFileAttributes.isReparsePoint
+     * covers both (read with NOFOLLOW_LINKS so the target is never touched).
+     */
+    private static boolean isReparsePoint(Path p) {
+        try {
+            java.nio.file.attribute.DosFileAttributes attrs =
+                    Files.readAttributes(p, java.nio.file.attribute.DosFileAttributes.class,
+                            java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            if (attrs.isSymbolicLink()) return true;
+        } catch (Exception ignored) {
+            // Fall through to attribute check below
+        }
+        return isReparsePointFallback(p);
+    }
+
+    private static boolean isReparsePointFallback(Path p) {
+        try {
+            Object v = Files.getAttribute(p, "dos:reparsePoint", java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            return Boolean.TRUE.equals(v);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
      * Invokes Kernel32 MoveFileEx API with MOVEFILE_DELAY_UNTIL_REBOOT flag.
      *
      * @param absolutePath Absolute path to the file or directory.
      * @return true if registration succeeded, false otherwise.
-     */
-    public static boolean queueForReboot(String absolutePath) {
+     */    public static boolean queueForReboot(String absolutePath) {
         try {
             // Kernel32.MOVEFILE_DELAY_UNTIL_REBOOT is 4
             boolean result = Kernel32.INSTANCE.MoveFileEx(absolutePath, null, new DWORD(Kernel32.MOVEFILE_DELAY_UNTIL_REBOOT));

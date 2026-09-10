@@ -14,7 +14,8 @@ if ($wifi) {
     else { $info.state = $wifi.Status.ToLower() }
     if ($wifi.LinkSpeed) { $info.receiveRate = $wifi.LinkSpeed }
 
-    $props = Get-NetAdapterAdvancedProperty -Name $wifi.Name -ErrorAction SilentlyContinue
+    $escapedWifiName = [WildcardPattern]::Escape($wifi.Name)
+    $props = Get-NetAdapterAdvancedProperty -Name $escapedWifiName -ErrorAction SilentlyContinue
     foreach ($p in $props) {
         if ($p.DisplayName -match 'Wireless Mode|802\.11.*Wireless|Radio Type') {
             $info.radioType = $p.DisplayValue

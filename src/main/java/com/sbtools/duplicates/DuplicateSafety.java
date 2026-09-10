@@ -150,19 +150,40 @@ public final class DuplicateSafety {
             // isProtected true for drive root already via CleanerUtils, but double-check
             // Also protect if path contains "\windowsapps\" anywhere (can be relocated)
             if (s.contains("\\windowsapps\\") || s.endsWith("\\windowsapps")) return true;
-            if (s.contains("\\system volume information\\")) return true;
+            if (s.contains("\\system volume information\\") || s.endsWith("\\system volume information")) return true;
             // AppData anywhere (normally <drive>:\Users\<user>\AppData\...,
             // but also relocated/custom). Per-user app installs, packages and
             // state live here — deleting "duplicates" breaks apps.
             if (s.contains("\\appdata\\") || s.endsWith("\\appdata")) return true;
-            // Relocated Program Files / ProgramData outside File.listRoots
-            // enumeration edge (e.g., mounted volumes, ramdisk, UNC shares).
-            if (s.contains("\\program files\\windowsapps\\") || s.endsWith("\\program files\\windowsapps")) return true;
-            if (s.contains("\\program files (x86)\\") || s.endsWith("\\program files (x86)")) return true;
-            // Bare "\program files\" / "\programdata\" segments cover relocated
-            // installs not under a File.listRoots drive letter.
-            if (s.contains("\\program files\\") || s.endsWith("\\program files")) return true;
-            if (s.contains("\\programdata\\") || s.endsWith("\\programdata")) return true;
+            // Blocker fix: OS-folder segments below only apply to non-drive-letter
+            // paths (UNC shares, mounted volumes without a letter, SUBST edge cases
+            // outside File.listRoots enumeration). Real local installs of Windows /
+            // Program Files / ProgramData / Recovery / EFI / Boot always live at a
+            // drive root, which the drive-letter loop above already covers. Applying
+            // them to ANY depth broke legitimate user data: a photo folder like
+            // D:\Photos\windows\pic.jpg, a dev folder like D:\work\boot\readme.txt
+            // or D:\Docs\efi\notes.txt was silently skipped (and even rejected as a
+            // scan root), so scans missed duplicates with no explanation.
+            boolean isDriveLetterPath = s.matches("^[a-z]:\\\\.*") || s.matches("^[a-z]:$");
+            if (!isDriveLetterPath) {
+                if (s.contains("\\program files (x86)\\") || s.endsWith("\\program files (x86)")) return true;
+                // Bare "\program files\" / "\programdata\" segments cover relocated
+                // installs not under a File.listRoots drive letter.
+                if (s.contains("\\program files\\") || s.endsWith("\\program files")) return true;
+                if (s.contains("\\programdata\\") || s.endsWith("\\programdata")) return true;
+                // Generic OS-folder segments — covers UNC shares (\\server\share\Windows\...),
+                // SUBST drives, mounted volumes and relocated installs outside
+                // File.listRoots enumeration. Without these, a UNC path to a remote
+                // Windows folder would not match any drive-letter prefix above.
+                if (s.contains("\\windows\\") || s.endsWith("\\windows")) return true;
+                if (s.contains("\\winnt\\") || s.endsWith("\\winnt")) return true;
+                if (s.contains("\\recovery\\") || s.endsWith("\\recovery")) return true;
+                if (s.contains("\\efi\\") || s.endsWith("\\efi")) return true;
+                // \boot at any level (e.g., \\server\share\boot\...). Drive-root
+                // \boot is already covered above; this covers UNC/relocated cases.
+                if (s.contains("\\boot\\") || s.endsWith("\\boot")) return true;
+            }
+            if (s.contains("\\$recycle.bin\\") || s.endsWith("\\$recycle.bin")) return true;
 
         } catch (Exception e) {
             AppLogger.warning("DuplicateSafety.isProtected check failed for " + path + ": " + e.getMessage());
@@ -189,6 +210,15 @@ public final class DuplicateSafety {
             Path abs = stripLongPrefixPath(path.toAbsolutePath().normalize());
             String rawS = abs.toString().toLowerCase(Locale.ROOT).replace('/', '\\');
             String s = stripLongPrefixStr(rawS);
+            // Block UNC administrative drive shares (e.g., \\server\c$) — the remote
+            // equivalent of scanning an entire drive root. The remote system drive
+            // is unknown, so all such share roots are rejected conservatively.
+            // Regular shares (\\server\photos) remain allowed; protected
+            // subfolders inside them are still skipped at walk time.
+            if (s.matches("^\\\\\\\\[^\\\\]+\\\\[a-z]\\$\\\\?$")) {
+                return "Scanning an entire administrative network share is not allowed for safety.\n"
+                        + "Please add a specific non-system subfolder.";
+            }
             boolean isDriveRoot = s.matches("^[a-z]:\\\\$") || s.matches("^[a-z]:$");
             if (isDriveRoot) {
                 String drive = s.substring(0, 2); // c:

@@ -43,10 +43,10 @@ public class NetworkOptimizerService {
         if (trimmed.contains(";") || trimmed.contains("|") || trimmed.contains("&") || trimmed.contains("`") || trimmed.contains("$") || trimmed.contains("\n") || trimmed.contains("\r")) {
             throw new IllegalArgumentException("Invalid adapter name: " + name);
         }
-        if (!SAFE_NAME.matcher(name).matches()) {
+        if (!SAFE_NAME.matcher(trimmed).matches()) {
             throw new IllegalArgumentException("Invalid adapter name: " + name);
         }
-        return name;
+        return trimmed;
     }
 
     public List<NetworkAdapterRow> listAdapters() {
@@ -240,10 +240,10 @@ public class NetworkOptimizerService {
 
     public OperationResult renewIp(String adapterName) {
         try {
-            sanitizeName(adapterName);
+            String safeName = sanitizeName(adapterName);
             // Call ipconfig directly without cmd.exe to avoid cmd metachar issues; ProcessBuilder handles spaces via quoting
             ProcessResult release = new ProcessRunner(30).run(
-                    List.of("ipconfig", "/release", adapterName));
+                    List.of("ipconfig", "/release", safeName));
             if (release.exitCode() != 0) {
                 AppLogger.warning("ipconfig /release failed: " + release.combinedOutput());
                 // Don't abort if adapter uses static IP; still try renew
@@ -253,13 +253,13 @@ public class NetworkOptimizerService {
                 }
             }
             ProcessResult renew = new ProcessRunner(30).run(
-                    List.of("ipconfig", "/renew", adapterName));
+                    List.of("ipconfig", "/renew", safeName));
             if (renew.exitCode() != 0) {
                 return OperationResult.fail("IP renewal failed.",
                         "release: " + release.combinedOutput() + "\nrenew: " + renew.combinedOutput());
             }
-            logChange("Renew IP", adapterName, "ipconfig /release + /renew", true);
-            return OperationResult.ok("IP address renewed for " + adapterName + ".", renew.stdout());
+            logChange("Renew IP", safeName, "ipconfig /release + /renew", true);
+            return OperationResult.ok("IP address renewed for " + safeName + ".", renew.stdout());
         } catch (Exception e) {
             AppLogger.warning("Failed to renew IP: " + e.getMessage());
             return OperationResult.fail("Failed to renew IP: " + e.getMessage());
@@ -268,11 +268,38 @@ public class NetworkOptimizerService {
 
     public OperationResult setAdapterState(String adapterName, boolean enable) {
         try {
-            sanitizeName(adapterName);
-            String cmd = enable ? "Enable-NetAdapter" : "Disable-NetAdapter";
-            // Use powershellScript approach with proper quoting via psQuote
-            String psCmd = cmd + " -Name " + ProcessRunner.psQuote(adapterName) + " -Confirm:$false";
-            ProcessResult pr = new ProcessRunner(30).run(powershellCommand(psCmd));
+            String safeName = sanitizeName(adapterName);
+            // Exact-match via net-adapter-state.ps1: the script resolves the adapter
+            // with "-eq" (no wildcards) and pipes by InputObject, so a name
+            // containing "*" can never expand to every adapter. Never pass the
+            // raw name to Enable/Disable-NetAdapter -Name (wildcard-capable).
+            Path script = PowerShellScripts.resolve("net-adapter-state.ps1");
+            ProcessResult pr = new ProcessRunner(30).run(
+                    ProcessRunner.powershellScript(script.toString(),
+                            "-AdapterName", safeName,
+                            "-Enable", String.valueOf(enable)));
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+            if (!stdout.isEmpty()) {
+                try {
+                    Map<String, Object> data = mapper.readValue(stdout,
+                            new TypeReference<Map<String, Object>>() {});
+                    Object success = data.get("success");
+                    boolean ok = success instanceof Boolean && (Boolean) success;
+                    String msg = str(data, "message");
+                    String out = pr.combinedOutput();
+                    if (!ok && out != null && out.toLowerCase().contains("access") && out.toLowerCase().contains("denied")) {
+                        return OperationResult.fail("Requires Administrator: failed to " + (enable ? "enable" : "disable") + " adapter.", out);
+                    }
+                    if (ok) {
+                        logChange(enable ? "Enable Adapter" : "Disable Adapter", safeName, "", true);
+                        return OperationResult.ok(msg.isEmpty() ? ((enable ? "Enabled " : "Disabled ") + safeName + ".") : msg, out);
+                    }
+                    return OperationResult.fail(msg.isEmpty()
+                            ? ("Failed to " + (enable ? "enable" : "disable") + " adapter.") : msg, out);
+                } catch (Exception je) {
+                    AppLogger.warning("Failed to parse adapter-state JSON: " + je.getMessage());
+                }
+            }
             String out = pr.combinedOutput();
             if (pr.exitCode() != 0) {
                 if (out != null && out.toLowerCase().contains("access") && out.toLowerCase().contains("denied")) {
@@ -280,8 +307,8 @@ public class NetworkOptimizerService {
                 }
                 return OperationResult.fail("Failed to " + (enable ? "enable" : "disable") + " adapter.", out);
             }
-            logChange(enable ? "Enable Adapter" : "Disable Adapter", adapterName, "", true);
-            return OperationResult.ok((enable ? "Enabled" : "Disabled") + " " + adapterName + ".", out);
+            logChange(enable ? "Enable Adapter" : "Disable Adapter", safeName, "", true);
+            return OperationResult.ok((enable ? "Enabled " : "Disabled ") + safeName + ".", out);
         } catch (Exception e) {
             AppLogger.warning("Failed to set adapter state: " + e.getMessage());
             return OperationResult.fail("Failed to set adapter state: " + e.getMessage());
@@ -339,10 +366,10 @@ public class NetworkOptimizerService {
 
     public List<String> getCurrentDnsServers(String adapterName) {
         try {
-            sanitizeName(adapterName);
+            String safeName = sanitizeName(adapterName);
             Path script = PowerShellScripts.resolve("net-dns-get.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", adapterName));
+                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", safeName));
             String stdout = pr.stdout().trim();
             if (!stdout.isEmpty()) {
                 Map<String, Object> data = mapper.readValue(stdout,
@@ -360,7 +387,7 @@ public class NetworkOptimizerService {
 
     public OperationResult setDnsServers(String adapterName, String primaryDns, String secondaryDns) {
         try {
-            sanitizeName(adapterName);
+            String safeName = sanitizeName(adapterName);
             String p1 = primaryDns != null ? primaryDns.trim() : "";
             String p2 = secondaryDns != null ? secondaryDns.trim() : "";
             if (!p1.isEmpty() && !isValidIpAddress(p1)) {
@@ -375,7 +402,7 @@ public class NetworkOptimizerService {
             Path script = PowerShellScripts.resolve("net-dns-set.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
                     ProcessRunner.powershellScript(script.toString(),
-                            "-AdapterName", adapterName,
+                            "-AdapterName", safeName,
                             "-PrimaryDNS", p1,
                             "-SecondaryDNS", p2));
             String stdout = pr.stdout().trim();
@@ -387,12 +414,12 @@ public class NetworkOptimizerService {
                 String msg = str(data, "message");
                 if (ok) {
                     String target = !p1.isEmpty() ? p1 + (!p2.isEmpty() ? ", " + p2 : "") : "DHCP";
-                    logChange("Set DNS", adapterName, target, true);
+                    logChange("Set DNS", safeName, target, true);
                 }
                 return ok ? OperationResult.ok(msg, stdout) : OperationResult.fail(msg, stdout);
             }
             boolean ok = pr.exitCode() == 0;
-            if (ok) logChange("Set DNS", adapterName, !p1.isEmpty() ? p1 : "DHCP", true);
+            if (ok) logChange("Set DNS", safeName, !p1.isEmpty() ? p1 : "DHCP", true);
             return ok
                     ? OperationResult.ok("DNS servers updated.")
                     : OperationResult.fail("DNS update failed with exit code " + pr.exitCode(), pr.combinedOutput());
@@ -421,18 +448,19 @@ public class NetworkOptimizerService {
     }
 
     public AdapterProperties getAdapterProperties(String adapterName) {
+        String safeName = adapterName;
         try {
-            sanitizeName(adapterName);
+            safeName = sanitizeName(adapterName);
             Path script = PowerShellScripts.resolve("net-adapter-properties.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", adapterName));
+                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", safeName));
             String stdout = pr.stdout().trim();
             if (!stdout.isEmpty()) {
                 Map<String, Object> data = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 if (data.containsKey("error")) {
                     AppLogger.warning("Adapter properties error: " + data.get("error"));
-                    return new AdapterProperties(adapterName, Map.of());
+                    return new AdapterProperties(safeName, Map.of());
                 }
                 Object propsObj = data.get("properties");
                 if (propsObj instanceof List<?> list) {
@@ -444,13 +472,13 @@ public class NetworkOptimizerService {
                             props.put(name, value);
                         }
                     }
-                    return new AdapterProperties(adapterName, props);
+                    return new AdapterProperties(safeName, props);
                 }
             }
         } catch (Exception e) {
             AppLogger.warning("Failed to get adapter properties: " + e.getMessage());
         }
-        return new AdapterProperties(adapterName, Map.of());
+        return new AdapterProperties(safeName, Map.of());
     }
 
     public WiFiInfo getCurrentWifiInfo() {
@@ -522,16 +550,16 @@ public class NetworkOptimizerService {
     }
 
     public OperationResult forgetWifiProfile(String ssid) {
-        if (ssid == null || ssid.isBlank()) {
-            return OperationResult.fail("SSID is required.");
-        }
-        if (ssid.length() > 32) {
-            return OperationResult.fail("SSID must be 32 characters or less.");
+        String safeSsid;
+        try {
+            safeSsid = sanitizeSsid(ssid);
+        } catch (IllegalArgumentException e) {
+            return OperationResult.fail(e.getMessage());
         }
         try {
             Path script = PowerShellScripts.resolve("net-wifi-forget.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(), "-SSID", ssid));
+                    ProcessRunner.powershellScript(script.toString(), "-SSID", safeSsid));
             String stdout = pr.stdout().trim();
             if (!stdout.isEmpty()) {
                 Map<String, Object> data = mapper.readValue(stdout,
@@ -539,18 +567,42 @@ public class NetworkOptimizerService {
                 Object success = data.get("success");
                 boolean ok = success instanceof Boolean && (Boolean) success;
                 String msg = str(data, "message");
-                if (ok) logChange("Forget Wi-Fi Profile", ssid, "", true);
+                if (ok) logChange("Forget Wi-Fi Profile", safeSsid, "", true);
                 return ok ? OperationResult.ok(msg) : OperationResult.fail(msg);
             }
             boolean ok = pr.exitCode() == 0;
-            if (ok) logChange("Forget Wi-Fi Profile", ssid, "", true);
+            if (ok) logChange("Forget Wi-Fi Profile", safeSsid, "", true);
             return ok
-                    ? OperationResult.ok("Profile '" + ssid + "' forgotten.")
+                    ? OperationResult.ok("Profile '" + safeSsid + "' forgotten.")
                     : OperationResult.fail("Forget failed with exit code " + pr.exitCode());
         } catch (Exception e) {
             AppLogger.warning("Failed to forget Wi-Fi profile: " + e.getMessage());
             return OperationResult.fail("Failed to forget Wi-Fi profile: " + e.getMessage());
         }
+    }
+
+    /**
+     * Validates a Wi-Fi profile name before it reaches netsh. The name is
+     * concatenated into a {@code name="..."} argument, so a double quote would
+     * break out and inject extra netsh arguments (wrong profile deleted).
+     * Passed via {@code -File} argv the PowerShell layer itself is safe; this
+     * guards the netsh quoting layer. Spaces are significant in SSIDs and kept.
+     */
+    private static String sanitizeSsid(String ssid) {
+        if (ssid == null || ssid.isBlank()) {
+            throw new IllegalArgumentException("SSID is required.");
+        }
+        if (ssid.length() > 32) {
+            throw new IllegalArgumentException("SSID must be 32 characters or less.");
+        }
+        for (int i = 0; i < ssid.length(); i++) {
+            char c = ssid.charAt(i);
+            if (c == '"' || c == ';' || c == '|' || c == '&' || c == '`' || c == '$'
+                    || c == '<' || c == '>' || c == '\n' || c == '\r' || Character.isISOControl(c)) {
+                throw new IllegalArgumentException("SSID contains an unsupported character and was rejected for safety.");
+            }
+        }
+        return ssid;
     }
 
     private String sanitizeHost(String host) {

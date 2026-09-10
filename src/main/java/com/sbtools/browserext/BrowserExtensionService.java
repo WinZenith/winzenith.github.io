@@ -461,8 +461,13 @@ public class BrowserExtensionService {
                     boolean enabled = true;
                     Object en = entry.get("enabled");
                     if (en instanceof Boolean) enabled = (Boolean) en;
+                    boolean managed = false;
+                    Object mg = entry.get("managed");
+                    if (mg instanceof Boolean) managed = (Boolean) mg;
+                    String installSource = str(entry, "installSource");
                     results.add(new BrowserExtensionRow(extBrowser, id, name, version,
-                            description, enabled, extPath, profilePath, profileName, installTime, permissions));
+                            description, enabled, extPath, profilePath, profileName, installTime, permissions,
+                            managed, installSource));
                 } catch (Exception e) {
                     AppLogger.warning("Failed to parse extension entry: " + e.getMessage());
                 }
@@ -492,6 +497,13 @@ public class BrowserExtensionService {
             if (cancelled != null && cancelled.get()) return false;
             String extId = ext.getExtensionId();
             if (extId == null || extId.isBlank()) return false;
+            // Policy/default/system extensions are re-enforced by the browser:
+            // refuse instead of reporting false success.
+            if (ext.isManaged()) {
+                AppLogger.warning("Refusing toggle of managed extension " + ext.getBrowser() + ":"
+                        + extId + " (source=" + ext.getInstallSource() + ")");
+                return false;
+            }
 
             // Prefer profilePath (added in fix) for accurate profile targeting
             Path profileDir;
@@ -538,15 +550,18 @@ public class BrowserExtensionService {
 
             Path script = PowerShellScripts.resolve("browser-extensions.ps1");
             List<String> cmd;
+            String toggleBrowser = ext.getBrowser() != null ? ext.getBrowser() : "";
             try {
                 cmd = ProcessRunner.powershellScript(script.toString(),
                         "-Action", "Toggle",
+                        "-Browser", toggleBrowser,
                         "-ProfilePath", profileDir.toString(),
                         "-ExtId", extId,
                         "-Enable", String.valueOf(enable));
             } catch (Exception e) {
                 cmd = ProcessRunner.bestPowerShellScript(script.toString(),
                         "-Action", "Toggle",
+                        "-Browser", toggleBrowser,
                         "-ProfilePath", profileDir.toString(),
                         "-ExtId", extId,
                         "-Enable", String.valueOf(enable));
@@ -564,6 +579,7 @@ public class BrowserExtensionService {
                 if (cmd.get(0).equalsIgnoreCase("powershell.exe")) {
                     cmd = ProcessRunner.pwshScript(script.toString(),
                             "-Action", "Toggle",
+                            "-Browser", toggleBrowser,
                             "-ProfilePath", profileDir.toString(),
                             "-ExtId", extId,
                             "-Enable", String.valueOf(enable));
@@ -615,13 +631,25 @@ public class BrowserExtensionService {
 
     /**
      * Expected process image for a browser (e.g. {@code chrome.exe}).
-     * Registry-driven; falls back to the legacy switch for built-ins.
+     * Registry-driven; falls back to the legacy switch for built-ins and to
+     * the file name of the first known exe path for pluggable custom browsers.
+     * Returns "" only when nothing is known — callers must treat "" as
+     * "unknown" (warn), never as "not running".
      */
     public static String expectedExeFor(String browser) {
         try {
             BrowserDefinition def = BrowserRegistry.find(browser);
-            if (def != null && def.processNameOrEmpty() != null && !def.processNameOrEmpty().isBlank()) {
-                return def.processNameOrEmpty().toLowerCase();
+            if (def != null) {
+                if (def.processNameOrEmpty() != null && !def.processNameOrEmpty().isBlank()) {
+                    return def.processNameOrEmpty().toLowerCase();
+                }
+                // Pluggable browser without processName: derive from exe paths.
+                for (String exe : def.exesOrEmpty()) {
+                    String fileName = fileNameOf(exe);
+                    if (fileName != null && fileName.toLowerCase().endsWith(".exe")) {
+                        return fileName.toLowerCase();
+                    }
+                }
             }
         } catch (Exception ignored) {
         }
@@ -634,6 +662,24 @@ public class BrowserExtensionService {
             case "Vivaldi" -> "vivaldi.exe";
             default -> "";
         };
+    }
+
+    private static String fileNameOf(String path) {
+        if (path == null || path.isBlank()) return null;
+        try {
+            String expanded = expandEnv(path);
+            String candidate = (expanded != null && !expanded.isBlank()) ? expanded : path;
+            int slash = Math.max(candidate.lastIndexOf('\\'), candidate.lastIndexOf('/'));
+            String leaf = slash >= 0 ? candidate.substring(slash + 1) : candidate;
+            leaf = leaf.trim();
+            // Strip any trailing args/quotes from catalog typos.
+            int space = leaf.indexOf(' ');
+            if (space > 0) leaf = leaf.substring(0, space);
+            leaf = leaf.replace("\"", "");
+            return leaf.isBlank() ? null : leaf;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** Store URL for an extension id, or "" when the browser has no known store. */

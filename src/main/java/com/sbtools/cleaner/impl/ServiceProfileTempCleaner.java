@@ -34,7 +34,12 @@ public class ServiceProfileTempCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        CleanerUtils.scanDirectorySizesOlderThan(row, getDirs(), MAX_AGE);
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        CleanerUtils.scanDirectorySizesOlderThan(row, getDirs(), MAX_AGE, token);
     }
 
     @Override

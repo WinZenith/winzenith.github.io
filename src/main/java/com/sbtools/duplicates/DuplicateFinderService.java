@@ -51,6 +51,7 @@ public class DuplicateFinderService {
         long enumeratedFiles;
         long skippedProtected;
         long skippedFiltered;
+        final List<String> failedRoots = new ArrayList<>();
     }
 
     public List<DuplicateFileRow> scan(Path root, BiConsumer<Integer, Integer> progress,
@@ -73,15 +74,19 @@ public class DuplicateFinderService {
     }
 
     public ScanResult scanWithStats(List<Path> roots, DuplicateScanOptions options,
-                                    BiConsumer<Integer, Integer> progress,
-                                    java.util.function.Consumer<String> phaseLabel,
-                                    AtomicBoolean cancelled) {
+                                     BiConsumer<Integer, Integer> progress,
+                                     java.util.function.Consumer<String> phaseLabel,
+                                     AtomicBoolean cancelled) {
         DuplicateScanOptions effectiveOptions = options == null ? DuplicateScanOptions.defaults() : options;
         DuplicateKeeperStrategy keeperStrategy = effectiveOptions.keeperStrategy() == null
                 ? DuplicateKeeperStrategy.NEWEST : effectiveOptions.keeperStrategy();
         ScanStats stats = new ScanStats();
         List<DuplicateFileRow> result = new ArrayList<>();
         ExecutorService executor = null;
+        // Blocker fix: never crash on null/degenerate inputs — a null token means
+        // "not cancelled", a null/empty root list means "nothing to scan".
+        AtomicBoolean cancelFlag = cancelled != null ? cancelled : new AtomicBoolean(false);
+        List<Path> effectiveRoots = roots != null ? roots : Collections.emptyList();
 
         try {
             // Phase 1: walk file tree, bucket by size (skip 0-byte files + option filters)
@@ -93,11 +98,16 @@ public class DuplicateFinderService {
             final long minSize = Math.max(1L, effectiveOptions.minSizeBytes());
             final DuplicateScanOptions filterOptions = effectiveOptions;
 
-            for (Path root : roots) {
-                if (cancelled.get()) break;
+            for (Path root : effectiveRoots) {
+                if (cancelFlag.get()) break;
+                // Blocker fix: one null/degenerate entry must not kill the whole multi-root scan.
+                if (root == null) continue;
                 // Validate scan root at walk time — guard against race where root was added before safety check
                 if (DuplicateSafety.isProtected(root)) {
                     AppLogger.warning("Skipping protected scan root: " + root);
+                    // Blocker fix: surface skipped roots so the UI reports them
+                    // instead of a misleading "No duplicates found".
+                    try { stats.failedRoots.add(root.toString()); } catch (Exception ignored) {}
                     continue;
                 }
                 // Additional real-path check: block junction/symlink at root that points to protected location
@@ -105,14 +115,16 @@ public class DuplicateFinderService {
                     Path realRoot = root.toRealPath(LinkOption.NOFOLLOW_LINKS);
                     if (!realRoot.equals(root.toAbsolutePath().normalize()) && DuplicateSafety.isProtected(realRoot)) {
                         AppLogger.warning("Skipping protected scan root (real path): " + root + " -> " + realRoot);
+                        try { stats.failedRoots.add(root.toString()); } catch (Exception ignored) {}
                         continue;
                     }
                 } catch (Exception ignored) {}
                 Path effectiveRoot = toLongPathForced(root);
-                Files.walkFileTree(effectiveRoot, new SimpleFileVisitor<Path>() {
+                try {
+                    Files.walkFileTree(effectiveRoot, new SimpleFileVisitor<Path>() {
                     @Override
                     public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                        if (cancelled.get()) return FileVisitResult.TERMINATE;
+                        if (cancelFlag.get()) return FileVisitResult.TERMINATE;
                         // Block any protected directory on any drive (C:\Windows, WindowsApps, System Volume Information, etc.)
                         if (DuplicateSafety.isProtected(dir)) {
                             return FileVisitResult.SKIP_SUBTREE;
@@ -149,7 +161,7 @@ public class DuplicateFinderService {
 
                     @Override
                     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                        if (cancelled.get()) return FileVisitResult.TERMINATE;
+                        if (cancelFlag.get()) return FileVisitResult.TERMINATE;
                         if (DuplicateSafety.isProtected(file)) {
                             stats.skippedProtected++;
                             return FileVisitResult.CONTINUE;
@@ -216,10 +228,19 @@ public class DuplicateFinderService {
                     public FileVisitResult visitFileFailed(Path file, IOException exc) {
                         return FileVisitResult.CONTINUE;
                     }
-                });
+                    });
+                } catch (Exception rootEx) {
+                    // One unreadable root (unplugged USB, access-denied, disconnected
+                    // share) must not abort the remaining roots. Record it, keep
+                    // whatever was enumerated from the good roots, and continue.
+                    try {
+                        stats.failedRoots.add(root.toString());
+                    } catch (Exception ignored) {}
+                    AppLogger.warning("Duplicate scan: skipping unreadable root " + root + ": " + rootEx.getMessage());
+                }
             }
 
-            if (cancelled.get()) return ScanResult.cancelled(result, stats);
+            if (cancelFlag.get()) return ScanResult.cancelled(result, stats);
 
             List<Path> toHash = new ArrayList<>();
             for (List<Path> paths : bySize.values()) {
@@ -243,10 +264,10 @@ public class DuplicateFinderService {
             List<Future<Map.Entry<String, Path>>> quickFutures = new ArrayList<>(quickTotal);
 
             for (Path p : toHash) {
-                if (cancelled.get()) return ScanResult.cancelled(result, stats);
+                if (cancelFlag.get()) return ScanResult.cancelled(result, stats);
                 final Path pathForTask = p;
                 quickFutures.add(executor.submit(() -> {
-                    if (cancelled.get()) return null;
+                    if (cancelFlag.get()) return null;
                     if (DuplicateSafety.isProtected(pathForTask)) return null;
                     byte[] localBuf = QUICK_BUF.get();
                     CRC32 crc = new CRC32();
@@ -266,7 +287,7 @@ public class DuplicateFinderService {
             Map<String, List<Path>> quickGroups = new HashMap<>();
             int quickProcessed = 0;
             for (int i = 0; i < quickFutures.size(); i++) {
-                if (cancelled.get()) {
+                if (cancelFlag.get()) {
                     for (int j = i; j < quickFutures.size(); j++) quickFutures.get(j).cancel(true);
                     return ScanResult.cancelled(result, stats);
                 }
@@ -280,7 +301,7 @@ public class DuplicateFinderService {
                 if (progress != null) progress.accept(quickProcessed, quickTotal);
             }
 
-            if (cancelled.get()) return ScanResult.cancelled(result, stats);
+            if (cancelFlag.get()) return ScanResult.cancelled(result, stats);
 
             // Phase 3: sample-hash (head/middle/tail 64KB) to prune same-size
             // collisions without reading multi-GB files in full (parallel).
@@ -308,13 +329,13 @@ public class DuplicateFinderService {
             if (!toSample.isEmpty()) {
                 List<Future<Map.Entry<String, Path>>> sampleFutures = new ArrayList<>(middleTotal);
                 for (Path p : toSample) {
-                    if (cancelled.get()) return ScanResult.cancelled(result, stats);
+                    if (cancelFlag.get()) return ScanResult.cancelled(result, stats);
                     final Path pathForTask = p;
                     sampleFutures.add(executor.submit(() -> {
-                        if (cancelled.get()) return null;
+                        if (cancelFlag.get()) return null;
                         if (DuplicateSafety.isProtected(pathForTask)) return null;
                         try {
-                            String sample = sampleHashSha256(pathForTask, cancelled);
+                            String sample = sampleHashSha256(pathForTask, cancelFlag);
                             if (sample == null) return null;
                             long size = Files.size(toLongPath(pathForTask));
                             return Map.entry(size + ":" + sample, pathForTask);
@@ -329,7 +350,7 @@ public class DuplicateFinderService {
                 int sampleProcessed = 0;
                 int sampleCombinedTotal = quickTotal + middleTotal;
                 for (int i = 0; i < sampleFutures.size(); i++) {
-                    if (cancelled.get()) {
+                    if (cancelFlag.get()) {
                         for (int j = i; j < sampleFutures.size(); j++) sampleFutures.get(j).cancel(true);
                         return ScanResult.cancelled(result, stats);
                     }
@@ -344,7 +365,7 @@ public class DuplicateFinderService {
                 }
             }
 
-            if (cancelled.get()) return ScanResult.cancelled(result, stats);
+            if (cancelFlag.get()) return ScanResult.cancelled(result, stats);
 
             List<Path> toFullHash = new ArrayList<>(smallDirect);
             for (List<Path> group : sampleGroups.values()) {
@@ -360,10 +381,10 @@ public class DuplicateFinderService {
             List<Future<Map.Entry<String, Path>>> fullFutures = new ArrayList<>(fullTotal);
 
             for (Path p : toFullHash) {
-                if (cancelled.get()) return ScanResult.cancelled(result, stats);
+                if (cancelFlag.get()) return ScanResult.cancelled(result, stats);
                 final Path pathForTask = p;
                 fullFutures.add(executor.submit(() -> {
-                    if (cancelled.get()) return null;
+                    if (cancelFlag.get()) return null;
                     // Extra guard: file may have become protected between enumeration and hashing
                     if (DuplicateSafety.isProtected(pathForTask)) return null;
                     try {
@@ -386,7 +407,7 @@ public class DuplicateFinderService {
             Map<String, List<Path>> hashGroups = new LinkedHashMap<>();
             int combinedProcessed = quickTotal + middleTotal;
             for (int i = 0; i < fullFutures.size(); i++) {
-                if (cancelled.get()) {
+                if (cancelFlag.get()) {
                     for (int j = i; j < fullFutures.size(); j++) fullFutures.get(j).cancel(true);
                     return ScanResult.cancelled(result, stats);
                 }
@@ -400,7 +421,7 @@ public class DuplicateFinderService {
                 if (progress != null) progress.accept(combinedProcessed, combinedTotal);
             }
 
-            if (cancelled.get()) return ScanResult.cancelled(result, stats);
+            if (cancelFlag.get()) return ScanResult.cancelled(result, stats);
 
             for (Map.Entry<String, List<Path>> entry : hashGroups.entrySet()) {
                 List<Path> group = entry.getValue();
@@ -930,7 +951,22 @@ public class DuplicateFinderService {
         op.pFrom = sb.toString();
         op.fFlags = 0x40 | 0x10 | 0x400; // FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI
 
-        int result = Shell32.INSTANCE.SHFileOperation(op);
+        // Blocker fix: never let the native call throw out of clean (missing shell32
+        // off-Windows, JNA linkage failure, malformed multi-string). On throw, fall
+        // through to the PowerShell fallback; files stay untouched and count as failed.
+        // Catch Throwable deliberately — UnsatisfiedLinkError and friends are Errors,
+        // and the clean-thread handler only catches Exception.
+        int result;
+        try {
+            result = Shell32.INSTANCE.SHFileOperation(op);
+        } catch (Throwable t) {
+            AppLogger.warning("SHFileOperation threw (" + t.getClass().getSimpleName() + ": " + t.getMessage()
+                    + ") — trying PowerShell recycle fallback");
+            if (!isCancelled(cancelled)) {
+                return recycleViaPowerShell(validPaths, cancelled);
+            }
+            return 0;
+        }
         if (result == 0 && !op.fAnyOperationsAborted && !hasLongPath) {
             // Verify every file — SH may report success while skipping locked files silently.
             int verified = countAbsent(validPaths);
@@ -1133,6 +1169,7 @@ public class DuplicateFinderService {
         private final long skippedProtected;
         private final long skippedFiltered;
         private final boolean cancelled;
+        private final List<String> failedRoots;
 
         private ScanResult(List<DuplicateFileRow> rows, ScanStats stats, boolean cancelled) {
             this.rows = rows != null ? rows : new ArrayList<>();
@@ -1140,6 +1177,9 @@ public class DuplicateFinderService {
             this.skippedProtected = stats != null ? stats.skippedProtected : 0;
             this.skippedFiltered = stats != null ? stats.skippedFiltered : 0;
             this.cancelled = cancelled;
+            List<String> fr = new ArrayList<>();
+            if (stats != null && stats.failedRoots != null) fr.addAll(stats.failedRoots);
+            this.failedRoots = Collections.unmodifiableList(fr);
         }
 
         static ScanResult completed(List<DuplicateFileRow> rows, ScanStats stats) {
@@ -1155,6 +1195,8 @@ public class DuplicateFinderService {
         public long getSkippedProtected() { return skippedProtected; }
         public long getSkippedFiltered() { return skippedFiltered; }
         public boolean isCancelled() { return cancelled; }
+        /** Roots that could not be enumerated at all (unplugged, denied, offline). */
+        public List<String> getFailedRoots() { return failedRoots; }
 
         public long getReclaimableBytes() {
             long total = 0;

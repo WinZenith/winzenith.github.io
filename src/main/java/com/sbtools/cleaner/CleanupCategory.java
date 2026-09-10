@@ -26,7 +26,7 @@ public enum CleanupCategory {
     SOFTWARE_DISTRIBUTION_CACHE("Software Distribution Cache", "Windows Update download cache in SoftwareDistribution\\Download (skipped during active updates or pending restart)", RiskLevel.HIGH),
     WINDOWS_DIAGNOSTICS_CACHE("Diagnostics Cache", "Windows diagnostic and error reporting data files", RiskLevel.LOW),
     OLD_WINDOWS_INSTALL("Previous Windows Installation", "Windows.old folder from a previous OS upgrade (large)", RiskLevel.HIGH),
-    DOCKER_CACHE("Docker Cache", "Docker builder & image cache via 'docker system prune' (volumes preserved for safety)", RiskLevel.HIGH),
+    DOCKER_CACHE("Docker Cache", "Dangling Docker build cache via 'docker system prune -f' (tagged images, containers and volumes preserved)", RiskLevel.HIGH),
     NPM_CACHE("NPM Cache", "Node.js package manager cache", RiskLevel.LOW),
     YARN_CACHE("Yarn Cache", "Yarn package manager cache", RiskLevel.LOW),
     MAVEN_CACHE("Maven Cache", "Old snapshot artifacts in .m2\\repository", RiskLevel.LOW),

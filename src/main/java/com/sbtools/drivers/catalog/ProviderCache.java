@@ -1,7 +1,10 @@
 package com.sbtools.drivers.catalog;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
 import com.sbtools.drivers.model.InstalledDriver;
 import com.sbtools.util.AppLogger;
@@ -27,7 +30,14 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public final class ProviderCache {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            // JavaTimeModule is mandatory: cached candidates embed InstalledDriver
+            // records with LocalDate release dates. Without it every write of a
+            // non-empty result threw InvalidDefinitionException, so positive
+            // caching never worked and each scan repaid the full provider cost.
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private static final long DEFAULT_TTL_SECONDS = 6 * 60 * 60L; // 6 hours
     private static final long WINDOWS_UPDATE_TTL_SECONDS = 30 * 60L; // 30 minutes — WU state changes frequently
     private static final long EMPTY_RESULT_TTL_SECONDS = 15 * 60L; // 15 min negative cache for empty/transient results

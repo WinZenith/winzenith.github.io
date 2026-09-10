@@ -17,6 +17,13 @@ public class DockerCacheCleaner implements CleanerExtension {
     public CleanupCategory getCategory() { return CleanupCategory.DOCKER_CACHE; }
 
     @Override
+    public java.util.List<String> describeTargets() {
+        return java.util.List.of(
+                "Dangling Docker build cache / unused networks via 'docker system prune -f'",
+                "Tagged images, stopped containers and volumes are preserved");
+    }
+
+    @Override
     public void scan(CleanupRow row) {
         long totalSize = 0;
         int itemCount = 0;
@@ -57,7 +64,11 @@ public class DockerCacheCleaner implements CleanerExtension {
         Path dockerDir = Path.of(progData, "Docker");
         if (!Files.isDirectory(dockerDir)) return 0;
         try {
-            ProcessBuilder pb = new ProcessBuilder("docker", "system", "prune", "-af");
+            // Dangling-only prune: removes dangling build cache/networks but
+            // preserves tagged unused images and stopped containers. The former
+            // '-af' scope destroyed dev assets beyond the advertised "cache"
+            // and beyond what the scan measures — never use it here.
+            ProcessBuilder pb = new ProcessBuilder("docker", "system", "prune", "-f");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
             java.io.InputStream is = p.getInputStream();

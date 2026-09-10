@@ -76,10 +76,45 @@ public class DiskToolsTabView extends BorderPane {
         return t;
     }
 
+    private void acquireGlobalBusy(java.util.concurrent.atomic.AtomicBoolean token) {
+        if (globalBusy == null || token == null) return;
+        if (token.compareAndSet(false, true)) {
+            setGlobalBusy(true);
+        }
+    }
+
+    private void releaseGlobalBusy(java.util.concurrent.atomic.AtomicBoolean token) {
+        if (globalBusy == null || token == null) return;
+        if (token.compareAndSet(true, false)) {
+            setGlobalBusy(false);
+        }
+    }
+
+    private void setGlobalBusy(boolean value) {
+        if (globalBusy == null) return;
+        try {
+            if (Platform.isFxApplicationThread()) {
+                globalBusy.set(value);
+            } else {
+                Platform.runLater(() -> {
+                    try { globalBusy.set(value); } catch (Exception ignored) {}
+                });
+            }
+        } catch (Exception ignored) {}
+    }
+
     private final BooleanProperty defragBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty wipeBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty secureBusy = new SimpleBooleanProperty(false);
     private final BooleanSupplier adminCheck;
+    /**
+     * Shared App busy flag driving the window-close "operation in progress"
+     * guard. DiskTools previously tracked work only in local flags, so closing
+     * the app mid-defrag/wipe/benchmark/shred showed no warning. Every
+     * long-running op below acquires this once (ref-counted BusyProperty) and
+     * releases exactly once via a per-invocation token. Null in unit tests.
+     */
+    private final BooleanProperty globalBusy;
     private final DefragService defragService = new DefragService();
     private final ShredderService shredderService = new ShredderService();
     private final DiskHealthService diskHealthService = new DiskHealthService();
@@ -146,6 +181,7 @@ public class DiskToolsTabView extends BorderPane {
     private final ObservableList<RecycleBinEntry> recycleBinEntries = FXCollections.observableArrayList();
     private final Button refreshRecycleBinBtn = new Button("Refresh");
     private final Button secureWipeRecycleBinBtn = new Button("Secure Wipe Recycle Bin");
+    private final Button stopRecycleBinBtn = new Button("Stop");
     private final ProgressBar recycleBinProgress = new ProgressBar(0);
     private final Label recycleBinStatus = new Label("Click Refresh to list Recycle Bin contents.");
     private final Label recycleBinSummary = new Label();
@@ -188,7 +224,12 @@ public class DiskToolsTabView extends BorderPane {
     private final Label benchLatencyLabel = new Label("-");
 
     public DiskToolsTabView(BooleanSupplier adminCheck) {
+        this(adminCheck, null);
+    }
+
+    public DiskToolsTabView(BooleanSupplier adminCheck, BooleanProperty globalBusy) {
         this.adminCheck = adminCheck;
+        this.globalBusy = globalBusy;
 
         ShredderService.sweepOrphanedTempFiles();
 
@@ -564,6 +605,8 @@ public class DiskToolsTabView extends BorderPane {
 
         defragBusy.set(true);
         defragCancelled.set(false);
+        final AtomicBoolean analyzeGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(analyzeGlobalToken);
         defragProgress.setProgress(-1);
         defragProgress.setVisible(true);
         defragStatus.setText("Analyzing " + selected.size() + " drive(s)...");
@@ -628,6 +671,7 @@ public class DiskToolsTabView extends BorderPane {
                 Platform.runLater(() -> {
                     defragBusy.set(false);
                     defragProgress.setVisible(false);
+                    releaseGlobalBusy(analyzeGlobalToken);
                 });
             }
         }, "analyze-orchestrator");
@@ -719,6 +763,8 @@ public class DiskToolsTabView extends BorderPane {
 
         defragBusy.set(true);
         defragCancelled.set(false);
+        final AtomicBoolean defragGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(defragGlobalToken);
         defragProgress.setProgress(0);
         defragProgress.setVisible(true);
 
@@ -805,6 +851,7 @@ public class DiskToolsTabView extends BorderPane {
                 Platform.runLater(() -> {
                     defragBusy.set(false);
                     defragProgress.setVisible(false);
+                    releaseGlobalBusy(defragGlobalToken);
                 });
             }
         }, "intelligent-defrag");
@@ -1263,6 +1310,8 @@ public class DiskToolsTabView extends BorderPane {
         }
 
         benchCancelled.set(false);
+        final AtomicBoolean benchGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(benchGlobalToken);
         benchStartBtn.setDisable(true);
         benchStopBtn.setVisible(true);
         benchStopBtn.setDisable(false);
@@ -1302,6 +1351,7 @@ public class DiskToolsTabView extends BorderPane {
                     benchStartBtn.setDisable(false);
                     benchStopBtn.setVisible(false);
                     benchProgress.setVisible(false);
+                    releaseGlobalBusy(benchGlobalToken);
                 });
             }
         }, "drive-benchmark");
@@ -1572,7 +1622,16 @@ public class DiskToolsTabView extends BorderPane {
         secureWipeRecycleBinBtn.setOnAction(e -> startSecureWipeRecycleBin());
         secureWipeRecycleBinBtn.setTooltip(new Tooltip("Securely overwrite all Recycle Bin contents (requires admin)"));
 
-        HBox toolbar = new HBox(8, refreshRecycleBinBtn, secureWipeRecycleBinBtn,
+        stopRecycleBinBtn.getStyleClass().add("danger");
+        stopRecycleBinBtn.setVisible(false);
+        stopRecycleBinBtn.setOnAction(e -> {
+            recycleBinCancelled.set(true);
+            stopRecycleBinBtn.setDisable(true);
+            recycleBinStatus.setText("Stopping...");
+        });
+        stopRecycleBinBtn.setTooltip(new Tooltip("Stop the running Recycle Bin wipe"));
+
+        HBox toolbar = new HBox(8, refreshRecycleBinBtn, secureWipeRecycleBinBtn, stopRecycleBinBtn,
                 recycleBinProgress, recycleBinStatus, recycleBinSummary);
         toolbar.setAlignment(Pos.CENTER_LEFT);
         toolbar.setPadding(new Insets(8, 16, 8, 16));
@@ -1667,8 +1726,12 @@ public class DiskToolsTabView extends BorderPane {
 
         recycleBinBusy.set(true);
         recycleBinCancelled.set(false);
+        final AtomicBoolean recycleGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(recycleGlobalToken);
         secureWipeRecycleBinBtn.setDisable(true);
         refreshRecycleBinBtn.setDisable(true);
+        stopRecycleBinBtn.setVisible(true);
+        stopRecycleBinBtn.setDisable(false);
         recycleBinProgress.setProgress(0);
         recycleBinProgress.setVisible(true);
         recycleBinStatus.setText("Securely wiping Recycle Bin...");
@@ -1721,6 +1784,9 @@ public class DiskToolsTabView extends BorderPane {
                     secureWipeRecycleBinBtn.setDisable(recycleBinEntries.isEmpty());
                     refreshRecycleBinBtn.setDisable(false);
                     recycleBinProgress.setVisible(false);
+                    stopRecycleBinBtn.setVisible(false);
+                    stopRecycleBinBtn.setDisable(false);
+                    releaseGlobalBusy(recycleGlobalToken);
                 });
             }
         }, "wipe-recyclebin").start();
@@ -1769,6 +1835,8 @@ public class DiskToolsTabView extends BorderPane {
         secureBusy.set(true);
         secureDeleteBtn.setDisable(true);
         deleteAllBtn.setDisable(true);
+        final AtomicBoolean singleDeleteGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(singleDeleteGlobalToken);
         secureDeleteProgress.setProgress(-1);
         secureDeleteProgress.setVisible(true);
         secureDeleteStatus.setText("Securely deleting file...");
@@ -1820,6 +1888,7 @@ public class DiskToolsTabView extends BorderPane {
                     stopSecureBtn.setVisible(false);
                     filePathField.clear();
                     updateDeleteButtons();
+                    releaseGlobalBusy(singleDeleteGlobalToken);
                 });
             }
         }, "secure-delete").start();
@@ -1910,6 +1979,8 @@ public class DiskToolsTabView extends BorderPane {
         secureCancelled.set(false);
         stopSecureBtn.setVisible(true);
         stopSecureBtn.setDisable(false);
+        final AtomicBoolean folderDeleteGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(folderDeleteGlobalToken);
         newDaemonThread(() -> {
             try {
                 int passCount = getSelectedPassCount();
@@ -1959,6 +2030,7 @@ public class DiskToolsTabView extends BorderPane {
                     filePathField.setUserData(null);
                     secureDeleteBtn.setText("Secure Delete");
                     updateDeleteButtons();
+                    releaseGlobalBusy(folderDeleteGlobalToken);
                 });
             }
         }, "secure-delete-folder").start();
@@ -2007,6 +2079,8 @@ public class DiskToolsTabView extends BorderPane {
         secureCancelled.set(false);
         stopSecureBtn.setVisible(true);
         stopSecureBtn.setDisable(false);
+        final AtomicBoolean batchDeleteGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(batchDeleteGlobalToken);
         secureDeleteBtn.setDisable(true);
         deleteAllBtn.setDisable(true);
         secureDeleteProgress.setProgress(-1);
@@ -2014,6 +2088,7 @@ public class DiskToolsTabView extends BorderPane {
         secureDeleteStatus.setText("Securely deleting files...");
 
         newDaemonThread(() -> {
+            try {
             int deleted = 0;
             int failed = 0;
             int cancelledCount = 0;
@@ -2068,7 +2143,12 @@ public class DiskToolsTabView extends BorderPane {
                 secureDeleteStatus.setText(msg);
                 new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
                 updateDeleteButtons();
+                releaseGlobalBusy(batchDeleteGlobalToken);
             });
+            } finally {
+                // Safety net: guarantee the shutdown guard is released even on unexpected throw.
+                Platform.runLater(() -> releaseGlobalBusy(batchDeleteGlobalToken));
+            }
         }, "batch-secure-delete").start();
     }
 
@@ -2390,6 +2470,8 @@ public class DiskToolsTabView extends BorderPane {
 
         wipeBusy.set(true);
         wipeCancelled.set(false);
+        final AtomicBoolean wipeGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(wipeGlobalToken);
         startWipeBtn.setDisable(true);
         stopWipeBtn.setDisable(false);
         wipeProgress.setProgress(0);
@@ -2454,6 +2536,7 @@ public class DiskToolsTabView extends BorderPane {
                     startWipeBtn.setDisable(false);
                     stopWipeBtn.setDisable(true);
                     wipeProgress.setVisible(false);
+                    releaseGlobalBusy(wipeGlobalToken);
                 });
             }
         }, "wipe-free-space").start();

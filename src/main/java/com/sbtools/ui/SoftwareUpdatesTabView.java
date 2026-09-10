@@ -162,7 +162,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
         if (!AppPaths.isWindows()) {
             scanButton.setDisable(true);
             updateSelectedButton.setDisable(true);
-            statusLabel.setText("This application requires Windows.");
+            // statusLabel is bound to viewModel.statusTextProperty() — never setText() on a
+            // bound label (throws "A bound value cannot be set"). Route through the ViewModel.
+            viewModel.statusTextProperty().set("This application requires Windows.");
         }
     }
 
@@ -170,6 +172,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
         statusLabel.textProperty().bind(viewModel.statusTextProperty());
         batchProgressBar.progressProperty().bind(viewModel.batchProgressProperty());
         batchProgressLabel.textProperty().bind(viewModel.batchProgressTextProperty());
+        // Scan/install spinner was never shown (stuck invisible). Bind to local busy so
+        // long winget/WU scans give visible feedback beyond the status text.
+        progress.visibleProperty().bind(viewModel.busyProperty());
+        progress.managedProperty().bind(progress.visibleProperty());
 
         batchProgressListener = (obs, oldVal, newVal) -> {
             batchProgressBar.setVisible(Boolean.TRUE.equals(newVal));
@@ -204,7 +210,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
         updateSelectedButton.setDisable(true);
 
         selectAllButton.setDisable(true);
-        // Select/Deselect operate on the currently visible (filtered) rows — intuitive with search active.
+        // Select adds the currently visible (filtered) rows; Deselect clears the
+        // whole tab selection (including filter-hidden rows) so hidden selections
+        // can never linger and cause surprise installs later (see updateSelected).
         selectAllButton.setOnAction(e -> {
             java.util.List<SoftwareUpdateEntry> visible = tableRef != null ? tableRef.getItems() : viewModel.getRows();
             visible.forEach(r -> r.setSelected(true));
@@ -212,8 +220,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
         deselectAllButton.setDisable(true);
         deselectAllButton.setOnAction(e -> {
-            java.util.List<SoftwareUpdateEntry> visible = tableRef != null ? tableRef.getItems() : viewModel.getRows();
-            visible.forEach(r -> r.setSelected(false));
+            // Clear ALL rows, not just visible: otherwise filter-hidden selections
+            // survive and would be silently ignored (or worse, installed) later.
+            viewModel.getRows().forEach(r -> r.setSelected(false));
         });
 
         retryFailedButton.setOnAction(e -> viewModel.retryFailed());
@@ -240,8 +249,12 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
     private TableView<SoftwareUpdateEntry> buildTable(javafx.collections.ObservableList<SoftwareUpdateEntry> items) {
         TableView<SoftwareUpdateEntry> table = new TableView<>(items);
+        // Required for CheckBoxTableCell (Install column) to receive clicks. Without this
+        // the checkboxes are inert and selection only works via row click. Other columns
+        // keep their default read-only cells, so only the Install column becomes editable.
+        table.setEditable(true);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-        table.setPlaceholder(new Label("No updates to show. Press Scan to check for app and Windows updates."));
+        table.setPlaceholder(new Label("No winget / Windows updates to show. Press Scan. (Microsoft Store apps are not checked here.)"));
 
         TableColumn<SoftwareUpdateEntry, Boolean> selCol = new TableColumn<>("Install");
         selCol.setCellValueFactory(c -> c.getValue().selectedProperty());
@@ -516,14 +529,47 @@ public class SoftwareUpdatesTabView extends BorderPane {
     }
 
     private void updateSelected() {
-        List<SoftwareUpdateEntry> selected = viewModel.getRows().stream()
-                .filter(r -> r.selectedProperty().get())
+        // Update operates on the currently visible (filtered) selection only, to
+        // match Select All semantics. Hidden selections are never silently
+        // installed: the user is told and asked before anything runs.
+        java.util.List<SoftwareUpdateEntry> visible =
+                tableRef != null && tableRef.getItems() != null
+                        ? new java.util.ArrayList<>(tableRef.getItems())
+                        : new java.util.ArrayList<>(viewModel.getRows());
+        java.util.Set<SoftwareUpdateEntry> visibleSet = new java.util.HashSet<>(visible);
+        List<SoftwareUpdateEntry> selectedVisible = visible.stream()
+                .filter(r -> r != null && r.selectedProperty().get())
                 .collect(Collectors.toList());
-        viewModel.updateSelected(selected);
+        long hiddenSelected = viewModel.getRows().stream()
+                .filter(r -> r != null && r.selectedProperty().get() && !visibleSet.contains(r))
+                .count();
+        if (selectedVisible.isEmpty()) {
+            if (hiddenSelected > 0) {
+                new Alert(Alert.AlertType.INFORMATION,
+                        hiddenSelected + " selected item(s) are hidden by the current filter and will not be updated.\n"
+                                + "Clear the search/filter to include them, or press Deselect All to reset.")
+                        .showAndWait();
+                return;
+            }
+            viewModel.updateSelected(selectedVisible);
+            return;
+        }
+        if (hiddenSelected > 0) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                    "You are about to update " + selectedVisible.size() + " visible item(s).\n"
+                            + hiddenSelected + " other selected item(s) are hidden by the current filter and will NOT be updated.\n\n"
+                            + "Continue with the visible selection?");
+            confirm.setHeaderText("Filtered selection");
+            if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                return;
+            }
+        }
+        viewModel.updateSelected(selectedVisible);
     }
 
     private void showWingetNotAvailableDialog(String diagnostics) {
-        statusLabel.setText("winget not found. Checking Windows Update...");
+        // statusLabel is bound — update via the ViewModel property, never setText() directly.
+        viewModel.statusTextProperty().set("winget not found. Checking Windows Update...");
         TextArea ta = new TextArea(diagnostics);
         ta.setEditable(false);
         ta.setWrapText(true);
@@ -570,8 +616,10 @@ public class SoftwareUpdatesTabView extends BorderPane {
         AppSettings current = settingsStore.load();
         IgnoredListDialog.show("Ignored Software Updates", current.skippedSoftwareIds(), (updated, ignored) -> {
             try {
-                AppSettings curr = settingsStore.load();
-                settingsStore.save(curr.toBuilder().skippedSoftwareIds(updated).build());
+                // Atomic read-modify-write: concurrent saves from other tabs (drivers,
+                // browser ext, cleanup) must not be lost via load->save races.
+                List<String> snapshot = updated == null ? List.of() : List.copyOf(updated);
+                settingsStore.update(curr -> curr.toBuilder().skippedSoftwareIds(snapshot).build());
             } catch (Exception ex) {
                 com.sbtools.util.AppLogger.warning("Failed to update ignored list: " + ex.getMessage());
             }
@@ -587,6 +635,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
         try { statusLabel.textProperty().unbind(); } catch (Exception ignored) {}
         try { batchProgressBar.progressProperty().unbind(); } catch (Exception ignored) {}
         try { batchProgressLabel.textProperty().unbind(); } catch (Exception ignored) {}
+        try { progress.visibleProperty().unbind(); } catch (Exception ignored) {}
+        try { progress.managedProperty().unbind(); } catch (Exception ignored) {}
         if (batchProgressListener != null) {
             try { viewModel.showBatchProgressProperty().removeListener(batchProgressListener); } catch (Exception ignored) {}
         }

@@ -22,6 +22,19 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Canceled");
+            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+            row.setErrorMessage("Scan canceled by user");
+            return;
+        }
         if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
             row.setTotalBytes(0);
             row.setItemCount(0);
@@ -37,28 +50,70 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
         }
         long totalSize = 0;
         int itemCount = 0;
+        Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image", "/AnalyzeComponentStore");
             pb.redirectErrorStream(true);
-            Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
-            if (finished) {
-                String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                for (String line : output.split("\\n")) {
-                    String lower = line.toLowerCase();
-                    if (lower.contains("superseded") || lower.contains("reclaimable")) {
-                        String sizePart = parseSizeFromLine(line);
-                        if (sizePart != null) {
-                            long bytes = parseBytesFromSizeString(sizePart);
-                            if (bytes > 0) {
-                                totalSize += bytes;
-                                itemCount = Math.max(itemCount, 1);
-                            }
+            p = ProcessManager.start(pb);
+            // Cancellable wait: poll in 1s slices so Cancel promptly kills DISM
+            // instead of blocking the worker for the full 120s budget.
+            boolean finished = false;
+            long deadline = System.currentTimeMillis() + 120_000L;
+            while (System.currentTimeMillis() < deadline) {
+                if (token != null && token.isCancelled()) {
+                    p.destroyForcibly();
+                    row.setTotalBytes(0);
+                    row.setItemCount(0);
+                    row.setSizeOrCountText("Canceled");
+                    row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                    row.setErrorMessage("Scan canceled by user");
+                    return;
+                }
+                try {
+                    if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    p.destroyForcibly();
+                    row.setSizeOrCountText("Canceled");
+                    row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                    row.setErrorMessage("Scan canceled by user");
+                    return;
+                }
+            }
+            if (!finished) {
+                p.destroyForcibly();
+                row.setTotalBytes(0);
+                row.setItemCount(0);
+                row.setSizeOrCountText("Timed out");
+                row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                row.setErrorMessage("Scan timed out");
+                return;
+            }
+            String output;
+            try {
+                output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                output = "";
+            }
+            for (String line : output.split("\\n")) {
+                if (token != null && token.isCancelled()) break;
+                String lower = line.toLowerCase();
+                if (lower.contains("superseded") || lower.contains("reclaimable")) {
+                    String sizePart = parseSizeFromLine(line);
+                    if (sizePart != null) {
+                        long bytes = parseBytesFromSizeString(sizePart);
+                        if (bytes > 0) {
+                            totalSize += bytes;
+                            itemCount = Math.max(itemCount, 1);
                         }
                     }
                 }
-            } else { p.destroyForcibly(); }
-        } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {
+            if (p != null) {
+                try { p.destroyForcibly(); } catch (Exception ignored2) {}
+            }
+        }
         lastScannedBytes = totalSize;
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);

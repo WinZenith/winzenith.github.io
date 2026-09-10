@@ -71,10 +71,10 @@ public class CleanupRow {
     }
 
     public void setSizeOrCountText(String text) {
-        if (Platform.isFxApplicationThread()) {
+        if (isFxThread()) {
             this.sizeOrCountText.set(text);
-        } else {
-            Platform.runLater(() -> this.sizeOrCountText.set(text));
+        } else if (!runLaterSafe(() -> this.sizeOrCountText.set(text))) {
+            this.sizeOrCountText.set(text);
         }
     }
 
@@ -95,10 +95,10 @@ public class CleanupRow {
     }
 
     public void setScanDurationMs(long ms) {
-        if (Platform.isFxApplicationThread()) {
+        if (isFxThread()) {
             this.scanDurationMs.set(ms);
-        } else {
-            Platform.runLater(() -> this.scanDurationMs.set(ms));
+        } else if (!runLaterSafe(() -> this.scanDurationMs.set(ms))) {
+            this.scanDurationMs.set(ms);
         }
     }
 
@@ -125,10 +125,10 @@ public class CleanupRow {
     public void setScanStatus(ScanStatus status) {
         this.scanStatus = status;
         Runnable update = () -> this.statusText.set(status.getDisplayText());
-        if (Platform.isFxApplicationThread()) {
+        if (isFxThread()) {
             update.run();
-        } else {
-            Platform.runLater(update);
+        } else if (!runLaterSafe(update)) {
+            update.run();
         }
     }
 
@@ -138,5 +138,32 @@ public class CleanupRow {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    /**
+     * Toolkit-safe FX-thread check. {@code Platform.isFxApplicationThread()}
+     * may report false (or throw) when the toolkit is not initialized
+     * (headless/service/test use) — callers then fall back to direct sets.
+     */
+    private static boolean isFxThread() {
+        try {
+            return Platform.isFxApplicationThread();
+        } catch (IllegalStateException notStarted) {
+            return false;
+        }
+    }
+
+    /**
+     * Enqueues {@code update} on the FX thread. Returns false when the
+     * toolkit is not initialized so callers can apply the update directly
+     * instead of failing the whole scan/clean operation.
+     */
+    private static boolean runLaterSafe(Runnable update) {
+        try {
+            Platform.runLater(update);
+            return true;
+        } catch (IllegalStateException notStarted) {
+            return false;
+        }
     }
 }

@@ -835,6 +835,10 @@ public class DriverInstallService {
                     + " (refusing to install an INF that does not match the device).");
         } else if (filename.endsWith(".rar")) {
             return new ProcessResult(1, "", "RAR archives require manual extraction. Download: " + driverFile);
+        } else if (filename.endsWith(".7z") || filename.endsWith(".gz") || filename.endsWith(".tar")
+                || filename.endsWith(".tgz") || filename.endsWith(".bz2")) {
+            return new ProcessResult(1, "", "Archive format requires manual extraction (no silent install path). Download: " + driverFile
+                    + " — extract it, then install via setup.exe or right-click the matching .inf → Install, or use pnputil.");
         } else if (filename.endsWith(".msi")) {
             if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.info("Installing MSI driver package: " + driverFile);
@@ -865,8 +869,15 @@ public class DriverInstallService {
         }
 
         String magicExt = detectExtensionByMagicBytes(driverFile);
-        if (magicExt != null) {
+        if (magicExt != null && !filename.endsWith(magicExt)) {
             Path renamed = driverFile.getParent().resolve(driverFile.getFileName().toString() + magicExt);
+            // Guard against runaway renames (e.g. driver.7z + .7z → driver.7z.7z → …):
+            // only rename when the extension actually changes, and refuse formats
+            // with no silent install path instead of recursing forever.
+            if (".7z".equals(magicExt) || ".gz".equals(magicExt)) {
+                return new ProcessResult(1, "", "Archive format requires manual extraction (no silent install path). Download: " + driverFile
+                        + " — extract it, then install via setup.exe or right-click the matching .inf → Install, or use pnputil.");
+            }
             Files.move(driverFile, renamed, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             AppLogger.info("installDriverFile: detected type " + magicExt + " from magic bytes, retrying with " + renamed);
             return installDriverFile(renamed, candidate);

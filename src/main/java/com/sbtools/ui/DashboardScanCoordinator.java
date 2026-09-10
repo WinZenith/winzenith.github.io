@@ -58,6 +58,28 @@ public final class DashboardScanCoordinator {
             BooleanSupplier isDisposed,
             long overallTimeoutSecs)
             throws InterruptedException, TimeoutException {
+        return awaitAllInterruptible(tasks, perTaskTimeoutSecs, isStale, token, isDisposed,
+                overallTimeoutSecs, null);
+    }
+
+    /**
+     * Interruptible wait for the combined scan with per-task cooperative cancellation.
+     *
+     * @param perTaskTokens optional per-task tokens (same order as {@code tasks});
+     *                      a timed-out task's token is cancelled so token-polling inner
+     *                      services (winget/WU, catalog providers, cleanup walks) abort
+     *                      promptly without poisoning the sibling categories' tokens.
+     *                      May be null.
+     */
+    public static Set<Integer> awaitAllInterruptible(
+            List<Future<?>> tasks,
+            long[] perTaskTimeoutSecs,
+            BooleanSupplier isStale,
+            CancellationToken token,
+            BooleanSupplier isDisposed,
+            long overallTimeoutSecs,
+            List<CancellationToken> perTaskTokens)
+            throws InterruptedException, TimeoutException {
         Set<Integer> timedOut = new HashSet<>();
         long overall = Math.max(30, overallTimeoutSecs);
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(overall);
@@ -91,6 +113,10 @@ public final class DashboardScanCoordinator {
                 if (t == null || t.isDone() || t.isCancelled()) continue;
                 long budget = budgetFor(perTaskTimeoutSecs, i);
                 if (budget > 0 && elapsedSecs >= budget) {
+                    try {
+                        cancelPerTaskToken(perTaskTokens, i);
+                    } catch (Exception ignored) {
+                    }
                     try {
                         t.cancel(true);
                     } catch (Exception ignored) {
@@ -147,6 +173,15 @@ public final class DashboardScanCoordinator {
     private static long budgetFor(long[] perTaskTimeoutSecs, int index) {
         if (perTaskTimeoutSecs == null || index < 0 || index >= perTaskTimeoutSecs.length) return 0;
         return Math.max(0, perTaskTimeoutSecs[index]);
+    }
+
+    private static void cancelPerTaskToken(List<CancellationToken> perTaskTokens, int index) {
+        try {
+            if (perTaskTokens == null || index < 0 || index >= perTaskTokens.size()) return;
+            CancellationToken t = perTaskTokens.get(index);
+            if (t != null) t.cancel();
+        } catch (Exception ignored) {
+        }
     }
 
     private static void cancelAll(List<Future<?>> tasks, Set<Integer> exceptTimedOut) {

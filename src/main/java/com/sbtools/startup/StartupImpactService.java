@@ -88,9 +88,11 @@ public class StartupImpactService {
         if ("Disabled".equalsIgnoreCase(startType)) {
             return 0;
         }
-        // Manual services do not start at boot unless triggered – minimal impact
+        // Manual services do not auto-start at boot (trigger-start only), so they
+        // contribute 0 to the boot-delay total. Kept Enabled in the UI to preserve
+        // Manual->Disabled toggle semantics; Location column still shows "Manual".
         if ("Manual".equalsIgnoreCase(startType)) {
-            return 15.0;
+            return 0.0;
         }
         if ("Automatic (Delayed Start)".equalsIgnoreCase(startType)) {
             // Delayed start has reduced boot impact

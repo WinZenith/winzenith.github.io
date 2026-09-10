@@ -85,6 +85,13 @@ public class DriverScanService {
         );
     }
 
+    /**
+     * Best-effort fallback for non-ISO dates (e.g. {@code dd/MM/yyyy},
+     * {@code MM/dd/yyyy} with 2- or 4-digit years). The primary script always
+     * emits ISO {@code yyyy-MM-dd}, handled by {@link LocalDate#parse} above;
+     * this path must never throw and returns {@code null} when ambiguous input
+     * cannot be resolved safely.
+     */
     private static LocalDate parseDate(String dateStr) {
         if (dateStr == null || dateStr.isBlank()) {
             return null;
@@ -95,24 +102,36 @@ public class DriverScanService {
         }
         try {
             String cleaned = dateStr.contains("T") ? dateStr.substring(0, dateStr.indexOf('T')) : dateStr;
-            String[] parts = cleaned.split("[/\\-]");
+            int space = cleaned.indexOf(' ');
+            if (space > 0) cleaned = cleaned.substring(0, space);
+            cleaned = cleaned.trim();
+            String[] parts = cleaned.split("[/\\-.]");
             if (parts.length == 3) {
-                int a = Integer.parseInt(parts[0]);
-                int b = Integer.parseInt(parts[1]);
-                int c = Integer.parseInt(parts[2]);
-                if (c > 0 && c < 100) {
-                    c += (c > 50) ? 1900 : 2000;
-                }
-                if (a > 12 && b <= 12 && c <= 31) {
+                String p0 = parts[0].trim();
+                String p1 = parts[1].trim();
+                String p2 = parts[2].trim();
+                int a = Integer.parseInt(p0);
+                int b = Integer.parseInt(p1);
+                int c = Integer.parseInt(p2);
+                // Leading 4-digit year: yyyy-MM-dd with non-dash separators.
+                if (p0.length() == 4 && a > 31) {
                     return LocalDate.of(a, b, c);
-                } else if (b > 12 && a <= 12 && c <= 31) {
-                    return LocalDate.of(c, a, b);
-                } else if (c > 31 && a <= 12 && b <= 12) {
-                    return LocalDate.of(c, a, b);
-                } else if (a <= 12 && b <= 12 && c > 31) {
-                    return LocalDate.of(c, a, b);
-                } else if (a <= 12 && b <= 12 && c > 100) {
-                    return LocalDate.of(c, a, b);
+                }
+                int year = c;
+                if (year >= 0 && year < 100) {
+                    year += (year > 50) ? 1900 : 2000;
+                }
+                if (a > 12 && b >= 1 && b <= 12) {
+                    // dd/MM/yyyy (day cannot be a month)
+                    return LocalDate.of(year, b, a);
+                }
+                if (b > 12 && a >= 1 && a <= 12) {
+                    // MM/dd/yyyy (day cannot be a month)
+                    return LocalDate.of(year, a, b);
+                }
+                if (a >= 1 && a <= 12 && b >= 1 && b <= 12) {
+                    // Ambiguous (e.g. 05/06/2023): default to MM/dd/yyyy.
+                    return LocalDate.of(year, a, b);
                 }
             }
         } catch (Exception ignored) {

@@ -38,6 +38,11 @@ public class BrowserTracesCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
         long totalSize = 0;
         int itemCount = 0;
         int skippedProfiles = 0;
@@ -46,28 +51,40 @@ public class BrowserTracesCleaner implements CleanerExtension {
         // Consistent with clean(): running browsers are skipped (locked DBs),
         // so scan only counts what clean can actually reclaim.
         for (BrowserProfile profile : getBrowserProfiles()) {
+            if (token != null && token.isCancelled()) break;
             String browserKey = getBrowserProcessKey(profile.name());
             boolean browserRunning = browserKey != null && isBrowserRunning(BROWSER_PROCESS_MAP.get(browserKey));
             if (browserRunning) { skippedProfiles++; continue; }
             for (Path dir : profile.cacheDirs()) {
+                if (token != null && token.isCancelled()) break;
                 if (Files.isDirectory(dir)) {
                     try (Stream<Path> walk = Files.walk(dir)) {
-                        var stats = walk.filter(Files::isRegularFile)
-                                .collect(java.util.stream.Collectors.summarizingLong(p -> {
-                                    try { return Files.size(p); } catch (Exception e) { return p.toFile().length(); }
-                                }));
-                        totalSize += stats.getSum();
-                        itemCount += (int) stats.getCount();
+                        var it = walk.filter(Files::isRegularFile).iterator();
+                        while (it.hasNext()) {
+                            if (token != null && token.isCancelled()) break;
+                            Path p = it.next();
+                            try { totalSize += Files.size(p); itemCount++; }
+                            catch (Exception ignored) {}
+                        }
                     } catch (Exception ignored) {}
                 }
             }
             // Include DB files that clean() will delete so scan accurately reflects reclaimable space
             List<Path> extraFiles = collectExtraFilesForProfile(profile.name(), localAppData, appData);
             for (Path f : extraFiles) {
+                if (token != null && token.isCancelled()) break;
                 if (Files.isRegularFile(f)) {
                     try { totalSize += Files.size(f); itemCount++; } catch (Exception ignored) {}
                 }
             }
+        }
+        if (token != null && token.isCancelled()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Canceled");
+            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+            row.setErrorMessage("Scan canceled by user");
+            return;
         }
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
