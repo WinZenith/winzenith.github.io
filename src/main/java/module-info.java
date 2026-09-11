@@ -23,7 +23,6 @@ module com.winzenith {
     opens com.sbtools.cleaner to javafx.controls;
     opens com.sbtools.cleaner.impl to javafx.controls;
     opens com.sbtools.backup to javafx.controls;
-    opens com.sbtools.duplicates to javafx.controls;
     opens com.sbtools.drivers to javafx.controls;
     opens com.sbtools.drivers.model to com.fasterxml.jackson.databind;
     opens com.sbtools.drivers.catalog to com.fasterxml.jackson.databind;
@@ -46,7 +45,6 @@ module com.winzenith {
     exports com.sbtools.cleaner;
     exports com.sbtools.cleaner.impl;
     exports com.sbtools.backup;
-    exports com.sbtools.duplicates;
     exports com.sbtools.drivers;
     exports com.sbtools.drivers.model;
     exports com.sbtools.drivers.catalog;

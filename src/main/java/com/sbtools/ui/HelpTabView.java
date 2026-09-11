@@ -86,21 +86,6 @@ public class HelpTabView extends VBox {
                 "If Registry is selected you are offered a .reg backup; a System Restore point can be created automatically if enabled. Some categories require admin. " +
                 "There is no registry-defragmentation tool. Always review results before cleaning."));
 
-        getChildren().add(createFaqSection("Duplicate Files",
-                "This tab finds duplicate files by comparing contents with SHA-256 hashes (after fast CRC32 and sample-hash pruning). "
-                + "Click \"Add...\" to choose folder(s) on any drive (e.g., Documents, Downloads, Photos) — or drag folders onto the list — then click \"Scan\" (\"Stop\" cancels). "
-                + "Use \"Min size:\" and \"Types:\" filters to speed up large scans (they apply on the next scan), and \"Keep:\" to choose which copy is kept per group "
-                + "(Newest, Oldest, or Shortest path; the safest non-system location always wins first). \"Search:\" filters results, \"Auto-select\" / \"Select All\" / \"Deselect All\" change selection, "
-                + "and \"Export CSV...\" saves results. "
-                + "Results are grouped by identical content: the keeper is shown as the keeper, "
-                + "and other copies are listed in the detail pane where you can tick individual files or click \"Keep instead\" to swap the keeper (plus \"Open\"). "
-                + "System and app folders on any drive (Windows, Program Files, ProgramData, AppData, WindowsApps, System Volume Information, $Recycle.Bin, Recovery, EFI, Boot) "
-                + "are automatically excluded and cannot be added; scanning an entire system drive is blocked. "
-                + "Select groups and per-file copies, then click \"Clean Selected\" (admin required). You can move files to the Recycle Bin (recommended, recoverable) "
-                + "or delete permanently (requires typing DELETE). A System Restore point can be created automatically if enabled in settings. "
-                + "Scan folders and filters are remembered between runs. "
-                + "Always review the deletable list in the bottom pane before confirming."));
-
         getChildren().add(createFaqSection("Disk Tools",
                 "The Disk Tools tab has four inner tabs: Defrag, Disk Health, Benchmark and Secure Erase. " +
                 "Defrag: click \"Refresh\", select drives, click \"Analyze Selected\", then \"Intelligent Defrag\" (Mode Auto / Quick / Deep, Filter All / HDD / SSD). Auto runs ReTrim on SSDs and full defrag on HDDs — SSDs are never defragmented. A color-coded grid visualizes fragmentation. Admin required. " +

@@ -27,10 +27,6 @@ public record AppSettings(
         List<String> ignoredBrowserExtensionIds,
         List<String> ignoredCleanupCategories,
         boolean autoCreateRestoreBeforeCleanup,
-        List<String> duplicateScanRoots,
-        long duplicateMinSizeBytes,
-        String duplicateIncludeFilter,
-        String duplicateKeeperStrategy,
         String browserExtLastFilter,
         String browserExtLastStatusFilter,
         boolean browserExtAutoScan
@@ -42,7 +38,6 @@ public record AppSettings(
                 false, false, false, true,
                 "", "powershell", 960, 600, true, true,
                 Collections.emptyList(), Collections.emptyList(), true,
-                Collections.emptyList(), 1L, "", "NEWEST",
                 "All", "All", false);
     }
 
@@ -79,10 +74,6 @@ public record AppSettings(
         private List<String> ignoredBrowserExtensionIds;
         private List<String> ignoredCleanupCategories;
         private boolean autoCreateRestoreBeforeCleanup;
-        private List<String> duplicateScanRoots;
-        private long duplicateMinSizeBytes;
-        private String duplicateIncludeFilter;
-        private String duplicateKeeperStrategy;
         private String browserExtLastFilter;
         private String browserExtLastStatusFilter;
         private boolean browserExtAutoScan;
@@ -108,10 +99,6 @@ public record AppSettings(
             this.ignoredBrowserExtensionIds = s.ignoredBrowserExtensionIds;
             this.ignoredCleanupCategories = s.ignoredCleanupCategories;
             this.autoCreateRestoreBeforeCleanup = s.autoCreateRestoreBeforeCleanup;
-            this.duplicateScanRoots = s.duplicateScanRoots;
-            this.duplicateMinSizeBytes = s.duplicateMinSizeBytes;
-            this.duplicateIncludeFilter = s.duplicateIncludeFilter;
-            this.duplicateKeeperStrategy = s.duplicateKeeperStrategy;
             this.browserExtLastFilter = s.browserExtLastFilter;
             this.browserExtLastStatusFilter = s.browserExtLastStatusFilter;
             this.browserExtAutoScan = s.browserExtAutoScan;
@@ -137,10 +124,6 @@ public record AppSettings(
         public Builder ignoredBrowserExtensionIds(List<String> v) { this.ignoredBrowserExtensionIds = v; return this; }
         public Builder ignoredCleanupCategories(List<String> v) { this.ignoredCleanupCategories = v; return this; }
         public Builder autoCreateRestoreBeforeCleanup(boolean v) { this.autoCreateRestoreBeforeCleanup = v; return this; }
-        public Builder duplicateScanRoots(List<String> v) { this.duplicateScanRoots = v; return this; }
-        public Builder duplicateMinSizeBytes(long v) { this.duplicateMinSizeBytes = Math.max(1L, v); return this; }
-        public Builder duplicateIncludeFilter(String v) { this.duplicateIncludeFilter = v; return this; }
-        public Builder duplicateKeeperStrategy(String v) { this.duplicateKeeperStrategy = v; return this; }
         public Builder browserExtLastFilter(String v) { this.browserExtLastFilter = v; return this; }
         public Builder browserExtLastStatusFilter(String v) { this.browserExtLastStatusFilter = v; return this; }
         public Builder browserExtAutoScan(boolean v) { this.browserExtAutoScan = v; return this; }
@@ -167,10 +150,6 @@ public record AppSettings(
                     ignoredBrowserExtensionIds,
                     ignoredCleanupCategories,
                     autoCreateRestoreBeforeCleanup,
-                    duplicateScanRoots,
-                    duplicateMinSizeBytes,
-                    duplicateIncludeFilter,
-                    duplicateKeeperStrategy,
                     browserExtLastFilter,
                     browserExtLastStatusFilter,
                     browserExtAutoScan);

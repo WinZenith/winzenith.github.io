@@ -1,7 +1,6 @@
 package com.sbtools.shredder;
 
 import com.sbtools.cleaner.CleanerUtils;
-import com.sbtools.duplicates.DuplicateSafety;
 import com.sbtools.util.AppLogger;
 
 import java.io.File;
@@ -14,7 +13,7 @@ import java.util.Locale;
 /**
  * Strict safety gate for Secure Erase (strict-blocking mode).
  * <p>
- * Reuses {@link DuplicateSafety} + {@link CleanerUtils} protection so shredder
+ * Reuses {@link CleanerUtils} protection plus built-in OS-location checks so shredder
  * can never destroy OS/app locations. Unlike the legacy critical-file warning
  * (single/batch files only), this blocks:
  * <ul>
@@ -80,9 +79,9 @@ public final class ShredderSafety {
             } catch (Exception ignored) {
                 // Attribute unavailable (e.g. missing file) — continue to protected checks.
             }
-            // 2. Protected OS locations (shared with Duplicate Finder + Cleaner).
+            // 2. Protected OS locations (shared with Cleaner).
             try {
-                if (DuplicateSafety.isProtected(path) || DuplicateSafety.isProtected(abs)) {
+                if (isProtectedSystemPath(path) || isProtectedSystemPath(abs)) {
                     return "System folders are protected and cannot be securely deleted:\n" + path
                             + "\n\nChoose a non-system file/folder (e.g. Documents, Downloads).";
                 }
@@ -132,5 +131,88 @@ public final class ShredderSafety {
         return isFolderOp
                 ? validateFolderForShred(rawPath) != null
                 : validateFileForShred(rawPath) != null;
+    }
+
+    private static String stripLongPrefixStr(String s) {
+        if (s == null) return null;
+        if (s.startsWith("\\\\?\\UNC\\")) return "\\\\" + s.substring(8);
+        if (s.startsWith("\\\\?\\")) return s.substring(4);
+        return s;
+    }
+
+    private static Path stripLongPrefixPath(Path p) {
+        try {
+            String s = p.toString();
+            String stripped = stripLongPrefixStr(s);
+            if (!stripped.equals(s)) return Paths.get(stripped);
+        } catch (Exception ignored) {}
+        return p;
+    }
+
+    // System/app locations shredder must never touch.
+    private static boolean isProtectedSystemPath(Path path) {
+        if (path == null) return false;
+        try {
+            Path strippedForCleaner = stripLongPrefixPath(path);
+            if (CleanerUtils.isProtectedPath(strippedForCleaner)) return true;
+            if (strippedForCleaner != path && CleanerUtils.isProtectedPath(path)) return true;
+        } catch (Exception ignored) {}
+
+        try {
+            Path abs = stripLongPrefixPath(path.toAbsolutePath().normalize());
+            String raw = abs.toString().toLowerCase(Locale.ROOT).replace('/', '\\');
+            String s = stripLongPrefixStr(raw);
+            for (File root : File.listRoots()) {
+                String rootPath = root.getPath().toLowerCase(Locale.ROOT).replace('/', '\\');
+                if (!rootPath.endsWith("\\")) rootPath = rootPath + "\\";
+                String winRoot = rootPath + "windows";
+                if (s.equals(winRoot) || s.startsWith(winRoot + "\\")) return true;
+                String winOld = rootPath + "windows.old";
+                if (s.equals(winOld) || s.startsWith(winOld + "\\")) return true;
+                String wApps = rootPath + "program files\\windowsapps";
+                if (s.equals(wApps) || s.startsWith(wApps + "\\")) return true;
+                String wAppsX86 = rootPath + "program files (x86)\\windowsapps";
+                if (s.equals(wAppsX86) || s.startsWith(wAppsX86 + "\\")) return true;
+                String pf = rootPath + "program files";
+                if (s.equals(pf) || s.startsWith(pf + "\\")) return true;
+                String pf86 = rootPath + "program files (x86)";
+                if (s.equals(pf86) || s.startsWith(pf86 + "\\")) return true;
+                String pdata = rootPath + "programdata";
+                if (s.equals(pdata) || s.startsWith(pdata + "\\")) return true;
+                String svi = rootPath + "system volume information";
+                if (s.equals(svi) || s.startsWith(svi + "\\")) return true;
+                String rb = rootPath + "$recycle.bin";
+                if (s.equals(rb) || s.startsWith(rb + "\\")) return true;
+                String rec = rootPath + "recovery";
+                if (s.equals(rec) || s.startsWith(rec + "\\")) return true;
+                String efi = rootPath + "efi";
+                if (s.equals(efi) || s.startsWith(efi + "\\")) return true;
+                String boot = rootPath + "boot";
+                if (s.equals(boot) || s.startsWith(boot + "\\")) return true;
+            }
+            String windir = System.getenv("WINDIR");
+            if (windir != null && !windir.isBlank()) {
+                String w = stripLongPrefixStr(windir.toLowerCase(Locale.ROOT).replace('/', '\\'));
+                if (s.equals(w) || s.startsWith(w + "\\")) return true;
+            }
+            if (s.contains("\\windowsapps\\") || s.endsWith("\\windowsapps")) return true;
+            if (s.contains("\\system volume information\\") || s.endsWith("\\system volume information")) return true;
+            if (s.contains("\\appdata\\") || s.endsWith("\\appdata")) return true;
+            boolean isDriveLetterPath = s.matches("^[a-z]:\\\\.*") || s.matches("^[a-z]:$");
+            if (!isDriveLetterPath) {
+                if (s.contains("\\program files (x86)\\") || s.endsWith("\\program files (x86)")) return true;
+                if (s.contains("\\program files\\") || s.endsWith("\\program files")) return true;
+                if (s.contains("\\programdata\\") || s.endsWith("\\programdata")) return true;
+                if (s.contains("\\windows\\") || s.endsWith("\\windows")) return true;
+                if (s.contains("\\winnt\\") || s.endsWith("\\winnt")) return true;
+                if (s.contains("\\recovery\\") || s.endsWith("\\recovery")) return true;
+                if (s.contains("\\efi\\") || s.endsWith("\\efi")) return true;
+                if (s.contains("\\boot\\") || s.endsWith("\\boot")) return true;
+            }
+            if (s.contains("\\$recycle.bin\\") || s.endsWith("\\$recycle.bin")) return true;
+        } catch (Exception e) {
+            AppLogger.warning("ShredderSafety protected check failed for " + path + ": " + e.getMessage());
+        }
+        return false;
     }
 }

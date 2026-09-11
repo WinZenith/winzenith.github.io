@@ -67,9 +67,6 @@ public class SettingsStore {
         boolean needsFix = s.excludedDriverIds() == null || s.skippedSoftwareIds() == null
                 || s.ignoredBrowserExtensionIds() == null || s.ignoredCleanupCategories() == null
                 || s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank()
-                || s.duplicateScanRoots() == null || s.duplicateKeeperStrategy() == null
-                || s.duplicateKeeperStrategy().isBlank() || s.duplicateIncludeFilter() == null
-                || s.duplicateMinSizeBytes() < 1
                 || s.browserExtLastFilter() == null || s.browserExtLastFilter().isBlank()
                 || s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank();
         if (needsFix) {
@@ -79,10 +76,6 @@ public class SettingsStore {
                     .ignoredBrowserExtensionIds(s.ignoredBrowserExtensionIds() == null ? java.util.Collections.emptyList() : s.ignoredBrowserExtensionIds())
                     .ignoredCleanupCategories(s.ignoredCleanupCategories() == null ? java.util.Collections.emptyList() : s.ignoredCleanupCategories())
                     .networkOptimizationPreset(s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank() ? "DEFAULT" : s.networkOptimizationPreset())
-                    .duplicateScanRoots(s.duplicateScanRoots() == null ? java.util.Collections.emptyList() : s.duplicateScanRoots())
-                    .duplicateMinSizeBytes(s.duplicateMinSizeBytes() < 1 ? 1L : s.duplicateMinSizeBytes())
-                    .duplicateIncludeFilter(s.duplicateIncludeFilter() == null ? "" : s.duplicateIncludeFilter())
-                    .duplicateKeeperStrategy(s.duplicateKeeperStrategy() == null || s.duplicateKeeperStrategy().isBlank() ? "NEWEST" : s.duplicateKeeperStrategy())
                     .browserExtLastFilter(s.browserExtLastFilter() == null || s.browserExtLastFilter().isBlank() ? "All" : s.browserExtLastFilter())
                     .browserExtLastStatusFilter(s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank() ? "All" : s.browserExtLastStatusFilter())
                     .build();
