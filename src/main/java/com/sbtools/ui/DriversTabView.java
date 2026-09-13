@@ -918,9 +918,15 @@ public class DriversTabView extends BorderPane {
                                 boolean rebootChanged = false;
                                 try {
                                     Set<String> pendingIds = rebootStore.loadPendingIds();
+                                    Set<String> pendingKeys = new HashSet<>();
+                                    for (String pid : pendingIds) {
+                                        if (pid != null && !pid.isBlank()) {
+                                            pendingKeys.add(DriverScanService.normalizeDeviceKey(pid));
+                                        }
+                                    }
                                     for (DriverRow r : rowByDevice.values()) {
                                         String did = r.installed().deviceId();
-                                        if (pendingIds.contains(did)) {
+                                        if (pendingKeys.contains(DriverScanService.normalizeDeviceKey(did))) {
                                             if (!r.isRebootPending()) {
                                                 r.setRebootPending(true);
                                                 rebootChanged = true;

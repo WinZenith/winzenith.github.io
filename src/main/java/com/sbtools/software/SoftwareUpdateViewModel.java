@@ -73,7 +73,15 @@ public class SoftwareUpdateViewModel {
 
     private final AtomicBoolean scanCancelled = new AtomicBoolean(false);
     private final AtomicBoolean scanRunning = new AtomicBoolean(false);
+    private final AtomicInteger scanGeneration = new AtomicInteger(0);
+    private final Object scanLock = new Object();
     private volatile Future<?> scanFuture;
+    /** Set when a WU install was cancelled: killing PowerShell does not abort WUA/CBS. */
+    private final AtomicBoolean wuServicingUnacked = new AtomicBoolean(false);
+    private static final String WU_SERVICING_WARNING =
+            "Stopping this app does not cancel Windows Update Agent. The update may still download or install "
+                    + "in the background and can leave a pending reboot.\n\n"
+                    + "Reboot before installing more Windows Updates.";
     private final AtomicBoolean installCancelled = new AtomicBoolean(false);
     private final AtomicBoolean installRunning = new AtomicBoolean(false);
     private final AtomicBoolean restorePointCreatedThisBatch = new AtomicBoolean(false);
@@ -139,8 +147,13 @@ public class SoftwareUpdateViewModel {
         // busy/installRunning are set synchronously below, so rapid double-clicks cannot start overlapping scans.
         // globalBusy covers other tabs' operations (their buttons are disabled the same way).
         if (busy.get() || installRunning.get() || globalBusy.get()) return;
-        scanCancelled.set(false);
-        scanRunning.set(true);
+        final int gen;
+        synchronized (scanLock) {
+            if (disposed || busy.get() || installRunning.get() || globalBusy.get()) return;
+            gen = scanGeneration.incrementAndGet();
+            scanCancelled.set(false);
+            scanRunning.set(true);
+        }
         restorePointCreatedThisBatch.set(false);
         // A fresh scan invalidates any previous failure state. Without this, Retry Failed
         // after a re-scan would reinstall orphaned entries from the old scan (wrong versions,
@@ -152,50 +165,72 @@ public class SoftwareUpdateViewModel {
         // Set busy synchronously when already on FX thread to close the race where a second
         // Scan click arrives before the async runLater from the first click executes.
         if (Platform.isFxApplicationThread()) {
-            if (disposed) return;
+            if (disposed || !isCurrentScan(gen)) {
+                synchronized (scanLock) {
+                    if (gen == scanGeneration.get()) scanRunning.set(false);
+                }
+                return;
+            }
             busy.set(true);
             showRetryFailed.set(false);
             statusText.set("Scanning for updates...");
         } else {
             Platform.runLater(() -> {
-                if (disposed) return;
+                if (disposed || !isCurrentScan(gen)) return;
                 busy.set(true);
                 showRetryFailed.set(false);
                 statusText.set("Scanning for updates...");
             });
         }
         try {
-            scanFuture = executor.submit(this::scanInternal, "SoftwareUpdate-Scan");
+            Future<?> submitted = executor.submit(() -> scanInternal(gen), "SoftwareUpdate-Scan");
+            synchronized (scanLock) {
+                if (!isCurrentScan(gen)) {
+                    submitted.cancel(true);
+                    return;
+                }
+                scanFuture = submitted;
+            }
         } catch (Exception ex) {
             AppLogger.warning("Failed to submit scan (shutting down?): " + ex.getMessage());
-            scanRunning.set(false);
+            synchronized (scanLock) {
+                if (isCurrentScan(gen)) {
+                    scanRunning.set(false);
+                    if (scanGeneration.get() == gen) scanFuture = null;
+                }
+            }
             Platform.runLater(() -> {
-                if (!disposed) busy.set(false);
+                if (!disposed && isCurrentScan(gen) && !installRunning.get()) busy.set(false);
             });
         }
     }
 
-    private void scanInternal() {
+    private boolean isCurrentScan(int gen) {
+        return !disposed && gen == scanGeneration.get();
+    }
+
+    private void scanInternal(int gen) {
         try {
+            if (!isCurrentScan(gen)) return;
             boolean wingetAvailable = service.isWingetAvailable();
-            if (!wingetAvailable && !scanCancelled.get()) {
+            if (!wingetAvailable && isCurrentScan(gen)) {
                 String diag = service.getWingetDiagnostics();
                 if (onWingetNotAvailable != null) {
                     Platform.runLater(() -> {
-                        if (!disposed) onWingetNotAvailable.accept(diag);
+                        if (!disposed && isCurrentScan(gen)) onWingetNotAvailable.accept(diag);
                     });
                 }
             }
 
             final int[] counts = {0, 0};
             List<SoftwareUpdateEntry> allUpdates = service.scanAllConcurrent(
-                    scanCancelled,
+                    () -> !isCurrentScan(gen),
                     wc -> counts[0] = wc,
                     wuc -> counts[1] = wuc,
                     SoftwareUpdateService.DEFAULT_SCAN_ALL_TIMEOUT_SECONDS
             );
 
-            if (scanCancelled.get() || disposed) return;
+            if (!isCurrentScan(gen)) return;
 
             AppSettings settings = settingsStore.load();
             List<String> skippedIds = settings.skippedSoftwareIds();
@@ -241,7 +276,7 @@ public class SoftwareUpdateViewModel {
             final int wc = counts[0];
             final int wuc = counts[1];
 
-            if (scanCancelled.get() || disposed) return;
+            if (!isCurrentScan(gen)) return;
             String wuError = service.getLastWindowsUpdateError();
             String wingetError = service.getLastWingetError();
             boolean wuFailed = wuError != null && !wuError.isBlank();
@@ -280,7 +315,7 @@ public class SoftwareUpdateViewModel {
             final boolean finalStale = showingStale;
             final java.time.Instant finalStaleAt = staleAt;
             Platform.runLater(() -> {
-                if (disposed) return;
+                if (disposed || !isCurrentScan(gen)) return;
                 rows.setAll(finalDisplay);
                 if (finalStale) {
                     long mins = finalStaleAt == null ? -1
@@ -325,41 +360,51 @@ public class SoftwareUpdateViewModel {
                 }
             });
         } catch (Exception ex) {
-            if (!scanCancelled.get() && !disposed) {
+            if (isCurrentScan(gen)) {
                 Platform.runLater(() -> {
-                    if (!disposed) {
-                        statusText.set("Scan failed: " + ex.getMessage());
-                        new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
-                    }
+                    if (disposed || !isCurrentScan(gen)) return;
+                    statusText.set("Scan failed: " + ex.getMessage());
+                    new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
                 });
             }
         } finally {
-            scanFuture = null;
-            scanRunning.set(false);
+            synchronized (scanLock) {
+                if (gen == scanGeneration.get()) {
+                    scanFuture = null;
+                    scanRunning.set(false);
+                }
+            }
             Platform.runLater(() -> {
-                if (!disposed) busy.set(false);
+                if (!disposed && gen == scanGeneration.get() && !installRunning.get()) {
+                    busy.set(false);
+                }
             });
         }
     }
 
     public void stopScan() {
-        scanCancelled.set(true);
-        // Press-time snapshot: a Stop landing after the scan worker finished (or while an
-        // install is finalizing) must not clear busy / overwrite the status text - that
-        // silently unblocked the UI while work (or its follow-up scan) was still landing.
-        boolean wasScanning = scanRunning.getAndSet(false);
-        if (scanFuture != null) {
+        final Future<?> toCancel;
+        final boolean wasScanning;
+        final int stopGen;
+        synchronized (scanLock) {
+            scanCancelled.set(true);
+            wasScanning = scanRunning.getAndSet(false);
+            // Invalidate the in-flight worker even if Scan is pressed before finally runs.
+            stopGen = wasScanning ? scanGeneration.incrementAndGet() : scanGeneration.get();
+            toCancel = scanFuture;
+            scanFuture = null;
+        }
+        if (toCancel != null) {
             try {
-                scanFuture.cancel(true);
+                toCancel.cancel(true);
             } catch (Exception ignored) {
             }
-            scanFuture = null;
         }
         if (!wasScanning) return;
         Platform.runLater(() -> {
-            if (!disposed && !installRunning.get()) {
-                busy.set(false);
-            }
+            if (disposed || installRunning.get()) return;
+            if (scanGeneration.get() != stopGen || scanRunning.get()) return;
+            busy.set(false);
             statusText.set("Scan stopped.");
         });
     }
@@ -401,6 +446,7 @@ public class SoftwareUpdateViewModel {
             Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Select at least one program to update.").showAndWait());
             return;
         }
+        if (blockIfWuServicingUnacked(selected)) return;
         // Non-admin users can still update per-user winget packages. Do NOT hard-block:
         // show a one-shot notice and let the install attempt run; system-level and
         // Windows Update items will fail gracefully with access-denied if elevated
@@ -554,7 +600,12 @@ public class SoftwareUpdateViewModel {
                         return;
                     }
                     if (installCancelled.get()) {
-                        statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
+                        if (wuServicingUnacked.get()) {
+                            statusText.set("Update cancelled. Windows Update may still be applying — reboot before installing more.");
+                            showWuServicingInfoDialog();
+                        } else {
+                            statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
+                        }
                         // Items that failed BEFORE the cancel still deserve a retry path:
                         // without this their rows show Failed but Retry Failed stays hidden.
                         if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty() || !finalManualRepair.isEmpty()) {
@@ -633,6 +684,7 @@ public class SoftwareUpdateViewModel {
         } catch (Exception ex) {
             AppLogger.warning("Admin check failed, proceeding as non-admin: " + ex.getMessage());
         }
+        if (blockIfWuServicingUnacked(List.of(entry))) return;
         if (!installRunning.compareAndSet(false, true)) {
             Platform.runLater(() -> {
                 if (!disposed) new Alert(Alert.AlertType.INFORMATION, "Another operation is already in progress. Please wait.").showAndWait();
@@ -730,25 +782,19 @@ public class SoftwareUpdateViewModel {
                 try {
                     res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_WU_SECONDS, installCancelled, entry);
                 } catch (CancellationException cex) {
-                    resetEntryUiState(entry);
-                    Platform.runLater(() -> {
-                        if (!disposed) statusText.set("Update cancelled for " + entry.getName() + ".");
-                    });
+                    handleInstallCancellation(entry, true);
                     return;
                 }
             } else {
                 try {
                     res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_WINGET_SECONDS, entry, installCancelled);
                 } catch (CancellationException cex) {
-                    resetEntryUiState(entry);
-                    Platform.runLater(() -> {
-                        if (!disposed) statusText.set("Update cancelled for " + entry.getName() + ".");
-                    });
+                    handleInstallCancellation(entry, true);
                     return;
                 }
             }
-            // Exit 0 or reboot-required (3010/1641, reboot phrasing) counts as installed; a 3010 must
-            // not be reported as Failed.
+            // Exit 0 or MSI 3010/1641 counts as installed; reboot phrasing on a
+            // failed exit must not.
             if (isInstallSuccess(entry, res)) {
                 // Non-blocking cleanup: the old synchronous promptAndCleanup() held the
                 // single install worker on a 60s latch while busy/installRunning stayed
@@ -1008,8 +1054,16 @@ public class SoftwareUpdateViewModel {
 
     public void dispose() {
         disposed = true;
-        scanCancelled.set(true);
-        scanRunning.set(false);
+        synchronized (scanLock) {
+            scanCancelled.set(true);
+            scanGeneration.incrementAndGet();
+            scanRunning.set(false);
+            Future<?> f = scanFuture;
+            scanFuture = null;
+            if (f != null) {
+                try { f.cancel(true); } catch (Exception ignored) {}
+            }
+        }
         installCancelled.set(true);
         installRunning.set(false);
         // Ensure UI busy flags are cleared immediately so globalBusy doesn't stick (B8/B9)
@@ -1022,9 +1076,6 @@ public class SoftwareUpdateViewModel {
             // Toolkit may be shutting down – set directly
             try { busy.set(false); } catch (Exception ignored2) {}
             try { showBatchProgress.set(false); } catch (Exception ignored2) {}
-        }
-        if (scanFuture != null) {
-            try { scanFuture.cancel(true); } catch (Exception ignored) {}
         }
         shutdownExecutor(installExecutor);
         shutdownExecutor(executor);
@@ -1090,21 +1141,22 @@ public class SoftwareUpdateViewModel {
                 try {
                     res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_WU_SECONDS, installCancelled, entry);
                 } catch (CancellationException cex) {
-                    resetEntryUiState(entry);
+                    handleInstallCancellation(entry, false);
                     return false;
                 }
             } else {
                 try {
                     res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_WINGET_SECONDS, entry, installCancelled);
                 } catch (CancellationException cex) {
-                    resetEntryUiState(entry);
+                    handleInstallCancellation(entry, false);
                     return false;
                 }
             }
 
-            // Exit 0 or reboot-required (3010/1641, reboot phrasing) counts as installed; a 3010 must
-            // not be reported as Failed, and the batch must abort so later installs are not layered
-            // over a pending reboot.
+            // Exit 0 or MSI 3010/1641 counts as installed; a 3010 must not be
+            // reported as Failed, and the batch must abort so later installs are
+            // not layered over a pending reboot. Reboot phrasing on a failed exit
+            // is not success.
             if (isInstallSuccess(entry, res)) {
                 synchronized (successfulEntries) { successfulEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), true, null);
@@ -1129,7 +1181,7 @@ public class SoftwareUpdateViewModel {
         } catch (CancellationException cex) {
             // Mid-item cancel must clear the "Installing..." row state, otherwise the
             // row claims to install forever (single-install path already does this).
-            resetEntryUiState(entry);
+            handleInstallCancellation(entry, false);
             return false;
         } catch (Exception ex) {
             String msg = ex.getMessage();
@@ -1420,6 +1472,69 @@ public class SoftwareUpdateViewModel {
             return SoftwareUpdateService.isWindowsUpdateInstallSuccess(res);
         }
         return SoftwareUpdateService.isWingetInstallSuccess(res);
+    }
+
+    private static boolean isWindowsUpdateEntry(SoftwareUpdateEntry entry) {
+        return entry != null && "WindowsUpdate".equals(entry.source());
+    }
+
+    /**
+     * Killing the PowerShell host does not abort WUA/CBS. Record that and optionally
+     * warn immediately (single-install). Batch warns once at the end.
+     */
+    private void handleInstallCancellation(SoftwareUpdateEntry entry, boolean showWuDialog) {
+        resetEntryUiState(entry);
+        if (isWindowsUpdateEntry(entry)) {
+            wuServicingUnacked.set(true);
+            AppLogger.warning("Windows Update install cancelled: host killed, WUA may still be applying"
+                    + (entry.id() != null ? " for " + entry.id() : ""));
+        }
+        if (!showWuDialog) return;
+        Platform.runLater(() -> {
+            if (disposed) return;
+            if (wuServicingUnacked.get()) {
+                statusText.set("Update cancelled. Windows Update may still be applying — reboot before installing more.");
+                showWuServicingInfoDialog();
+            } else if (entry != null) {
+                statusText.set("Update cancelled for " + entry.getName() + ".");
+            }
+        });
+    }
+
+    private void showWuServicingInfoDialog() {
+        Alert a = new Alert(Alert.AlertType.WARNING, WU_SERVICING_WARNING);
+        a.setHeaderText("Windows Update may still be applying");
+        a.showAndWait();
+    }
+
+    /**
+     * @return true when the caller must abort this install attempt
+     */
+    private boolean blockIfWuServicingUnacked(List<SoftwareUpdateEntry> selected) {
+        if (!wuServicingUnacked.get()) return false;
+        boolean includesWu = false;
+        if (selected != null) {
+            for (SoftwareUpdateEntry e : selected) {
+                if (isWindowsUpdateEntry(e)) { includesWu = true; break; }
+            }
+        }
+        if (!includesWu) return false;
+        if (!Platform.isFxApplicationThread()) {
+            AppLogger.warning("WU servicing gate blocked off FX thread");
+            return true;
+        }
+        Alert a = new Alert(Alert.AlertType.WARNING,
+                WU_SERVICING_WARNING + "\n\nContinue only if you already rebooted or the update has finished.");
+        a.setHeaderText("Windows Update may still be applying");
+        ButtonType continueBtn = new ButtonType("Continue anyway", ButtonBar.ButtonData.OK_DONE);
+        a.getButtonTypes().setAll(continueBtn, ButtonType.CANCEL);
+        ButtonType result = a.showAndWait().orElse(ButtonType.CANCEL);
+        if (result == continueBtn) {
+            wuServicingUnacked.set(false);
+            AppLogger.info("User acknowledged pending Windows Update servicing");
+            return false;
+        }
+        return true;
     }
 
     private static boolean isInstallRebootRequired(SoftwareUpdateEntry entry, ProcessResult res) {

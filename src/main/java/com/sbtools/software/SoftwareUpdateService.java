@@ -985,22 +985,25 @@ public class SoftwareUpdateService {
     }
 
     /**
-     * True when the result should be treated as installed (exit 0 or reboot-required exit).
-     * Callers must still consult {@link #isRebootRequired(ProcessResult)} to decide whether
-     * to abort the remaining batch and prompt for restart.
+     * True when the result should be treated as installed: exit 0 or MSI reboot
+     * success codes (3010 / 1641) only. Reboot <em>phrasing</em> in the log must
+     * not flip a failed exit into success ("Please restart and try again").
+     * Callers still consult {@link #isWingetRebootRequired(ProcessResult)} to
+     * abort the remaining batch after a real install success.
      */
     public static boolean isSuccessOrRebootRequired(ProcessResult result) {
         if (result == null) return false;
-        return result.success() || isRebootRequired(result);
+        return result.success() || isRebootExitCode(result.exitCode());
     }
 
-    /** Winget/MSI install success (exit 0 or reboot exit codes / phrasing). */
+    /** Winget/MSI install success (exit 0 or MSI 3010/1641). */
     public static boolean isWingetInstallSuccess(ProcessResult result) {
         return isSuccessOrRebootRequired(result);
     }
 
+    /** Reboot abort only after a real install success; failure + reboot wording is not a success. */
     public static boolean isWingetRebootRequired(ProcessResult result) {
-        return isRebootRequired(result);
+        return isWingetInstallSuccess(result) && isRebootRequired(result);
     }
 
     /** Windows Update: process exit 0 and strict JSON from {@code wu-install.ps1}. */
@@ -1335,11 +1338,9 @@ public class SoftwareUpdateService {
             );
             AppLogger.info("winget upgrade result for " + packageId + ": exitCode=" + r.exitCode()
                     + " output=" + (r.stdout() != null ? r.stdout().substring(0, Math.min(500, r.stdout().length())) : "null"));
-            // Reboot-required (exit 3010/1641 or reboot phrasing) counts as installed; the caller
-            // aborts the batch and prompts for restart. Check before mismatch/failure handling so a
-            // 3010 is not misreported as Failed and does not trigger another launcher retry.
-            if (isRebootRequired(r)) return r;
-            if (r.success()) return r;
+            // Exit 0 / MSI 3010/1641 counts as installed. Reboot phrasing on a failed
+            // exit must fall through so the caller records a failure, not a success.
+            if (isSuccessOrRebootRequired(r)) return r;
             if (isInstallTechnologyMismatch(r)) {
                 throw new IOException("INSTALL_TECHNOLOGY_MISMATCH");
             }

@@ -822,8 +822,13 @@ public class DashboardTabView extends BorderPane {
                     restored.add(IssueCategory.error(
                             s.category(), s.countText(), s.sizeText(), s.source(), s.sizeBytes()));
                 } else if (s.details() != null && !s.details().isEmpty()) {
-                    restored.add(new IssueCategory(
-                            s.category(), s.countText(), s.sizeText(), s.source(), s.sizeBytes(), s.details()));
+                    if (("Drivers".equals(s.source()) || "Software".equals(s.source())) && s.count() > 0) {
+                        restored.add(new IssueCategory(
+                                s.category(), s.count(), s.sizeBytes(), s.source(), s.details()));
+                    } else {
+                        restored.add(new IssueCategory(
+                                s.category(), s.countText(), s.sizeText(), s.source(), s.sizeBytes(), s.details()));
+                    }
                 } else if (s.source() != null
                         && ("Drivers".equals(s.source()) || "Software".equals(s.source()))) {
                     restored.add(new IssueCategory(s.category(), s.count(), s.sizeBytes(), s.source()));
@@ -1016,16 +1021,21 @@ public class DashboardTabView extends BorderPane {
     /**
      * Always run when a full-scan or retry worker thread exits, including admin-check
      * early returns (non-admin, stop during privilege check). Idempotent release.
+     * A stale generation must not clear {@code scanning} or release busy: Stop already
+     * dropped that hold, and a newer Scan/Retry may already own it.
      */
     private void endScanWorker(int generation) {
-        scanning.set(false);
+        if (!isScanStale(generation)) {
+            scanning.set(false);
+        }
         Platform.runLater(() -> {
-            if (!isScanStale(generation)) {
-                progressBar.setVisible(false);
-                stopButton.setVisible(false);
-                stopButton.setDisable(true);
-                scanButton.setDisable(busy.get());
+            if (isScanStale(generation)) {
+                return;
             }
+            progressBar.setVisible(false);
+            stopButton.setVisible(false);
+            stopButton.setDisable(true);
+            scanButton.setDisable(busy.get());
             releaseBusyOnce();
         });
     }
@@ -1245,19 +1255,7 @@ public class DashboardTabView extends BorderPane {
                     Platform.runLater(() -> {
                         if (isScanStale(generation)) return;
 
-                        IssueCategory driversEntry = null;
-                        IssueCategory softwareEntry = null;
-                        for (IssueCategory ic : issues) {
-                            if ("Outdated Drivers".equals(ic.categoryProperty().get())) {
-                                driversEntry = ic;
-                            } else if ("Outdated Software".equals(ic.categoryProperty().get())) {
-                                softwareEntry = ic;
-                            }
-                        }
-                        if (driversEntry != null) issues.remove(driversEntry);
-                        if (softwareEntry != null) issues.remove(softwareEntry);
-                        if (driversEntry != null) issues.add(0, driversEntry);
-                        if (softwareEntry != null) issues.add(driversEntry != null ? 1 : 0, softwareEntry);
+                        collapseDriverSoftwareRows();
 
                         long preErrorCount = issues.stream().filter(IssueCategory::isError).count();
                         boolean keepProgress = shouldKeepProgressRowVisible(
@@ -1343,9 +1341,25 @@ public class DashboardTabView extends BorderPane {
                             statusLabel.setText("Scan stopped.");
                         });
                     }
+                } catch (TimeoutException te) {
+                    // Coordinator cancels the parent token before throwing; do not treat
+                    // that as a user Stop — Stop restores pre-scan UI, timeout keeps partials.
+                    AppLogger.warning("Dashboard scan timed out: " + te.getMessage());
+                    if (!isScanStale(generation) && !disposed) {
+                        Platform.runLater(() -> {
+                            if (isScanStale(generation)) return;
+                            addTimeoutRowIfMissing("Outdated Drivers", "Drivers");
+                            addTimeoutRowIfMissing("Outdated Software", "Software");
+                            addTimeoutRowIfMissing("System Cleanup", "Cleanup");
+                            collapseDriverSoftwareRows();
+                            updateSummaryCards();
+                            progressRow.setVisible(true);
+                            progressRow.setManaged(true);
+                            statusLabel.setText("Scan timed out — partial results kept.");
+                        });
+                    }
                 } catch (Exception ex) {
                     if (!isScanStale(generation) && !token.isCancelled()) {
-                        // Timeout surfaces as TimeoutException with a clear message.
                         AppLogger.error("Dashboard scan failed", ex);
                         Platform.runLater(() -> {
                             if (isScanStale(generation)) return;
@@ -1406,27 +1420,53 @@ public class DashboardTabView extends BorderPane {
             updateCategoryProgress(idx, "timeout", generation);
             final String name = names[idx];
             final String source = sources[idx];
-            boolean alreadyPresent = false;
-            try {
-                // issues is only mutated on FX thread; read a snapshot safely via copy.
-                // Iterating directly off-FX risks ConcurrentModification — instead
-                // check inside the runLater below. Optimistically add; dupes avoided
-                // by the worker having been cancelled before it could add.
-                alreadyPresent = false;
-            } catch (Exception ignored) {}
-            if (!alreadyPresent) {
-                Platform.runLater(() -> {
-                    if (isScanStale(generation)) return;
-                    boolean exists = issues.stream().anyMatch(ic ->
-                            name.equals(ic.categoryProperty().get())
-                                    || ("System Cleanup".equals(name)
-                                    && "Cleanup".equals(ic.sourceProperty().get())));
-                    if (!exists) {
-                        issues.add(IssueCategory.error(
-                                name, "Timed out — press Retry to rescan", "", source, 0));
-                    }
-                });
+            Platform.runLater(() -> {
+                if (isScanStale(generation)) return;
+                addTimeoutRowIfMissing(name, source);
+            });
+        }
+    }
+
+    /** FX thread: keep a single Drivers/Software row, last non-stale write wins. */
+    private void collapseDriverSoftwareRows() {
+        IssueCategory driversEntry = null;
+        IssueCategory softwareEntry = null;
+        for (IssueCategory ic : issues) {
+            String name = ic.categoryProperty().get();
+            if ("Outdated Drivers".equals(name)) {
+                driversEntry = ic;
+            } else if ("Outdated Software".equals(name)) {
+                softwareEntry = ic;
             }
+        }
+        issues.removeIf(ic -> {
+            String name = ic.categoryProperty().get();
+            return "Outdated Drivers".equals(name) || "Outdated Software".equals(name);
+        });
+        if (driversEntry != null) {
+            issues.add(0, driversEntry);
+        }
+        if (softwareEntry != null) {
+            issues.add(driversEntry != null ? 1 : 0, softwareEntry);
+        }
+    }
+
+    /** FX thread: replace any existing row for this category name. */
+    private void replaceNamedIssue(String categoryName, IssueCategory row) {
+        issues.removeIf(ic -> categoryName.equals(ic.categoryProperty().get()));
+        if (row != null) {
+            issues.add(row);
+        }
+    }
+
+    /** FX thread: timeout placeholder so Retry has a target; skip if results already landed. */
+    private void addTimeoutRowIfMissing(String category, String source) {
+        boolean exists = issues.stream().anyMatch(ic ->
+                category.equals(ic.categoryProperty().get())
+                        || ("Cleanup".equals(source) && "Cleanup".equals(ic.sourceProperty().get())));
+        if (!exists) {
+            issues.add(IssueCategory.error(
+                    category, "Timed out — press Retry to rescan", "", source, 0));
         }
     }
 
@@ -1571,7 +1611,7 @@ public class DashboardTabView extends BorderPane {
             final IssueCategory toAdd = success != null ? success : failure;
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
-                issues.add(toAdd);
+                replaceNamedIssue("Outdated Drivers", toAdd);
             });
         }
         } finally {
@@ -1688,7 +1728,7 @@ public class DashboardTabView extends BorderPane {
             final IssueCategory finalAdd = toAdd;
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
-                issues.add(finalAdd);
+                replaceNamedIssue("Outdated Software", finalAdd);
             });
         }
         } finally {
@@ -1892,10 +1932,12 @@ public class DashboardTabView extends BorderPane {
             } catch (Exception ignored) {}
         }
         // Single batched FX mutation for all cleanup rows (P1).
-        if (!batch.isEmpty() && !isCancelledAny(generation, parent, child)) {
+        if (!batch.isEmpty()) {
             final List<IssueCategory> toAdd = List.copyOf(batch);
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
+                issues.removeIf(ic -> "Cleanup".equals(ic.sourceProperty().get())
+                        || "System Cleanup".equals(ic.categoryProperty().get()));
                 issues.addAll(toAdd);
             });
         }
@@ -2063,16 +2105,7 @@ public class DashboardTabView extends BorderPane {
                     }
                     Platform.runLater(() -> {
                         if (isScanStale(generation)) return;
-                        IssueCategory d = null;
-                        IssueCategory s = null;
-                        for (IssueCategory ic : issues) {
-                            if ("Outdated Drivers".equals(ic.categoryProperty().get())) d = ic;
-                            else if ("Outdated Software".equals(ic.categoryProperty().get())) s = ic;
-                        }
-                        if (d != null) issues.remove(d);
-                        if (s != null) issues.remove(s);
-                        if (d != null) issues.add(0, d);
-                        if (s != null) issues.add(d != null ? 1 : 0, s);
+                        collapseDriverSoftwareRows();
                         if (issues.isEmpty()) {
                             showHealthyState();
                             statusLabel.setText("Scan complete \u2014 no issues found.");

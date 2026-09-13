@@ -375,7 +375,8 @@ public class WingetRunner {
                 }
                 // A reboot-required result (MSI 3010/1641 or reboot phrasing) means the installer
                 // already ran: return immediately instead of re-executing the same upgrade via the
-                // next launcher candidate, which would reinstall or report a false failure.
+                // next launcher candidate. Callers must still require exit 0/3010/1641 for success —
+                // phrasing alone must not count as installed.
                 // (Mirrors SoftwareUpdateService.isRebootRequired; inlined to avoid a class cycle.)
                 if (isRebootRequiredResult(r)) {
                     workingCandidateIndex = idx;
