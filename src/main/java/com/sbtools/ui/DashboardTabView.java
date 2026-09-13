@@ -1013,6 +1013,23 @@ public class DashboardTabView extends BorderPane {
         }
     }
 
+    /**
+     * Always run when a full-scan or retry worker thread exits, including admin-check
+     * early returns (non-admin, stop during privilege check). Idempotent release.
+     */
+    private void endScanWorker(int generation) {
+        scanning.set(false);
+        Platform.runLater(() -> {
+            if (!isScanStale(generation)) {
+                progressBar.setVisible(false);
+                stopButton.setVisible(false);
+                stopButton.setDisable(true);
+                scanButton.setDisable(busy.get());
+            }
+            releaseBusyOnce();
+        });
+    }
+
     private void capturePreScanUi(int generation) {
         preScanUiState = new PreScanUiState(
                 generation,
@@ -1124,6 +1141,7 @@ public class DashboardTabView extends BorderPane {
 
         try {
             scanFuture = dashboardPool.submit(() -> {
+                try {
                 boolean isAdmin;
                 try {
                     isAdmin = adminCheck.getAsBoolean();
@@ -1349,17 +1367,14 @@ public class DashboardTabView extends BorderPane {
                     }
                     teardownGeneration(driverScan, softwareScan, cleanupScan,
                             driverChild, softwareChild, cleanupChild);
-                    scanning.set(false);
                     Platform.runLater(() -> {
                         if (!isScanStale(generation)) {
-                            progressBar.setVisible(false);
-                            stopButton.setVisible(false);
-                            stopButton.setDisable(true);
-                            scanButton.setDisable(busy.get());
                             revealRetryForErrors();
                         }
-                        releaseBusyOnce();
                     });
+                }
+                } finally {
+                    endScanWorker(generation);
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException ex) {
@@ -1741,12 +1756,9 @@ public class DashboardTabView extends BorderPane {
         return new ArrayList<>(byId.values());
     }
 
-    static record SoftwareScanDashboardBuild(IssueCategory category, boolean categoryFailed) {}
+    private static record SoftwareScanDashboardBuild(IssueCategory category, boolean categoryFailed) {}
 
-    /**
-     * Package-visible for unit tests — mirrors Software tab partial-failure semantics.
-     */
-    static SoftwareScanDashboardBuild resolveSoftwareScanCategory(
+    private static SoftwareScanDashboardBuild resolveSoftwareScanCategory(
             List<SoftwareUpdateEntry> filteredUpdates,
             String wingetError,
             String wuError,
@@ -1759,9 +1771,7 @@ public class DashboardTabView extends BorderPane {
             if (!sourceFailed) {
                 return new SoftwareScanDashboardBuild(null, false);
             }
-            String err = wuFailed && wingetFailed
-                    ? "winget: " + wingetError + "; Windows Update: " + wuError
-                    : (wuFailed ? wuError : wingetError);
+            String err = SoftwareUpdateService.formatScanSourceError(wingetError, wuError);
             if (err.length() > 200) err = err.substring(0, 200) + "...";
             return new SoftwareScanDashboardBuild(
                     IssueCategory.error("Outdated Software", err, "", "Software", 0), true);
@@ -1925,6 +1935,7 @@ public class DashboardTabView extends BorderPane {
         final int retryIndex = Math.min(2, Math.max(0, categoryIndex));
         try {
             scanFuture = dashboardPool.submit(() -> {
+                try {
                 boolean isAdmin;
                 try {
                     // Off the FX thread: AdminCheck spawns PowerShell (up to ~5s).
@@ -1979,6 +1990,9 @@ public class DashboardTabView extends BorderPane {
                     }
                 });
                 runRetryScan(retryIndex, generation, token, retryChild);
+                } finally {
+                    endScanWorker(generation);
+                }
             });
         } catch (java.util.concurrent.RejectedExecutionException ex) {
             scanning.set(false);
@@ -2103,16 +2117,10 @@ public class DashboardTabView extends BorderPane {
                             categoryIndex == 0 ? retryChild : null,
                             categoryIndex == 1 ? retryChild : null,
                             categoryIndex == 2 ? retryChild : null);
-                    scanning.set(false);
                     Platform.runLater(() -> {
                         if (!isScanStale(generation)) {
-                            progressBar.setVisible(false);
-                            stopButton.setVisible(false);
-                            stopButton.setDisable(true);
-                            scanButton.setDisable(busy.get());
                             revealRetryForErrors();
                         }
-                        releaseBusyOnce();
                     });
                 }
         } catch (java.util.concurrent.RejectedExecutionException ex) {
@@ -2149,8 +2157,8 @@ public class DashboardTabView extends BorderPane {
             f.cancel(true);
             scanFuture = null;
         }
-        // Local flag only — never decrement global busy we do not own.
         scanning.set(false);
+        releaseBusyOnce();
         progressBar.setVisible(false);
         stopButton.setVisible(false);
         stopButton.setDisable(true);

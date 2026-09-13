@@ -27,6 +27,25 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class SoftwareUpdateService {
 
+    /** Overall deadline for parallel winget + Windows Update scans (matches Dashboard software budget). */
+    public static final long DEFAULT_SCAN_ALL_TIMEOUT_SECONDS = 180;
+
+    /**
+     * Combined user-facing message when one or both scan sources failed.
+     * Used by the Software tab status line and Dashboard issue cards.
+     */
+    public static String formatScanSourceError(String wingetError, String wuError) {
+        boolean wuFailed = wuError != null && !wuError.isBlank();
+        boolean wingetFailed = wingetError != null && !wingetError.isBlank();
+        if (!wuFailed && !wingetFailed) {
+            return "";
+        }
+        if (wuFailed && wingetFailed) {
+            return "winget: " + wingetError + "; Windows Update: " + wuError;
+        }
+        return wuFailed ? wuError : wingetError;
+    }
+
     private final ProcessRunner runner = new ProcessRunner(600);
     private final WingetRunner winget = new WingetRunner(runner);
     private volatile String lastWindowsUpdateError = null;
@@ -1041,7 +1060,7 @@ public class SoftwareUpdateService {
     public List<SoftwareUpdateEntry> scanAllConcurrent(java.util.function.BooleanSupplier cancelled,
                                                         java.util.function.IntConsumer onWingetDone,
                                                         java.util.function.IntConsumer onWuDone) {
-        return scanAllConcurrent(cancelled, onWingetDone, onWuDone, 150);
+        return scanAllConcurrent(cancelled, onWingetDone, onWuDone, DEFAULT_SCAN_ALL_TIMEOUT_SECONDS);
     }
 
     public List<SoftwareUpdateEntry> scanAllConcurrent(java.util.function.BooleanSupplier cancelled,
@@ -1058,7 +1077,7 @@ public class SoftwareUpdateService {
     public List<SoftwareUpdateEntry> scanAllConcurrent(AtomicBoolean cancelled,
                                                         java.util.function.IntConsumer onWingetDone,
                                                         java.util.function.IntConsumer onWuDone) {
-        return scanAllConcurrent(cancelled, onWingetDone, onWuDone, 150);
+        return scanAllConcurrent(cancelled, onWingetDone, onWuDone, DEFAULT_SCAN_ALL_TIMEOUT_SECONDS);
     }
 
     public List<SoftwareUpdateEntry> scanAllConcurrent(AtomicBoolean cancelled,
@@ -1088,6 +1107,17 @@ public class SoftwareUpdateService {
 
         CompletableFuture<List<SoftwareUpdateEntry>> wingetFuture = CompletableFuture.supplyAsync(() -> {
             if (!winget.isAvailable()) {
+                // Surface as a failed winget source so UI/Dashboard never report a false
+                // "everything up to date" when winget was never scanned.
+                String diag = getWingetDiagnostics();
+                if (diag == null || diag.isBlank()) {
+                    lastWingetError = "winget is not available on this system";
+                } else {
+                    String oneLine = diag.trim().replace('\r', ' ').replace('\n', ' ');
+                    if (oneLine.length() > 160) oneLine = oneLine.substring(0, 160) + "...";
+                    lastWingetError = "winget is not available on this system: " + oneLine;
+                }
+                AppLogger.warning(lastWingetError);
                 if (onWingetDone != null) onWingetDone.accept(0);
                 return List.<SoftwareUpdateEntry>of();
             }

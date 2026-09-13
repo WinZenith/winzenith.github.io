@@ -42,7 +42,7 @@ public class SystemInfoService {
      * {@link #SECTION_TIMEOUT_SECONDS} with one retry. Keys match the
      * {@code system-info.ps1} {@code ShouldRun} filter (JSON property names).
      */
-    static final List<SectionGroup> SECTION_GROUPS = List.of(
+    private static final List<SectionGroup> SECTION_GROUPS = List.of(
             new SectionGroup("core", List.of("cpu", "os", "bios", "motherboard", "battery")),
             new SectionGroup("compute", List.of("ram", "gpu", "storage")),
             new SectionGroup("devices", List.of("others", "usbDevices", "networkAdapters", "audioDevices")),
@@ -164,6 +164,10 @@ public class SystemInfoService {
             int usableGroups = 0;
 
             for (int i = 0; i < futures.size(); i++) {
+                if (cancelledToken != null && cancelledToken.get()) {
+                    cancelAll(futures);
+                    return null;
+                }
                 SectionGroup group = SECTION_GROUPS.get(i);
                 GroupResult result = null;
                 try {
@@ -224,16 +228,7 @@ public class SystemInfoService {
                 AppLogger.warning("SystemInfo: merged payload unparseable: " + e.getMessage());
                 return null;
             }
-            // Prepend Java-level group warnings (PS warnings already inside payload).
-            if (!warnings.isEmpty() && data.warnings() != null) {
-                List<String> combined = new ArrayList<>(warnings);
-                combined.addAll(data.warnings());
-                data = new SystemInfoData(data.cpu(), data.gpu(), data.ram(), data.os(),
-                        data.storage(), data.motherboard(), data.bios(), data.others(),
-                        data.networkAdapters(), data.audioDevices(), data.battery(),
-                        data.temperatures(), data.usbDevices(), data.monitors(),
-                        data.printers(), data.version(), combined, data.timings(), data.collectedAt());
-            }
+            data = attachGroupWarnings(data, warnings);
             if (!isUsable(data)) {
                 AppLogger.warning("SystemInfo: parallel merge produced no usable sections");
                 return null;
@@ -244,7 +239,23 @@ public class SystemInfoService {
         }
     }
 
-    record GroupResult(JsonNode root, String version, String warning, Map<String, Long> timings) {}
+    private record GroupResult(JsonNode root, String version, String warning, Map<String, Long> timings) {}
+
+    /** Merges parallel fan-out group failures into the payload warnings list. */
+    private static SystemInfoData attachGroupWarnings(SystemInfoData data, List<String> groupWarnings) {
+        if (data == null || groupWarnings == null || groupWarnings.isEmpty()) {
+            return data;
+        }
+        List<String> combined = new ArrayList<>(groupWarnings);
+        if (data.warnings() != null && !data.warnings().isEmpty()) {
+            combined.addAll(data.warnings());
+        }
+        return new SystemInfoData(data.cpu(), data.gpu(), data.ram(), data.os(),
+                data.storage(), data.motherboard(), data.bios(), data.others(),
+                data.networkAdapters(), data.audioDevices(), data.battery(),
+                data.temperatures(), data.usbDevices(), data.monitors(),
+                data.printers(), data.version(), combined, data.timings(), data.collectedAt());
+    }
 
     private GroupResult gatherGroup(String scriptPath, SectionGroup group, AtomicBoolean cancelledToken) {
         long startMs = System.currentTimeMillis();
@@ -317,7 +328,7 @@ public class SystemInfoService {
         return new GroupResult(null, null, warn, groupTimings);
     }
 
-    static void mergeGroup(ObjectNode merged, List<String> warnings,
+    private static void mergeGroup(ObjectNode merged, List<String> warnings,
                             Map<String, Long> timings, GroupResult result) {
         JsonNode root = result.root();
         if (root == null || !root.isObject()) {
@@ -534,7 +545,7 @@ public class SystemInfoService {
      * of failing the entire payload. Missing/null sections stay {@code null}
      * (legal — e.g. battery on desktops); only genuine conversion errors warn.
      */
-    static SystemInfoData parseTolerantly(String json) throws IOException {
+    private static SystemInfoData parseTolerantly(String json) throws IOException {
         JsonNode root;
         try {
             root = JsonMapper.mapper().readTree(json);
@@ -739,12 +750,17 @@ public class SystemInfoService {
         } catch (Exception ignored) {}
     }
 
-    private static Path diagnosticPath() {
+    /** Portable-aware path for the last raw gather dump (UI + support). */
+    public static Path diagnosticLogPath() {
         try {
             Path portable = AppPaths.portableLogsDir();
             if (portable != null) return portable.resolve("system-info-last-raw.txt");
         } catch (Exception ignored) {}
         return AppPaths.logsDir().resolve("system-info-last-raw.txt");
+    }
+
+    private static Path diagnosticPath() {
+        return diagnosticLogPath();
     }
 
     /**
@@ -754,7 +770,7 @@ public class SystemInfoService {
      * We now keep streams separate (see gatherSystemInfo), but still defend against
      * any leading/trailing noise by locating the outermost JSON object that parses.
      */
-    static String extractJson(String rawOut, String stderr) {
+    private static String extractJson(String rawOut, String stderr) {
         if (rawOut == null) return null;
         // Strip BOM (PowerShell UTF-8 preamble) wherever it appears, then trim.
         String s = rawOut.replace("﻿", "").replace("￾", "").trim();
@@ -804,7 +820,7 @@ public class SystemInfoService {
         return s;
     }
 
-    static boolean isValidSystemInfoJson(String json) {
+    private static boolean isValidSystemInfoJson(String json) {
         if (json == null || json.isBlank()) return false;
         String t = json.trim();
         if (!t.startsWith("{") || !t.endsWith("}")) return false;

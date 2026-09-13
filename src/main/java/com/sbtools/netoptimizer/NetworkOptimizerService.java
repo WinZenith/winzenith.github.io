@@ -49,50 +49,101 @@ public class NetworkOptimizerService {
         return trimmed;
     }
 
-    public List<NetworkAdapterRow> listAdapters() {
-        List<NetworkAdapterRow> adapters = new ArrayList<>();
+    public record AdapterListResult(boolean success, List<NetworkAdapterRow> adapters, String errorMessage) {
+        public static AdapterListResult ok(List<NetworkAdapterRow> adapters) {
+            return new AdapterListResult(true, adapters != null ? adapters : List.of(), null);
+        }
+
+        public static AdapterListResult failure(String message) {
+            String msg = message != null && !message.isBlank() ? message : "Failed to list network adapters.";
+            return new AdapterListResult(false, List.of(), msg);
+        }
+    }
+
+    public AdapterListResult queryAdapters() {
         try {
             Path script = PowerShellScripts.resolve("net-adapter-info.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
                     ProcessRunner.powershellScript(script.toString()));
-            String stdout = pr.stdout().trim();
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             String stderr = pr.stderr() != null ? pr.stderr().trim() : "";
-            if (!stdout.isEmpty() && !"[]".equals(stdout)) {
+            if (!stdout.isEmpty() && stdout.startsWith("{")) {
                 try {
-                    List<Map<String, Object>> raw = mapper.readValue(stdout,
-                            new TypeReference<List<Map<String, Object>>>() {});
-                    for (Map<String, Object> entry : raw) {
-                        try {
-                            String name = str(entry, "Name");
-                            if (name.isBlank()) continue;
-                            String desc = str(entry, "InterfaceDescription");
-                            String status = str(entry, "Status");
-                            String speed = str(entry, "LinkSpeed");
-                            String mac = str(entry, "MacAddress");
-                            String ip = str(entry, "IPAddress");
-                            String adminStatus = str(entry, "AdminStatus");
-                            // enabled = administrative state, not operational Up status
-                            boolean adminEnabled = "Up".equalsIgnoreCase(adminStatus) || "Enabled".equalsIgnoreCase(adminStatus);
-                            // status reflects operational: Up/Disconnected/Disabled etc.
-                            boolean enabled = adminEnabled;
-                            String dhcp = str(entry, "Dhcp");
-                            String gateway = str(entry, "Gateway");
-                            String dns = str(entry, "DnsServers");
-                            adapters.add(new NetworkAdapterRow(name, desc, status, speed, mac, ip, enabled, dhcp, gateway, dns));
-                        } catch (Exception e) {
-                            AppLogger.warning("Failed to parse adapter entry: " + e.getMessage());
-                        }
+                    Map<String, Object> data = mapper.readValue(stdout,
+                            new TypeReference<Map<String, Object>>() {});
+                    Object success = data.get("success");
+                    if (success instanceof Boolean b && !b) {
+                        String err = str(data, "error");
+                        return AdapterListResult.failure(err.isEmpty() ? "Failed to list network adapters." : err);
                     }
                 } catch (Exception je) {
-                    AppLogger.warning("Failed to parse adapter JSON: " + je.getMessage() + " stdout=" + stdout + " stderr=" + stderr);
+                    AppLogger.warning("Failed to parse adapter error JSON: " + je.getMessage());
                 }
-            } else if (!stderr.isEmpty()) {
-                AppLogger.warning("List adapters stderr: " + stderr);
             }
+            List<NetworkAdapterRow> adapters = parseAdapterJsonArray(stdout);
+            if (adapters == null) {
+                if (!stdout.isEmpty() && !"[]".equals(stdout)) {
+                    String detail = stderr.isEmpty() ? stdout : stderr;
+                    return AdapterListResult.failure("Failed to parse adapter list." + (detail.isEmpty() ? "" : "\n" + detail));
+                }
+                if (pr.exitCode() != 0) {
+                    String detail = !stderr.isEmpty() ? stderr : pr.combinedOutput();
+                    return AdapterListResult.failure(
+                            "Failed to list network adapters (exit " + pr.exitCode() + ")."
+                                    + (detail != null && !detail.isBlank() ? "\n" + detail.trim() : ""));
+                }
+                return AdapterListResult.ok(List.of());
+            }
+            if (pr.exitCode() != 0 && adapters.isEmpty()) {
+                String detail = !stderr.isEmpty() ? stderr : pr.combinedOutput();
+                return AdapterListResult.failure(
+                        "Failed to list network adapters (exit " + pr.exitCode() + ")."
+                                + (detail != null && !detail.isBlank() ? "\n" + detail.trim() : ""));
+            }
+            return AdapterListResult.ok(adapters);
         } catch (Exception e) {
             AppLogger.warning("Failed to list adapters: " + e.getMessage());
+            return AdapterListResult.failure(e.getMessage());
         }
-        return adapters;
+    }
+
+    public List<NetworkAdapterRow> listAdapters() {
+        AdapterListResult result = queryAdapters();
+        return result.success() ? result.adapters() : List.of();
+    }
+
+    private List<NetworkAdapterRow> parseAdapterJsonArray(String stdout) {
+        if (stdout == null || stdout.isBlank() || "[]".equals(stdout)) {
+            return List.of();
+        }
+        try {
+            List<Map<String, Object>> raw = mapper.readValue(stdout,
+                    new TypeReference<List<Map<String, Object>>>() {});
+            List<NetworkAdapterRow> adapters = new ArrayList<>();
+            for (Map<String, Object> entry : raw) {
+                try {
+                    String name = str(entry, "Name");
+                    if (name.isBlank()) continue;
+                    String desc = str(entry, "InterfaceDescription");
+                    String status = str(entry, "Status");
+                    String speed = str(entry, "LinkSpeed");
+                    String mac = str(entry, "MacAddress");
+                    String ip = str(entry, "IPAddress");
+                    String adminStatus = str(entry, "AdminStatus");
+                    boolean adminEnabled = "Up".equalsIgnoreCase(adminStatus) || "Enabled".equalsIgnoreCase(adminStatus);
+                    boolean enabled = adminEnabled;
+                    String dhcp = str(entry, "Dhcp");
+                    String gateway = str(entry, "Gateway");
+                    String dns = str(entry, "DnsServers");
+                    adapters.add(new NetworkAdapterRow(name, desc, status, speed, mac, ip, enabled, dhcp, gateway, dns));
+                } catch (Exception e) {
+                    AppLogger.warning("Failed to parse adapter entry: " + e.getMessage());
+                }
+            }
+            return adapters;
+        } catch (Exception je) {
+            return null;
+        }
     }
 
     private static final java.util.regex.Pattern WIRELESS_DESC =
@@ -132,15 +183,21 @@ public class NetworkOptimizerService {
                 // Partial application: some settings may already be in effect.
                 // Report per-setting detail (not raw JSON) and log it so history matches reality.
                 String details = formatted != null ? formatted : (!stdout.isEmpty() ? stdout : combined);
+                boolean partialApply = isPartialOptimizeApply(formatted);
                 // Detect access denied hints
                 if (combined.toLowerCase().contains("access") && combined.toLowerCase().contains("denied")) {
                     details += "\n\nTip: Run WinZenith as Administrator.";
                 }
-                logChange("Apply Optimization", preset.getDisplayName(), details, false);
-                return OperationResult.fail(
-                        "Optimization did not fully apply (exit code " + pr.exitCode()
-                                + "). Lines marked OK succeeded in this run; the system may be in a mixed state.",
-                        details);
+                String logDetails = partialApply
+                        ? "PARTIAL APPLY — some settings changed before failure:\n" + details
+                        : details;
+                logChange("Apply Optimization", preset.getDisplayName(), logDetails, false);
+                String failMsg = "Optimization did not fully apply (exit code " + pr.exitCode()
+                        + "). Lines marked OK succeeded in this run; the system may be in a mixed state.";
+                if (partialApply) {
+                    failMsg += " Use 'Reset to Defaults' on the Optimization tab (or Snapshots…) to undo changes.";
+                }
+                return OperationResult.fail(failMsg, details);
             }
             String successDetails = formatted != null ? formatted : (!stdout.isEmpty() ? stdout : preset.getDescription());
             logChange("Apply Optimization", preset.getDisplayName(), successDetails, true);
@@ -179,6 +236,11 @@ public class NetworkOptimizerService {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private static boolean isPartialOptimizeApply(String formatted) {
+        if (formatted == null || formatted.isBlank()) return false;
+        return formatted.contains(" — OK") && formatted.contains(" — FAILED");
     }
 
     private static String firstPresent(Map<String, Object> map, String... keys) {
@@ -390,25 +452,47 @@ public class NetworkOptimizerService {
         }
     }
 
-    public List<String> getCurrentDnsServers(String adapterName) {
+    /** Result of a read-only DNS server query for one adapter. */
+    public record DnsServersQuery(boolean success, List<String> servers, String errorMessage) {
+        public static DnsServersQuery ok(List<String> servers) {
+            return new DnsServersQuery(true, servers != null ? servers : List.of(), null);
+        }
+
+        public static DnsServersQuery failure(String message) {
+            String msg = message != null && !message.isBlank() ? message : "Failed to read DNS servers.";
+            return new DnsServersQuery(false, List.of(), msg);
+        }
+    }
+
+    public DnsServersQuery queryCurrentDnsServers(String adapterName) {
         try {
             String safeName = sanitizeName(adapterName);
             Path script = PowerShellScripts.resolve("net-dns-get.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
                     ProcessRunner.powershellScript(script.toString(), "-AdapterName", safeName));
-            String stdout = pr.stdout().trim();
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {
                 Map<String, Object> data = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
+                Object success = data.get("success");
+                boolean ok = success instanceof Boolean && (Boolean) success;
+                if (!ok) {
+                    String err = str(data, "error");
+                    return DnsServersQuery.failure(err.isEmpty() ? "Failed to read DNS for adapter." : err);
+                }
                 Object dnsObj = data.get("dnsServers");
                 if (dnsObj instanceof List<?> list) {
-                    return list.stream().map(Object::toString).toList();
+                    return DnsServersQuery.ok(list.stream().map(Object::toString).toList());
                 }
+                return DnsServersQuery.ok(List.of());
             }
+            return DnsServersQuery.failure("No output from DNS query.");
+        } catch (IllegalArgumentException e) {
+            return DnsServersQuery.failure(e.getMessage());
         } catch (Exception e) {
             AppLogger.warning("Failed to get DNS servers: " + e.getMessage());
+            return DnsServersQuery.failure(e.getMessage());
         }
-        return List.of();
     }
 
     public OperationResult setDnsServers(String adapterName, String primaryDns, String secondaryDns) {
@@ -852,6 +936,7 @@ public class NetworkOptimizerService {
                     Object n = data.get("TCPNoDelay");
                     ack = a != null ? a.toString() : null;
                     noDelay = n != null ? n.toString() : null;
+                    mergeStableTcpGlobalsFromSnapshot(tcp, data);
                 }
             } catch (Exception ignored) {}
             current = new NetworkSnapshot("", Instant.now().toString(), "preview", tcp, ack, noDelay);
@@ -877,9 +962,12 @@ public class NetworkOptimizerService {
         if ("TCP No Delay".equalsIgnoreCase(key)) {
             return current.tcpNoDelay() == null ? "default (absent)" : current.tcpNoDelay();
         }
-        // TCP global keys: netsh uses names like "Receive-Side Scaling State", "ECN Capability", etc.
-        // Map our short names to likely netsh keys case-insensitively.
+        // Stable keys from net-tcp-snapshot.ps1 (locale-independent ordinal netsh parse)
         Map<String, String> tcp = current.tcpSettings() != null ? current.tcpSettings() : Map.of();
+        String stable = tcp.get(key);
+        if (stable != null && !stable.isBlank()) {
+            return stable;
+        }
         if (tcp.isEmpty()) return "(no data — not Windows or access denied)";
         String lookup = switch (key) {
             case "TCP AutoTuning" -> findTcpKey(tcp, "auto-tuning", "autotuning");
@@ -889,6 +977,20 @@ public class NetworkOptimizerService {
             default -> null;
         };
         return lookup != null ? lookup : "(not reported by netsh)";
+    }
+
+    private static void mergeStableTcpGlobalsFromSnapshot(Map<String, String> tcp, Map<String, Object> data) {
+        if (tcp == null || data == null) return;
+        putStableTcpPreview(tcp, "TCP AutoTuning", data.get("AutoTuning"));
+        putStableTcpPreview(tcp, "RSS", data.get("RSS"));
+        putStableTcpPreview(tcp, "RSC", data.get("RSC"));
+        putStableTcpPreview(tcp, "ECN", data.get("ECN"));
+    }
+
+    private static void putStableTcpPreview(Map<String, String> tcp, String key, Object value) {
+        if (value == null) return;
+        String s = value.toString().trim();
+        if (!s.isEmpty()) tcp.put(key, s);
     }
 
     private static String findTcpKey(Map<String, String> tcp, String... hints) {

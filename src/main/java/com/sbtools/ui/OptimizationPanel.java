@@ -38,6 +38,7 @@ class OptimizationPanel extends VBox {
     private AppSettings currentSettings;
     private final Label statusLabel;
     private final Consumer<AppSettings> onSettingsSaved;
+    private final Runnable onRebootStateChanged;
     private ToggleGroup presetGroup;
     private Label descLabel;
     private Label snapshotLabel;
@@ -47,12 +48,19 @@ class OptimizationPanel extends VBox {
     OptimizationPanel(NetworkOptimizerService service, BooleanProperty busy,
                       SettingsStore settingsStore, AppSettings currentSettings,
                       Label statusLabel, Consumer<AppSettings> onSettingsSaved) {
-        this(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved, () -> false);
+        this(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved, () -> false, null);
     }
 
     OptimizationPanel(NetworkOptimizerService service, BooleanProperty busy,
                       SettingsStore settingsStore, AppSettings currentSettings,
                       Label statusLabel, Consumer<AppSettings> onSettingsSaved, BooleanSupplier adminCheck) {
+        this(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved, adminCheck, null);
+    }
+
+    OptimizationPanel(NetworkOptimizerService service, BooleanProperty busy,
+                      SettingsStore settingsStore, AppSettings currentSettings,
+                      Label statusLabel, Consumer<AppSettings> onSettingsSaved, BooleanSupplier adminCheck,
+                      Runnable onRebootStateChanged) {
         this.service = service;
         this.busy = busy;
         this.adminCheck = adminCheck != null ? adminCheck : () -> false;
@@ -60,6 +68,7 @@ class OptimizationPanel extends VBox {
         this.currentSettings = currentSettings;
         this.statusLabel = statusLabel;
         this.onSettingsSaved = onSettingsSaved;
+        this.onRebootStateChanged = onRebootStateChanged;
         getChildren().addAll(buildContent());
     }
 
@@ -235,7 +244,16 @@ class OptimizationPanel extends VBox {
             try {
                 var result = service.applyOptimization(preset);
                 String saveError = null;
-                if (result.success()) {
+                boolean partialApply = result.partialApply();
+                if (result.success() || partialApply) {
+                    try {
+                        String rebootReason = result.success()
+                                ? "TCP optimization preset applied (" + preset.getDisplayName() + ")"
+                                : "Partial TCP optimization (" + preset.getDisplayName() + ")";
+                        service.markRebootRequired(rebootReason);
+                    } catch (Exception e) {
+                        AppLogger.warning("Failed to mark reboot required after optimization: " + e.getMessage());
+                    }
                     try {
                         AppSettings newSettings = currentSettings.toBuilder()
                                 .networkOptimizationPreset(preset.name())
@@ -252,11 +270,15 @@ class OptimizationPanel extends VBox {
                 }
                 final String finalSaveError = saveError;
                 final boolean wasSuccess = result.success();
+                final boolean partialFailure = partialApply;
+                final boolean presetReconciled = partialFailure && saveError == null;
                 Platform.runLater(() -> {
                     progressBar.setVisible(false);
                     busy.set(false);
-                    if (wasSuccess) {
-                        // update toggle to reflect actual applied preset
+                    if (wasSuccess || partialFailure) {
+                        if (onRebootStateChanged != null) {
+                            try { onRebootStateChanged.run(); } catch (Exception ignored) {}
+                        }
                         for (javafx.scene.control.Toggle t : presetGroup.getToggles()) {
                             if (t instanceof RadioButton rb && rb.getUserData() == preset) {
                                 rb.setSelected(true);
@@ -267,9 +289,15 @@ class OptimizationPanel extends VBox {
                     }
                     statusLabel.setText(wasSuccess
                             ? "Optimization applied: " + preset.getDisplayName()
-                            : "Optimization failed.");
-                    Alert a = new Alert(wasSuccess ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
-                            result.message() + (result.details() != null ? "\n\n" + result.details() : ""));
+                            : (partialFailure ? "Optimization partially applied — mixed TCP state." : "Optimization failed."));
+                    Alert.AlertType alertType = wasSuccess ? Alert.AlertType.INFORMATION
+                            : (partialFailure ? Alert.AlertType.WARNING : Alert.AlertType.ERROR);
+                    String alertBody = result.message() + (result.details() != null ? "\n\n" + result.details() : "");
+                    if (presetReconciled) {
+                        alertBody += "\n\nSaved preset preference as " + preset.getDisplayName()
+                                + " to reflect partial apply. Use 'Reset to Defaults' to undo system changes.";
+                    }
+                    Alert a = new Alert(alertType, alertBody);
                     a.showAndWait();
                     if (finalSaveError != null) {
                         new Alert(Alert.AlertType.WARNING,

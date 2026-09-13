@@ -19,8 +19,15 @@ import java.util.function.Consumer;
 
 public class DriverCatalogAggregator {
 
-    /** Per-provider budget. Lowered 180s→120s: WU/OEM rarely recover after 2 min; cache covers retries. */
+    /** Default per-provider budget (OEM HTTP / single-pass providers). */
     private static final long PROVIDER_TIMEOUT_SECONDS = 120;
+
+    private static long providerTimeoutSeconds(String providerId) {
+        if ("WindowsUpdate".equals(providerId)) {
+            return WindowsUpdateCatalogProvider.catalogAggregatorWaitBudgetSeconds();
+        }
+        return PROVIDER_TIMEOUT_SECONDS;
+    }
 
     private final List<DriverCatalogProvider> providers;
     private final ProviderCache cache;
@@ -291,27 +298,20 @@ public class DriverCatalogAggregator {
                         }
                     })))
                     .toList();
-            long deadlineNanos = System.nanoTime()
-                    + java.util.concurrent.TimeUnit.SECONDS.toNanos(PROVIDER_TIMEOUT_SECONDS);
             for (var task : futures) {
                 var future = task.future();
                 if (token.isCancelled() || Thread.currentThread().isInterrupted()) {
                     future.cancel(true);
                     continue;
                 }
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    future.cancel(true);
-                    if (!token.isCancelled() && !Thread.currentThread().isInterrupted()) {
-                        deliverOnce.accept(task.id(), List.of());
-                    }
-                    continue;
-                }
+                long timeoutSecs = providerTimeoutSeconds(task.id());
+                long waitNanos = java.util.concurrent.TimeUnit.SECONDS.toNanos(timeoutSecs);
                 try {
-                    future.get(remainingNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
+                    future.get(waitNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
                 } catch (java.util.concurrent.TimeoutException e) {
                     future.cancel(true);
-                    AppLogger.warning("CatalogAggregator: Provider timed out after " + PROVIDER_TIMEOUT_SECONDS + "s");
+                    AppLogger.warning("CatalogAggregator: Provider " + task.id()
+                            + " timed out after " + timeoutSecs + "s");
                     // Advance streaming progress: without a callback the
                     // Drivers-tab providersDone counter never reaches
                     // providerCount and progress/status freeze mid-scan.

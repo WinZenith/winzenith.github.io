@@ -73,7 +73,18 @@ class AdaptersPanel extends VBox {
         if (busy.get()) {
             isLoading.set(false);
             statusLabel.setText("Please wait, another operation is in progress...");
-            if (whenFinished != null) whenFinished.run();
+            if (whenFinished != null) {
+                javafx.beans.value.ChangeListener<Boolean> retryWhenIdle = new javafx.beans.value.ChangeListener<>() {
+                    @Override
+                    public void changed(javafx.beans.value.ObservableValue<? extends Boolean> obs, Boolean wasBusy, Boolean nowBusy) {
+                        if (Boolean.FALSE.equals(nowBusy)) {
+                            busy.removeListener(this);
+                            loadAdapters(whenFinished);
+                        }
+                    }
+                };
+                busy.addListener(retryWhenIdle);
+            }
             return;
         }
         busy.set(true);
@@ -81,12 +92,20 @@ class AdaptersPanel extends VBox {
 
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
-                List<NetworkAdapterRow> adapters = service.listAdapters();
+                NetworkOptimizerService.AdapterListResult result = service.queryAdapters();
                 lastLoadMillis = System.currentTimeMillis();
                 Platform.runLater(() -> {
-                    adapterRows.setAll(adapters);
-                    applyFilter();
-                    statusLabel.setText("Found " + adapters.size() + " adapter(s).");
+                    if (result.success()) {
+                        adapterRows.setAll(result.adapters());
+                        applyFilter();
+                        statusLabel.setText(result.adapters().isEmpty()
+                                ? "No network adapters found."
+                                : "Found " + result.adapters().size() + " adapter(s).");
+                    } else {
+                        statusLabel.setText("Failed to load adapters.");
+                        new Alert(Alert.AlertType.ERROR,
+                                "Failed to load network adapters:\n" + result.errorMessage()).showAndWait();
+                    }
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to load adapters", e);

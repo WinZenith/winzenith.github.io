@@ -83,6 +83,13 @@ public class BrowserExtensionService {
         return Map.copyOf(lastScanErrors);
     }
 
+    /** Expanded user-data / profiles root for a catalog browser label, or "". */
+    public static String userDataDirFor(String browser) {
+        String template = BROWSER_PATHS.get(browser);
+        if (template == null) return "";
+        return expandEnv(template);
+    }
+
     private static String expandEnv(String template) {
         if (template == null) return "";
         String local = System.getenv("LOCALAPPDATA");
@@ -475,15 +482,18 @@ public class BrowserExtensionService {
         } catch (java.util.concurrent.CancellationException ce) {
             throw ce;
         } catch (IOException ioe) {
-            // Infrastructure failure - propagate to caller for proper UX
-            AppLogger.warning("Failed to scan browser " + browser + ": " + ioe.getMessage());
+            String msg = ioe.getMessage() != null ? ioe.getMessage() : "scan failed";
+            lastScanErrors.put(browser, msg);
+            AppLogger.warning("Failed to scan browser " + browser + ": " + msg);
             throw ioe;
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new IOException("Scan interrupted", ie);
         } catch (Exception e) {
-            AppLogger.warning("Failed to scan browser " + browser + ": " + e.getMessage());
-            // Non-infra parse errors return partial results, not throw
+            String msg = e.getMessage() != null ? e.getMessage() : "scan failed";
+            AppLogger.warning("Failed to scan browser " + browser + ": " + msg);
+            lastScanErrors.put(browser, msg);
+            throw new IOException("Scan failed for " + browser + ": " + msg, e);
         }
         return results;
     }

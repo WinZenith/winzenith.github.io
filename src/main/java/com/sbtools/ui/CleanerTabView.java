@@ -191,19 +191,29 @@ import java.util.concurrent.atomic.AtomicInteger;
         String q = searchField != null && searchField.getText() != null
                 ? searchField.getText().trim().toLowerCase() : "";
         String risk = riskFilter != null && riskFilter.getValue() != null ? riskFilter.getValue() : "All risks";
-        filteredRows.setPredicate(row -> {
-            if (row == null) return false;
-            if (!"All risks".equals(risk)) {
-                String rowRisk = row.getCategory().getRiskLevel().getDisplayName();
-                if (!risk.equalsIgnoreCase(rowRisk)) return false;
+        filteredRows.setPredicate(row -> rowMatchesFilter(row, q, risk));
+        // Hidden rows must not stay selected: a filter + preset could otherwise
+        // leave HIGH-risk categories checked while the table shows only "Safe" rows.
+        for (CleanupRow row : sessionRows) {
+            if (row.isSelected() && !rowMatchesFilter(row, q, risk)) {
+                row.setSelected(false);
             }
-            if (!q.isEmpty()) {
-                String hay = (row.getCategory().getDisplayName() + " "
-                        + row.getCategory().getDescription()).toLowerCase();
-                if (!hay.contains(q)) return false;
-            }
-            return true;
-        });
+        }
+        updateCleanButtonState();
+    }
+
+    private static boolean rowMatchesFilter(CleanupRow row, String q, String risk) {
+        if (row == null) return false;
+        if (!"All risks".equals(risk)) {
+            String rowRisk = row.getCategory().getRiskLevel().getDisplayName();
+            if (!risk.equalsIgnoreCase(rowRisk)) return false;
+        }
+        if (!q.isEmpty()) {
+            String hay = (row.getCategory().getDisplayName() + " "
+                    + row.getCategory().getDescription()).toLowerCase();
+            if (!hay.contains(q)) return false;
+        }
+        return true;
     }
 
     private static String formatDuration(long ms) {
@@ -514,7 +524,10 @@ import java.util.concurrent.atomic.AtomicInteger;
             item.setOnAction(e -> {
                 if (busy.get()) return;
                 Set<CleanupCategory> cats = preset.getCategories();
-                for (CleanupRow row : filteredRows) {
+                // Presets define the full intended selection (e.g. Safe Only), not
+                // only visible rows — apply across sessionRows so hidden categories
+                // cannot remain selected after a risk/search filter.
+                for (CleanupRow row : sessionRows) {
                     row.setSelected(cats.contains(row.getCategory()));
                 }
                 updateCleanButtonState();
@@ -815,9 +828,10 @@ import java.util.concurrent.atomic.AtomicInteger;
         }
 
         // Second explicit confirmation for irreversible user-data destruction
-        // (iOS backups, Docker images/containers, previous Windows install).
+        // (browser logins/cookies, iOS backups, Docker, previous Windows install).
         java.util.List<CleanupRow> destructive = selected.stream()
-                .filter(r -> r.getCategory() == CleanupCategory.ITUNES_BACKUPS
+                .filter(r -> r.getCategory() == CleanupCategory.WEB_BROWSING_TRACES
+                        || r.getCategory() == CleanupCategory.ITUNES_BACKUPS
                         || r.getCategory() == CleanupCategory.DOCKER_CACHE
                         || r.getCategory() == CleanupCategory.OLD_WINDOWS_INSTALL)
                 .toList();
@@ -826,7 +840,8 @@ import java.util.concurrent.atomic.AtomicInteger;
                     + destructive.stream()
                             .map(r -> "  [!] " + r.getCategory().getDisplayName() + " — " + r.getCategory().getDescription())
                             .collect(java.util.stream.Collectors.joining("\n"))
-                    + "\n\niTunes backups cannot be recovered. Docker prune removes dangling build cache "
+                    + "\n\nWeb browsing cleanup removes saved passwords, cookies, and history when the browser is closed. "
+                    + "iTunes backups cannot be recovered. Docker prune removes dangling build cache "
                     + "and unused networks (tagged images, containers, and volumes are preserved). "
                     + "Removing Windows.old prevents rollback to the previous Windows version.\n\n"
                     + "Type-understanding: click OK only if you have independent backups.";

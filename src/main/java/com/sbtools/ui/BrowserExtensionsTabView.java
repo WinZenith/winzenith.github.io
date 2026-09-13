@@ -1140,34 +1140,31 @@ public class BrowserExtensionsTabView extends BorderPane {
                 List<BrowserExtensionRow> probes = allRows.stream()
                         .filter(r -> browsers.contains(r.getBrowser()))
                         .toList();
-                java.util.Set<String> running = new java.util.HashSet<>();
+                List<BrowserExtensionRow> probeRows = probes.isEmpty()
+                        ? allRows.stream().toList() : probes;
+                BrowserRunningState runningState = BrowserRunningState.empty();
                 try {
-                    running = detectRunningBrowsersFresh(probes.isEmpty()
-                            ? allRows.stream().toList() : probes, null);
+                    runningState = probeRunningState(probeRows, true);
                 } catch (Exception ex) {
                     AppLogger.warning("Failed to detect running browsers before restore: " + ex.getMessage());
                 }
-                final java.util.Set<String> runningSnapshot = running;
-                final boolean probeOkSnapshot = com.sbtools.browserext.BrowserProcessProbe.lastProbeOk();
-                final java.util.Set<String> unknownSnapshot = unknownExeBrowsers(
-                        probes.isEmpty() ? allRows.stream().toList() : probes);
+                final BrowserRunningState stateSnapshot = runningState;
+                final java.util.Set<String> unknownSnapshot = unknownExeBrowsers(probeRows);
                 Platform.runLater(() -> {
-                    if (!runningSnapshot.isEmpty()) {
+                    if (!stateSnapshot.runningLabels().isEmpty()) {
                         new Alert(Alert.AlertType.ERROR,
-                                formatRunningBrowserWarning(runningSnapshot)
+                                formatRunningBrowserWarning(stateSnapshot.runningLabels())
                                         + "\n\nAborted — close all browsers and try again.\n"
                                         + "Restoring now would be silently overwritten on browser exit.")
                                 .showAndWait();
                         statusLabel.setText("Restore aborted: browsers still running.");
                         return;
                     }
-                    if (!probeOkSnapshot || !unknownSnapshot.isEmpty()) {
+                    if (runningStateUnverified(stateSnapshot, unknownSnapshot)) {
                         StringBuilder why = new StringBuilder(
                                 "The running-process check could not verify all browsers are closed");
-                        if (!unknownSnapshot.isEmpty()) {
-                            why.append(" (no known executable image for: ")
-                                    .append(String.join(", ", unknownSnapshot)).append(")");
-                        }
+                        appendRunningProbeWarnings(why, stateSnapshot.probeOk(), unknownSnapshot,
+                                stateSnapshot.unverifiedLabels());
                         why.append(".\nRestoring while a browser runs is silently lost on browser exit."
                                 + "\n\nClose ALL browsers now, then click OK to restore, or Cancel to abort.");
                         Alert unreliable = new Alert(Alert.AlertType.WARNING);
@@ -1323,17 +1320,20 @@ public class BrowserExtensionsTabView extends BorderPane {
         AppExecutors.ioPool().submit(() -> {
             java.util.Set<String> browsersToWarn = new java.util.HashSet<>();
             java.util.Set<String> unknownExes = new java.util.HashSet<>();
-            boolean probeOk = false;
+            java.util.Set<String> unverifiedChannels = new java.util.HashSet<>();
+            BrowserRunningState runningState = BrowserRunningState.empty();
             try {
-                browsersToWarn = detectRunningBrowsers(selected, toggleCancelled);
-                probeOk = com.sbtools.browserext.BrowserProcessProbe.lastProbeOk();
+                runningState = probeRunningState(selected, false);
+                browsersToWarn = runningState.runningLabels();
+                unverifiedChannels = runningState.unverifiedLabels();
                 unknownExes = unknownExeBrowsers(selected);
             } catch (Exception ex) {
                 AppLogger.warning("Failed to detect running browsers: " + ex.getMessage());
             }
             final java.util.Set<String> warnSnapshot = browsersToWarn;
             final java.util.Set<String> unknownSnapshot = unknownExes;
-            final boolean probeOkSnapshot = probeOk;
+            final java.util.Set<String> unverifiedSnapshot = unverifiedChannels;
+            final boolean probeOkSnapshot = runningState.probeOk();
             final List<BrowserExtensionRow> selectedSnapshot = List.copyOf(selected);
             Platform.runLater(() -> {
                 if (toggleCancelled.get()) {
@@ -1345,16 +1345,10 @@ public class BrowserExtensionsTabView extends BorderPane {
                 // failed tasklist (or a browser with no known exe image) means
                 // "unknown", not "not running". Require informed consent
                 // instead of silently toggling while a browser may be open.
-                if (warnSnapshot.isEmpty() && (!probeOkSnapshot || !unknownSnapshot.isEmpty())) {
+                if (warnSnapshot.isEmpty()
+                        && runningStateUnverified(probeOkSnapshot, unknownSnapshot, unverifiedSnapshot)) {
                     StringBuilder why = new StringBuilder();
-                    if (!probeOkSnapshot) {
-                        why.append("The running-process check (tasklist) failed, so open browsers may not have been detected.\n");
-                    }
-                    if (!unknownSnapshot.isEmpty()) {
-                        why.append("No known executable image for: ")
-                                .append(String.join(", ", unknownSnapshot))
-                                .append(" — a running instance cannot be detected.\n");
-                    }
+                    appendRunningProbeWarnings(why, probeOkSnapshot, unknownSnapshot, unverifiedSnapshot);
                     Alert unreliable = new Alert(Alert.AlertType.WARNING);
                     unreliable.setTitle(AppInfo.DISPLAY_NAME);
                     unreliable.setHeaderText("Could not verify browsers are closed");
@@ -1384,19 +1378,18 @@ public class BrowserExtensionsTabView extends BorderPane {
                     setBusy(true);
                     statusLabel.setText("Re-checking running browsers...");
                     AppExecutors.ioPool().submit(() -> {
-                        java.util.Set<String> recheck = new java.util.HashSet<>();
-                        boolean recheckProbeOk = false;
+                        BrowserRunningState recheckState = BrowserRunningState.empty();
                         try {
-                            recheck = detectRunningBrowsers(selectedSnapshot, toggleCancelled);
-                            recheckProbeOk = com.sbtools.browserext.BrowserProcessProbe.lastProbeOk();
+                            recheckState = probeRunningState(selectedSnapshot, true);
                         } catch (Exception ex) {
                             AppLogger.warning("Failed to re-check running browsers: " + ex.getMessage());
                         }
-                        final java.util.Set<String> recheckSnapshot = recheck;
-                        final boolean probeOkFinal = recheckProbeOk;
+                        final BrowserRunningState recheckSnapshot = recheckState;
                         Platform.runLater(() -> {
                             setBusy(false);
-                            if (!probeOkFinal) {
+                            if (runningStateUnverified(recheckSnapshot.probeOk(), java.util.Set.of(),
+                                    recheckSnapshot.unverifiedLabels())
+                                    || !recheckSnapshot.probeOk()) {
                                 new Alert(Alert.AlertType.ERROR,
                                         "Could not verify browsers are closed (process check failed).\n"
                                                 + "Aborted — close all browsers and try again.")
@@ -1404,9 +1397,9 @@ public class BrowserExtensionsTabView extends BorderPane {
                                 statusLabel.setText("Toggle aborted: running state unverified.");
                                 return;
                             }
-                            if (!recheckSnapshot.isEmpty()) {
+                            if (!recheckSnapshot.runningLabels().isEmpty()) {
                                 new Alert(Alert.AlertType.ERROR,
-                                        formatRunningBrowserWarning(recheckSnapshot)
+                                        formatRunningBrowserWarning(recheckSnapshot.runningLabels())
                                                 + "\n\nAborted — close them and try again.")
                                         .showAndWait();
                                 statusLabel.setText("Toggle aborted: browsers still running.");
@@ -1463,14 +1456,15 @@ public class BrowserExtensionsTabView extends BorderPane {
                 // a cached entry could miss a browser relaunched inside the
                 // TTL window and further writes would be silently lost.
                 try {
-                    java.util.Set<String> running = detectRunningBrowsersFresh(List.of(ext), toggleCancelled);
-                    if (!com.sbtools.browserext.BrowserProcessProbe.lastProbeOk()) {
+                    BrowserRunningState perItem = probeRunningState(List.of(ext), true);
+                    if (runningStateUnverified(perItem.probeOk(), java.util.Set.of(),
+                            perItem.unverifiedLabels()) || !perItem.probeOk()) {
                         AppLogger.warning("Toggle aborted mid-batch: process probe unreliable.");
                         skipped = selected.size() - success - fail;
                         break;
                     }
-                    if (!running.isEmpty()) {
-                        AppLogger.warning("Toggle aborted mid-batch: " + running + " started running.");
+                    if (!perItem.runningLabels().isEmpty()) {
+                        AppLogger.warning("Toggle aborted mid-batch: " + perItem.runningLabels() + " started running.");
                         skipped = selected.size() - success - fail;
                         break;
                     }
@@ -1600,42 +1594,62 @@ public class BrowserExtensionsTabView extends BorderPane {
         return sb.toString();
     }
 
-    private java.util.Set<String> detectRunningBrowsers(List<BrowserExtensionRow> selected, AtomicBoolean cancelled) {
-        java.util.Set<String> result = new java.util.HashSet<>();
-        try {
-            if (cancelled != null && cancelled.get()) return result;
-            // Cached probe: one tasklist per ~2s instead of one per row (batch-toggle optimization).
-            // Exact exe-name matching avoids false positives from updater paths (B2).
-            java.util.Set<String> runningExes = com.sbtools.browserext.BrowserProcessProbe.runningExes();
-            collectRunningBrowsers(selected, cancelled, runningExes, result);
-        } catch (Exception ignored) {
+    private record BrowserRunningState(
+            java.util.Set<String> runningLabels,
+            java.util.Set<String> unverifiedLabels,
+            boolean probeOk) {
+        static BrowserRunningState empty() {
+            return new BrowserRunningState(new java.util.HashSet<>(), new java.util.HashSet<>(), false);
         }
-        return result;
     }
 
-    /** Fresh (uncached) variant for safety-critical one-shot checks. */
-    private java.util.Set<String> detectRunningBrowsersFresh(List<BrowserExtensionRow> selected, AtomicBoolean cancelled) {
-        java.util.Set<String> result = new java.util.HashSet<>();
-        try {
-            if (cancelled != null && cancelled.get()) return result;
-            java.util.Set<String> runningExes = com.sbtools.browserext.BrowserProcessProbe.runningExesFresh();
-            collectRunningBrowsers(selected, cancelled, runningExes, result);
-        } catch (Exception ignored) {
+    private BrowserRunningState probeRunningState(List<BrowserExtensionRow> selected, boolean fresh) {
+        if (selected == null || selected.isEmpty()) {
+            com.sbtools.browserext.BrowserProcessProbe.Snapshot snap = fresh
+                    ? com.sbtools.browserext.BrowserProcessProbe.snapshotFresh()
+                    : com.sbtools.browserext.BrowserProcessProbe.snapshot();
+            return new BrowserRunningState(new java.util.HashSet<>(), new java.util.HashSet<>(), snap.probeOk());
         }
-        return result;
+        com.sbtools.browserext.BrowserProcessProbe.Snapshot snap = fresh
+                ? com.sbtools.browserext.BrowserProcessProbe.snapshotFresh()
+                : com.sbtools.browserext.BrowserProcessProbe.snapshot();
+        java.util.Set<String> running =
+                com.sbtools.browserext.BrowserChannelRunning.runningAmong(selected, snap);
+        java.util.Set<String> unverified =
+                com.sbtools.browserext.BrowserChannelRunning.multiChannelExeWithoutDetailAmong(selected, snap);
+        unverified.addAll(com.sbtools.browserext.BrowserChannelRunning
+                .ambiguousMultiChannelExeBrowsers(selected, snap));
+        return new BrowserRunningState(running, unverified, snap.probeOk());
     }
 
-    private void collectRunningBrowsers(List<BrowserExtensionRow> selected, AtomicBoolean cancelled,
-                                        java.util.Set<String> runningExes, java.util.Set<String> result) {
-        for (BrowserExtensionRow ext : selected) {
-            if (cancelled != null && cancelled.get()) break;
-            String browserName = ext.getBrowser();
-            if (browserName == null) continue;
-            String expectedExe = com.sbtools.browserext.BrowserExtensionService.expectedExeFor(browserName);
-            if (expectedExe != null && !expectedExe.isBlank()
-                    && runningExes.contains(expectedExe.toLowerCase())) {
-                result.add(browserName);
-            }
+    private static boolean runningStateUnverified(BrowserRunningState state,
+                                                  java.util.Set<String> unknownExeBrowsers) {
+        return runningStateUnverified(state.probeOk(), unknownExeBrowsers, state.unverifiedLabels());
+    }
+
+    private static boolean runningStateUnverified(boolean probeOk,
+                                                  java.util.Set<String> unknownExeBrowsers,
+                                                  java.util.Set<String> unverifiedChannels) {
+        return !probeOk
+                || (unknownExeBrowsers != null && !unknownExeBrowsers.isEmpty())
+                || (unverifiedChannels != null && !unverifiedChannels.isEmpty());
+    }
+
+    private static void appendRunningProbeWarnings(StringBuilder why, boolean probeOk,
+                                                   java.util.Set<String> unknownExeBrowsers,
+                                                   java.util.Set<String> unverifiedChannels) {
+        if (!probeOk) {
+            why.append("The running-process check failed, so open browsers may not have been detected.\n");
+        }
+        if (unknownExeBrowsers != null && !unknownExeBrowsers.isEmpty()) {
+            why.append("No known executable image for: ")
+                    .append(String.join(", ", unknownExeBrowsers))
+                    .append(" — a running instance cannot be detected.\n");
+        }
+        if (unverifiedChannels != null && !unverifiedChannels.isEmpty()) {
+            why.append("A shared browser executable is running but the channel could not be verified for: ")
+                    .append(String.join(", ", unverifiedChannels))
+                    .append(".\n");
         }
     }
 

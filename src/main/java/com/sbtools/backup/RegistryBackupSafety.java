@@ -149,7 +149,7 @@ public final class RegistryBackupSafety {
         return new SnapshotResult(safetyDir, exported, absent);
     }
 
-    static String decodeRegText(byte[] bytes) {
+    private static String decodeRegText(byte[] bytes) {
         if (bytes.length >= 2 && bytes[0] == (byte) 0xFF && bytes[1] == (byte) 0xFE) {
             return new String(bytes, 2, bytes.length - 2, StandardCharsets.UTF_16LE);
         }
@@ -162,7 +162,7 @@ public final class RegistryBackupSafety {
         return new String(bytes, Charset.forName("Windows-1252"));
     }
 
-    static String normalizeHivePath(String path) {
+    private static String normalizeHivePath(String path) {
         if (path == null) {
             return "";
         }
@@ -184,7 +184,7 @@ public final class RegistryBackupSafety {
         return p;
     }
 
-    static boolean isAllowedHivePath(String hivePath) {
+    private static boolean isAllowedHivePath(String hivePath) {
         String norm = normalizeHivePath(hivePath).toUpperCase(Locale.ROOT);
         for (String allowed : allowedKeyPrefixes()) {
             String a = allowed.toUpperCase(Locale.ROOT);
@@ -195,7 +195,7 @@ public final class RegistryBackupSafety {
         return false;
     }
 
-    static boolean keyExists(String fullKey) {
+    private static boolean keyExists(String fullKey) {
         try {
             ProcessBuilder pb = new ProcessBuilder("reg", "query", fullKey);
             pb.redirectErrorStream(true);
@@ -223,7 +223,100 @@ public final class RegistryBackupSafety {
         return runRegExport(fullKey, outputFile) ? RegExportOutcome.OK : RegExportOutcome.FAILED;
     }
 
-    static boolean runRegExport(String fullKey, Path outputFile) {
+    /**
+     * Imports session {@code .reg} files in order. On any failure, re-applies the
+     * pre-restore safety snapshot (when provided) before throwing.
+     */
+    public static void importRegSessionAtomically(List<Path> regFiles, Path safetySnapshotDir) throws IOException {
+        if (regFiles == null || regFiles.isEmpty()) {
+            return;
+        }
+        int sessionImported = 0;
+        for (Path regFile : regFiles) {
+            if (!runRegImport(regFile)) {
+                String failed = regFile.getFileName().toString();
+                if (sessionImported > 0 && safetySnapshotDir != null) {
+                    if (!hasPreRestoreSafetyRegs(safetySnapshotDir)) {
+                        throw new IOException("Registry import failed at " + failed + " after " + sessionImported
+                                + " file(s) had already been merged.\n\n"
+                                + "No pre-restore .reg exports were available (keys may not have existed on this PC), "
+                                + "so automatic rollback was not possible.\n"
+                                + "Use System Restore or import a known-good registry backup session.");
+                    }
+                    try {
+                        importPreRestoreSafetyRegs(safetySnapshotDir);
+                    } catch (IOException rollbackEx) {
+                        throw new IOException("Registry import failed at " + failed
+                                + " and automatic rollback from the safety snapshot also failed: "
+                                + rollbackEx.getMessage(), rollbackEx);
+                    }
+                    throw new IOException("Registry import failed at " + failed
+                            + ". Pre-restore keys were re-applied from the safety snapshot at:\n"
+                            + safetySnapshotDir);
+                }
+                throw new IOException("Registry import failed at " + failed);
+            }
+            sessionImported++;
+        }
+    }
+
+    private static boolean hasPreRestoreSafetyRegs(Path safetyDir) throws IOException {
+        if (safetyDir == null || !Files.isDirectory(safetyDir)) {
+            return false;
+        }
+        try (var stream = Files.list(safetyDir)) {
+            return stream.anyMatch(p -> {
+                String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
+                return name.startsWith("pre-restore_") && name.endsWith(".reg");
+            });
+        }
+    }
+
+    /** Imports all {@code pre-restore_*.reg} files from a safety session directory. */
+    public static void importPreRestoreSafetyRegs(Path safetyDir) throws IOException {
+        if (safetyDir == null || !Files.isDirectory(safetyDir)) {
+            throw new IOException("Safety snapshot folder missing: " + safetyDir);
+        }
+        List<Path> safetyRegs = new ArrayList<>();
+        try (var stream = Files.list(safetyDir)) {
+            for (Path p : stream.sorted()) {
+                String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
+                if (name.startsWith("pre-restore_") && name.endsWith(".reg")) {
+                    safetyRegs.add(p);
+                }
+            }
+        }
+        for (Path reg : safetyRegs) {
+            if (!runRegImport(reg)) {
+                throw new IOException("Safety rollback import failed for " + reg.getFileName());
+            }
+        }
+    }
+
+    private static boolean runRegImport(Path regFile) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("reg", "import", regFile.toString());
+            pb.redirectErrorStream(true);
+            Process process = ProcessManager.start(pb);
+            boolean finished = process.waitFor(120, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                AppLogger.warning("reg import timed out for " + regFile.getFileName());
+                return false;
+            }
+            if (process.exitValue() != 0) {
+                AppLogger.warning("reg import failed for " + regFile.getFileName()
+                        + " (exit=" + process.exitValue() + ")");
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            AppLogger.warning("reg import error for " + regFile.getFileName() + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean runRegExport(String fullKey, Path outputFile) {
         try {
             Files.createDirectories(outputFile.getParent());
             ProcessBuilder pb = new ProcessBuilder("reg", "export", fullKey, outputFile.toString(), "/y");

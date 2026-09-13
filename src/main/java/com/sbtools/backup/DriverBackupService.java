@@ -213,9 +213,9 @@ public class DriverBackupService {
         if (!BackupHealth.isPathShapeSafe(folder)) {
             throw new IOException("Refusing to revert from unsafe folder: " + folder);
         }
-        if (!isUnderCurrentRoots(folder)) {
-            throw new IOException("Backup is outside the current backup locations: " + folder
-                    + ". Point the backup directory back to its original location and retry.");
+        if (!isAuthorizedBackupPath(folder)) {
+            throw new IOException("Backup is outside known backup locations: " + folder
+                    + ". Point the backup directory back to its original location, or use Repair if the index is stale.");
         }
         String infName = entry.infName();
         if (infName == null || !RECORDED_INF_NAME.matcher(infName).matches()) {
@@ -305,6 +305,44 @@ public class DriverBackupService {
         } catch (Exception ignored) {
             return new RevertDetail(-1, -1, "", false, false);
         }
+    }
+
+    /**
+     * True when this entry can be removed without administrator elevation
+     * (writable backup folder and index files under known backup roots).
+     */
+    public boolean canDeleteAsCurrentUser(DriverBackupEntry entry) {
+        if (entry == null || entry.id() == null) {
+            return false;
+        }
+        Path folder;
+        try {
+            folder = Path.of(entry.backupFolder());
+        } catch (Exception e) {
+            return false;
+        }
+        if (Files.isDirectory(folder)) {
+            if (!isSafeToDelete(folder, entry)) {
+                return false;
+            }
+            if (!BackupDeleteAccess.isPathDeletableByCurrentUser(folder)) {
+                return false;
+            }
+        } else if (entry.backupFolder() != null && !entry.backupFolder().isBlank()) {
+            if (!isSafeToDelete(folder, entry)) {
+                return false;
+            }
+        }
+        return canUpdateIndexesAsCurrentUser();
+    }
+
+    public boolean canDeleteAllAsCurrentUser() throws IOException {
+        for (DriverBackupEntry entry : listAll()) {
+            if (!canDeleteAsCurrentUser(entry)) {
+                return false;
+            }
+        }
+        return canUpdateIndexesAsCurrentUser();
     }
 
     public void removeBackupEntry(DriverBackupEntry entry) throws IOException {
@@ -459,10 +497,18 @@ public class DriverBackupService {
     }
 
     /**
-     * Current-roots membership for destructive paths (revert): shape + depth +
-     * under a present-day allowed root. Unlike {@link #isSafeToDelete}, it never
-     * consults index references — an index entry must not authorize itself.
+     * Revert may use indexed paths even when settings moved (merged index entries).
      */
+    private boolean isAuthorizedBackupPath(Path folder) {
+        if (folder == null || !BackupHealth.isPathShapeSafe(folder)) {
+            return false;
+        }
+        if (isUnderCurrentRoots(folder)) {
+            return true;
+        }
+        return isIndexedBackupFolder(folder);
+    }
+
     private boolean isUnderCurrentRoots(Path folder) {
         if (folder == null) return false;
         if (!BackupHealth.isPathShapeSafe(folder)) return false;
@@ -489,6 +535,34 @@ public class DriverBackupService {
             }
         } catch (Exception ignored) {}
         return false;
+    }
+
+    private boolean canUpdateIndexesAsCurrentUser() {
+        try {
+            boolean anyIndexFile = false;
+            for (Path idx : allIndexPaths()) {
+                if (!Files.exists(idx)) {
+                    continue;
+                }
+                anyIndexFile = true;
+                if (!BackupDeleteAccess.isFileWritableByCurrentUser(idx)) {
+                    return false;
+                }
+            }
+            if (anyIndexFile) {
+                return true;
+            }
+            // No index yet: need a writable primary backups root to record the purge.
+            for (Path idx : allIndexPaths()) {
+                Path parent = idx.getParent();
+                if (parent != null && BackupDeleteAccess.isPathDeletableByCurrentUser(parent)) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**
@@ -525,7 +599,7 @@ public class DriverBackupService {
         }
         try {
             Path normalized = folder.toAbsolutePath().normalize();
-            if (!isUnderCurrentRoots(normalized)) {
+            if (!isUnderCurrentRoots(normalized) && !isIndexedBackupFolder(normalized)) {
                 return false;
             }
             if (normalized.getNameCount() < 2) {

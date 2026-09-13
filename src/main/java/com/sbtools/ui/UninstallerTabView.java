@@ -706,7 +706,17 @@ public class UninstallerTabView extends BorderPane {
     }
 
     private void scan() {
-        if (busy.get()) return;
+        scan(null);
+    }
+
+    /** Runs on the FX thread after the scan thread finishes and {@code busy} is cleared. */
+    private void scan(Runnable onComplete) {
+        if (busy.get()) {
+            if (onComplete != null) {
+                Platform.runLater(onComplete);
+            }
+            return;
+        }
         busy.set(true);
         progress.setVisible(true);
         cancelButton.setDisable(false);
@@ -813,6 +823,9 @@ public class UninstallerTabView extends BorderPane {
                         busy.set(false);
                         progress.setVisible(false);
                         cancelButton.setDisable(true);
+                        if (onComplete != null) {
+                            onComplete.run();
+                        }
                     }
                 });
             }
@@ -889,6 +902,8 @@ public class UninstallerTabView extends BorderPane {
             Platform.runLater(() -> {
                 if (stopQ) {
                     queueProgress.setVisible(false);
+                    queueActive = false;
+                    queueStopRequested = false;
                     scan();
                 } else {
                     processQueueNext(queue, index + 1, total);
@@ -902,6 +917,7 @@ public class UninstallerTabView extends BorderPane {
             if (outcome == UninstallerOperationGate.WorkflowOutcome.CANCELLED) {
                 queueProgress.setVisible(false);
                 queueActive = false;
+                queueStopRequested = false;
                 statusLabel.setText("Queue stopped.");
                 scan();
                 return;
@@ -909,6 +925,7 @@ public class UninstallerTabView extends BorderPane {
             if (queueStopRequested) {
                 queueProgress.setVisible(false);
                 queueActive = false;
+                queueStopRequested = false;
                 scan();
                 return;
             }
@@ -923,12 +940,16 @@ public class UninstallerTabView extends BorderPane {
             // If this was the last item, just finish.
             if (index + 1 >= queue.size()) {
                 queueProgress.setVisible(false);
+                queueActive = false;
+                queueStopRequested = false;
                 scan();
                 return;
             }
             ButtonType r = next.showAndWait().orElse(stopBtn);
             if (r == stopBtn) {
                 queueProgress.setVisible(false);
+                queueActive = false;
+                queueStopRequested = false;
                 scan();
             } else {
                 processQueueNext(queue, index + 1, total);
@@ -1242,8 +1263,13 @@ public class UninstallerTabView extends BorderPane {
     }
 
     private void refreshAfterUninstallWorkflow() {
-        scan();
-        finishWorkflow(UninstallerOperationGate.WorkflowOutcome.COMPLETED);
+        // Batch queue: do not scan here — scan holds busy and blocks the next app.
+        // Full list refresh runs when the queue exits (processQueueNext / stop paths).
+        if (queueActive) {
+            finishWorkflow(UninstallerOperationGate.WorkflowOutcome.COMPLETED);
+            return;
+        }
+        scan(() -> finishWorkflow(UninstallerOperationGate.WorkflowOutcome.COMPLETED));
     }
 
     private void runUninstallWizard(InstalledApp app) {

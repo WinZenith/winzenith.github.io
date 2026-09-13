@@ -191,7 +191,8 @@ public class SoftwareUpdateViewModel {
             List<SoftwareUpdateEntry> allUpdates = service.scanAllConcurrent(
                     scanCancelled,
                     wc -> counts[0] = wc,
-                    wuc -> counts[1] = wuc
+                    wuc -> counts[1] = wuc,
+                    SoftwareUpdateService.DEFAULT_SCAN_ALL_TIMEOUT_SECONDS
             );
 
             if (scanCancelled.get() || disposed) return;
@@ -310,7 +311,7 @@ public class SoftwareUpdateViewModel {
                     statusText.set("No updates to install. (" + (wc + wuc - dedupedUpdates.size()) + " ignored; Store apps not checked)");
                 } else {
                     if (wuFailed || wingetFailed) {
-                        String err = wuFailed ? wuError : wingetError;
+                        String err = SoftwareUpdateService.formatScanSourceError(wingetError, wuError);
                         String shortErr = err.length() > 120 ? err.substring(0, 120) + "..." : err;
                         statusText.set("Scan completed with warnings: " + shortErr);
                         AppLogger.warning("Scan warning surfaced: " + err);
@@ -989,12 +990,8 @@ public class SoftwareUpdateViewModel {
         }
     }
 
-    /**
-     * Deduplicates entries by package id (case-insensitive), keeping the first occurrence.
-     * Callers pass winget results before Windows Update results so winget wins ties.
-     * Package-visible for unit tests.
-     */
-    static List<SoftwareUpdateEntry> dedupeById(List<SoftwareUpdateEntry> entries) {
+    /** Deduplicates by package id (case-insensitive); winget list is merged before WU so winget wins ties. */
+    private static List<SoftwareUpdateEntry> dedupeById(List<SoftwareUpdateEntry> entries) {
         if (entries == null || entries.size() < 2) return entries == null ? List.of() : entries;
         java.util.LinkedHashMap<String, SoftwareUpdateEntry> byId = new java.util.LinkedHashMap<>();
         for (SoftwareUpdateEntry e : entries) {

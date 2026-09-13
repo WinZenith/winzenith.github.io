@@ -87,6 +87,24 @@ public class RestoreRow {
         });
     }
 
+    /**
+     * Re-inspects disk on the caller thread (for Verify). Updates volatile health
+     * fields synchronously; javafx properties update on the FX thread.
+     */
+    public void inspectFromDiskOnWorker() {
+        BackupHealth.Stats stats = BackupHealth.inspect(entry.backupFolder());
+        applyStats(stats);
+    }
+
+    public static void inspectAllOnWorker(List<RestoreRow> rows) {
+        if (rows == null) {
+            return;
+        }
+        for (RestoreRow row : rows) {
+            row.inspectFromDiskOnWorker();
+        }
+    }
+
     public static CompletableFuture<Void> computeAllSizesAsync(List<RestoreRow> rows) {
         return CompletableFuture.runAsync(() -> {
             for (RestoreRow row : rows) {

@@ -64,7 +64,6 @@ public final class DashboardSummaryStore {
         save(path(), scannedAt, issues);
     }
 
-    /** Package-visible for tests; production {@link #save(Instant, List)} uses {@link #path()}. */
     static void save(Path target, Instant scannedAt, List<DashboardTabView.IssueCategory> issues) {
         if (target == null || scannedAt == null || issues == null) return;
         try {
@@ -114,7 +113,6 @@ public final class DashboardSummaryStore {
         return load(path());
     }
 
-    /** Package-visible for tests. */
     static Snapshot load(Path p) {
         try {
             if (p == null || !Files.isRegularFile(p)) return null;

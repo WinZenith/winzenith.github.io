@@ -1,5 +1,8 @@
 package com.sbtools.ui;
 
+import com.sbtools.drivers.DriverScanService;
+import com.sbtools.drivers.catalog.WindowsUpdateCatalogProvider;
+import com.sbtools.software.SoftwareUpdateService;
 import com.sbtools.util.CancellationToken;
 
 import java.util.HashSet;
@@ -27,10 +30,15 @@ public final class DashboardScanCoordinator {
 
     /** Overall Dashboard scan budget (outer coordinator). */
     public static final long OVERALL_TIMEOUT_SECONDS = 360;
-    /** Soft budget for the driver sub-scan. */
-    public static final long DRIVER_TIMEOUT_SECONDS = 180;
+    /**
+     * Soft budget for the driver sub-scan: enumerate installed devices, then
+     * catalog providers (WU may use two 120s script attempts).
+     */
+    public static final long DRIVER_TIMEOUT_SECONDS = DriverScanService.ENUMERATE_TIMEOUT_SECONDS
+            + WindowsUpdateCatalogProvider.catalogAggregatorWaitBudgetSeconds()
+            + 15;
     /** Soft budget for the software sub-scan. */
-    public static final long SOFTWARE_TIMEOUT_SECONDS = 180;
+    public static final long SOFTWARE_TIMEOUT_SECONDS = SoftwareUpdateService.DEFAULT_SCAN_ALL_TIMEOUT_SECONDS;
     /** Soft budget for the cleanup sub-scan (40 categories, file walks). */
     public static final long CLEANUP_TIMEOUT_SECONDS = 240;
 
@@ -84,10 +92,7 @@ public final class DashboardScanCoordinator {
                 overallTimeoutSecs, perTaskTokens, 30, 100);
     }
 
-    /**
-     * Package-visible for unit tests (shorter poll / overall floor).
-     */
-    static Set<Integer> awaitAllInterruptible(
+    private static Set<Integer> awaitAllInterruptible(
             List<Future<?>> tasks,
             long[] perTaskTimeoutSecs,
             BooleanSupplier isStale,

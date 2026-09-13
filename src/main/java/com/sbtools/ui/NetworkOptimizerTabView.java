@@ -29,7 +29,7 @@ public class NetworkOptimizerTabView extends BorderPane {
     private final WiFiPanel wiFiPanel;
     private final ConnectionOverviewPanel connectionOverviewPanel;
     private final ChangeLogPanel changeLogPanel;
-    private final Label adminWarningLabel = new Label("Not running as Administrator — network changes (optimize, DNS, adapter enable/disable, reset, WoWlan forget) will fail. Right-click WinZenith.exe → Run as administrator.");
+    private final Label adminWarningLabel = new Label("Not running as Administrator — network changes (optimize, DNS server apply/reset, adapter enable/disable, stack reset, Wi-Fi forget) will fail. DNS cache flush works without elevation. Right-click WinZenith.exe → Run as administrator.");
     private final Label rebootLabel = new Label();
     private final javafx.scene.control.Button rebootClearBtn = new javafx.scene.control.Button("Hide");
     // Session-only snooze: hiding the banner must NOT clear the persistent
@@ -77,7 +77,7 @@ public class NetworkOptimizerTabView extends BorderPane {
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
         adaptersPanel = new AdaptersPanel(service, busy, this.adminCheck);
-        optimizationPanel = new OptimizationPanel(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved, this.adminCheck);
+        optimizationPanel = new OptimizationPanel(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved, this.adminCheck, this::refreshRebootBanner);
         dnsCachePanel = new DnsCachePanel(service, busy, statusLabel, this.adminCheck, this::refreshRebootBanner);
         adapterSettingsPanel = new AdapterSettingsPanel(service, busy);
         wiFiPanel = new WiFiPanel(service, busy, this.adminCheck);

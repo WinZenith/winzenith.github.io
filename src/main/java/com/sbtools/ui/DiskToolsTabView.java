@@ -484,6 +484,12 @@ public class DiskToolsTabView extends BorderPane {
         return prop;
     }
 
+    private BooleanProperty createWipeSelectedProp(String driveLetter) {
+        BooleanProperty prop = new SimpleBooleanProperty(false);
+        prop.addListener((obs, oldVal, newVal) -> updateWipeStartButton());
+        return prop;
+    }
+
     private void updateDefragButtons() {
         boolean anySelected = allDrives.stream()
                 .anyMatch(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get());
@@ -926,16 +932,8 @@ public class DiskToolsTabView extends BorderPane {
 
         healthDriveCombo.setPrefWidth(250);
         healthDriveCombo.setTooltip(new Tooltip("Select a drive to view detailed SMART data"));
-        healthDriveCombo.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
-            if (sel != null) {
-                DiskHealthInfo info = findHealthInfo(sel);
-                if (info != null) {
-                    updateSmartDetailPanel(info);
-                } else {
-                    clearSmartDetailPanel();
-                }
-            }
-        });
+        healthDriveCombo.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) ->
+                refreshHealthDetailForSelection(sel));
 
         HBox toolbar = new HBox(8, refreshHealthBtn, healthDriveCombo, healthProgress, healthStatus);
         toolbar.setAlignment(Pos.CENTER_LEFT);
@@ -989,6 +987,7 @@ public class DiskToolsTabView extends BorderPane {
                     if (!healthDriveCombo.getItems().isEmpty()) {
                         healthDriveCombo.getSelectionModel().select(0);
                     }
+                    refreshHealthDetailForSelection(healthDriveCombo.getSelectionModel().getSelectedItem());
                     healthStatus.setText("Found " + result.drives().size() + " disk(s).");
                 });
             } catch (Exception e) {
@@ -1005,6 +1004,19 @@ public class DiskToolsTabView extends BorderPane {
                 });
             }
         }, "disk-health-load").start();
+    }
+
+    private void refreshHealthDetailForSelection(String sel) {
+        if (sel == null) {
+            clearSmartDetailPanel();
+            return;
+        }
+        DiskHealthInfo info = findHealthInfo(sel);
+        if (info != null) {
+            updateSmartDetailPanel(info);
+        } else {
+            clearSmartDetailPanel();
+        }
     }
 
     private void clearSmartDetailPanel() {
@@ -1276,6 +1288,12 @@ public class DiskToolsTabView extends BorderPane {
     private void startBenchmark() {
         String selected = benchDriveCombo.getSelectionModel().getSelectedItem();
         if (selected == null) return;
+
+        if (currentBenchThread != null && currentBenchThread.isAlive()) {
+            new Alert(Alert.AlertType.WARNING,
+                    "A benchmark is already running. Please wait or click Stop first.").showAndWait();
+            return;
+        }
 
         // Prefer map lookup (volumeLabel may contain " - "); fallback to legacy parsing for compatibility
         String driveLetter;
@@ -1739,6 +1757,7 @@ public class DiskToolsTabView extends BorderPane {
     private void startSecureWipeRecycleBin() {
         List<RecycleBinEntry> entries = List.copyOf(recycleBinEntries);
         if (entries.isEmpty()) return;
+        if (recycleBinBusy.get()) return;
 
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING, "Secure Recycle Bin wipe requires administrator rights.").showAndWait();
@@ -2363,7 +2382,7 @@ public class DiskToolsTabView extends BorderPane {
         selectAllWipeCheck.setOnAction(e -> {
             boolean sel = selectAllWipeCheck.isSelected();
             for (DriveInfo d : wipeDrives) {
-                BooleanProperty prop = wipeSelected.computeIfAbsent(d.getDriveLetter(), k -> new SimpleBooleanProperty(false));
+                BooleanProperty prop = wipeSelected.computeIfAbsent(d.getDriveLetter(), k -> createWipeSelectedProp(k));
                 prop.set(sel);
             }
             wipeDriveTable.refresh();
@@ -2401,7 +2420,7 @@ public class DiskToolsTabView extends BorderPane {
                     setGraphic(null);
                 } else {
                     String key = item.getDriveLetter();
-                    BooleanProperty prop = wipeSelected.computeIfAbsent(key, k -> new SimpleBooleanProperty(false));
+                    BooleanProperty prop = wipeSelected.computeIfAbsent(key, k -> createWipeSelectedProp(k));
                     cb.selectedProperty().bindBidirectional(prop);
                     prevProp = prop;
                     setGraphic(cb);
@@ -2444,6 +2463,7 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void startWipeFreeSpace() {
+        if (wipeBusy.get()) return;
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING, "Free space wiping requires administrator rights.").showAndWait();
             return;
@@ -2602,7 +2622,7 @@ public class DiskToolsTabView extends BorderPane {
             } finally {
                 Platform.runLater(() -> {
                     wipeBusy.set(false);
-                    startWipeBtn.setDisable(false);
+                    updateWipeStartButton();
                     stopWipeBtn.setDisable(true);
                     wipeProgress.setVisible(false);
                     releaseGlobalBusy(wipeGlobalToken);

@@ -40,6 +40,7 @@ class DnsCachePanel extends VBox {
     private final TextArea diagnosticOutput = new TextArea();
     private volatile Future<?> currentTask;
     private volatile Future<?> dnsQueryTask;
+    private final java.util.concurrent.atomic.AtomicLong dnsQueryGeneration = new java.util.concurrent.atomic.AtomicLong(0);
     // Adapter refresh is read-only and frequent (tab selects, Refresh button): coalesce
     // concurrent runs and track them separately so the handle of an in-flight mutating
     // op (flush/DNS) stored in currentTask is never lost.
@@ -515,7 +516,6 @@ class DnsCachePanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
-        if (!requireAdmin()) return;
         busy.set(true);
         statusLabel.setText("Flushing DNS...");
         currentTask = AppExecutors.ioPool().submit(() -> {
@@ -623,24 +623,49 @@ class DnsCachePanel extends VBox {
 
     private void loadCurrentDns() {
         String adapter = adapterCombo.getSelectionModel().getSelectedItem();
-        if (adapter == null) return;
+        if (adapter == null) {
+            currentDnsLabel.setText("Current DNS: -");
+            return;
+        }
         final String requestedAdapter = adapter;
+        final long generation = dnsQueryGeneration.incrementAndGet();
         currentDnsLabel.setText("Current DNS: loading...");
         Future<?> prev = dnsQueryTask;
         if (prev != null) prev.cancel(true);
         dnsQueryTask = AppExecutors.ioPool().submit(() -> {
-            List<String> dns = service.getCurrentDnsServers(requestedAdapter);
-            Platform.runLater(() -> {
-                // Avoid race: only update if selection hasn't changed since request
-                String current = adapterCombo.getSelectionModel().getSelectedItem();
-                if (!requestedAdapter.equals(current)) return;
-                if (dns.isEmpty()) {
-                    currentDnsLabel.setText("Current DNS: None (DHCP)");
-                } else {
-                    currentDnsLabel.setText("Current DNS: " + String.join(", ", dns));
+            try {
+                if (Thread.currentThread().isInterrupted()) {
+                    return;
                 }
-            });
+                NetworkOptimizerService.DnsServersQuery query = service.queryCurrentDnsServers(requestedAdapter);
+                Platform.runLater(() -> applyDnsQueryToLabel(generation, requestedAdapter, query));
+            } catch (Exception e) {
+                if (Thread.currentThread().isInterrupted()
+                        || e instanceof InterruptedException
+                        || e instanceof java.util.concurrent.CancellationException) {
+                    return;
+                }
+                Platform.runLater(() -> {
+                    if (generation != dnsQueryGeneration.get()) return;
+                    if (!requestedAdapter.equals(adapterCombo.getSelectionModel().getSelectedItem())) return;
+                    currentDnsLabel.setText("Current DNS: (error — " + e.getMessage() + ")");
+                });
+            }
         });
+    }
+
+    private void applyDnsQueryToLabel(long generation, String requestedAdapter,
+                                      NetworkOptimizerService.DnsServersQuery query) {
+        if (generation != dnsQueryGeneration.get()) return;
+        String current = adapterCombo.getSelectionModel().getSelectedItem();
+        if (!requestedAdapter.equals(current)) return;
+        if (!query.success()) {
+            currentDnsLabel.setText("Current DNS: (error — " + query.errorMessage() + ")");
+        } else if (query.servers().isEmpty()) {
+            currentDnsLabel.setText("Current DNS: None (DHCP)");
+        } else {
+            currentDnsLabel.setText("Current DNS: " + String.join(", ", query.servers()));
+        }
     }
 
     private void applyDns() {

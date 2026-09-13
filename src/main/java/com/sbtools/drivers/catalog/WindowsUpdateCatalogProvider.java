@@ -23,6 +23,16 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
     private record MatchProposal(InstalledDriver driver, WuDriverOffer offer, int titleStrength, int hwRank) {}
 
     private static final long WU_SEARCH_TIMEOUT_SECONDS = 120;
+    private static final long WU_INTER_ATTEMPT_PAUSE_SECONDS = 2;
+    private static final long WU_CATALOG_WAIT_SLACK_SECONDS = 5;
+
+    /**
+     * Wall-clock budget for {@link DriverCatalogAggregator} to wait on this
+     * provider: two script attempts, inter-attempt pause, and small slack.
+     */
+    public static long catalogAggregatorWaitBudgetSeconds() {
+        return 2L * WU_SEARCH_TIMEOUT_SECONDS + WU_INTER_ATTEMPT_PAUSE_SECONDS + WU_CATALOG_WAIT_SLACK_SECONDS;
+    }
 
     private final ProcessRunner processRunner = new ProcessRunner(WU_SEARCH_TIMEOUT_SECONDS);
 

@@ -2050,26 +2050,25 @@ public class UninstallerService {
                         "Write-Output (\"KILLED:\" + $n)";
             } else {
                 String raw = safeApp != null ? safeApp.trim() : "";
-                String alnum = raw.replaceAll("[^A-Za-z0-9]", "");
-                // Safety: short or generic names must not use substring wildcards —
-                // '*Go*' or '*Mail*' would kill unrelated processes. Fall back to exact match only.
-                boolean allowWildcard = alnum.length() >= 4 && !isGenericName(raw.toLowerCase().trim());
+                if (raw.isBlank()) {
+                    if (summary != null) {
+                        summary.add("No running processes stopped (no install path or app name).");
+                    }
+                    return;
+                }
+                // CRITICAL FIX: exact ProcessName only — -like '*name*' killed unrelated processes.
                 String escapedExact = raw.replace("'", "''");
-                if (!allowWildcard) {
-                    AppLogger.info("Process kill restricted to exact match for short/generic name: " + raw);
+                String noSpace = raw.replaceAll("\\s+", "");
+                String escapedNoSpace = noSpace.replace("'", "''");
+                if (noSpace.equalsIgnoreCase(raw)) {
                     psScript = "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq '" + escapedExact + "' }; " +
                             "$n = @($cands).Count; " +
                             "$cands | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                             "Write-Output (\"KILLED:\" + $n)";
                 } else {
-                    // Match by process name: -like needs wildcards and escaped wildcard chars; also handle space-less variant (e.g. "Google Chrome" -> chrome)
-                    String likeEscaped = raw.replace("`", "``").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?").replace("$", "`$").replace("'", "''");
-                    String noSpace = raw.replaceAll("\\s+", "");
-                    String likeNoSpace = noSpace.replace("`", "``").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?").replace("$", "`$").replace("'", "''");
-                    // Use wildcards around the name; PowerShell -like is case-insensitive
-                    psScript = "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like '*" + likeEscaped + "*' -or $_.ProcessName -like '*" + likeNoSpace + "*' -or $_.ProcessName -eq '" + escapedExact + "' }; " +
-                            "$n = @($cands).Count; " +
-                            "$cands | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
+                    psScript = "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq '" + escapedExact + "' -or $_.ProcessName -eq '" + escapedNoSpace + "' }; " +
+                            "$n = @(@($cands) | Select-Object -Unique Id).Count; " +
+                            "$cands | Select-Object -Unique Id | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                             "Write-Output (\"KILLED:\" + $n)";
                 }
             }

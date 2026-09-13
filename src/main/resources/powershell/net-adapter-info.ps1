@@ -63,5 +63,7 @@ try {
         ConvertTo-Json -Compress @($result) -Depth 3
     }
 } catch {
-    Write-Output "[]"
+    $output = @{ success = $false; error = $_.Exception.Message }
+    ConvertTo-Json -Compress $output
+    exit 1
 }

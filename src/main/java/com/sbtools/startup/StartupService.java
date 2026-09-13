@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 
 public class StartupService {
 
@@ -116,19 +117,40 @@ public class StartupService {
     }
 
     public List<StartupItem> listAll() {
+        scanErrors.clear();
+        return collectAllSequential(() -> false);
+    }
+
+    /**
+     * Sequential scan phases. Does not clear {@link #scanErrors}; used by parallel fallback
+     * so partial-failure warnings from the parallel attempt are preserved.
+     */
+    private List<StartupItem> collectAllSequential(BooleanSupplier abortScan) {
         List<StartupItem> items = new ArrayList<>();
         if (!AppPaths.isWindows()) return items;
+        if (shouldAbortSequentialScan(abortScan)) return items;
 
-        scanErrors.clear();
         loadOriginalStartTypes();
         items.addAll(listRegistryApps());
+        if (shouldAbortSequentialScan(abortScan)) return items;
+
         items.addAll(listScheduledTasks());
+        if (shouldAbortSequentialScan(abortScan)) return items;
+
         items.addAll(listWindowsServices());
-        // Include startup folder items merged into registry view
+        if (shouldAbortSequentialScan(abortScan)) return items;
+
         items.addAll(listStartupFolderItems());
 
         items.sort(Comparator.comparing(StartupItem::getName, String.CASE_INSENSITIVE_ORDER));
         return items;
+    }
+
+    private static boolean shouldAbortSequentialScan(BooleanSupplier abortScan) {
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        return abortScan != null && abortScan.getAsBoolean();
     }
 
     /**
@@ -137,6 +159,13 @@ public class StartupService {
      * Honors thread interruption so the UI Stop button can cancel promptly.
      */
     public List<StartupItem> listAllParallel() {
+        return listAllParallel(() -> false);
+    }
+
+    /**
+     * @param abortScan when true, never falls back to sequential {@link #listAll()} and returns promptly
+     */
+    public List<StartupItem> listAllParallel(BooleanSupplier abortScan) {
         if (!AppPaths.isWindows()) return Collections.emptyList();
 
         scanErrors.clear();
@@ -155,6 +184,9 @@ public class StartupService {
 
             // Submit all and wait with timeout 60s total
             for (Callable<List<StartupItem>> t : tasks) {
+                if (abortScan != null && abortScan.getAsBoolean()) {
+                    throw new InterruptedException("Startup scan cancelled before submit");
+                }
                 if (Thread.currentThread().isInterrupted()) {
                     throw new InterruptedException("Startup scan cancelled before submit");
                 }
@@ -165,6 +197,11 @@ public class StartupService {
             long[] phaseMs = new long[scanNames.length];
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
             for (int i = 0; i < futures.size(); i++) {
+                if (abortScan != null && abortScan.getAsBoolean()) {
+                    cancelAll(futures);
+                    Thread.currentThread().interrupt();
+                    return items;
+                }
                 long remaining = deadline - System.nanoTime();
                 if (remaining <= 0) {
                     AppLogger.warning("Startup scan timed out: " + scanNames[i]);
@@ -215,11 +252,18 @@ public class StartupService {
                 Thread.currentThread().interrupt();
                 return Collections.emptyList();
             }
-            AppLogger.error("Parallel scan failed, falling back to sequential", e);
+            cancelAll(futures);
+            if (abortScan != null && abortScan.getAsBoolean()) {
+                Thread.currentThread().interrupt();
+                return Collections.emptyList();
+            }
             if (Thread.currentThread().isInterrupted()) {
                 return Collections.emptyList();
             }
-            return listAll();
+            AppLogger.error("Parallel scan failed, falling back to sequential", e);
+            scanErrors.add("Startup scan: parallel phase failed, retrying sequentially ("
+                    + e.getMessage() + ")");
+            return collectAllSequential(abortScan);
         }
     }
 
@@ -388,14 +432,8 @@ public class StartupService {
         }
     }
 
-    /**
-     * Pure, registry-free fallback mapping from a location label to key paths.
-     * Extracted for unit testing — mirrors the fallback branch of
-     * {@link #resolveRegistryPaths} without touching JNA.
-     *
-     * @return String[2] of {keyPath, approvedPath}
-     */
-    static String[] fallbackPathsForLocation(String location) {
+    /** Registry-free fallback mapping from a location label to {keyPath, approvedPath}. */
+    private static String[] fallbackPathsForLocation(String location) {
         String loc = location == null ? "" : location;
         boolean is32bit = loc.contains("32-bit");
         boolean isRunOnce = loc.contains("RunOnce");
@@ -541,12 +579,8 @@ public class StartupService {
             ProcessResult result = processRunner.run(ProcessRunner.powershellScript(script.toString()));
             if (result.success() && result.stdout() != null && !result.stdout().isBlank()) {
                 JsonNode root = JsonMapper.parseTree(result.stdout());
-                if (root.has("Error") && !root.path("Error").asText("").isBlank()) {
-                    String err = root.path("Error").asText("");
-                    String msg = "Scheduled Tasks WMI warning: " + err;
-                    AppLogger.warning(msg);
-                    scanErrors.add("Scheduled Tasks: " + err + " (partial listing, requires admin)");
-                }
+                String scriptError = root.has("Error") ? root.path("Error").asText("") : "";
+                String scriptWarning = root.has("Warning") ? root.path("Warning").asText("") : "";
 
                 JsonNode tasksNode = root.path("ScheduledTasks");
                 java.util.List<JsonNode> taskNodes = new java.util.ArrayList<>();
@@ -575,6 +609,18 @@ public class StartupService {
                                 StartupItemType.TASK,
                                 null
                         ));
+                }
+                if (!scriptWarning.isBlank()) {
+                    AppLogger.warning("Scheduled tasks schtasks fallback: " + scriptWarning);
+                    scanErrors.add("Scheduled Tasks: " + scriptWarning);
+                } else if (!scriptError.isBlank() && items.isEmpty()) {
+                    String msg = "Scheduled Tasks: enumeration failed — " + scriptError
+                            + " (no logon/startup tasks could be listed; try Run as administrator)";
+                    AppLogger.warning(msg);
+                    scanErrors.add(msg);
+                } else if (!scriptError.isBlank()) {
+                    AppLogger.warning("Scheduled tasks partial warning: " + scriptError);
+                    scanErrors.add("Scheduled Tasks: " + scriptError + " (partial listing)");
                 }
             } else {
                 String msg = "Failed to run scheduled task scan script: " + result.combinedOutput();
@@ -901,15 +947,20 @@ public class StartupService {
             if (primaryKey != null) {
                 deleteRegistryValueRequired(paths.hive(), primaryKey, valName);
                 deleteApprovedBestEffort(paths.hive(), StartupConstants.toApprovedPath(primaryKey), valName);
+                return;
             }
-            return;
+            throw new IOException("Failed to delete registry startup item: value '" + valName
+                    + "' was not found under Run (Disabled) keys.");
         }
         if (registryValueExistsSafe(paths.hive(), paths.keyPath(), valName)) {
             deleteRegistryValueRequired(paths.hive(), paths.keyPath(), valName);
             if (!StartupConstants.isRunOnceKey(paths.keyPath())) {
                 deleteApprovedBestEffort(paths.hive(), StartupConstants.toApprovedPath(paths.keyPath()), valName);
             }
+            return;
         }
+        throw new IOException("Failed to delete registry startup item: registry value '" + valName
+                + "' was not found at " + paths.keyPath() + ".");
     }
 
     private static boolean registryValueExistsSafe(HKEY hive, String keyPath, String valName) {

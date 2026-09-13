@@ -1545,6 +1545,56 @@ public class DriversTabView extends BorderPane {
         return confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
     }
 
+    private List<String> collectBatchPreflightWarnings(List<DriverRow> rows, AppSettings settings) {
+        List<String> lines = new ArrayList<>();
+        for (DriverRow row : rows) {
+            if (row == null || row.candidate() == null || row.isRebootPending()) {
+                continue;
+            }
+            DriverUpdateCandidate c = row.candidate();
+            if (DriverPreflightService.needsManualDownload(c)) {
+                continue;
+            }
+            try {
+                DriverPreflightService.PreflightResult pre =
+                        DriverPreflightService.check(c, settings, rebootStore);
+                if (pre.ok() && pre.hasWarnings()) {
+                    String name = row.installed().friendlyName();
+                    lines.add(name + ": " + String.join("; ", pre.warnings()));
+                }
+            } catch (Exception ex) {
+                AppLogger.warning("Batch pre-flight collect failed for "
+                        + row.installed().friendlyName() + ": " + ex.getMessage());
+            }
+        }
+        return lines;
+    }
+
+    private boolean confirmBatchPreflightWarnings(List<String> perDeviceWarnings) {
+        int cap = 15;
+        List<String> shown = perDeviceWarnings.size() <= cap
+                ? perDeviceWarnings
+                : perDeviceWarnings.subList(0, cap);
+        StringBuilder body = new StringBuilder();
+        body.append("Pre-install checks reported warnings for ")
+                .append(perDeviceWarnings.size())
+                .append(" driver(s):\n\n");
+        for (String line : shown) {
+            body.append("• ").append(line).append('\n');
+        }
+        if (perDeviceWarnings.size() > cap) {
+            body.append("\n… and ").append(perDeviceWarnings.size() - cap)
+                    .append(" more (see app.log).\n");
+        }
+        body.append("\nProceed with batch update anyway?");
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, body.toString(),
+                ButtonType.OK, ButtonType.CANCEL);
+        confirm.setTitle("Pre-install Warnings");
+        confirm.setHeaderText("Proceed with batch driver updates?");
+        confirm.getDialogPane().setPrefWidth(560);
+        return confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
+    }
+
     private void showErrorWithFallback(String message, String vendorPageUrl, String friendlyDeviceName) {
         // Cap: raw installer/pnputil/WU output can be megabytes and would
         // freeze the dialog (batch caps at the same 1500).
@@ -2034,6 +2084,14 @@ public class DriversTabView extends BorderPane {
     private void installBatchUpdates(List<DriverRow> rows) {
         final DriversOperationGate.Lease capturedBatchLease = tryAcquireOperation(DriversOperationGate.Owner.INSTALL);
         if (capturedBatchLease == null) return;
+        AppSettings batchSettings = settingsStore.load();
+        List<String> batchPreflightWarnings = collectBatchPreflightWarnings(rows, batchSettings);
+        if (!batchPreflightWarnings.isEmpty()
+                && !confirmBatchPreflightWarnings(batchPreflightWarnings)) {
+            releaseOperation(capturedBatchLease);
+            updateControlStates();
+            return;
+        }
         installCancelFlag.set(false);
         installService.resetCancellation();
         scanButton.setDisable(true);
@@ -2152,7 +2210,10 @@ public class DriversTabView extends BorderPane {
                                 installCells.put(row, cell);
                             }
                         });
-                        DriverInstallService.InstallResult result = installService.install(c, settings);
+                        boolean allowRestoreOnly = com.sbtools.backup.DriverBackupService
+                                .backupSupportIssue(c.installed()) != null;
+                        DriverInstallService.InstallResult result = installService.install(
+                                c, settings, allowRestoreOnly);
                         // Invalidate caches per-install so next Dashboard scan is fresh
                         try {
                             catalog.clearWindowsUpdateCache();

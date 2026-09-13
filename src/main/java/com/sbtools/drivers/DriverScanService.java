@@ -19,7 +19,7 @@ import java.util.Map;
 
 public class DriverScanService {
 
-    private static final long ENUMERATE_TIMEOUT_SECONDS = 90;
+    public static final long ENUMERATE_TIMEOUT_SECONDS = 90;
 
     private final ProcessRunner processRunner = new ProcessRunner(ENUMERATE_TIMEOUT_SECONDS);
 

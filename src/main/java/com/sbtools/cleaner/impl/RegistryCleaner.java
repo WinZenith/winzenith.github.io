@@ -156,17 +156,22 @@ public class RegistryCleaner implements CleanerExtension {
                     if (isConfidentlyMissing(cleanPath)) toDelete.add(entry.getKey());
                 }
                 if (!toDelete.isEmpty() && (token == null || !token.isCancelled())) {
-                    if (backupRootOrNull != null) {
+                    if (backupRootOrNull == null) {
                         String hiveName = hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU";
-                        Path regBackup = backupRootOrNull.resolve("registry-" + hiveName + "-" + keyPath.replace("\\", "_") + ".reg");
-                        boolean backedUp = exportRegKey(
-                                (hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") + "\\" + keyPath, regBackup);
-                        if (!backedUp) {
-                            com.sbtools.util.AppLogger.warning(
-                                    "Registry backup failed for " + hiveName + "\\" + keyPath
-                                            + " — skipping delete for safety");
-                            return 0;
-                        }
+                        com.sbtools.util.AppLogger.warning(
+                                "Registry backup required for " + hiveName + "\\" + keyPath
+                                        + " — skipping delete for safety");
+                        return 0;
+                    }
+                    String hiveName = hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU";
+                    Path regBackup = backupRootOrNull.resolve("registry-" + hiveName + "-" + keyPath.replace("\\", "_") + ".reg");
+                    boolean backedUp = exportRegKey(
+                            (hive == WinReg.HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") + "\\" + keyPath, regBackup);
+                    if (!backedUp) {
+                        com.sbtools.util.AppLogger.warning(
+                                "Registry backup failed for " + hiveName + "\\" + keyPath
+                                        + " — skipping delete for safety");
+                        return 0;
                     }
                     for (String valName : toDelete) {
                         if (token != null && token.isCancelled()) break;
@@ -247,16 +252,23 @@ public class RegistryCleaner implements CleanerExtension {
                     } catch (Exception ignored) {}
                 }
                 if (!toDelete.isEmpty() && (token == null || !token.isCancelled())) {
-                    if (backupRootOrNull != null
-                            && !backupRegKey(backupRootOrNull, "shareddlls", "HKLM", keyPath)) {
+                    if (backupRootOrNull == null) {
+                        com.sbtools.util.AppLogger.warning(
+                                "Registry backup required for HKLM\\" + keyPath + " — skipping delete for safety");
+                        return 0;
+                    }
+                    if (!backupRegKey(backupRootOrNull, "shareddlls", "HKLM", keyPath)) {
                         com.sbtools.util.AppLogger.warning(
                                 "Registry backup failed for HKLM\\" + keyPath + " — skipping delete for safety");
                         return 0;
                     }
-                }
-                for (String valName : toDelete) {
-                    if (token != null && token.isCancelled()) break;
-                    try { Advapi32Util.registryDeleteValue(WinReg.HKEY_LOCAL_MACHINE, keyPath, valName); count++; } catch (Throwable ignored) {}
+                    for (String valName : toDelete) {
+                        if (token != null && token.isCancelled()) break;
+                        try {
+                            Advapi32Util.registryDeleteValue(WinReg.HKEY_LOCAL_MACHINE, keyPath, valName);
+                            count++;
+                        } catch (Throwable ignored) {}
+                    }
                 }
             }
         } catch (Throwable ignored) {}
@@ -264,7 +276,7 @@ public class RegistryCleaner implements CleanerExtension {
     }
 
     private boolean backupRegKey(Path backupRootOrNull, String description, String hiveName, String keyPath) {
-        if (backupRootOrNull == null) return true;
+        if (backupRootOrNull == null) return false;
         try {
             Path regBackup = backupRootOrNull.resolve("registry-" + description + ".reg");
             java.nio.file.Files.createDirectories(regBackup.getParent());

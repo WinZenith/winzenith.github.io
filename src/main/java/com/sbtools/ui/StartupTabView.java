@@ -585,10 +585,35 @@ public class StartupTabView extends BorderPane {
 
         scanFuture = executor.submit(() -> {
             try {
-                List<StartupItem> allItems = service.listAllParallel();
+                List<StartupItem> allItems = service.listAllParallel(
+                        () -> scanCancelled.get() || gen != scanGeneration.get());
                 if (scanCancelled.get() || Thread.currentThread().isInterrupted() || gen != scanGeneration.get()) {
                     Platform.runLater(() -> statusLabel.setText("Scan stopped; previous results kept."));
                     return;
+                }
+
+                if (allItems.isEmpty()) {
+                    List<String> scanFailures = service.drainScanErrors();
+                    if (!scanFailures.isEmpty()) {
+                        Platform.runLater(() -> {
+                            statusLabel.setText("Scan failed; previous results kept.");
+                            boolean critical = scanFailures.stream().anyMatch(err ->
+                                    err.contains("enumeration failed")
+                                            || err.contains("Failed to run scheduled task scan script"));
+                            StringBuilder sb = new StringBuilder();
+                            if (critical) {
+                                sb.append("Startup scan could not complete:\n");
+                            } else {
+                                sb.append("Scan completed with errors:\n");
+                            }
+                            for (String err : scanFailures) {
+                                sb.append("- ").append(err).append("\n");
+                            }
+                            new Alert(critical ? Alert.AlertType.ERROR : Alert.AlertType.WARNING,
+                                    sb.toString()).showAndWait();
+                        });
+                        return;
+                    }
                 }
 
                 for (StartupItem item : allItems) {
@@ -602,30 +627,42 @@ public class StartupTabView extends BorderPane {
                 List<StartupItem> regItems = allItems.stream().filter(i -> i.getType() == StartupItemType.REGISTRY).collect(Collectors.toList());
                 List<StartupItem> taskItemsResult = allItems.stream().filter(i -> i.getType() == StartupItemType.TASK).collect(Collectors.toList());
                 List<StartupItem> svcItems = allItems.stream().filter(i -> i.getType() == StartupItemType.SERVICE).collect(Collectors.toList());
+                List<String> scanErrors = service.drainScanErrors();
+                boolean tasksPhaseFailed = scanErrors.stream().anyMatch(e -> e.startsWith("Scheduled Tasks:"));
+                boolean servicesPhaseFailed = scanErrors.stream().anyMatch(e -> e.startsWith("Windows Services:"));
 
                 double totalMs = allItems.stream().filter(StartupItem::isEnabled).mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
-                final String formattedTotal = StartupImpactService.formatImpact(totalMs);
                 Platform.runLater(() -> {
                     if (scanCancelled.get() || gen != scanGeneration.get()) {
                         statusLabel.setText("Scan stopped; previous results kept.");
                         return;
                     }
                     registryItems.setAll(regItems);
-                    taskItems.setAll(taskItemsResult);
-                    serviceItems.setAll(svcItems);
+                    if (!tasksPhaseFailed || !taskItemsResult.isEmpty()) {
+                        taskItems.setAll(taskItemsResult);
+                    }
+                    if (!servicesPhaseFailed || !svcItems.isEmpty()) {
+                        serviceItems.setAll(svcItems);
+                    }
                     applyAllFilters();
                     updateTabCounts();
-                    int total = allItems.size();
+                    int total = registryItems.size() + taskItems.size() + serviceItems.size();
                     statusLabel.setText("Found " + total + " startup item(s).");
                     updateBootDelayLabel();
 
-                    List<String> errors = service.drainScanErrors();
+                    List<String> errors = scanErrors;
                     if (!errors.isEmpty()) {
-                        StringBuilder sb = new StringBuilder("Scan completed with warnings:\n");
+                        boolean critical = errors.stream().anyMatch(err ->
+                                err.contains("enumeration failed")
+                                        || err.contains("Failed to run scheduled task scan script"));
+                        StringBuilder sb = new StringBuilder();
+                        sb.append(critical ? "Startup scan completed with errors:\n"
+                                : "Scan completed with warnings:\n");
                         for (String err : errors) {
                             sb.append("- ").append(err).append("\n");
                         }
-                        new Alert(Alert.AlertType.WARNING, sb.toString()).showAndWait();
+                        new Alert(critical ? Alert.AlertType.ERROR : Alert.AlertType.WARNING,
+                                sb.toString()).showAndWait();
                     }
                     loadLastBootAsync();
                 });

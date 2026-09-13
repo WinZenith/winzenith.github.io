@@ -29,7 +29,6 @@ import javafx.beans.property.BooleanProperty;
 
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import com.sbtools.util.ProcessManager;
 
 public class App extends Application {
 

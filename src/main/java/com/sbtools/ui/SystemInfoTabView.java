@@ -71,11 +71,18 @@ public class SystemInfoTabView extends BorderPane {
     private final SystemInfoService service = new SystemInfoService();
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "system-info");
+    private final ExecutorService gatherExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "system-info-gather");
         t.setDaemon(true);
         return t;
     });
+    private final ExecutorService exportExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "system-info-export");
+        t.setDaemon(true);
+        return t;
+    });
+    private final java.util.concurrent.atomic.AtomicBoolean exportInProgress =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private final Label statusLabel = new Label("Click Load to query system information.");
     private final Label adminWarningLabel = new Label("Not running as admin. Some data (temperatures, NVMe) may be unavailable.");
@@ -112,7 +119,7 @@ public class SystemInfoTabView extends BorderPane {
         progressBar.setVisible(false);
 
         loadButton.setOnAction(e -> loadInfo());
-        refreshButton.setOnAction(e -> { service.invalidateCache(); loadInfo(false); });
+        refreshButton.setOnAction(e -> { service.invalidateCache(); loadInfo(true); });
         refreshButton.setDisable(true);
         cancelButton.setDisable(true);
         cancelButton.setOnAction(e -> cancelLoading());
@@ -177,10 +184,14 @@ public class SystemInfoTabView extends BorderPane {
     }
 
     private void loadInfo() {
-        loadInfo(false);
+        loadInfo(true);
     }
 
     private void loadInfo(boolean forceRefresh) {
+        if (exportInProgress.get()) {
+            statusLabel.setText("Export in progress. Wait for it to finish or try again shortly.");
+            return;
+        }
         if (!isLoading.compareAndSet(false, true)) return;
         // Decouple from global busy but also set it for outer UI dimming
         busy.set(true);
@@ -198,12 +209,15 @@ public class SystemInfoTabView extends BorderPane {
         progressBar.setVisible(true);
         statusLabel.setText("Querying system information\u2026");
 
-        currentTask = executor.submit(() -> {
+        final java.util.concurrent.atomic.AtomicBoolean servedFromMemoryCache =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        currentTask = gatherExecutor.submit(() -> {
             try {
                 if (cancellationToken.get()) throw new InterruptedException("Cancelled");
                 SystemInfoData data = service.gatherSystemInfo(
                         (section, progress) -> Platform.runLater(() -> {
                             if ("cached".equals(section)) {
+                                servedFromMemoryCache.set(true);
                                 statusLabel.setText("Loaded from cache.");
                             } else {
                                 statusLabel.setText("Loading " + section + "\u2026");
@@ -221,7 +235,9 @@ public class SystemInfoTabView extends BorderPane {
                     // B3 fix: surface empty-state clearly instead of silent blank
                     // Note: buildTabs now inserts placeholder when data is empty, so tabPane is never empty after.
                     // Check data content directly for correct status message.
-                    if (isDataMostlyEmpty(data)) {
+                    if (servedFromMemoryCache.get()) {
+                        statusLabel.setText(cachedLoadStatusMessage(data));
+                    } else if (isDataMostlyEmpty(data)) {
                         statusLabel.setText(emptyDataStatusMessage(data));
                     } else if (tabPane.getTabs().isEmpty()) {
                         statusLabel.setText(emptyDataStatusMessage(data));
@@ -265,7 +281,9 @@ public class SystemInfoTabView extends BorderPane {
                 Platform.runLater(() -> {
                     releaseBusyOnce();
                     isLoading.set(false);
-                    loadButton.setDisable(false);
+                    if (!exportInProgress.get()) {
+                        loadButton.setDisable(false);
+                    }
                     cancelButton.setDisable(true);
                     spinner.setVisible(false);
                     progressBar.setVisible(false);
@@ -423,6 +441,12 @@ public class SystemInfoTabView extends BorderPane {
         return "No system information available. Try Retry refresh or restart as Administrator.";
     }
 
+    private static String cachedLoadStatusMessage(SystemInfoData data) {
+        String when = data != null && data.collectedAt() != null && !data.collectedAt().isBlank()
+                ? " (collected " + data.collectedAt() + ")" : "";
+        return "Loaded from cache" + when + ". Click Refresh for latest.";
+    }
+
     private Tab buildEmptyStateTab(SystemInfoData data) {
         VBox box = new VBox(12);
         box.setPadding(new Insets(24));
@@ -436,7 +460,8 @@ public class SystemInfoTabView extends BorderPane {
         if (hasWarningsTabContent(data)) {
             msgText.append("\u2022 Check the Warnings tab for diagnostics.\n");
         }
-        msgText.append("\u2022 See logs/system-info-last-raw.txt for raw output.");
+        msgText.append("\u2022 See ").append(SystemInfoService.diagnosticLogPath().toString())
+                .append(" for raw output.");
         Label msg = new Label(msgText.toString());
         msg.setWrapText(true);
         msg.getStyleClass().addAll("label", "text-muted");
@@ -1374,13 +1399,6 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    /** Legacy overload retained for tests/callers passing warnings only. */
-    private Tab buildWarningsTab(List<String> warnings) {
-        return buildWarningsTab(new SystemInfoData(null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null,
-                warnings != null ? List.copyOf(warnings) : List.of(), null, null));
-    }
-
     // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private static boolean containsLower(String value, String lower) {
@@ -1560,6 +1578,9 @@ public class SystemInfoTabView extends BorderPane {
         if (currentData == null) {
             return;
         }
+        if (exportInProgress.get()) {
+            return;
+        }
 
         FileChooser fileChooser = new FileChooser();
         fileChooser.setTitle(com.sbtools.util.UiText.label("Export system information"));
@@ -1621,8 +1642,10 @@ public class SystemInfoTabView extends BorderPane {
         final Boolean adminHint = adminHintFast();
 
         statusLabel.setText("Exporting to " + target.getName() + "\u2026");
+        exportInProgress.set(true);
         exportButton.setDisable(true);
-        executor.submit(() -> {
+        loadButton.setDisable(true);
+        exportExecutor.submit(() -> {
             try {
                 String content;
                 if (".json".equals(finalExt)) {
@@ -1635,13 +1658,14 @@ public class SystemInfoTabView extends BorderPane {
                 Files.writeString(target.toPath(), content, StandardCharsets.UTF_8);
                 Platform.runLater(() -> {
                     statusLabel.setText("Exported to: " + target.getName());
-                    exportButton.setDisable(false);
+                    finishExportUi();
                 });
-            } catch (IOException ex) {
+            } catch (Exception ex) {
                 AppLogger.error("Failed to export system info", ex);
                 Platform.runLater(() -> {
-                    exportButton.setDisable(false);
-                    new Alert(Alert.AlertType.ERROR, "Failed to export: " + ex.getMessage()).showAndWait();
+                    finishExportUi();
+                    String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                    new Alert(Alert.AlertType.ERROR, "Failed to export: " + msg).showAndWait();
                 });
             }
         });
@@ -1659,7 +1683,27 @@ public class SystemInfoTabView extends BorderPane {
         return s != null ? s : "";
     }
 
+    private void finishExportUi() {
+        exportInProgress.set(false);
+        exportButton.setDisable(currentData == null);
+        if (!isLoading.get()) {
+            loadButton.setDisable(false);
+        }
+    }
+
     public void dispose() {
-        executor.shutdownNow();
+        cancellationToken.set(true);
+        java.util.concurrent.Future<?> task = currentTask;
+        if (task != null) {
+            task.cancel(true);
+        }
+        exportInProgress.set(false);
+        gatherExecutor.shutdownNow();
+        exportExecutor.shutdownNow();
+        if (Platform.isFxApplicationThread()) {
+            releaseBusyOnce();
+        } else {
+            Platform.runLater(this::releaseBusyOnce);
+        }
     }
 }

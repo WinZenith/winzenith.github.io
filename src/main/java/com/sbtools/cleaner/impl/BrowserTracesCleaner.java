@@ -53,7 +53,8 @@ public class BrowserTracesCleaner implements CleanerExtension {
         for (BrowserProfile profile : getBrowserProfiles()) {
             if (token != null && token.isCancelled()) break;
             String browserKey = getBrowserProcessKey(profile.name());
-            boolean browserRunning = browserKey != null && isBrowserRunning(BROWSER_PROCESS_MAP.get(browserKey));
+            String processName = browserKey != null ? BROWSER_PROCESS_MAP.get(browserKey) : null;
+            boolean browserRunning = processName != null && isBrowserRunning(processName);
             if (browserRunning) { skippedProfiles++; continue; }
             for (Path dir : profile.cacheDirs()) {
                 if (token != null && token.isCancelled()) break;
@@ -108,7 +109,8 @@ public class BrowserTracesCleaner implements CleanerExtension {
         for (BrowserProfile profile : getBrowserProfiles()) {
             if (token != null && token.isCancelled()) break;
             String browserKey = getBrowserProcessKey(profile.name());
-            boolean browserRunning = browserKey != null && isBrowserRunning(BROWSER_PROCESS_MAP.get(browserKey));
+            String processName = browserKey != null ? BROWSER_PROCESS_MAP.get(browserKey) : null;
+            boolean browserRunning = processName != null && isBrowserRunning(processName);
 
             if (!browserRunning) {
                 for (Path dir : profile.cacheDirs()) {
@@ -186,24 +188,28 @@ public class BrowserTracesCleaner implements CleanerExtension {
         return best;
     }
 
+    /**
+     * Fail closed: when process enumeration is unavailable, assume the browser is
+     * running so we never delete Cookies / Login Data against an open profile.
+     */
     private boolean isBrowserRunning(String processName) {
-        if (processName == null) return false;
+        return isBrowserRunningInTaskList(processName, getTaskListOutput());
+    }
+
+    private static boolean isBrowserRunningInTaskList(String processName, String taskListOutput) {
+        if (processName == null) return true;
+        if (taskListOutput == null || taskListOutput.isBlank()) return true;
         String target = processName.toLowerCase();
-        String output = getTaskListOutput();
-        if (output == null) return false;
-        // Parse CSV lines: "image.exe","PID",...  extract first column without quotes
-        for (String line : output.split("\\R")) {
+        for (String line : taskListOutput.split("\\R")) {
             String trimmed = line.trim();
             if (trimmed.isEmpty()) continue;
-            // CSV format: "chrome.exe","1234","Console",...
             int firstQuote = trimmed.indexOf('"');
             int secondQuote = firstQuote >= 0 ? trimmed.indexOf('"', firstQuote + 1) : -1;
             if (firstQuote >= 0 && secondQuote > firstQuote) {
                 String proc = trimmed.substring(firstQuote + 1, secondQuote).toLowerCase();
                 if (proc.equals(target)) return true;
-            } else {
-                // Fallback contains check for unexpected format
-                if (trimmed.toLowerCase().contains(target)) return true;
+            } else if (trimmed.toLowerCase().contains(target)) {
+                return true;
             }
         }
         return false;
@@ -227,7 +233,9 @@ public class BrowserTracesCleaner implements CleanerExtension {
                 p.destroyForcibly();
             }
         } catch (Exception ignored) {}
-        return cached;
+        // Fail closed: a stale snapshot may show the browser as closed after a
+        // failed refresh while it is actually running.
+        return null;
     }
 
     private List<BrowserProfile> getBrowserProfiles() {
