@@ -158,10 +158,12 @@ class AdapterSettingsPanel extends VBox {
             return;
         }
         String adapter = adapterCombo.getSelectionModel().getSelectedItem();
+        java.util.List<java.util.Map.Entry<String, String>> snapshot =
+                new java.util.ArrayList<>(propertyRows);
         AppExecutors.ioPool().submit(() -> {
             try {
                 StringBuilder sb = new StringBuilder("Property,Value\n");
-                for (Map.Entry<String, String> e : propertyRows) {
+                for (java.util.Map.Entry<String, String> e : snapshot) {
                     sb.append(csv(e.getKey())).append(",").append(csv(e.getValue())).append("\n");
                 }
                 java.nio.file.Path base = com.sbtools.util.AppPaths.portableBaseDir();

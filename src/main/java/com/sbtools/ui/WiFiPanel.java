@@ -391,20 +391,15 @@ class WiFiPanel extends VBox {
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 List<NetworkAdapterRow> adapters = service.listAdapters();
-                String wifiAdapterName = null;
-                for (NetworkAdapterRow a : adapters) {
-                    if (a.getDescription() != null && a.getDescription().matches("(?i).*(Wireless|Wi-?Fi|WLAN|802\\.11).*")) {
-                        wifiAdapterName = a.getName();
-                        break;
-                    }
-                }
-                if (wifiAdapterName == null) {
+                var wifiName = service.resolveWifiAdapterName(adapters);
+                if (wifiName.isEmpty()) {
                     Platform.runLater(() -> {
                         statusLabel.setText("No Wi-Fi adapter found.");
                         new Alert(Alert.AlertType.WARNING, "No Wi-Fi adapter found on this system.").showAndWait();
                     });
                     return;
                 }
+                String wifiAdapterName = wifiName.get();
                 var result = service.setAdapterState(wifiAdapterName, enable);
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success()

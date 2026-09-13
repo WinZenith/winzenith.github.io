@@ -77,11 +77,13 @@ public class NetworkStateStore {
         }
         if (markedWall < 0 || markedTick < 0) return false;
         long wallElapsed = System.currentTimeMillis() - markedWall;
-        // Too soon to tell, or past the 49.7-day tick wraparound horizon.
-        if (wallElapsed < 60_000 || wallElapsed > 45L * 24 * 3600 * 1000) return false;
+        if (wallElapsed > 45L * 24 * 3600 * 1000) return false;
         long nowTick = tickMillis();
         if (nowTick < 0) return false;
-        return nowTick < markedTick;
+        if (nowTick < markedTick) {
+            return wallElapsed >= 2_000;
+        }
+        return false;
     }
 
     /** Monotonic milliseconds since boot, or -1 when unavailable / non-Windows. */
@@ -141,13 +143,16 @@ public class NetworkStateStore {
             }
         } catch (Exception ignored) {}
         Path legacy = Path.of(System.getProperty("user.home"), ".winzenith", FILE);
+        Path portableCandidate = null;
         try {
             java.nio.file.Path pb = com.sbtools.util.AppPaths.portableBaseDir();
-            if (pb != null) {
-                Path cand = pb.resolve(".winzenith").resolve(FILE);
-                if (Files.exists(cand)) return cand;
-                return cand;
-            }
+            if (pb != null) portableCandidate = pb.resolve(".winzenith").resolve(FILE);
+        } catch (Exception ignored) {}
+        if (portableCandidate != null && Files.exists(portableCandidate)) return portableCandidate;
+        if (Files.exists(legacy)) return legacy;
+        try {
+            java.nio.file.Path pb = com.sbtools.util.AppPaths.portableBaseDir();
+            if (pb != null) return pb.resolve(".winzenith").resolve(FILE);
         } catch (Exception ignored) {}
         return legacy;
     }

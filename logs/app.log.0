@@ -125,3 +125,63 @@ WARNING: Installer emitted Windows Installer usage help (exit 8): Windows Instal
 Install Options
 	</package | /i> <Product.msi>
 Setting Public Properties
+Sep 13, 2026 8:06:29 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 8:06:29 PM com.sbtools.util.AppLogger info
+INFO: SettingsStore: Migrated settings to portable location C:\Users\durot\IdeaProjects\BasicSDriverUpdate\settings.json
+Sep 13, 2026 8:06:30 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=3656
+Sep 13, 2026 8:06:30 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=3656
+Sep 13, 2026 8:06:30 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=24176
+Sep 13, 2026 8:06:30 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=24176
+Sep 13, 2026 8:06:31 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping unsafe scan directory: C:\
+Sep 13, 2026 8:06:31 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping unsafe delete directory: C:\
+Sep 13, 2026 8:06:31 PM com.sbtools.util.AppLogger warning
+WARNING: Installer emitted Windows Installer usage help (exit 8): Windows Installer
+Install Options
+	</package | /i> <Product.msi>
+Setting Public Properties
+Sep 13, 2026 8:06:32 PM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=google.chrome
+Sep 13, 2026 8:06:32 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping delete outside winget download cache: C:\Users\durot\AppData\Local\Temp\junit-5298197410532847978\evil.exe
+Sep 13, 2026 8:06:32 PM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=abc
+Sep 13, 2026 8:06:35 PM com.sbtools.util.AppLogger warning
+WARNING: Dashboard snapshot load failed: Unexpected character ('n' (code 110)): was expecting double-quote to start field name
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 2]
+Sep 13, 2026 8:06:35 PM com.sbtools.util.AppLogger info
+INFO: JVM shutdown hook: terminating tracked processes
+Sep 13, 2026 8:07:54 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 8:07:54 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=19652
+Sep 13, 2026 8:07:54 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=19652
+Sep 13, 2026 8:07:54 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=13716
+Sep 13, 2026 8:07:54 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=13716
+Sep 13, 2026 8:07:55 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping unsafe scan directory: C:\
+Sep 13, 2026 8:07:55 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping unsafe delete directory: C:\
+Sep 13, 2026 8:07:56 PM com.sbtools.util.AppLogger warning
+WARNING: Installer emitted Windows Installer usage help (exit 8): Windows Installer
+Install Options
+	</package | /i> <Product.msi>
+Setting Public Properties
+Sep 13, 2026 8:07:56 PM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=google.chrome
+Sep 13, 2026 8:07:56 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping delete outside winget download cache: C:\Users\durot\AppData\Local\Temp\junit-10428703803568729097\evil.exe
+Sep 13, 2026 8:07:56 PM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=abc
+Sep 13, 2026 8:07:58 PM com.sbtools.util.AppLogger warning
+WARNING: Dashboard snapshot load failed: Unexpected character ('n' (code 110)): was expecting double-quote to start field name
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 2]

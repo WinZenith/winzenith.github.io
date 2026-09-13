@@ -95,6 +95,30 @@ public class NetworkOptimizerService {
         return adapters;
     }
 
+    private static final java.util.regex.Pattern WIRELESS_DESC =
+            java.util.regex.Pattern.compile("(?i).*(Wireless|Wi-?Fi|WLAN|802\\.11).*");
+    private static final java.util.regex.Pattern VIRTUAL_WIRELESS_DESC =
+            java.util.regex.Pattern.compile("(?i).*(virtual|wi-?fi direct|hosted network|microsoft.*virtual).*");
+
+    /** Prefer physical WLAN NIC (Up first), matching net-wifi-info.ps1 selection. */
+    public java.util.Optional<String> resolveWifiAdapterName(List<NetworkAdapterRow> adapters) {
+        if (adapters == null || adapters.isEmpty()) return java.util.Optional.empty();
+        String up = null;
+        String any = null;
+        for (NetworkAdapterRow a : adapters) {
+            String desc = a.getDescription();
+            if (desc == null || !WIRELESS_DESC.matcher(desc).matches()) continue;
+            if (VIRTUAL_WIRELESS_DESC.matcher(desc).matches()) continue;
+            if (any == null) any = a.getName();
+            if ("Up".equalsIgnoreCase(a.getStatus())) {
+                up = a.getName();
+                break;
+            }
+        }
+        if (up != null) return java.util.Optional.of(up);
+        return any != null ? java.util.Optional.of(any) : java.util.Optional.empty();
+    }
+
     public OperationResult applyOptimization(OptimizationPreset preset) {
         try {
             Path script = PowerShellScripts.resolve("net-optimize.ps1");
@@ -114,10 +138,12 @@ public class NetworkOptimizerService {
                 }
                 logChange("Apply Optimization", preset.getDisplayName(), details, false);
                 return OperationResult.fail(
-                        "Optimization did not fully apply (exit code " + pr.exitCode() + "). Settings marked OK below are already in effect.",
+                        "Optimization did not fully apply (exit code " + pr.exitCode()
+                                + "). Lines marked OK succeeded in this run; the system may be in a mixed state.",
                         details);
             }
-            logChange("Apply Optimization", preset.getDisplayName(), preset.getDescription(), true);
+            String successDetails = formatted != null ? formatted : (!stdout.isEmpty() ? stdout : preset.getDescription());
+            logChange("Apply Optimization", preset.getDisplayName(), successDetails, true);
             return OperationResult.ok(preset.getDisplayName() + " applied successfully.",
                     formatted != null ? formatted : stdout);
         } catch (Exception e) {
@@ -659,11 +685,11 @@ public class NetworkOptimizerService {
 
     public PingResult ping(String host, int count) {
         try {
-            sanitizeHost(host);
+            String safe = sanitizeHost(host);
             if (count < 1 || count > 50) throw new IllegalArgumentException("Count must be 1-50");
             Path script = PowerShellScripts.resolve("net-ping.ps1");
             ProcessResult pr = new ProcessRunner(30 + (long) count * 5).run(
-                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", host, "-Count", String.valueOf(count)));
+                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", safe, "-Count", String.valueOf(count)));
             String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {
                 try {
@@ -704,11 +730,11 @@ public class NetworkOptimizerService {
 
     public List<TracerouteHop> traceroute(String host, int maxHops) {
         try {
-            sanitizeHost(host);
+            String safe = sanitizeHost(host);
             if (maxHops < 1 || maxHops > 30) maxHops = 30;
             Path script = PowerShellScripts.resolve("net-traceroute.ps1");
             ProcessResult pr = new ProcessRunner(60 + (long) maxHops * 5).run(
-                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", host, "-MaxHops", String.valueOf(maxHops)));
+                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", safe, "-MaxHops", String.valueOf(maxHops)));
             String stdout = pr.stdout().trim();
             if (!stdout.isEmpty() && !"[]".equals(stdout)) {
                 List<Map<String, Object>> raw = mapper.readValue(stdout,
@@ -837,7 +863,7 @@ public class NetworkOptimizerService {
             String key = e.getKey();
             String willSet = e.getValue();
             String cur = resolveCurrentForPreview(key, current);
-            boolean changes = !normalizePreviewValue(cur).equalsIgnoreCase(normalizePreviewValue(willSet));
+            boolean changes = !previewValuesEquivalent(key, cur, willSet);
             rows.add(new PresetExpectations.PreviewRow(key, cur, willSet, changes));
         }
         return rows;
@@ -878,6 +904,25 @@ public class NetworkOptimizerService {
     private static String normalizePreviewValue(String v) {
         if (v == null) return "";
         return v.trim().toLowerCase();
+    }
+
+    private static boolean previewValuesEquivalent(String settingKey, String current, String willSet) {
+        if ("TCP Ack Frequency".equalsIgnoreCase(settingKey) || "TCP No Delay".equalsIgnoreCase(settingKey)) {
+            return registryPreviewToken(current).equals(registryPreviewToken(willSet));
+        }
+        return normalizePreviewValue(current).equalsIgnoreCase(normalizePreviewValue(willSet));
+    }
+
+    /** Semantic token for registry preview rows (absent vs removed vs numeric). */
+    private static String registryPreviewToken(String v) {
+        if (v == null || v.isBlank()) return "absent";
+        String t = v.trim().toLowerCase();
+        if (t.contains("default (absent)") || t.contains("removed (registry default)")
+                || t.contains("absent (default)") || t.equals("absent")) {
+            return "absent";
+        }
+        if (t.startsWith("1") || t.equals("1 (set via registry)")) return "1";
+        return t.replaceAll("\\s*\\([^)]*\\)", "").trim();
     }
 
     /**
@@ -1055,15 +1100,16 @@ public class NetworkOptimizerService {
     }
 
     public MtuProbeResult probeMtu(String targetHost, java.util.concurrent.atomic.AtomicBoolean cancelled) {
+        String safe;
         try {
-            sanitizeHost(targetHost);
+            safe = sanitizeHost(targetHost);
         } catch (IllegalArgumentException e) {
             return new MtuProbeResult(false, -1, "Invalid host: " + e.getMessage());
         }
         try {
             Path script = PowerShellScripts.resolve("net-mtu-probe.ps1");
             ProcessResult pr = new ProcessRunner(120).run(
-                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", targetHost),
+                    ProcessRunner.powershellScript(script.toString(), "-TargetHost", safe),
                     cancelled);
             String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {

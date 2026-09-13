@@ -6,10 +6,14 @@ import com.sbtools.settings.SettingsStore;
 import com.sbtools.util.AppPaths;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
+import javafx.geometry.Pos;
 import javafx.scene.control.Label;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 
 import java.util.function.BooleanSupplier;
@@ -32,6 +36,11 @@ public class NetworkOptimizerTabView extends BorderPane {
     // reboot flag (network-state.json) — the system still needs a reboot and
     // the banner must return on next launch. A new reason re-arms the banner.
     private volatile String rebootDismissedReason;
+    private final StackPane centerStack = new StackPane();
+    private final StackPane initialLoadingOverlay = new StackPane();
+    private final ProgressIndicator initialLoadingSpinner = new ProgressIndicator();
+    private final java.util.concurrent.atomic.AtomicBoolean initialLoadFinished =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public NetworkOptimizerTabView(BooleanProperty busy, BooleanSupplier adminCheck,
                                    SettingsStore settingsStore, AppSettings currentSettings) {
@@ -43,6 +52,9 @@ public class NetworkOptimizerTabView extends BorderPane {
                                    java.util.function.Consumer<AppSettings> onSettingsSaved) {
         this.adminCheck = adminCheck != null ? adminCheck : () -> false;
         Label statusLabel = new Label("Ready.");
+        statusLabel.setWrapText(true);
+        statusLabel.setMaxWidth(Double.MAX_VALUE);
+        statusLabel.setStyle("-fx-padding: 4 16; -fx-text-fill: #6272a4; -fx-font-size: 11px;");
 
         adminWarningLabel.setWrapText(true);
         adminWarningLabel.setMaxWidth(Double.MAX_VALUE);
@@ -66,7 +78,7 @@ public class NetworkOptimizerTabView extends BorderPane {
 
         adaptersPanel = new AdaptersPanel(service, busy, this.adminCheck);
         optimizationPanel = new OptimizationPanel(service, busy, settingsStore, currentSettings, statusLabel, onSettingsSaved, this.adminCheck);
-        dnsCachePanel = new DnsCachePanel(service, busy, statusLabel, this.adminCheck);
+        dnsCachePanel = new DnsCachePanel(service, busy, statusLabel, this.adminCheck, this::refreshRebootBanner);
         adapterSettingsPanel = new AdapterSettingsPanel(service, busy);
         wiFiPanel = new WiFiPanel(service, busy, this.adminCheck);
         connectionOverviewPanel = new ConnectionOverviewPanel(service, busy);
@@ -116,12 +128,34 @@ public class NetworkOptimizerTabView extends BorderPane {
         rebootBox.visibleProperty().bind(rebootLabel.visibleProperty());
         VBox topContainer = new VBox(adminWarningLabel, rebootBox, tabPane);
         VBox.setVgrow(tabPane, javafx.scene.layout.Priority.ALWAYS);
-        setCenter(topContainer);
+
+        initialLoadingSpinner.setMaxSize(24, 24);
+        initialLoadingSpinner.setPrefSize(24, 24);
+        initialLoadingSpinner.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
+        Label loadingLabel = new Label("Loading network information\u2026");
+        loadingLabel.setStyle("-fx-text-fill: #f8f8f2; -fx-font-size: 13px;");
+        HBox loadingRow = new HBox(12, initialLoadingSpinner, loadingLabel);
+        loadingRow.setAlignment(Pos.CENTER);
+        initialLoadingOverlay.setStyle("-fx-background-color: rgba(30, 31, 41, 0.92);");
+        initialLoadingOverlay.getChildren().add(loadingRow);
+        initialLoadingOverlay.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+
+        centerStack.getChildren().addAll(topContainer, initialLoadingOverlay);
+        StackPane.setAlignment(initialLoadingOverlay, Pos.CENTER);
+        setCenter(centerStack);
 
         // Initial load after scene is ready
         Platform.runLater(() -> {
-            adaptersPanel.loadAdapters();
             updateRebootBanner();
+            adaptersPanel.loadAdapters(this::hideInitialLoadingOverlay);
+        });
+    }
+
+    private void hideInitialLoadingOverlay() {
+        if (!initialLoadFinished.compareAndSet(false, true)) return;
+        Platform.runLater(() -> {
+            initialLoadingOverlay.setVisible(false);
+            initialLoadingOverlay.setManaged(false);
         });
     }
 

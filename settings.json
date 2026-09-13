@@ -1,0 +1,22 @@
+{
+  "autoBackupDrivers" : true,
+  "createSystemRestorePoint" : false,
+  "eulaAccepted" : true,
+  "excludedDriverIds" : [ ],
+  "skippedSoftwareIds" : [ "Futuremark SystemInfo\tFuturemark.FuturemarkSystemInfo" ],
+  "networkOptimizationPreset" : "DEFAULT",
+  "downloadDirectory" : "C:\\Users\\durot\\Downloads",
+  "minimizeToTray" : false,
+  "startMinimized" : false,
+  "scanOnStartup" : false,
+  "notifyOnDriverUpdate" : true,
+  "backupDirectory" : "",
+  "powerShellPath" : "powershell",
+  "windowWidth" : 960,
+  "windowHeight" : 600,
+  "windowMaximized" : true,
+  "autoCheckForUpdates" : true,
+  "ignoredBrowserExtensionIds" : null,
+  "ignoredCleanupCategories" : null,
+  "autoCreateRestoreBeforeCleanup" : false
+}

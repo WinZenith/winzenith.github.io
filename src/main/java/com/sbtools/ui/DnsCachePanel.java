@@ -30,6 +30,7 @@ class DnsCachePanel extends VBox {
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
     private final Label statusLabel;
+    private final Runnable onRebootStateChanged;
     private final ComboBox<String> adapterCombo = new ComboBox<>();
     private final TextField primaryDnsField = new TextField();
     private final TextField secondaryDnsField = new TextField();
@@ -65,16 +66,22 @@ class DnsCachePanel extends VBox {
     private int pingSampleIndex = 0;
     private javafx.scene.chart.LineChart<Number, Number> pingChart;
 
-    DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel, BooleanSupplier adminCheck) {
+    DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel,
+                  BooleanSupplier adminCheck, Runnable onRebootStateChanged) {
         this.service = service;
         this.busy = busy;
         this.adminCheck = adminCheck != null ? adminCheck : () -> false;
         this.statusLabel = statusLabel;
+        this.onRebootStateChanged = onRebootStateChanged;
         getChildren().addAll(buildContent());
     }
 
+    DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel, BooleanSupplier adminCheck) {
+        this(service, busy, statusLabel, adminCheck, null);
+    }
+
     DnsCachePanel(NetworkOptimizerService service, BooleanProperty busy, Label statusLabel) {
-        this(service, busy, statusLabel, () -> false);
+        this(service, busy, statusLabel, () -> false, null);
     }
 
     void refreshAdapters() {
@@ -94,6 +101,9 @@ class DnsCachePanel extends VBox {
                         } else {
                             adapterCombo.getSelectionModel().selectFirst();
                         }
+                        loadCurrentDns();
+                    } else {
+                        currentDnsLabel.setText("Current DNS: -");
                     }
                 });
             } finally {
@@ -552,6 +562,9 @@ class DnsCachePanel extends VBox {
                 }
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "Network stack reset. Reboot required." : "Reset failed.");
+                    if (result.success() && onRebootStateChanged != null) {
+                        onRebootStateChanged.run();
+                    }
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
                             result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });
@@ -591,6 +604,9 @@ class DnsCachePanel extends VBox {
                 }
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "Winsock reset. Reboot recommended." : "Reset failed.");
+                    if (result.success() && onRebootStateChanged != null) {
+                        onRebootStateChanged.run();
+                    }
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
                             result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });

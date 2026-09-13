@@ -626,22 +626,24 @@ public class DiskToolsTabView extends BorderPane {
                             "Analyzing " + letter + "... (" + (completedCount.get() + 1) + "/" + totalDrives + ")"));
 
                     try {
-                        defragService.analyze(driveCopy, msg -> {
+                        DefragService.AnalyzeResult analyzeResult = defragService.analyze(driveCopy, msg -> {
                             statusMessages.add(letter + ": " + msg);
                             Platform.runLater(() -> defragStatus.setText(msg));
                         }, defragCancelled);
 
-                        analyzedDrives.add(letter);
-                        lastAnalyzed.put(letter, Instant.now());
+                        if (analyzeResult == null) return;
 
                         int done = completedCount.incrementAndGet();
                         Platform.runLater(() -> {
+                            DefragService.applyAnalyzeResult(driveCopy, analyzeResult);
+                            analyzedDrives.add(letter);
+                            lastAnalyzed.put(letter, Instant.now());
                             driveTable.refresh();
                             String elapsed = formatElapsed(Duration.between(startTime, Instant.now()));
-                            defragStatus.setText("Analysis complete - "
-                                    + driveCopy.getFragmentsFormatted() + " fragmented space, "
-                                    + driveCopy.getFragmentationPercent() + "% fragmentation on " + letter
-                                    + " (" + elapsed + ", " + done + "/" + totalDrives + ")");
+                            String completion = analyzeResult.completionMessage() != null
+                                    ? analyzeResult.completionMessage()
+                                    : "Analysis complete on " + letter;
+                            defragStatus.setText(completion + " (" + elapsed + ", " + done + "/" + totalDrives + ")");
                             updateRichBlockVisualization(driveCopy);
                         });
                     } catch (java.util.concurrent.CancellationException e) {
@@ -927,7 +929,11 @@ public class DiskToolsTabView extends BorderPane {
         healthDriveCombo.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             if (sel != null) {
                 DiskHealthInfo info = findHealthInfo(sel);
-                if (info != null) updateSmartDetailPanel(info);
+                if (info != null) {
+                    updateSmartDetailPanel(info);
+                } else {
+                    clearSmartDetailPanel();
+                }
             }
         });
 
@@ -957,6 +963,8 @@ public class DiskToolsTabView extends BorderPane {
         healthProgress.setProgress(-1);
         healthProgress.setVisible(true);
         healthStatus.setText("Loading disk health data...");
+        final AtomicBoolean healthGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(healthGlobalToken);
 
         newDaemonThread(() -> {
             try {
@@ -970,7 +978,6 @@ public class DiskToolsTabView extends BorderPane {
                         String base = d.getDriveLetter().isEmpty()
                                 ? d.getModel() + " (" + d.getMediaType() + ")"
                                 : d.getDriveLetter() + " - " + d.getModel();
-                        // Ensure unique display key even if models duplicate
                         String display = base;
                         int dup = 1;
                         while (healthDriveMap.containsKey(display)) {
@@ -994,15 +1001,22 @@ public class DiskToolsTabView extends BorderPane {
                 Platform.runLater(() -> {
                     refreshHealthBtn.setDisable(false);
                     healthProgress.setVisible(false);
+                    releaseGlobalBusy(healthGlobalToken);
                 });
             }
         }, "disk-health-load").start();
     }
 
+    private void clearSmartDetailPanel() {
+        smartGrid.getChildren().clear();
+        overallHealthLabel.setText("Drive details unavailable.");
+        overallHealthLabel.getStyleClass().removeAll("success", "warning", "danger");
+        overallHealthLabel.getStyleClass().add("text-muted");
+    }
+
     private DiskHealthInfo findHealthInfo(String display) {
         DiskHealthInfo mapped = healthDriveMap.get(display);
         if (mapped != null) return mapped;
-        // Fallback legacy logic for robustness
         for (DiskHealthInfo d : healthDrives) {
             String letter = d.getDriveLetter();
             if (!letter.isEmpty() && display.startsWith(letter + " - ") && display.contains(d.getModel())) {
@@ -1014,7 +1028,7 @@ public class DiskToolsTabView extends BorderPane {
                 return d;
             }
         }
-        return healthDrives.isEmpty() ? null : healthDrives.get(0);
+        return null;
     }
 
     private void updateSmartDetailPanel(DiskHealthInfo info) {
@@ -1685,6 +1699,8 @@ public class DiskToolsTabView extends BorderPane {
         recycleBinProgress.setProgress(-1);
         recycleBinProgress.setVisible(true);
         recycleBinStatus.setText("Loading Recycle Bin contents...");
+        final AtomicBoolean recycleLoadGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(recycleLoadGlobalToken);
 
         newDaemonThread(() -> {
             try {
@@ -1714,6 +1730,7 @@ public class DiskToolsTabView extends BorderPane {
                 Platform.runLater(() -> {
                     refreshRecycleBinBtn.setDisable(false);
                     recycleBinProgress.setVisible(false);
+                    releaseGlobalBusy(recycleLoadGlobalToken);
                 });
             }
         }, "load-recyclebin").start();
@@ -1932,12 +1949,12 @@ public class DiskToolsTabView extends BorderPane {
         secureDeleteProgress.setProgress(-1);
         secureDeleteProgress.setVisible(true);
         secureDeleteStatus.setText("Counting files in folder...");
+        final AtomicBoolean folderCountGlobalToken = new AtomicBoolean();
+        acquireGlobalBusy(folderCountGlobalToken);
 
         newDaemonThread(() -> {
-            int fileCount = 0;
             try {
-                // Default walk does NOT follow links unless FOLLOW_LINKS is passed,
-                // so junctions/symlinks are never descended into here.
+                int fileCount = 0;
                 try (var walk = java.nio.file.Files.walk(f.toPath(), 64)) {
                     fileCount = (int) walk.filter(p -> {
                         try {
@@ -1947,39 +1964,50 @@ public class DiskToolsTabView extends BorderPane {
                             return false;
                         }
                     }).count();
+                } catch (Exception ignored) {
+                    fileCount = countFilesRecursive(f);
                 }
-            } catch (Exception ignored) {
-                fileCount = countFilesRecursive(f);
+                final int countedFiles = fileCount;
+                Platform.runLater(() -> {
+                    secureBusy.set(false);
+                    secureDeleteBtn.setDisable(false);
+                    secureDeleteProgress.setVisible(false);
+                    secureDeleteStatus.setText("");
+                    releaseGlobalBusy(folderCountGlobalToken);
+
+                    Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                            "Are you sure you want to securely delete this folder?\n\n"
+                                    + folderPath + "\n\n"
+                                    + "Contains approximately " + countedFiles + " file(s).\n"
+                                    + "All files will be overwritten multiple times and cannot be recovered.\n"
+                                    + "This action is irreversible.");
+                    confirm.setHeaderText("Confirm Secure Folder Delete");
+                    if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                        filePathField.clear();
+                        filePathField.setUserData(null);
+                        secureDeleteBtn.setText("Secure Delete");
+                        updateDeleteButtons();
+                        return;
+                    }
+
+                    secureBusy.set(true);
+                    secureDeleteBtn.setDisable(true);
+                    secureDeleteProgress.setProgress(-1);
+                    secureDeleteProgress.setVisible(true);
+                    secureDeleteStatus.setText("Securely deleting folder contents...");
+                    startSecureDeleteFolderInternal(folderPath);
+                });
+            } catch (Exception e) {
+                AppLogger.error("Failed to count folder files", e);
+                Platform.runLater(() -> {
+                    secureBusy.set(false);
+                    secureDeleteBtn.setDisable(false);
+                    secureDeleteProgress.setVisible(false);
+                    secureDeleteStatus.setText("");
+                    releaseGlobalBusy(folderCountGlobalToken);
+                    new Alert(Alert.AlertType.ERROR, "Failed to count folder files:\n" + e.getMessage()).showAndWait();
+                });
             }
-            final int countedFiles = fileCount;
-            Platform.runLater(() -> {
-                secureBusy.set(false);
-                secureDeleteBtn.setDisable(false);
-                secureDeleteProgress.setVisible(false);
-                secureDeleteStatus.setText("");
-
-                Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                        "Are you sure you want to securely delete this folder?\n\n"
-                                + folderPath + "\n\n"
-                                + "Contains approximately " + countedFiles + " file(s).\n"
-                                + "All files will be overwritten multiple times and cannot be recovered.\n"
-                                + "This action is irreversible.");
-                confirm.setHeaderText("Confirm Secure Folder Delete");
-                if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
-                    filePathField.clear();
-                    filePathField.setUserData(null);
-                    secureDeleteBtn.setText("Secure Delete");
-                    updateDeleteButtons();
-                    return;
-                }
-
-                secureBusy.set(true);
-                secureDeleteBtn.setDisable(true);
-                secureDeleteProgress.setProgress(-1);
-                secureDeleteProgress.setVisible(true);
-                secureDeleteStatus.setText("Securely deleting folder contents...");
-                startSecureDeleteFolderInternal(folderPath);
-            });
         }, "count-folder-files").start();
         return;
     }
@@ -2098,68 +2126,99 @@ public class DiskToolsTabView extends BorderPane {
         secureDeleteStatus.setText("Securely deleting files...");
 
         newDaemonThread(() -> {
-            try {
             int deleted = 0;
+            int scheduled = 0;
             int failed = 0;
             int cancelledCount = 0;
-            int passCount = getSelectedPassCount();
-            for (ShredderFileEntry entry : pendingEntries) {
-                if (secureCancelled.get()) {
-                    cancelledCount++;
-                    continue;
-                }
-                String filePath = entry.getFilePath();
-                Platform.runLater(() -> secureDeleteStatus.setText("Deleting: " + filePath));
-                try {
-                    ShredderResult result = shredderService.secureDelete(filePath, passCount);
-                    Platform.runLater(() -> {
+            try {
+                int passCount = getSelectedPassCount();
+                for (ShredderFileEntry entry : pendingEntries) {
+                    if (secureCancelled.get()) {
+                        cancelledCount++;
+                        continue;
+                    }
+                    String filePath = entry.getFilePath();
+                    Platform.runLater(() -> secureDeleteStatus.setText("Deleting: " + filePath));
+                    try {
+                        ShredderResult result = shredderService.secureDelete(filePath, passCount);
                         if (result.isSuccess() && result.isDeleted()) {
-                            entry.setStatusEnum(ShredderFileEntry.Status.DELETED);
+                            deleted++;
+                            Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.DELETED));
                         } else if (result.isScheduledForReboot()) {
-                            handleScheduleForReboot(entry, filePath, result);
+                            if (scheduleRebootForBatchEntry(entry, filePath)) {
+                                scheduled++;
+                            } else {
+                                failed++;
+                            }
                         } else {
-                            entry.setStatusEnum(ShredderFileEntry.Status.FAILED);
+                            failed++;
+                            Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.FAILED));
                         }
-                    });
-                    if (result.isSuccess() && result.isDeleted()) {
-                        deleted++;
-                    } else {
-                        failed++;
-                    }
-                } catch (Exception e) {
-                    String errMsg = e.getMessage() != null ? e.getMessage() : "";
-                    if (errMsg.toLowerCase().contains("in use") || errMsg.toLowerCase().contains("access denied")
-                            || errMsg.toLowerCase().contains("unauthorized")) {
-                        ShredderResult fakeResult = new ShredderResult(filePath, false, false, true,
-                                "File is in use. Scheduling for deletion on next reboot.");
-                        Platform.runLater(() -> handleScheduleForReboot(entry, filePath, fakeResult));
-                        failed++;
-                    } else {
-                        Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.FAILED));
-                        failed++;
+                    } catch (Exception e) {
+                        String errMsg = e.getMessage() != null ? e.getMessage() : "";
+                        if (errMsg.toLowerCase().contains("in use") || errMsg.toLowerCase().contains("access denied")
+                                || errMsg.toLowerCase().contains("unauthorized")) {
+                            if (scheduleRebootForBatchEntry(entry, filePath)) {
+                                scheduled++;
+                            } else {
+                                failed++;
+                            }
+                        } else {
+                            failed++;
+                            Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.FAILED));
+                        }
                     }
                 }
-            }
-            int finalDeleted = deleted;
-            int finalFailed = failed;
-            int finalCancelled = cancelledCount;
-            Platform.runLater(() -> {
-                secureBusy.set(false);
-                secureDeleteBtn.setDisable(false);
-                secureDeleteProgress.setVisible(false);
-                stopSecureBtn.setVisible(false);
-                String msg = "Batch delete completed: " + finalDeleted + " deleted, " + finalFailed + " failed."
-                        + (finalCancelled > 0 ? " " + finalCancelled + " skipped (cancelled)." : "");
-                secureDeleteStatus.setText(msg);
-                new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
-                updateDeleteButtons();
-                releaseGlobalBusy(batchDeleteGlobalToken);
-            });
             } finally {
-                // Safety net: guarantee the shutdown guard is released even on unexpected throw.
-                Platform.runLater(() -> releaseGlobalBusy(batchDeleteGlobalToken));
+                int finalDeleted = deleted;
+                int finalScheduled = scheduled;
+                int finalFailed = failed;
+                int finalCancelled = cancelledCount;
+                Platform.runLater(() -> {
+                    secureBusy.set(false);
+                    secureDeleteBtn.setDisable(false);
+                    secureDeleteProgress.setVisible(false);
+                    stopSecureBtn.setVisible(false);
+                    StringBuilder msg = new StringBuilder("Batch delete completed: ")
+                            .append(finalDeleted).append(" deleted");
+                    if (finalScheduled > 0) {
+                        msg.append(", ").append(finalScheduled).append(" scheduled for reboot");
+                    }
+                    msg.append(", ").append(finalFailed).append(" failed.");
+                    if (finalCancelled > 0) {
+                        msg.append(" ").append(finalCancelled).append(" skipped (cancelled).");
+                    }
+                    secureDeleteStatus.setText(msg.toString());
+                    new Alert(Alert.AlertType.INFORMATION, msg.toString()).showAndWait();
+                    updateDeleteButtons();
+                    releaseGlobalBusy(batchDeleteGlobalToken);
+                });
             }
         }, "batch-secure-delete").start();
+    }
+
+    /**
+     * Batch secure delete: schedule reboot without stacking per-file dialogs.
+     * Runs on a worker thread; updates entry status on the FX thread.
+     */
+    private boolean scheduleRebootForBatchEntry(ShredderFileEntry entry, String filePath) {
+        if (!adminCheck.getAsBoolean()) {
+            Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.FAILED));
+            return false;
+        }
+        try {
+            ShredderResult scheduleResult = shredderService.scheduleForReboot(filePath);
+            if (scheduleResult.isSuccess()) {
+                Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.SCHEDULED_FOR_REBOOT));
+                return true;
+            }
+            Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.FAILED));
+            return false;
+        } catch (Exception ex) {
+            AppLogger.error("Failed to schedule reboot delete for batch entry: " + filePath, ex);
+            Platform.runLater(() -> entry.setStatusEnum(ShredderFileEntry.Status.FAILED));
+            return false;
+        }
     }
 
     private void updateDeleteButtons() {

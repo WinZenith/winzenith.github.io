@@ -27,7 +27,7 @@ public class DiskHealthService {
         Path script = PowerShellScripts.resolve("disk-health.ps1");
         ProcessResult result = null;
         IOException lastIo = null;
-        for (List<String> cmd : List.of(ProcessRunner.powershellScript(script.toString()), ProcessRunner.pwshScript(script.toString()))) {
+        for (List<String> cmd : List.of(ProcessRunner.powershellScriptNonInteractive(script.toString()), ProcessRunner.pwshScriptNonInteractive(script.toString()))) {
             try {
                 result = processRunner.run(cmd);
                 break;

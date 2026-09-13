@@ -213,9 +213,6 @@ if (-not $SkipMetadata) {
 # ── Stage 6: Total directories ──
 $totalDirectories = 0
 
-# ── Stage 7: Ensure minimums ──
-if ($totalFileCount -eq 0) { $totalFileCount = 1 }
-
 # Reliability fix: previously averageFragmentsPerFile was estimated as
 # fragmentedFileCount/totalFileCount (always <=1, mathematically wrong — the true
 # average is totalFragments/fragmentedFiles which defrag.exe does not report).

@@ -56,8 +56,8 @@ class ChangeLogPanel extends VBox {
     }
 
     void loadEntries() {
-        if (busy.get()) return;
-        busy.set(true);
+        Future<?> prev = currentTask;
+        if (prev != null) prev.cancel(true);
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.getChangeLog();
@@ -67,8 +67,6 @@ class ChangeLogPanel extends VBox {
                 });
             } catch (Exception e) {
                 AppLogger.warning("Failed to load changelog: " + e.getMessage());
-            } finally {
-                Platform.runLater(() -> busy.set(false));
             }
         });
     }
@@ -161,10 +159,11 @@ class ChangeLogPanel extends VBox {
             new Alert(Alert.AlertType.INFORMATION, "Nothing to export.").showAndWait();
             return;
         }
+        java.util.List<NetworkChangeEntry> snapshot = new java.util.ArrayList<>(filtered);
         AppExecutors.ioPool().submit(() -> {
             try {
                 StringBuilder sb = new StringBuilder("Time,Operation,Target,Details,Result\n");
-                for (NetworkChangeEntry e : filtered) {
+                for (NetworkChangeEntry e : snapshot) {
                     String t = e.timestamp() != null ? e.timestamp() : "";
                     try {
                         t = FORMATTER.format(Instant.parse(e.timestamp()));

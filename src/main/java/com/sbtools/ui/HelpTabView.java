@@ -97,10 +97,10 @@ public class HelpTabView extends VBox {
         getChildren().add(createFaqSection("Browser Extensions",
                 "This tab scans installed browsers — Chrome, Chrome Canary, Edge, Edge Beta, Edge Dev, Edge Canary, Firefox, Brave, Opera, Opera GX and Vivaldi (plus extra browsers from browser-catalog.json) — for installed extensions. " +
                 "Click \"Scan All Browsers\" for a full parallel scan with determinate progress, or pick a browser in the Browser filter and click \"Rescan Browser\" for a fast single-browser refresh. Use \"Cancel\" to stop a running scan or toggle. " +
-                "Filter by Browser, Status (Enabled / Disabled / Ignored), Profile (Default, Profile 1, ...) and free-text search (name, description, ID, permissions, version). Tick \"Auto-scan on open\" to scan automatically. " +
+                "Filter by Browser, Status (Enabled / Disabled / Managed / Ignored), Profile (Default, Profile 1, ...) and free-text search (name, description, ID, permissions, version). Tick \"Auto-scan on open\" to scan automatically. " +
                 "Each extension shows its name, version, profile, install date, description, and current state (enabled / disabled / ignored). Double-click a row (or right-click > \"View Details\") for the full detail dialog. " +
                 "Select rows and click \"Enable\" / \"Disable\" to toggle without uninstalling (browsers must stay closed; the app blocks the toggle while they run, re-checks mid-batch, and verifies the write). " +
-                "Right-click offers \"Open Extension Folder\", \"Copy Extension ID\" / \"Copy Profile Path\" / \"Copy Store URL\", \"Open Store Page\", and \"Ignore\" / \"Unignore\". Use \"Select All\" / \"Deselect All\" for the filtered view. " +
+                "Right-click offers \"Open Extension Folder\", \"Copy Extension ID\" / \"Copy Profile Path\" / \"Copy Store URL\", \"Open Store Page\", and \"Ignore\" / \"Unignore\". \"Select All\" applies to visible (filtered) non-ignored rows; \"Deselect All\" clears selection on every row, including hidden ones. " +
                 "Use \"Export...\" to save the filtered list as CSV/JSON, \"Restore Backup...\" to roll back a Preferences / extensions.json backup created during a toggle, and \"Manage Ignored\" to review ignored items. " +
                 "Changes take effect after restarting the browser. Only store-installed extensions are scanned; unpacked developer-mode extensions are not."));
 

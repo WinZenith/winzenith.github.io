@@ -697,65 +697,28 @@ try {
             $raw2 = $devEnt.ClassGuid
             if ($null -ne $raw2) {
                 $guid = [string]$raw2
+                # Devguid.h setup-class prefixes (PNPClass missing fallback only).
                 $devClass = switch -Regex ($guid) {
                     '{4d36e968' { 'Display' }
-                    '{4d36e96b' { 'SCSIAdapter' }
-                    '{4d36e96c' { 'USB' }
-                    '{4d36e96d' { 'Media' }
-                    '{4d36e96e' { 'Image' }
-                    '{4d36e96f' { 'Keyboard' }
+                    '{4d36e96b' { 'Keyboard' }
+                    '{4d36e96c' { 'Media' }
+                    '{4d36e96d' { 'Modem' }
+                    '{4d36e96e' { 'Monitor' }
+                    '{4d36e96f' { 'Mouse' }
                     '{4d36e970' { 'HIDClass' }
                     '{4d36e971' { 'Net' }
-                    '{4d36e972' { 'NetService' }
-                    '{4d36e973' { 'NetTrans' }
+                    '{4d36e972' { 'Net' }
+                    '{4d36e973' { 'Net' }
                     '{4d36e974' { 'System' }
                     '{4d36e977' { 'Battery' }
-                    '{4d36e978' { 'HDC' }
-                    '{4d36e979' { 'Infrared' }
-                    '{4d36e97a' { 'Modem' }
-                    '{4d36e97b' { 'Monitor' }
-                    '{4d36e97c' { 'Mouse' }
-                    '{4d36e97d' { 'MTD' }
-                    '{4d36e97e' { 'MultiFunction' }
-                    '{4d36e97f' { 'Adapter' }
-                    '{4d36e980' { 'Printer' }
-                    '{4d36e981' { 'Ports' }
-                    '{4d36e982' { 'SBEmul' }
-                    '{4d36e983' { 'Sound' }
-                    '{4d36e984' { 'Storage' }
-                    '{4d36e985' { 'TapeDrive' }
-                    '{4d36e986' { 'Volume' }
-                    '{4d36e987' { 'Processor' }
-                    '{4d36e988' { 'DiskDrive' }
-                    '{4d36e989' { 'FloppyDisk' }
-                    '{4d36e98a' { 'Keyboard' }
-                    '{4d36e98b' { 'Mouse' }
-                    '{4d36e98c' { 'SoftwareDevice' }
-                    '{4d36e98d' { 'Sound' }
-                    '{4d36e98e' { 'USB' }
-                    '{4d36e98f' { 'Display' }
-                    '{4d36e990' { 'Battery' }
-                    '{4d36e991' { 'HIDClass' }
-                    '{4d36e992' { 'IEEE1284.4' }
-                    '{4d36e993' { 'IEEE1394' }
-                    '{4d36e994' { 'Image' }
-                    '{4d36e995' { 'Infrared' }
-                    '{4d36e996' { 'Modem' }
-                    '{4d36e997' { 'Monitor' }
-                    '{4d36e998' { 'Mouse' }
-                    '{4d36e999' { 'Multifunction' }
-                    '{4d36e99a' { 'Adapter' }
-                    '{4d36e99b' { 'Ports' }
-                    '{4d36e99c' { 'Printer' }
-                    '{4d36e99d' { 'SBEmul' }
-                    '{4d36e99e' { 'SCSIAdapter' }
-                    '{4d36e99f' { 'Storage' }
-                    '{4d36e9a0' { 'TapeDrive' }
-                    '{4d36e9a1' { 'Volume' }
-                    '{4d36e9a2' { 'System' }
-                    '{50dd5230' { 'BAElement' }
+                    '{4d36e978' { 'Ports' }
+                    '{4d36e979' { 'Printer' }
+                    '{4d36e97b' { 'SCSIAdapter' }
+                    '{4d36e97d' { 'System' }
+                    '{4d36e97e' { 'Unknown' }
+                    '{36fc9e60' { 'USB' }
+                    '{88bae032' { 'USBDevice' }
                     '{71a27cdd' { 'Volume' }
-                    '{d48179be' { 'Adapter' }
                     default { 'Other' }
                 }
             }
@@ -818,8 +781,20 @@ try {
         $status = ''
         try { if ($na.NetConnectionStatus) {
             $status = switch ([int]$na.NetConnectionStatus) {
-                0 { 'Disconnected' } 1 { 'Connecting' } 2 { 'Connected' }
-                3 { 'Media Disconnected' } 7 { 'Media Connected' } default { 'Unknown' }
+                0 { 'Disconnected' }
+                1 { 'Connecting' }
+                2 { 'Connected' }
+                3 { 'Disconnecting' }
+                4 { 'Hardware Not Present' }
+                5 { 'Hardware Disabled' }
+                6 { 'Hardware Malfunction' }
+                7 { 'Media Disconnected' }
+                8 { 'Authenticating' }
+                9 { 'Authentication Succeeded' }
+                10 { 'Authentication Failed' }
+                11 { 'Invalid Address' }
+                12 { 'Credentials Required' }
+                default { 'Unknown' }
             }
         } } catch {}
         $adapterType = ''

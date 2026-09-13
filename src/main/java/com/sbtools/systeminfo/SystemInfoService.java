@@ -742,9 +742,9 @@ public class SystemInfoService {
     private static Path diagnosticPath() {
         try {
             Path portable = AppPaths.portableLogsDir();
-            if (portable != null) return portable.resolve("system-info-last.json");
+            if (portable != null) return portable.resolve("system-info-last-raw.txt");
         } catch (Exception ignored) {}
-        return AppPaths.logsDir().resolve("system-info-last.json");
+        return AppPaths.logsDir().resolve("system-info-last-raw.txt");
     }
 
     /**

@@ -47,8 +47,13 @@ import javafx.stage.FileChooser;
 
 import java.awt.Desktop;
 import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
@@ -74,6 +79,8 @@ public class BrowserExtensionsTabView extends BorderPane {
     private final BrowserExtensionService service = new BrowserExtensionService();
     private final SettingsStore settingsStore;
     private final BooleanProperty busy = new SimpleBooleanProperty(false);
+    /** Shared App busy for window-close guard; null in tests. */
+    private final BooleanProperty globalBusy;
     private final BooleanSupplier adminCheck;
     private volatile Thread scanThread;
     private volatile Thread toggleThread;
@@ -112,10 +119,15 @@ public class BrowserExtensionsTabView extends BorderPane {
     private final Label selectionLabel = new Label("");
 
     public BrowserExtensionsTabView(BooleanSupplier adminCheck) {
-        this(adminCheck, new SettingsStore());
+        this(null, adminCheck, new SettingsStore());
     }
 
     public BrowserExtensionsTabView(BooleanSupplier adminCheck, SettingsStore settingsStore) {
+        this(null, adminCheck, settingsStore);
+    }
+
+    public BrowserExtensionsTabView(BooleanProperty globalBusy, BooleanSupplier adminCheck, SettingsStore settingsStore) {
+        this.globalBusy = globalBusy;
         this.adminCheck = adminCheck;
         this.settingsStore = settingsStore;
 
@@ -335,8 +347,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                 java.util.Set<String> ignoredSet = new java.util.HashSet<>(ignoredIds);
                 for (BrowserExtensionRow row : allRows) {
                     boolean ignored = ignoredSet.contains(qualifiedKey(row))
-                            || ignoredSet.contains(legacyQualifiedKey(row))
-                            || ignoredSet.contains(row.getExtensionId());
+                            || ignoredSet.contains(legacyQualifiedKey(row));
                     row.setIgnored(ignored);
                     if (ignored) {
                         row.setSelected(false);
@@ -759,15 +770,7 @@ public class BrowserExtensionsTabView extends BorderPane {
     }
 
     private void openContainingFolder(BrowserExtensionRow row) {
-        // Try profilePath first (new field), then fall back to legacy path
-        String profilePath = row.getProfilePath();
-        String legacyPath = row.getPath();
-        String targetPath = null;
-        if (profilePath != null && !profilePath.isBlank()) {
-            targetPath = profilePath;
-        } else if (legacyPath != null && !legacyPath.isBlank()) {
-            targetPath = legacyPath;
-        }
+        String targetPath = resolveExtensionFolderPath(row);
         if (targetPath == null) return;
         try {
             File file = new File(targetPath);
@@ -794,13 +797,12 @@ public class BrowserExtensionsTabView extends BorderPane {
         if (busy.get()) return;
         scanCancelled.set(false);
         toggleCancelled.set(false);
-        busy.set(true);
+        setBusy(true);
         scanTargetLabel = "all browsers";
         int total = BrowserExtensionService.ALL_BROWSERS.size();
         progressBar.setVisible(true);
         progressBar.setProgress(0);
         statusLabel.setText("Scanning browser extensions (0/" + total + ")...");
-        allRows.clear();
 
         Thread t = new Thread(() -> {
             try {
@@ -853,7 +855,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                     new Alert(Alert.AlertType.ERROR, "Browser extension scan failed:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                Platform.runLater(() -> setBusy(false));
             }
         }, "browser-extensions-scan");
         scanThread = t;
@@ -870,7 +872,7 @@ public class BrowserExtensionsTabView extends BorderPane {
         }
         scanCancelled.set(false);
         toggleCancelled.set(false);
-        busy.set(true);
+        setBusy(true);
         scanTargetLabel = browser;
         progressBar.setVisible(true);
         progressBar.setProgress(-1);
@@ -893,8 +895,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                     allRows.removeIf(r -> target.equals(r.getBrowser()));
                     for (BrowserExtensionRow r : fresh) {
                         boolean ign = ignoredBefore.contains(qualifiedKey(r))
-                                || ignoredBefore.contains(legacyQualifiedKey(r))
-                                || ignoredBefore.contains(r.getExtensionId());
+                                || ignoredBefore.contains(legacyQualifiedKey(r));
                         r.setIgnored(ign);
                     }
                     allRows.addAll(fresh);
@@ -913,7 +914,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                     new Alert(Alert.AlertType.ERROR, "Re-scan of " + target + " failed:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                Platform.runLater(() -> setBusy(false));
             }
         }, "browser-extensions-rescan");
         scanThread = t;
@@ -1105,11 +1106,19 @@ public class BrowserExtensionsTabView extends BorderPane {
             new Alert(Alert.AlertType.INFORMATION, "Scan first — no profile paths are known yet.").showAndWait();
             return;
         }
-        // Collect backups across known profiles (cap listing to avoid huge dialogs).
         List<java.nio.file.Path> backups = new ArrayList<>();
         for (String pp : profiles) {
             backups.addAll(com.sbtools.browserext.BrowserExtensionService.listProfileBackups(pp));
-            if (backups.size() >= 30) break;
+        }
+        backups.sort((a, b) -> {
+            try {
+                return Files.getLastModifiedTime(b).compareTo(Files.getLastModifiedTime(a));
+            } catch (Exception e) {
+                return 0;
+            }
+        });
+        if (backups.size() > 30) {
+            backups = new ArrayList<>(backups.subList(0, 30));
         }
         if (backups.isEmpty()) {
             new Alert(Alert.AlertType.INFORMATION, "No Preferences/extensions.json backups found.\nBackups are created automatically during enable/disable.").showAndWait();
@@ -1145,8 +1154,8 @@ public class BrowserExtensionsTabView extends BorderPane {
                 Platform.runLater(() -> {
                     if (!runningSnapshot.isEmpty()) {
                         new Alert(Alert.AlertType.ERROR,
-                                String.join(", ", runningSnapshot)
-                                        + " appear(s) to be running. Aborted — close all browsers and try again.\n"
+                                formatRunningBrowserWarning(runningSnapshot)
+                                        + "\n\nAborted — close all browsers and try again.\n"
                                         + "Restoring now would be silently overwritten on browser exit.")
                                 .showAndWait();
                         statusLabel.setText("Restore aborted: browsers still running.");
@@ -1307,7 +1316,7 @@ public class BrowserExtensionsTabView extends BorderPane {
         if (selected.isEmpty()) return;
 
         String action = enable ? "enable" : "disable";
-        busy.set(true);
+        setBusy(true);
         statusLabel.setText("Checking running browsers...");
 
         // Offload blocking tasklist to background pool to avoid FX freeze (Blocker 3)
@@ -1328,10 +1337,10 @@ public class BrowserExtensionsTabView extends BorderPane {
             final List<BrowserExtensionRow> selectedSnapshot = List.copyOf(selected);
             Platform.runLater(() -> {
                 if (toggleCancelled.get()) {
-                    busy.set(false);
+                    setBusy(false);
                     return;
                 }
-                busy.set(false);
+                setBusy(false);
                 // Fail-closed on unreliable probe: an empty result after a
                 // failed tasklist (or a browser with no known exe image) means
                 // "unknown", not "not running". Require informed consent
@@ -1366,29 +1375,39 @@ public class BrowserExtensionsTabView extends BorderPane {
                     Alert blocked = new Alert(Alert.AlertType.WARNING);
                     blocked.setTitle(AppInfo.DISPLAY_NAME);
                     blocked.setHeaderText("Close browsers before " + action + "ing");
-                    blocked.setContentText(String.join(", ", warnSnapshot)
-                            + " appear(s) to be running.\n\n"
-                            + "Toggling now would likely fail or be reverted (locked Preferences / Secure Preferences).\n"
+                    blocked.setContentText(formatRunningBrowserWarning(warnSnapshot)
+                            + "\n\nToggling now would likely fail or be reverted (locked Preferences / Secure Preferences).\n"
                             + "Please close the browsers, then click OK to re-check, or Cancel.");
                     blocked.getButtonTypes().setAll(ButtonType.OK, ButtonType.CANCEL);
                     if (blocked.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
                     // Re-check after user claims browsers are closed.
-                    busy.set(true);
+                    setBusy(true);
                     statusLabel.setText("Re-checking running browsers...");
                     AppExecutors.ioPool().submit(() -> {
                         java.util.Set<String> recheck = new java.util.HashSet<>();
+                        boolean recheckProbeOk = false;
                         try {
                             recheck = detectRunningBrowsers(selectedSnapshot, toggleCancelled);
+                            recheckProbeOk = com.sbtools.browserext.BrowserProcessProbe.lastProbeOk();
                         } catch (Exception ex) {
                             AppLogger.warning("Failed to re-check running browsers: " + ex.getMessage());
                         }
                         final java.util.Set<String> recheckSnapshot = recheck;
+                        final boolean probeOkFinal = recheckProbeOk;
                         Platform.runLater(() -> {
-                            busy.set(false);
+                            setBusy(false);
+                            if (!probeOkFinal) {
+                                new Alert(Alert.AlertType.ERROR,
+                                        "Could not verify browsers are closed (process check failed).\n"
+                                                + "Aborted — close all browsers and try again.")
+                                        .showAndWait();
+                                statusLabel.setText("Toggle aborted: running state unverified.");
+                                return;
+                            }
                             if (!recheckSnapshot.isEmpty()) {
                                 new Alert(Alert.AlertType.ERROR,
-                                        String.join(", ", recheckSnapshot)
-                                                + " still appear(s) to be running. Aborted — close them and try again.")
+                                        formatRunningBrowserWarning(recheckSnapshot)
+                                                + "\n\nAborted — close them and try again.")
                                         .showAndWait();
                                 statusLabel.setText("Toggle aborted: browsers still running.");
                                 return;
@@ -1430,12 +1449,13 @@ public class BrowserExtensionsTabView extends BorderPane {
 
         // Start actual toggle
         toggleCancelled.set(false);
-        busy.set(true);
+        setBusy(true);
         statusLabel.setText(action.substring(0, 1).toUpperCase() + action.substring(1) + "ing " + selected.size() + " extension(s)...");
 
         Thread t = new Thread(() -> {
             int success = 0;
             int fail = 0;
+            int skipped = 0;
             List<BrowserExtensionRow> succeeded = new ArrayList<>();
             for (BrowserExtensionRow ext : selected) {
                 if (toggleCancelled.get() || Thread.currentThread().isInterrupted()) break;
@@ -1444,12 +1464,20 @@ public class BrowserExtensionsTabView extends BorderPane {
                 // TTL window and further writes would be silently lost.
                 try {
                     java.util.Set<String> running = detectRunningBrowsersFresh(List.of(ext), toggleCancelled);
-                    if (!running.isEmpty()) {
-                        AppLogger.warning("Toggle aborted mid-batch: " + running + " started running.");
-                        fail += selected.size() - success - fail;
+                    if (!com.sbtools.browserext.BrowserProcessProbe.lastProbeOk()) {
+                        AppLogger.warning("Toggle aborted mid-batch: process probe unreliable.");
+                        skipped = selected.size() - success - fail;
                         break;
                     }
-                } catch (Exception ignored) {
+                    if (!running.isEmpty()) {
+                        AppLogger.warning("Toggle aborted mid-batch: " + running + " started running.");
+                        skipped = selected.size() - success - fail;
+                        break;
+                    }
+                } catch (Exception ex) {
+                    AppLogger.warning("Toggle aborted mid-batch: " + ex.getMessage());
+                    skipped = selected.size() - success - fail;
+                    break;
                 }
                 boolean ok = service.toggleExtension(ext, enable, toggleCancelled);
                 if (toggleCancelled.get()) break;
@@ -1462,6 +1490,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             }
             final int s = success;
             final int f = fail;
+            final int sk = skipped;
             final List<BrowserExtensionRow> succSnapshot = List.copyOf(succeeded);
             Platform.runLater(() -> {
                 // Apply enabled state on FX thread only for verified successes
@@ -1470,14 +1499,23 @@ public class BrowserExtensionsTabView extends BorderPane {
                     r.setEnabled(enable);
                 }
                 table.refresh();
-                statusLabel.setText("Toggled " + s + " extension(s)." + (f > 0 ? " " + f + " failed." : ""));
-                if (f > 0) {
-                    String detail = s + " toggled, " + f + " failed."
-                            + "\nClose all browsers and retry failed items."
-                            + "\nIf failures persist, check logs (Secure Preferences HMAC reset, missing Preferences, or Firefox cache restore).";
-                    new Alert(Alert.AlertType.WARNING, detail).showAndWait();
+                StringBuilder status = new StringBuilder("Toggled " + s + " extension(s).");
+                if (f > 0) status.append(' ').append(f).append(" failed.");
+                if (sk > 0) status.append(' ').append(sk).append(" skipped.");
+                statusLabel.setText(status.toString());
+                if (f > 0 || sk > 0) {
+                    StringBuilder detail = new StringBuilder();
+                    detail.append(s).append(" toggled");
+                    if (f > 0) detail.append(", ").append(f).append(" failed");
+                    if (sk > 0) detail.append(", ").append(sk).append(" skipped (browser started running or probe failed)");
+                    detail.append('.');
+                    if (f > 0) {
+                        detail.append("\nClose all browsers and retry failed items."
+                                + "\nIf failures persist, check logs (Secure Preferences HMAC reset, missing Preferences, or Firefox cache restore).");
+                    }
+                    new Alert(Alert.AlertType.WARNING, detail.toString()).showAndWait();
                 }
-                busy.set(false);
+                setBusy(false);
             });
         }, "browser-extensions-toggle");
         toggleThread = t;
@@ -1486,10 +1524,80 @@ public class BrowserExtensionsTabView extends BorderPane {
             AppLogger.error("Browser extension toggle failed", ex);
             Platform.runLater(() -> {
                 statusLabel.setText("Toggle failed: " + ex.getMessage());
-                busy.set(false);
+                setBusy(false);
             });
         });
         t.start();
+    }
+
+    private void setBusy(boolean value) {
+        busy.set(value);
+        setGlobalBusy(value);
+    }
+
+    private void setGlobalBusy(boolean value) {
+        if (globalBusy == null) return;
+        try {
+            if (Platform.isFxApplicationThread()) {
+                globalBusy.set(value);
+            } else {
+                Platform.runLater(() -> {
+                    try {
+                        globalBusy.set(value);
+                    } catch (Exception ignored) {
+                    }
+                });
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String resolveExtensionFolderPath(BrowserExtensionRow row) {
+        String extPath = row.getPath();
+        String extId = row.getExtensionId();
+        if (extPath != null && !extPath.isBlank() && extId != null && !extId.isBlank()) {
+            Path idDir = Paths.get(extPath, extId);
+            if (Files.isDirectory(idDir)) {
+                return idDir.toString();
+            }
+        }
+        if (extPath != null && !extPath.isBlank()) {
+            Path extensionsDir = Paths.get(extPath);
+            if (Files.isDirectory(extensionsDir)) {
+                return extPath;
+            }
+        }
+        String profilePath = row.getProfilePath();
+        if (profilePath != null && !profilePath.isBlank()) {
+            return profilePath;
+        }
+        return null;
+    }
+
+    private static String formatRunningBrowserWarning(java.util.Set<String> browserLabels) {
+        if (browserLabels == null || browserLabels.isEmpty()) {
+            return "";
+        }
+        Map<String, List<String>> byExe = new LinkedHashMap<>();
+        for (String label : browserLabels) {
+            if (label == null || label.isBlank()) continue;
+            String exe = BrowserExtensionService.expectedExeFor(label);
+            if (exe == null || exe.isBlank()) {
+                exe = "(unknown)";
+            }
+            byExe.computeIfAbsent(exe.toLowerCase(), k -> new ArrayList<>()).add(label);
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, List<String>> entry : byExe.entrySet()) {
+            if (sb.length() > 0) {
+                sb.append("\n\n");
+            }
+            LinkedHashSet<String> unique = new LinkedHashSet<>(entry.getValue());
+            sb.append(entry.getKey()).append(" is running (covers: ")
+                    .append(String.join(", ", unique))
+                    .append(").\nClose all of those browser channels before continuing.");
+        }
+        return sb.toString();
     }
 
     private java.util.Set<String> detectRunningBrowsers(List<BrowserExtensionRow> selected, AtomicBoolean cancelled) {

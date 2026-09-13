@@ -108,8 +108,8 @@ public class BenchmarkService {
         ProcessResult result = null;
         IOException pendingIo = null;
         List<List<String>> candidates = List.of(
-                ProcessRunner.powershellScript(script.toString(), letter, String.valueOf(testSizeMB), stopFlag.getAbsolutePath()),
-                ProcessRunner.pwshScript(script.toString(), letter, String.valueOf(testSizeMB), stopFlag.getAbsolutePath())
+                ProcessRunner.powershellScriptNonInteractive(script.toString(), letter, String.valueOf(testSizeMB), stopFlag.getAbsolutePath()),
+                ProcessRunner.pwshScriptNonInteractive(script.toString(), letter, String.valueOf(testSizeMB), stopFlag.getAbsolutePath())
         );
         try {
         try {

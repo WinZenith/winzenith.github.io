@@ -28,11 +28,7 @@ function Invoke-RegistryRemove {
             return $true
         }
         # Access denied or other error is real failure
-        if ($_.Exception.Message -like "*Access*denied*" -or $_.Exception.Message -like "*Unauthorized*") {
-            return $false
-        }
-        # For other errors (e.g., path exists but property missing), consider success
-        return $true
+        return $false
     }
 }
 

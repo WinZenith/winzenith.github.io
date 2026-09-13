@@ -8,7 +8,12 @@ $info = @{
     transmitRate  = ""
 }
 
-$wifi = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'Wireless|Wi-?Fi|WLAN|802\.11' } | Select-Object -First 1
+$wireless = Get-NetAdapter | Where-Object {
+    $_.InterfaceDescription -match 'Wireless|Wi-?Fi|WLAN|802\.11' -and
+    $_.InterfaceDescription -notmatch '(?i)virtual|wi-?fi direct|hosted network|microsoft.*virtual'
+}
+$wifi = $wireless | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1
+if (-not $wifi) { $wifi = $wireless | Select-Object -First 1 }
 if ($wifi) {
     if ($wifi.Status -eq "Up") { $info.state = "connected" }
     else { $info.state = $wifi.Status.ToLower() }

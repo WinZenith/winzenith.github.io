@@ -54,11 +54,16 @@ class AdaptersPanel extends VBox {
     }
 
     void loadAdapters() {
+        loadAdapters(null);
+    }
+
+    void loadAdapters(Runnable whenFinished) {
         // 5s TTL cache: tab switches within 5s reuse rows without spawning PowerShell.
         long now = System.currentTimeMillis();
         if (now - lastLoadMillis < 5000 && !adapterRows.isEmpty()) {
             applyFilter();
             statusLabel.setText("Found " + filteredRows.size() + " adapter(s) (cached).");
+            if (whenFinished != null) whenFinished.run();
             return;
         }
         if (!isLoading.compareAndSet(false, true)) {
@@ -68,6 +73,7 @@ class AdaptersPanel extends VBox {
         if (busy.get()) {
             isLoading.set(false);
             statusLabel.setText("Please wait, another operation is in progress...");
+            if (whenFinished != null) whenFinished.run();
             return;
         }
         busy.set(true);
@@ -92,6 +98,7 @@ class AdaptersPanel extends VBox {
                 Platform.runLater(() -> {
                     busy.set(false);
                     isLoading.set(false);
+                    if (whenFinished != null) whenFinished.run();
                 });
             }
         });
@@ -142,16 +149,17 @@ class AdaptersPanel extends VBox {
 
         adapterTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             boolean hasSel = sel != null && !busy.get();
-            enableBtn.setDisable(!hasSel);
-            disableBtn.setDisable(!hasSel);
+            enableBtn.setDisable(!hasSel || (sel != null && sel.isEnabled()));
+            disableBtn.setDisable(!hasSel || (sel != null && !sel.isEnabled()));
             renewIpBtn.setDisable(!hasSel);
         });
 
         busy.addListener((obs, old, nv) -> {
             refreshBtn.setDisable(nv);
-            boolean hasSelection = adapterTable.getSelectionModel().getSelectedItem() != null;
-            enableBtn.setDisable(nv || !hasSelection);
-            disableBtn.setDisable(nv || !hasSelection);
+            NetworkAdapterRow sel = adapterTable.getSelectionModel().getSelectedItem();
+            boolean hasSelection = sel != null;
+            enableBtn.setDisable(nv || !hasSelection || (sel != null && sel.isEnabled()));
+            disableBtn.setDisable(nv || !hasSelection || (sel != null && !sel.isEnabled()));
             renewIpBtn.setDisable(nv || !hasSelection);
         });
 
@@ -276,11 +284,12 @@ class AdaptersPanel extends VBox {
             new Alert(Alert.AlertType.INFORMATION, "Nothing to export.").showAndWait();
             return;
         }
+        java.util.List<NetworkAdapterRow> snapshot = new java.util.ArrayList<>(filteredRows);
         AppExecutors.ioPool().submit(() -> {
             try {
                 StringBuilder sb = new StringBuilder();
                 sb.append("Name,Description,Status,Speed,MAC,IP,DHCP,Gateway,DNS\n");
-                for (NetworkAdapterRow r : filteredRows) {
+                for (NetworkAdapterRow r : snapshot) {
                     sb.append(csv(r.getName())).append(",").append(csv(r.getDescription())).append(",")
                             .append(csv(r.getStatus())).append(",").append(csv(r.getLinkSpeed())).append(",")
                             .append(csv(r.getMacAddress())).append(",").append(csv(r.getIpAddress())).append(",")

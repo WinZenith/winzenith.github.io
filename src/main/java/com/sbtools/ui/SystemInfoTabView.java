@@ -98,6 +98,7 @@ public class SystemInfoTabView extends BorderPane {
     // each decrement (previously 1 acquire / 2 releases corrupted BusyProperty's
     // counter and could clear another tab's still-running busy state).
     private final java.util.concurrent.atomic.AtomicBoolean busyHeld = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile Boolean lastAdminHint;
 
     public SystemInfoTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -221,11 +222,11 @@ public class SystemInfoTabView extends BorderPane {
                     // Note: buildTabs now inserts placeholder when data is empty, so tabPane is never empty after.
                     // Check data content directly for correct status message.
                     if (isDataMostlyEmpty(data)) {
-                        statusLabel.setText("No system information available. Check Warnings tab or try Refresh as Administrator.");
+                        statusLabel.setText(emptyDataStatusMessage(data));
                     } else if (tabPane.getTabs().isEmpty()) {
-                        statusLabel.setText("No system information available. Check Warnings tab or try Refresh as Administrator.");
+                        statusLabel.setText(emptyDataStatusMessage(data));
                     } else if (hasAnyWarningsOrPartial(data)) {
-                        statusLabel.setText("System information loaded (partial â€” some data unavailable).");
+                        statusLabel.setText("System information loaded (partial \u2014 some data unavailable).");
                     } else {
                         statusLabel.setText("System information loaded.");
                     }
@@ -304,6 +305,7 @@ public class SystemInfoTabView extends BorderPane {
                     try { return adminCheck.getAsBoolean(); } catch (Exception ignored) { return false; }
                 })
                 .thenAcceptAsync(isAdmin -> {
+                    lastAdminHint = isAdmin;
                     boolean show = !isAdmin;
                     adminWarningLabel.setVisible(show);
                     adminWarningLabel.setManaged(show);
@@ -404,6 +406,23 @@ public class SystemInfoTabView extends BorderPane {
         return s == null || s.isBlank();
     }
 
+    private static boolean hasWarningsTabContent(SystemInfoData data) {
+        if (data == null) {
+            return false;
+        }
+        if (data.warnings() != null && !data.warnings().isEmpty()) {
+            return true;
+        }
+        return data.timings() != null && !data.timings().isEmpty();
+    }
+
+    private static String emptyDataStatusMessage(SystemInfoData data) {
+        if (hasWarningsTabContent(data)) {
+            return "No system information available. Check Warnings tab or try Retry refresh.";
+        }
+        return "No system information available. Try Retry refresh or restart as Administrator.";
+    }
+
     private Tab buildEmptyStateTab(SystemInfoData data) {
         VBox box = new VBox(12);
         box.setPadding(new Insets(24));
@@ -411,11 +430,14 @@ public class SystemInfoTabView extends BorderPane {
         Label title = new Label("No system information available");
         title.getStyleClass().addAll("label", "large");
         title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
-        Label msg = new Label(
-                "WinZenith queried WMI but received no usable data.\n" +
-                "â€¢ Try Refresh or restart as Administrator (some data requires elevation).\n" +
-                "â€¢ Check the Warnings tab for diagnostics.\n" +
-                "â€¢ See logs/system-info-last.json for raw output.");
+        StringBuilder msgText = new StringBuilder(
+                "WinZenith queried WMI but received no usable data.\n"
+                        + "\u2022 Try Retry refresh or restart as Administrator (some data requires elevation).\n");
+        if (hasWarningsTabContent(data)) {
+            msgText.append("\u2022 Check the Warnings tab for diagnostics.\n");
+        }
+        msgText.append("\u2022 See logs/system-info-last-raw.txt for raw output.");
+        Label msg = new Label(msgText.toString());
         msg.setWrapText(true);
         msg.getStyleClass().addAll("label", "text-muted");
         box.getChildren().addAll(title, msg);
@@ -423,7 +445,7 @@ public class SystemInfoTabView extends BorderPane {
             Label wTitle = UILabel.sectionTitle("Warnings");
             box.getChildren().add(wTitle);
             for (String w : data.warnings()) {
-                Label wl = new Label("â€¢ " + w);
+                Label wl = new Label("\u2022 " + w);
                 wl.setWrapText(true);
                 wl.getStyleClass().addAll("label", "warning");
                 wl.setStyle("-fx-padding: 4 8; -fx-background-color: #3d2e1a; -fx-background-radius: 4; -fx-border-color: #ffb86c; -fx-border-radius: 4;");
@@ -431,7 +453,7 @@ public class SystemInfoTabView extends BorderPane {
                 box.getChildren().add(wl);
             }
         }
-        Button retry = new Button("Refresh as Administrator");
+        Button retry = new Button("Retry refresh");
         retry.setOnAction(e -> { service.invalidateCache(); loadInfo(true); });
         box.getChildren().add(retry);
         ScrollableContainer scroll = new ScrollableContainer(box);
@@ -740,11 +762,17 @@ public class SystemInfoTabView extends BorderPane {
         VBox deviceList = new VBox(8);
         deviceList.setPadding(new Insets(0, 8, 0, 8));
 
-        categoryList.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, cat) -> {
+        Runnable refreshDevicePane = () -> {
             deviceList.getChildren().clear();
-            if (cat == null) return;
+            String cat = categoryList.getSelectionModel().getSelectedItem();
+            if (cat == null) {
+                return;
+            }
             List<OtherDevice> devs = grouped.get(cat);
-            if (devs == null) return;
+            if (devs == null) {
+                return;
+            }
+            String lower = searchField.getText() == null ? "" : searchField.getText().toLowerCase();
             GridPane grid = new GridPane();
             grid.setHgap(0);
             grid.setVgap(0);
@@ -758,7 +786,14 @@ public class SystemInfoTabView extends BorderPane {
             grid.getColumnConstraints().addAll(nameCol, mfrCol);
             int r = 0;
             for (OtherDevice dev : devs) {
-                // B4 fix: ensure every device renders even when manufacturer/status blank
+                if (!lower.isEmpty()) {
+                    boolean match = cat.toLowerCase().contains(lower)
+                            || containsLower(dev.name(), lower)
+                            || containsLower(dev.manufacturer(), lower);
+                    if (!match) {
+                        continue;
+                    }
+                }
                 String devName = dev.name();
                 if (devName == null || devName.isBlank()) {
                     devName = dev.deviceId() != null && !dev.deviceId().isBlank() ? dev.deviceId() : "Unknown Device";
@@ -766,11 +801,11 @@ public class SystemInfoTabView extends BorderPane {
                 String rawVal = (dev.manufacturer() != null && !dev.manufacturer().isBlank())
                         ? dev.manufacturer()
                         : (dev.status() != null && !dev.status().isBlank() ? dev.status() : "");
-                String val = rawVal.isBlank() ? "â€”" : rawVal;
+                String val = rawVal.isBlank() ? "\u2014" : rawVal;
                 r = addRow(grid, r, devName, val);
             }
             if (r == 0) {
-                Label empty = new Label("No details available");
+                Label empty = new Label(lower.isEmpty() ? "No details available" : "No matching devices");
                 empty.getStyleClass().addAll("label", "text-muted");
                 deviceList.getChildren().add(empty);
             } else {
@@ -780,7 +815,9 @@ public class SystemInfoTabView extends BorderPane {
                 deviceList.getChildren().add(inner);
                 VBox.setVgrow(inner, Priority.ALWAYS);
             }
-        });
+        };
+        searchField.textProperty().addListener((obs, oldVal, newVal) -> refreshDevicePane.run());
+        categoryList.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, cat) -> refreshDevicePane.run());
 
         javafx.scene.control.SplitPane splitPane = new javafx.scene.control.SplitPane();
         splitPane.getItems().addAll(leftPanel, deviceList);
@@ -1485,19 +1522,10 @@ public class SystemInfoTabView extends BorderPane {
     // header metadata, TOC). Export runs off-FX so large payloads never freeze UI.
 
     private Boolean adminHintFast() {
-        try {
-            if (!AppPaths.isWindows()) {
-                return null;
-            }
-            // Instant, non-blocking: banner visibility mirrors last elevation check.
-            // Visible == not admin; hidden == admin (or not yet resolved -> null).
-            if (adminWarningLabel.isManaged()) {
-                return !adminWarningLabel.isVisible();
-            }
-            return null;
-        } catch (Exception ignored) {
+        if (!AppPaths.isWindows()) {
             return null;
         }
+        return lastAdminHint;
     }
 
     private void copyToClipboard() {

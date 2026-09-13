@@ -51,8 +51,8 @@ public class DefragService {
         IOException lastIoException = null;
         // Try powershell.exe first, fallback to pwsh.exe if not available
         List<List<String>> candidates = List.of(
-                ProcessRunner.powershellScript(script.toString()),
-                ProcessRunner.pwshScript(script.toString())
+                ProcessRunner.powershellScriptNonInteractive(script.toString()),
+                ProcessRunner.pwshScriptNonInteractive(script.toString())
         );
         for (List<String> cmd : candidates) {
             try {
@@ -223,8 +223,8 @@ public class DefragService {
                                                    AtomicBoolean cancelled, String... args)
             throws IOException, CancellationException {
         List<List<String>> candidates = List.of(
-                ProcessRunner.powershellScript(script.toString(), args),
-                ProcessRunner.pwshScript(script.toString(), args));
+                ProcessRunner.powershellScriptNonInteractive(script.toString(), args),
+                ProcessRunner.pwshScriptNonInteractive(script.toString(), args));
         IOException pending = null;
         for (List<String> cmd : candidates) {
             try {
@@ -253,33 +253,48 @@ public class DefragService {
     }
 
     /**
-     * Analyzes fragmentation for a single drive.
-     * If the drive is an SSD, populates zero values and returns without running analysis.
-     * Metadata (MFT, system files) is cached for 5 minutes to avoid redundant queries.
+     * Parsed fragmentation analysis; apply to {@link DriveInfo} on the JavaFX thread only.
      */
-    public void analyze(DriveInfo drive, Consumer<String> progressCallback, AtomicBoolean cancelled)
+    public record AnalyzeResult(
+            long fragmentedSpaceBytes,
+            long fragmentationPercent,
+            long fragmentedFileCount,
+            long totalFileCount,
+            double averageFragmentsPerFile,
+            long mftSizeBytes,
+            long pageFileSizeBytes,
+            long hiberFileSizeBytes,
+            long swapFileSizeBytes,
+            long totalDirectories,
+            String completionMessage
+    ) {}
+
+    /**
+     * Analyzes fragmentation for a single drive.
+     * If the drive is an SSD, returns zero fragmentation and metadata only.
+     * Does not mutate {@link DriveInfo} (JavaFX properties must be updated on the FX thread).
+     */
+    public AnalyzeResult analyze(DriveInfo drive, Consumer<String> progressCallback, AtomicBoolean cancelled)
             throws IOException, InterruptedException, CancellationException {
-        if (!AppPaths.isWindows()) return;
+        if (!AppPaths.isWindows()) {
+            return null;
+        }
 
         String letter = drive.getDriveLetter().replace(":", "");
 
         if (isSsd(drive)) {
-            drive.setFragmentedSpaceBytes(0);
-            drive.setFragmentationPercent(0);
-            drive.setFragmentedFileCount(0);
-            drive.setTotalFileCount(0);
-            drive.setAverageFragmentsPerFile(0);
+            long mftSize = 0;
+            long pageSize = 0;
+            long hiberSize = 0;
+            long swapSize = 0;
 
             MetadataCacheEntry cached = metadataCache.get(letter);
             if (cached != null && cached.isFresh()) {
-                drive.setMftSizeBytes(cached.mftSizeBytes());
-                drive.setPageFileSizeBytes(cached.pageFileSizeBytes());
-                drive.setHiberFileSizeBytes(cached.hiberFileSizeBytes());
-                drive.setSwapFileSizeBytes(cached.swapFileSizeBytes());
+                mftSize = cached.mftSizeBytes();
+                pageSize = cached.pageFileSizeBytes();
+                hiberSize = cached.hiberFileSizeBytes();
+                swapSize = cached.swapFileSizeBytes();
             } else {
-                // Reliability fix: SSDs previously never collected MFT/pagefile metadata
-                // (early return with empty cache left sizes at 0). Collect metadata-only
-                // via the script so visualization stays accurate.
                 try {
                     Path metaScript = PowerShellScripts.resolve("analyze-fragmentation.ps1");
                     ProcessResult meta = runStreamingWithFallback(metaScript,
@@ -291,14 +306,10 @@ public class DefragService {
                     String metaJson = extractJson(meta.stdout());
                     if (!metaJson.isBlank()) {
                         var parsed = JsonMapper.mapper().readTree(metaJson);
-                        long mftSize = parsed.has("mftSizeBytes") ? parsed.get("mftSizeBytes").asLong(0) : 0;
-                        long pageSize = parsed.has("pageFileSizeBytes") ? parsed.get("pageFileSizeBytes").asLong(0) : 0;
-                        long hiberSize = parsed.has("hiberFileSizeBytes") ? parsed.get("hiberFileSizeBytes").asLong(0) : 0;
-                        long swapSize = parsed.has("swapFileSizeBytes") ? parsed.get("swapFileSizeBytes").asLong(0) : 0;
-                        drive.setMftSizeBytes(mftSize);
-                        drive.setPageFileSizeBytes(pageSize);
-                        drive.setHiberFileSizeBytes(hiberSize);
-                        drive.setSwapFileSizeBytes(swapSize);
+                        mftSize = parsed.has("mftSizeBytes") ? parsed.get("mftSizeBytes").asLong(0) : 0;
+                        pageSize = parsed.has("pageFileSizeBytes") ? parsed.get("pageFileSizeBytes").asLong(0) : 0;
+                        hiberSize = parsed.has("hiberFileSizeBytes") ? parsed.get("hiberFileSizeBytes").asLong(0) : 0;
+                        swapSize = parsed.has("swapFileSizeBytes") ? parsed.get("swapFileSizeBytes").asLong(0) : 0;
                         metadataCache.put(letter, new MetadataCacheEntry(mftSize, pageSize, hiberSize, swapSize,
                                 System.currentTimeMillis()));
                     }
@@ -309,18 +320,16 @@ public class DefragService {
             if (progressCallback != null) {
                 progressCallback.accept("SSD detected — fragmentation analysis skipped. Use Trim instead.");
             }
-            return;
+            return new AnalyzeResult(0, 0, 0, 0, 0,
+                    mftSize, pageSize, hiberSize, swapSize, 0, null);
         }
 
         MetadataCacheEntry cached = metadataCache.get(letter);
         boolean skipMetadata = cached != null && cached.isFresh();
-
-        if (skipMetadata) {
-            drive.setMftSizeBytes(cached.mftSizeBytes());
-            drive.setPageFileSizeBytes(cached.pageFileSizeBytes());
-            drive.setHiberFileSizeBytes(cached.hiberFileSizeBytes());
-            drive.setSwapFileSizeBytes(cached.swapFileSizeBytes());
-        }
+        long cachedMft = skipMetadata ? cached.mftSizeBytes() : 0;
+        long cachedPage = skipMetadata ? cached.pageFileSizeBytes() : 0;
+        long cachedHiber = skipMetadata ? cached.hiberFileSizeBytes() : 0;
+        long cachedSwap = skipMetadata ? cached.swapFileSizeBytes() : 0;
 
         List<String> args = new ArrayList<>();
         args.add(letter);
@@ -341,43 +350,57 @@ public class DefragService {
         }
 
         String json = extractJson(result.stdout());
-        if (json.isBlank()) return;
+        if (json.isBlank()) {
+            throw new IOException("Analysis returned no JSON result");
+        }
         try {
             var parsed = JsonMapper.mapper().readTree(json);
             long fragments = parsed.get("fragmentsFound").asLong(0);
             long percent = parsed.get("fragmentationPercent").asLong(0);
-            drive.setFragmentedSpaceBytes(fragments);
-            drive.setFragmentationPercent(percent);
 
             long fragFiles = parsed.has("fragmentedFileCount") ? parsed.get("fragmentedFileCount").asLong(0) : 0;
             long totalFiles = parsed.has("totalFileCount") ? parsed.get("totalFileCount").asLong(0) : 0;
             double avgFrag = parsed.has("averageFragmentsPerFile") ? parsed.get("averageFragmentsPerFile").asDouble(0) : 0;
-            long mftSize = parsed.has("mftSizeBytes") ? parsed.get("mftSizeBytes").asLong(0) : 0;
-            long pageSize = parsed.has("pageFileSizeBytes") ? parsed.get("pageFileSizeBytes").asLong(0) : 0;
-            long hiberSize = parsed.has("hiberFileSizeBytes") ? parsed.get("hiberFileSizeBytes").asLong(0) : 0;
-            long swapSize = parsed.has("swapFileSizeBytes") ? parsed.get("swapFileSizeBytes").asLong(0) : 0;
+            long mftSize = skipMetadata ? cachedMft
+                    : (parsed.has("mftSizeBytes") ? parsed.get("mftSizeBytes").asLong(0) : 0);
+            long pageSize = skipMetadata ? cachedPage
+                    : (parsed.has("pageFileSizeBytes") ? parsed.get("pageFileSizeBytes").asLong(0) : 0);
+            long hiberSize = skipMetadata ? cachedHiber
+                    : (parsed.has("hiberFileSizeBytes") ? parsed.get("hiberFileSizeBytes").asLong(0) : 0);
+            long swapSize = skipMetadata ? cachedSwap
+                    : (parsed.has("swapFileSizeBytes") ? parsed.get("swapFileSizeBytes").asLong(0) : 0);
             long totalDirs = parsed.has("totalDirectories") ? parsed.get("totalDirectories").asLong(0) : 0;
-
-            drive.setFragmentedFileCount(fragFiles);
-            drive.setTotalFileCount(totalFiles);
-            drive.setAverageFragmentsPerFile(avgFrag);
-            drive.setMftSizeBytes(mftSize);
-            drive.setPageFileSizeBytes(pageSize);
-            drive.setHiberFileSizeBytes(hiberSize);
-            drive.setSwapFileSizeBytes(swapSize);
-            drive.setTotalDirectories(totalDirs);
 
             if (!skipMetadata) {
                 metadataCache.put(letter, new MetadataCacheEntry(mftSize, pageSize, hiberSize, swapSize, System.currentTimeMillis()));
             }
 
+            String completion = "Analysis complete - " + fragments + " bytes fragmented space, " + percent + "% fragmented";
             if (progressCallback != null) {
-                progressCallback.accept("Analysis complete - " + fragments + " bytes fragmented space, " + percent + "% fragmented");
+                progressCallback.accept(completion);
             }
+            return new AnalyzeResult(fragments, percent, fragFiles, totalFiles, avgFrag,
+                    mftSize, pageSize, hiberSize, swapSize, totalDirs, completion);
+        } catch (IOException e) {
+            throw e;
         } catch (Exception e) {
             AppLogger.error("Failed to parse analysis result", e);
             throw new IOException("Failed to parse analysis: " + e.getMessage(), e);
         }
+    }
+
+    public static void applyAnalyzeResult(DriveInfo drive, AnalyzeResult result) {
+        if (drive == null || result == null) return;
+        drive.setFragmentedSpaceBytes(result.fragmentedSpaceBytes());
+        drive.setFragmentationPercent(result.fragmentationPercent());
+        drive.setFragmentedFileCount(result.fragmentedFileCount());
+        drive.setTotalFileCount(result.totalFileCount());
+        drive.setAverageFragmentsPerFile(result.averageFragmentsPerFile());
+        drive.setMftSizeBytes(result.mftSizeBytes());
+        drive.setPageFileSizeBytes(result.pageFileSizeBytes());
+        drive.setHiberFileSizeBytes(result.hiberFileSizeBytes());
+        drive.setSwapFileSizeBytes(result.swapFileSizeBytes());
+        drive.setTotalDirectories(result.totalDirectories());
     }
 
     private static String extractJson(String output) {

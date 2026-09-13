@@ -119,7 +119,7 @@ public class ShredderService {
 
     private ProcessResult runWithFallback(String scriptPath, String... args) throws IOException, InterruptedException {
         IOException pending = null;
-        for (List<String> cmd : List.of(ProcessRunner.powershellScript(scriptPath, args), ProcessRunner.pwshScript(scriptPath, args))) {
+        for (List<String> cmd : List.of(ProcessRunner.powershellScriptNonInteractive(scriptPath, args), ProcessRunner.pwshScriptNonInteractive(scriptPath, args))) {
             try {
                 return processRunner.run(cmd);
             } catch (IOException e) {
@@ -142,8 +142,8 @@ public class ShredderService {
                                                     AtomicBoolean cancelled, String... args)
             throws IOException {
         IOException pending = null;
-        for (List<String> cmd : List.of(ProcessRunner.powershellScript(scriptPath, args),
-                ProcessRunner.pwshScript(scriptPath, args))) {
+        for (List<String> cmd : List.of(ProcessRunner.powershellScriptNonInteractive(scriptPath, args),
+                ProcessRunner.pwshScriptNonInteractive(scriptPath, args))) {
             try {
                 return processRunner.runStreaming(cmd, lineCallback, progressCallback, cancelled);
             } catch (IOException e) {
@@ -435,8 +435,8 @@ public class ShredderService {
                 };
 
                 List<List<String>> candidates = List.of(
-                        new ArrayList<>(ProcessRunner.powershellScript(script.toString())),
-                        new ArrayList<>(ProcessRunner.pwshScript(script.toString()))
+                        new ArrayList<>(ProcessRunner.powershellScriptNonInteractive(script.toString())),
+                        new ArrayList<>(ProcessRunner.pwshScriptNonInteractive(script.toString()))
                 );
                 // Append args to each candidate
                 for (List<String> c : candidates) {

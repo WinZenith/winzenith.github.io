@@ -5,6 +5,7 @@ import com.sbtools.util.AppInfo;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -72,6 +73,7 @@ public final class SystemInfoReportGenerator {
             appendField(sb, "Computer Name", data.os().computerName());
             appendField(sb, "Install Date", data.os().installDate());
             appendField(sb, "Last Boot", data.os().lastBoot());
+            appendField(sb, "Windows Directory", data.os().windowsDir());
             appendField(sb, "Serial Number", data.os().serialNumber());
             sb.append("\n");
         }
@@ -89,6 +91,8 @@ public final class SystemInfoReportGenerator {
             appendField(sb, "L2 Cache", data.cpu().formatL2Cache());
             appendField(sb, "L3 Cache", data.cpu().formatL3Cache());
             appendField(sb, "Voltage", data.cpu().voltage());
+            appendField(sb, "Stepping", data.cpu().stepping());
+            appendField(sb, "Revision", data.cpu().revision());
             sb.append("\n");
         }
 
@@ -98,11 +102,13 @@ public final class SystemInfoReportGenerator {
                 sb.append("--- GPU").append(data.gpu().size() > 1 ? " " + (i + 1) : "").append(" ---\n");
                 appendField(sb, "Name", gpu.name());
                 appendField(sb, "Manufacturer", gpu.manufacturer());
+                appendField(sb, "Video Processor", gpu.videoProcessor());
                 appendField(sb, "VRAM", gpu.formatVram());
                 appendField(sb, "Memory Type", gpu.memoryType());
                 appendField(sb, "Driver Version", gpu.driverVersion());
                 appendField(sb, "Driver Date", gpu.driverDate());
                 appendField(sb, "Resolution", gpu.resolution());
+                appendField(sb, "Color Depth", gpu.colorDepth());
                 sb.append("\n");
             }
         }
@@ -116,7 +122,8 @@ public final class SystemInfoReportGenerator {
                     RamInfo.RamStick stick = data.ram().sticks().get(i);
                     sb.append("  Slot ").append(i + 1).append(": ").append(stick.formatCapacity())
                             .append(" ").append(nvl(stick.memoryType())).append(" ").append(stick.formatSpeed())
-                            .append(" ").append(nvl(stick.manufacturer())).append("\n");
+                            .append(" ").append(nvl(stick.formFactor())).append(" ")
+                            .append(nvl(stick.manufacturer())).append("\n");
                 }
             }
             sb.append("\n");
@@ -158,6 +165,8 @@ public final class SystemInfoReportGenerator {
             appendField(sb, "Model", data.motherboard().model());
             appendField(sb, "Version", data.motherboard().version());
             appendField(sb, "Chipset", data.motherboard().chipset());
+            appendField(sb, "Southbridge", data.motherboard().southbridge());
+            appendField(sb, "Serial Number", data.motherboard().serialNumber());
             sb.append("\n");
         }
 
@@ -197,7 +206,9 @@ public final class SystemInfoReportGenerator {
             sb.append("Charge: ").append(batt.formatChargeLevel()).append("\n");
             appendField(sb, "Status", batt.status());
             appendField(sb, "Chemistry", batt.chemistry());
-            sb.append("Remaining: ").append(batt.formatRemainingCapacity()).append("\n\n");
+            sb.append("Remaining: ").append(batt.formatRemainingCapacity()).append("\n");
+            appendField(sb, "Charge Rate", batt.formatChargeRate());
+            sb.append("\n");
         }
 
         if (data.temperatures() != null && !data.temperatures().isEmpty()) {
@@ -262,15 +273,43 @@ public final class SystemInfoReportGenerator {
         if (data == null || tabName == null) {
             return "";
         }
+        if ("Overview".equals(tabName)) {
+            StringBuilder sb = new StringBuilder();
+            appendOverviewText(sb, data);
+            return sb.toString().strip() + "\n";
+        }
+        if ("Warnings".equals(tabName)) {
+            return buildWarningsSectionText(data) + "\n";
+        }
+        if ("GPU".equals(tabName)) {
+            String gpu = extractGpuSections(generatePlainTextReport(data));
+            return gpu.isBlank() ? tabName + ": (no data)\n" : gpu + "\n";
+        }
+        if ("Motherboard".equals(tabName)) {
+            String full = generatePlainTextReport(data);
+            String mb = extractSingleSection(full, "--- Motherboard ---");
+            String bios = extractSingleSection(full, "--- BIOS ---");
+            if (mb.isBlank() && bios.isBlank()) {
+                return tabName + ": (no data)\n";
+            }
+            StringBuilder out = new StringBuilder();
+            if (!mb.isBlank()) {
+                out.append(mb);
+            }
+            if (!bios.isBlank()) {
+                if (!out.isEmpty()) {
+                    out.append("\n\n");
+                }
+                out.append(bios);
+            }
+            return out.toString().strip() + "\n";
+        }
         String full = generatePlainTextReport(data);
         String header = switch (tabName) {
-            case "Overview" -> null; // full summary
             case "CPU" -> "--- CPU ---";
-            case "GPU" -> "--- GPU";
             case "RAM" -> "--- RAM ---";
             case "OS" -> "--- Operating System ---";
             case "Storage" -> "--- Storage ---";
-            case "Motherboard" -> "--- Motherboard ---";
             case "Network" -> "--- Network Adapters ---";
             case "Audio" -> "--- Audio Devices ---";
             case "Battery" -> "--- Battery ---";
@@ -279,21 +318,13 @@ public final class SystemInfoReportGenerator {
             case "USB Devices" -> "--- USB Devices ---";
             case "Monitors" -> "--- Monitors ---";
             case "Printers" -> "--- Printers ---";
-            case "Warnings" -> "--- Warnings ---";
             default -> null;
         };
         if (header == null) {
-            return full;
+            return "";
         }
-        int start = full.indexOf(header);
-        if (start < 0) {
-            return tabName + ": (no data)\n";
-        }
-        int end = full.indexOf("\n--- ", start + header.length());
-        if (end < 0) {
-            end = full.length();
-        }
-        return full.substring(start, end).strip() + "\n";
+        String section = extractSingleSection(full, header);
+        return section.isBlank() ? tabName + ": (no data)\n" : section + "\n";
     }
 
     public static String generateHtmlReport(SystemInfoData data) {
@@ -346,7 +377,7 @@ public final class SystemInfoReportGenerator {
         // TOC anchors (print-friendly, no JS)
         html.append("<div class=\"toc\">");
         String[] toc = {"OS", "CPU", "GPU", "RAM", "Storage", "Motherboard", "BIOS",
-                "Network", "Audio", "Battery", "Temperatures", "USB", "Monitors", "Printers", "Warnings"};
+                "Network", "Audio", "Battery", "Temperatures", "Others", "USB", "Monitors", "Printers", "Warnings"};
         for (String t : toc) {
             html.append("<a href=\"#sec-").append(t).append("\">").append(t).append("</a>");
         }
@@ -366,6 +397,7 @@ public final class SystemInfoReportGenerator {
             html.append(row("Computer Name", data.os().computerName()));
             html.append(row("Install Date", data.os().installDate()));
             html.append(row("Last Boot", data.os().lastBoot()));
+            html.append(row("Windows Directory", data.os().windowsDir()));
             html.append(row("Serial Number", data.os().serialNumber()));
             html.append("</table>");
         }
@@ -383,20 +415,26 @@ public final class SystemInfoReportGenerator {
             html.append(row("L2 Cache", data.cpu().formatL2Cache()));
             html.append(row("L3 Cache", data.cpu().formatL3Cache()));
             html.append(row("Voltage", data.cpu().voltage()));
+            html.append(row("Stepping", data.cpu().stepping()));
+            html.append(row("Revision", data.cpu().revision()));
             html.append("</table>");
         }
 
         if (data.gpu() != null) {
             for (int i = 0; i < data.gpu().size(); i++) {
                 GpuInfo gpu = data.gpu().get(i);
-                html.append("<h2 id=\"sec-GPU\">GPU").append(data.gpu().size() > 1 ? " " + (i + 1) : "").append("</h2><table>");
+                String gpuId = data.gpu().size() > 1 ? "sec-GPU-" + (i + 1) : "sec-GPU";
+                html.append("<h2 id=\"").append(gpuId).append("\">GPU")
+                        .append(data.gpu().size() > 1 ? " " + (i + 1) : "").append("</h2><table>");
                 html.append(row("Name", gpu.name()));
                 html.append(row("Manufacturer", gpu.manufacturer()));
+                html.append(row("Video Processor", gpu.videoProcessor()));
                 html.append(row("VRAM", gpu.formatVram()));
                 html.append(row("Memory Type", gpu.memoryType()));
                 html.append(row("Driver Version", gpu.driverVersion()));
                 html.append(row("Driver Date", gpu.driverDate()));
                 html.append(row("Resolution", gpu.resolution()));
+                html.append(row("Color Depth", gpu.colorDepth()));
                 html.append("</table>");
             }
         }
@@ -413,6 +451,7 @@ public final class SystemInfoReportGenerator {
                     html.append(row("Capacity", stick.formatCapacity()));
                     html.append(row("Type", stick.memoryType()));
                     html.append(row("Speed", stick.formatSpeed()));
+                    html.append(row("Form Factor", stick.formFactor()));
                     html.append(row("Manufacturer", stick.manufacturer()));
                     html.append(row("Part Number", stick.partNumber()));
                     html.append("</table>");
@@ -492,6 +531,8 @@ public final class SystemInfoReportGenerator {
             html.append(row("Model", data.motherboard().model()));
             html.append(row("Version", data.motherboard().version()));
             html.append(row("Chipset", data.motherboard().chipset()));
+            html.append(row("Southbridge", data.motherboard().southbridge()));
+            html.append(row("Serial Number", data.motherboard().serialNumber()));
             html.append("</table>");
         }
 
@@ -537,6 +578,7 @@ public final class SystemInfoReportGenerator {
             html.append(row("Status", data.battery().status()));
             html.append(row("Chemistry", data.battery().chemistry()));
             html.append(row("Remaining", data.battery().formatRemainingCapacity()));
+            html.append(row("Charge Rate", data.battery().formatChargeRate()));
             html.append("</table>");
         }
 
@@ -607,6 +649,117 @@ public final class SystemInfoReportGenerator {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
+
+    private static void appendOverviewText(StringBuilder sb, SystemInfoData data) {
+        sb.append("--- Overview ---\n");
+        if (data.os() != null) {
+            appendField(sb, "OS", data.os().name());
+            appendField(sb, "Version", data.os().version());
+            appendField(sb, "Build", data.os().buildNumber());
+            appendField(sb, "Architecture", data.os().architecture());
+        }
+        if (data.cpu() != null) {
+            appendField(sb, "CPU", data.cpu().name());
+            appendField(sb, "Cores / Threads", data.cpu().cores() + " / " + data.cpu().logicalCpus());
+            appendField(sb, "Base Clock", data.cpu().formatBaseClock());
+            appendField(sb, "Socket", data.cpu().socket());
+        }
+        if (data.ram() != null) {
+            appendField(sb, "Total RAM", data.ram().formatTotal());
+            appendField(sb, "Channel", data.ram().channel());
+            if (data.ram().sticks() != null && !data.ram().sticks().isEmpty()) {
+                RamInfo.RamStick firstStick = data.ram().sticks().get(0);
+                appendField(sb, "RAM Type", firstStick.memoryType());
+                appendField(sb, "RAM Speed", firstStick.formatSpeed());
+            }
+        }
+        if (data.gpu() != null && !data.gpu().isEmpty()) {
+            GpuInfo primaryGpu = data.gpu().get(0);
+            appendField(sb, "GPU", primaryGpu.name());
+            appendField(sb, "VRAM", primaryGpu.formatVram());
+            appendField(sb, "Driver", primaryGpu.driverVersion());
+        }
+        if (data.storage() != null && data.storage().disks() != null && !data.storage().disks().isEmpty()) {
+            StorageInfo.Disk primaryDisk = data.storage().disks().get(0);
+            appendField(sb, "Primary Disk", primaryDisk.model());
+            appendField(sb, "Disk Size", primaryDisk.formatSize());
+            appendField(sb, "Interface", primaryDisk.interfaceType());
+        }
+        if (data.motherboard() != null) {
+            appendField(sb, "Motherboard",
+                    nvl(data.motherboard().manufacturer()) + " " + nvl(data.motherboard().model()));
+            appendField(sb, "Chipset", data.motherboard().chipset());
+        }
+        if (data.bios() != null) {
+            appendField(sb, "BIOS", nvl(data.bios().manufacturer()) + " " + nvl(data.bios().version()));
+            appendField(sb, "BIOS Date", data.bios().releaseDate());
+        }
+    }
+
+    private static String buildWarningsSectionText(SystemInfoData data) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("--- Warnings ---\n");
+        List<String> warnings = data.warnings();
+        if (warnings != null && !warnings.isEmpty()) {
+            for (String w : warnings) {
+                sb.append("! ").append(w).append("\n");
+            }
+        } else {
+            sb.append("(no warnings)\n");
+        }
+        if (data.timings() != null && !data.timings().isEmpty()) {
+            sb.append("\nCollection timings (ms):\n");
+            List<Map.Entry<String, Long>> entries = new ArrayList<>(data.timings().entrySet());
+            entries.sort(Map.Entry.comparingByKey());
+            for (Map.Entry<String, Long> e : entries) {
+                sb.append(e.getKey()).append(": ").append(e.getValue() == null ? 0 : e.getValue()).append("\n");
+            }
+        }
+        if (data.collectedAt() != null && !data.collectedAt().isBlank()) {
+            sb.append("Collected at: ").append(data.collectedAt()).append("\n");
+        }
+        if (data.version() != null && !data.version().isBlank()) {
+            sb.append("Payload version: ").append(data.version()).append("\n");
+        }
+        return sb.toString().strip();
+    }
+
+    private static String extractSingleSection(String full, String header) {
+        int start = full.indexOf(header);
+        if (start < 0) {
+            return "";
+        }
+        int end = full.indexOf("\n--- ", start + header.length());
+        if (end < 0) {
+            end = full.length();
+        }
+        return full.substring(start, end).strip();
+    }
+
+    private static String extractGpuSections(String full) {
+        int start = full.indexOf("--- GPU");
+        if (start < 0) {
+            return "";
+        }
+        int scanFrom = start;
+        int end = full.length();
+        while (true) {
+            int nextHdr = full.indexOf("\n--- ", scanFrom + 5);
+            if (nextHdr < 0) {
+                break;
+            }
+            int lineStart = nextHdr + 1;
+            int lineEnd = full.indexOf('\n', lineStart);
+            String line = lineEnd < 0 ? full.substring(lineStart) : full.substring(lineStart, lineEnd);
+            if (line.startsWith("--- GPU")) {
+                scanFrom = lineStart;
+                continue;
+            }
+            end = nextHdr;
+            break;
+        }
+        return full.substring(start, end).strip();
+    }
 
     private static void appendTimingsText(StringBuilder sb, Map<String, Long> timings) {
         if (timings == null || timings.isEmpty()) {
