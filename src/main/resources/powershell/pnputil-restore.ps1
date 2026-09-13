@@ -3,25 +3,29 @@
 param(
     [Parameter(Mandatory = $true)][string]$BackupFolder,
     [Parameter(Mandatory = $false)][string]$DeviceId,
-    [Parameter(Mandatory = $false)][string]$RecordedInfName
+    [Parameter(Mandatory = $true)][string]$RecordedInfName
 )
 $ErrorActionPreference = 'Stop'
-$infs = Get-ChildItem -Path $BackupFolder -Filter *.inf -Recurse -ErrorAction SilentlyContinue
-if (-not $infs) {
-    Write-Error "No INF files in $BackupFolder"
+if (-not $RecordedInfName -or -not $RecordedInfName.Trim()) {
+    Write-Error "RecordedInfName is required - refusing to install every INF in the folder"
     exit 1
 }
-# Scope to the recorded INF when the caller provides one: installing every INF
-# in the folder would also install a planted extra INF with admin rights.
-if ($RecordedInfName -and $RecordedInfName.Trim()) {
-    $want = $RecordedInfName.Trim()
-    $scoped = @($infs | Where-Object { $_.Name -eq $want })
-    if (-not $scoped -or $scoped.Count -eq 0) {
-        Write-Error "Recorded INF $want not found in $BackupFolder - refusing to install other INFs"
-        exit 1
-    }
-    $infs = $scoped
+$want = $RecordedInfName.Trim()
+if ($want -match '[\\/:*?"<>|]') {
+    Write-Error "RecordedInfName must be a bare filename, not a path: $want"
+    exit 1
 }
+$infs = Get-ChildItem -Path $BackupFolder -Filter $want -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ceq $want }
+if (-not $infs -or @($infs).Count -eq 0) {
+    Write-Error "Recorded INF $want not found in $BackupFolder"
+    exit 1
+}
+if (@($infs).Count -gt 1) {
+    Write-Error "Multiple copies of $want found in $BackupFolder - refusing ambiguous restore"
+    exit 1
+}
+$infs = @($infs[0])
 
 # Phase 1: Install backed-up drivers first (never delete current driver automatically - destructive)
 $failed = 0

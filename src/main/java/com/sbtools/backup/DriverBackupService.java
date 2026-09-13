@@ -22,6 +22,12 @@ import java.util.stream.Collectors;
 public class DriverBackupService {
 
     private static final java.util.concurrent.ConcurrentHashMap<Path, ReentrantReadWriteLock> LOCKS = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Serializes merged index reads and cross-file index mutations in-process. */
+    private static final ReentrantReadWriteLock INDEX_STORE_LOCK = new ReentrantReadWriteLock(true);
+    static final java.util.regex.Pattern RECORDED_INF_NAME = java.util.regex.Pattern.compile("(?i)[\\w\\-]+\\.inf");
+    private static final java.util.regex.Pattern BACKUP_LEAF_DIR =
+            java.util.regex.Pattern.compile("\\d+_[0-9a-fA-F]{8}");
+
     private static ReentrantReadWriteLock lockFor(Path indexPath) {
         return LOCKS.computeIfAbsent(indexPath.toAbsolutePath().normalize(), k -> new ReentrantReadWriteLock());
     }
@@ -33,9 +39,7 @@ public class DriverBackupService {
     private final ProcessRunner processRunner = new ProcessRunner(300);
 
     public List<DriverBackupEntry> listAll() throws IOException {
-        Path idx = indexPath();
-        ReentrantReadWriteLock lock = lockFor(idx);
-        lock.readLock().lock();
+        INDEX_STORE_LOCK.readLock().lock();
         try {
             // Null-safe: a single corrupt entry (createdAt=null) must never NPE the whole tab.
             return loadIndex().getEntries().stream()
@@ -43,14 +47,12 @@ public class DriverBackupService {
                             Comparator.nullsLast(Comparator.reverseOrder())))
                     .collect(Collectors.toList());
         } finally {
-            lock.readLock().unlock();
+            INDEX_STORE_LOCK.readLock().unlock();
         }
     }
 
     public List<DriverBackupEntry> listBackups(String deviceId) throws IOException {
-        Path idx = indexPath();
-        ReentrantReadWriteLock lock = lockFor(idx);
-        lock.readLock().lock();
+        INDEX_STORE_LOCK.readLock().lock();
         try {
             return loadIndex().getEntries().stream()
                     .filter(e -> deviceId != null && deviceId.equals(e.deviceId()))
@@ -58,7 +60,7 @@ public class DriverBackupService {
                             Comparator.nullsLast(Comparator.reverseOrder())))
                     .collect(Collectors.toList());
         } finally {
-            lock.readLock().unlock();
+            INDEX_STORE_LOCK.readLock().unlock();
         }
     }
 
@@ -92,16 +94,14 @@ public class DriverBackupService {
             throws IOException, InterruptedException {
         String supportIssue = backupSupportIssue(driver);
         if (supportIssue != null) {
-            throw new IOException("Cannot backup driver: " + supportIssue + " for "
-                    + driver.friendlyName() + " (" + driver.deviceId()
-                    + "). Automatic backup is not supported for this device.");
+            throw new IOException("Cannot backup driver: " + supportIssue
+                    + ". Automatic backup is not supported for this device.");
         }
         String inf = driver.infName();
         if (driver.deviceId() == null || driver.deviceId().isBlank()) {
             throw new IOException("Cannot backup driver: device ID not available.");
         }
-        String safeId = driver.deviceId().replaceAll("[^a-zA-Z0-9_-]", "_");
-        if (safeId.isBlank()) safeId = "unknown";
+        String safeId = sanitizeDeviceId(driver.deviceId());
         Path root = AppPaths.backupsRoot(settings);
         Instant now = Instant.now();
         Path folder = root
@@ -173,26 +173,31 @@ public class DriverBackupService {
         final Path idx = usedFallbackRoot
                 ? AppPaths.legacyBackupsRoot().resolve("index.json")
                 : indexPath(settings);
-        ReentrantReadWriteLock lock = lockFor(idx);
-        lock.writeLock().lock();
         final Path savedFolder = folder;
+        INDEX_STORE_LOCK.writeLock().lock();
         try {
-            BackupIndex index = loadIndex(settings);
-            index.getEntries().add(entry);
+            ReentrantReadWriteLock lock = lockFor(idx);
+            lock.writeLock().lock();
             try {
-                if (usedFallbackRoot) {
-                    saveIndexToPath(index, idx);
-                } else {
-                    saveIndex(index, settings);
+                BackupIndex index = loadIndex(settings);
+                index.getEntries().add(entry);
+                try {
+                    if (usedFallbackRoot) {
+                        saveIndexToPath(index, idx);
+                    } else {
+                        saveIndex(index, settings);
+                    }
+                } catch (IOException | RuntimeException saveEx) {
+                    // No index, no rollback: remove the files rather than leak an
+                    // orphan backup the UI can never revert.
+                    try { deleteDirectory(savedFolder); } catch (Exception ignored) {}
+                    throw saveEx;
                 }
-            } catch (IOException | RuntimeException saveEx) {
-                // No index, no rollback: remove the files rather than leak an
-                // orphan backup the UI can never revert.
-                try { deleteDirectory(savedFolder); } catch (Exception ignored) {}
-                throw saveEx;
+            } finally {
+                lock.writeLock().unlock();
             }
         } finally {
-            lock.writeLock().unlock();
+            INDEX_STORE_LOCK.writeLock().unlock();
         }
 
         AppLogger.info("Driver backup created: " + entry.friendlyName()
@@ -205,17 +210,26 @@ public class DriverBackupService {
             throw new IOException("Invalid backup entry");
         }
         Path folder = Path.of(entry.backupFolder());
-        if (!isSafeToDelete(folder)) {
-            throw new IOException("Refusing to revert from folder outside backups root: " + folder);
+        if (!BackupHealth.isPathShapeSafe(folder)) {
+            throw new IOException("Refusing to revert from unsafe folder: " + folder);
         }
-        // Strict roots for the destructive path: isSafeToDelete also trusts
-        // index-referenced folders outside the current roots (old custom dir),
-        // but an index entry authorizes itself — a planted entry + INF would
-        // get an elevated install. Revert requires a current location; point
-        // the backup directory back first to revert older entries.
         if (!isUnderCurrentRoots(folder)) {
             throw new IOException("Backup is outside the current backup locations: " + folder
                     + ". Point the backup directory back to its original location and retry.");
+        }
+        String infName = entry.infName();
+        if (infName == null || !RECORDED_INF_NAME.matcher(infName).matches()) {
+            throw new IOException("This backup has no recorded INF name. Automatic revert is not supported.\n"
+                    + "Use Device Manager → Update driver → Browse → Let me pick → Have Disk\n"
+                    + "and point at: " + folder);
+        }
+        int infMatches = BackupHealth.countMatchingInfFiles(folder, infName);
+        if (infMatches < 0) {
+            throw new IOException("Backup folder is too large to verify: " + folder);
+        }
+        if (infMatches != 1) {
+            throw new IOException("Expected exactly one " + infName + " in backup folder, found " + infMatches
+                    + ". Refusing ambiguous revert.");
         }
         if (!Files.isDirectory(folder)) {
             throw new IOException("Backup folder missing: " + folder);
@@ -239,9 +253,7 @@ public class DriverBackupService {
             AppLogger.warning("Revert: deviceId contains wildcards, skipping device restart for entry " + entry.id());
             deviceArg = "";
         }
-        // Recorded INF scopes the restore: without it the script would install
-        // every INF in the folder (a planted extra INF would ride along).
-        String infArg = entry.infName() != null ? entry.infName() : "";
+        String infArg = infName;
         // Non-interactive: prompts hang to the timeout.
         ProcessResult result = processRunner.run(ProcessRunner.powershellScriptNonInteractive(
                 script.toString(), folder.toString(), deviceArg, infArg));
@@ -297,106 +309,102 @@ public class DriverBackupService {
 
     public void removeBackupEntry(DriverBackupEntry entry) throws IOException {
         if (entry == null || entry.id() == null) return;
-        // Authorize BEFORE purging: isSafeToDelete trusts index-referenced
-        // folders outside the current roots (old custom dir after a settings
-        // change), and purging first would destroy that authorization and leak
-        // the folder forever.
-        Path folder = null;
-        boolean safe = false;
+        Path folder;
         try {
             folder = Path.of(entry.backupFolder());
-            safe = isSafeToDelete(folder);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            throw new IOException("Invalid backup folder: " + entry.backupFolder());
         }
-        // Remove from all index files (primary + fallbacks) to prevent ghost reappearance
-        java.util.Set<String> idsToRemove = java.util.Set.of(entry.id());
-        purgeFromAllIndexes(idsToRemove);
-
-        try {
-            if (folder != null && safe) {
-                deleteDirectory(folder);
-                cleanupEmptyParent(folder.getParent());
+        if (Files.isDirectory(folder)) {
+            if (!isSafeToDelete(folder, entry)) {
+                throw new IOException("Refusing to delete folder outside current backup locations: " + folder
+                        + ". Point the backup directory to its original location, or use Repair to remove only the index entry.");
             }
-        } catch (IOException e) {
-            AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
+            deleteDirectory(folder);
+            cleanupEmptyParent(folder.getParent());
         }
+        purgeFromAllIndexes(java.util.Set.of(entry.id()));
     }
 
     public void removeAll() throws IOException {
-        List<DriverBackupEntry> entriesToDelete;
-        Path idx = indexPath();
-        ReentrantReadWriteLock lock = lockFor(idx);
-        lock.writeLock().lock();
-        try {
-            BackupIndex index = loadIndex();
-            entriesToDelete = new java.util.ArrayList<>(index.getEntries());
-            index.getEntries().clear();
-            saveIndex(index);
-        } finally {
-            lock.writeLock().unlock();
-        }
-        // Purge all fallback indexes as well so deleted entries don't resurrect
-        if (!entriesToDelete.isEmpty()) {
-            java.util.Set<String> allIds = new java.util.HashSet<>();
-            for (DriverBackupEntry e : entriesToDelete) if (e.id()!=null) allIds.add(e.id());
-            // Also include any entries that only lived in fallback files
-            for (Path fb : fallbackIndexPaths(indexPath())) {
-                try {
-                    BackupIndex fbIdx = loadSingleIndex(fb);
-                    for (DriverBackupEntry e : fbIdx.getEntries()) if (e.id()!=null) allIds.add(e.id());
-                } catch (Exception ignored) {}
-            }
-            purgeFromAllIndexes(allIds);
-            // Ensure fallback files are truncated
-            for (Path fb : fallbackIndexPaths(indexPath())) {
-                try {
-                    BackupIndex fbIdx = loadSingleIndex(fb);
-                    if (!fbIdx.getEntries().isEmpty()) {
-                        fbIdx.getEntries().clear();
-                        saveIndexToPath(fbIdx, fb);
-                    }
-                } catch (Exception ex) {
-                    AppLogger.warning("Failed to clear fallback index " + fb + ": " + ex.getMessage());
-                }
-            }
-        }
-        // Sequential to avoid race on shared parent (same safeId)
+        List<DriverBackupEntry> entriesToDelete = listAll();
+        java.util.List<String> folderFailures = new java.util.ArrayList<>();
+        java.util.Set<String> purgedIds = new java.util.HashSet<>();
         java.util.Set<Path> cleanedParents = new java.util.HashSet<>();
         for (DriverBackupEntry entry : entriesToDelete) {
+            if (entry == null || entry.id() == null) {
+                continue;
+            }
+            Path folder;
             try {
-                Path folder = Path.of(entry.backupFolder());
-                if (isSafeToDelete(folder) && Files.isDirectory(folder)) {
+                folder = Path.of(entry.backupFolder());
+            } catch (Exception e) {
+                folderFailures.add(entry.id() + ": invalid path");
+                continue;
+            }
+            if (Files.isDirectory(folder)) {
+                if (!isSafeToDelete(folder, entry)) {
+                    folderFailures.add(folder.toString() + ": outside current backup roots");
+                    continue;
+                }
+                try {
                     deleteDirectory(folder);
                     Path parent = folder.getParent();
                     if (parent != null && cleanedParents.add(parent)) {
                         cleanupEmptyParent(parent);
                     }
+                } catch (IOException e) {
+                    folderFailures.add(folder + ": " + e.getMessage());
+                    continue;
                 }
-            } catch (IOException e) {
-                AppLogger.warning("Could not delete backup folder: " + entry.backupFolder(), e);
             }
+            purgedIds.add(entry.id());
+        }
+        if (!purgedIds.isEmpty()) {
+            purgeFromAllIndexes(purgedIds);
+        }
+        if (!folderFailures.isEmpty()) {
+            throw new IOException("Deleted " + purgedIds.size() + " backup(s); "
+                    + folderFailures.size() + " could not be removed completely:\n"
+                    + String.join("\n", folderFailures.subList(0, Math.min(5, folderFailures.size())))
+                    + (folderFailures.size() > 5 ? "\n…" : ""));
         }
         AppLogger.info("All driver backups removed (" + entriesToDelete.size() + ")");
     }
 
     private void purgeFromAllIndexes(java.util.Set<String> idsToRemove) throws IOException {
         if (idsToRemove == null || idsToRemove.isEmpty()) return;
-        java.util.List<Path> allPaths = allIndexPaths();
-        for (Path p : allPaths) {
-            ReentrantReadWriteLock lock = lockFor(p);
-            lock.writeLock().lock();
-            try {
-                if (!Files.exists(p) && !Files.exists(p.resolveSibling(p.getFileName().toString() + ".bak"))) continue;
-                BackupIndex idx = loadSingleIndex(p);
-                boolean changed = idx.getEntries().removeIf(e -> e != null && e.id() != null && idsToRemove.contains(e.id()));
-                if (changed) {
-                    saveIndexToPath(idx, p);
+        java.util.List<Path> allPaths = allIndexPaths().stream()
+                .map(p -> p.toAbsolutePath().normalize())
+                .distinct()
+                .sorted()
+                .collect(Collectors.toList());
+        java.util.List<String> errors = new java.util.ArrayList<>();
+        INDEX_STORE_LOCK.writeLock().lock();
+        try {
+            for (Path p : allPaths) {
+                ReentrantReadWriteLock lock = lockFor(p);
+                lock.writeLock().lock();
+                try {
+                    if (!Files.exists(p) && !Files.exists(p.resolveSibling(p.getFileName().toString() + ".bak"))) {
+                        continue;
+                    }
+                    BackupIndex idx = loadSingleIndex(p);
+                    boolean changed = idx.getEntries().removeIf(e -> e != null && e.id() != null && idsToRemove.contains(e.id()));
+                    if (changed) {
+                        saveIndexToPath(idx, p);
+                    }
+                } catch (IOException ex) {
+                    errors.add(p + ": " + ex.getMessage());
+                } finally {
+                    lock.writeLock().unlock();
                 }
-            } catch (IOException ex) {
-                AppLogger.warning("Failed to purge index " + p + ": " + ex.getMessage());
-            } finally {
-                lock.writeLock().unlock();
             }
+        } finally {
+            INDEX_STORE_LOCK.writeLock().unlock();
+        }
+        if (!errors.isEmpty()) {
+            throw new IOException("Failed to update backup index: " + String.join("; ", errors));
         }
     }
 
@@ -505,76 +513,50 @@ public class DriverBackupService {
                     return false;
                 }
             }
-            // Indexed orphan locations (old custom dir) are still readable:
-            // fall back to full check which consults indexes.
-            return isSafeToDelete(folder);
+            return isIndexedBackupFolder(folder);
         } catch (Exception e) {
             return false;
         }
     }
 
-    private boolean isSafeToDelete(Path folder) {
-        if (folder == null) return false;
-        // Shape guard first: never trust an indexed path pointing at a system
-        // location (tampered index.json must not enable arbitrary delete).
-        if (!BackupHealth.isPathShapeSafe(folder)) {
-            AppLogger.warning("Refusing to delete unsafe-shaped folder: " + folder);
+    private boolean isSafeToDelete(Path folder, DriverBackupEntry entry) {
+        if (folder == null || !BackupHealth.isPathShapeSafe(folder)) {
             return false;
         }
         try {
             Path normalized = folder.toAbsolutePath().normalize();
-            // Must be at least 2 levels deep ( <root>/<safeId>/<timestamp> ).
-            if (normalized.getNameCount() < 2) {
-                AppLogger.warning("Refusing to delete shallow folder: " + folder);
+            if (!isUnderCurrentRoots(normalized)) {
                 return false;
             }
-            java.util.List<Path> allowedRoots = cachedAllowedRoots();
-            // Ensure current primary root is included even if cache predates a settings change.
-            try {
-                Path primaryRoot = indexPath().getParent();
-                if (primaryRoot != null) {
-                    Path normPrimary = primaryRoot.toAbsolutePath().normalize();
-                    if (!allowedRoots.contains(normPrimary)) {
-                        allowedRoots = new java.util.ArrayList<>(allowedRoots);
-                        allowedRoots.add(normPrimary);
-                    }
+            if (normalized.getNameCount() < 2) {
+                return false;
+            }
+            String leaf = normalized.getFileName().toString();
+            if (!BACKUP_LEAF_DIR.matcher(leaf).matches()) {
+                return false;
+            }
+            if (entry != null && entry.deviceId() != null && !entry.deviceId().isBlank()) {
+                Path parent = normalized.getParent();
+                if (parent == null) {
+                    return false;
                 }
-            } catch (Exception ignored) {}
-            for (Path root : allowedRoots) {
-                if (normalized.startsWith(root)) {
-                    // Additional safety: folder must be inside root/safeId/... ensure not directly root
-                    Path rel = root.relativize(normalized);
-                    if (rel.getNameCount() >= 2) return true;
-                    AppLogger.warning("Refusing to delete folder directly under backups root: " + folder);
+                String expectedParent = sanitizeDeviceId(entry.deviceId());
+                if (!parent.getFileName().toString().equals(expectedParent)) {
                     return false;
                 }
             }
-            // Old custom location after a settings change: the folder is
-            // still legit if an index (primary or fallback) references it.
-            // Allow revert/size/delete for indexed folders even when they
-            // live outside the current roots (orphan-backup fix).
-            try {
-                for (Path idxPath : allIndexPaths()) {
-                    try {
-                        BackupIndex idx = loadSingleIndex(idxPath);
-                        for (DriverBackupEntry e : idx.getEntries()) {
-                            if (e == null || e.backupFolder() == null) continue;
-                            try {
-                                Path indexed = Path.of(e.backupFolder()).toAbsolutePath().normalize();
-                                if (indexed.equals(normalized)) {
-                                    Path rel = indexed.getFileName() != null ? indexed : null;
-                                    // Require timestamp-style leaf + safeId parent to
-                                    // avoid trusting a tampered drive-root entry.
-                                    if (indexed.getNameCount() >= 2 && rel != null) return true;
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                    } catch (Exception ignored) {}
-                }
-            } catch (Exception ignored) {}
-        } catch (Exception ignored) {}
-        AppLogger.warning("Refusing to delete folder outside backups root: " + folder);
-        return false;
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static String sanitizeDeviceId(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return "unknown";
+        }
+        String safe = deviceId.replaceAll("[^a-zA-Z0-9_-]", "_");
+        return safe.isBlank() ? "unknown" : safe;
     }
 
     private static boolean isValidCustomRoot(Path custom) {
@@ -670,19 +652,51 @@ public class DriverBackupService {
     }
 
     private void deleteDirectory(Path directory) throws IOException {
-        if (Files.exists(directory)) {
-            try (var stream = Files.walk(directory)) {
-                stream.sorted(Comparator.reverseOrder())
-                        .forEach(path -> {
-                            // pnputil exports inherit the read-only flag from the
-                            // DriverStore; without clearing it every delete on
-                            // Windows throws AccessDeniedException and the UI
-                            // reports success while files remain on disk.
-                            try { Files.setAttribute(path, "dos:readonly", Boolean.FALSE); } catch (Exception ignored) {}
-                            try { Files.deleteIfExists(path); } catch (IOException e) { AppLogger.warning("Could not delete: " + path, e); }
-                        });
-            }
+        if (!Files.exists(directory)) {
+            return;
         }
+        java.util.List<Path> failed = new java.util.ArrayList<>();
+        try (var stream = Files.walk(directory)) {
+            stream.sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try { Files.setAttribute(path, "dos:readonly", Boolean.FALSE); } catch (Exception ignored) {}
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException e) {
+                            failed.add(path);
+                            AppLogger.warning("Could not delete: " + path, e);
+                        }
+                    });
+        }
+        if (!failed.isEmpty() || Files.exists(directory)) {
+            throw new IOException("Could not delete backup folder completely: " + directory
+                    + (failed.isEmpty() ? "" : " (" + failed.size() + " path(s) failed)"));
+        }
+    }
+
+    private boolean isIndexedBackupFolder(Path folder) {
+        if (folder == null || !BackupHealth.isPathShapeSafe(folder)) {
+            return false;
+        }
+        try {
+            Path normalized = folder.toAbsolutePath().normalize();
+            String leaf = normalized.getFileName().toString();
+            if (!BACKUP_LEAF_DIR.matcher(leaf).matches()) {
+                return false;
+            }
+            for (Path idxPath : allIndexPaths()) {
+                try {
+                    BackupIndex idx = loadSingleIndex(idxPath);
+                    for (DriverBackupEntry e : idx.getEntries()) {
+                        if (e == null || e.backupFolder() == null) continue;
+                        if (Path.of(e.backupFolder()).toAbsolutePath().normalize().equals(normalized)) {
+                            return true;
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     private Path indexPath() {

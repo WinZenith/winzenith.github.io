@@ -103,12 +103,10 @@ public final class StartupSafety {
         if (item == null || item.getType() != StartupItemType.TASK) {
             return false;
         }
-        String tp = item.getTaskPath();
-        if (tp == null) {
-            return false;
-        }
-        String lower = tp.toLowerCase(Locale.ROOT);
-        return lower.startsWith("\\microsoft\\") || lower.startsWith("\\windows\\")
-                || lower.contains("\\microsoft\\windows");
+        return StartupBackupValidation.isSystemTaskPath(item.getTaskPath());
+    }
+
+    public static boolean requiresAdminForBackup(StartupService.StartupBackupEntry entry) {
+        return StartupBackupValidation.requiresAdmin(entry);
     }
 }

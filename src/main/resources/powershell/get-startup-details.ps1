@@ -3,7 +3,7 @@ $results = @{
 }
 
 # Relevant trigger classes for auto-start at logon/boot
-$startupTriggerClasses = @('MSFT_TaskLogonTrigger','MSFT_TaskBootTrigger','MSFT_TaskRegistrationTrigger')
+$startupTriggerClasses = @('MSFT_TaskLogonTrigger','MSFT_TaskBootTrigger')
 
 # Scan Scheduled Tasks – filter to tasks that have at least one startup-relevant trigger
 $scanError = $null

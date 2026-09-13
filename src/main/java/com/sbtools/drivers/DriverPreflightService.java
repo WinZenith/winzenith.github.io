@@ -114,9 +114,10 @@ public final class DriverPreflightService {
                 } catch (Exception ex) {
                     AppLogger.debug("Preflight: could not query backup free space: " + ex.getMessage());
                 }
-                if (candidate.installed().infName() == null || candidate.installed().infName().isBlank()) {
-                    warnings.add("Automatic driver backup is not supported for this device (no INF name). "
-                            + "A system restore point will be the only rollback.");
+                String backupIssue = com.sbtools.backup.DriverBackupService.backupSupportIssue(candidate.installed());
+                if (backupIssue != null) {
+                    warnings.add("Automatic driver backup is not supported for this device (" + backupIssue + "). "
+                            + "A system restore point will be the only rollback unless you disable automatic backup.");
                 }
             }
 

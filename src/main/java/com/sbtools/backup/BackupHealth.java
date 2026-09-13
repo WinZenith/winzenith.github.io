@@ -14,6 +14,9 @@ import java.time.temporal.ChronoUnit;
  */
 public final class BackupHealth {
 
+    /** ponytail: cap walk size for pathological trees; raise if pnputil layout changes */
+    public static final int MAX_VISIT_FILES = 50_000;
+
     private BackupHealth() {
     }
 
@@ -61,13 +64,16 @@ public final class BackupHealth {
         long bytes = 0;
         long inf = 0;
         long files = 0;
-        try (var stream = Files.walk(folder, 5)) {
+        try (var stream = Files.walk(folder)) {
             var it = stream.iterator();
             while (it.hasNext()) {
                 Path p = it.next();
+                if (Files.isSymbolicLink(p)) {
+                    continue;
+                }
                 boolean isFile;
                 try {
-                    isFile = Files.isRegularFile(p) && !Files.isSymbolicLink(p);
+                    isFile = Files.isRegularFile(p);
                 } catch (Exception e) {
                     continue;
                 }
@@ -75,12 +81,15 @@ public final class BackupHealth {
                     continue;
                 }
                 files++;
+                if (files > MAX_VISIT_FILES) {
+                    return new Stats(bytes, inf, files, Status.UNREADABLE);
+                }
                 try {
                     bytes += Files.size(p);
                 } catch (IOException ignored) {
                 }
                 try {
-                    if (p.toString().toLowerCase().endsWith(".inf")) {
+                    if (p.getFileName().toString().toLowerCase().endsWith(".inf")) {
                         inf++;
                     }
                 } catch (Exception ignored) {
@@ -93,6 +102,37 @@ public final class BackupHealth {
             return new Stats(bytes, 0, files, Status.EMPTY);
         }
         return new Stats(bytes, inf, files, Status.OK);
+    }
+
+    /**
+     * Count regular .inf files matching {@code infBasename} (case-insensitive name).
+     * Does not follow symbolic links. Returns -1 when the walk exceeds {@link #MAX_VISIT_FILES}.
+     */
+    public static int countMatchingInfFiles(Path folder, String infBasename) throws IOException {
+        if (folder == null || infBasename == null || infBasename.isBlank()) {
+            return 0;
+        }
+        String want = infBasename.trim();
+        int count = 0;
+        int files = 0;
+        try (var stream = Files.walk(folder)) {
+            for (Path p : (Iterable<Path>) stream::iterator) {
+                if (Files.isSymbolicLink(p)) {
+                    continue;
+                }
+                if (!Files.isRegularFile(p)) {
+                    continue;
+                }
+                files++;
+                if (files > MAX_VISIT_FILES) {
+                    return -1;
+                }
+                if (p.getFileName().toString().equalsIgnoreCase(want)) {
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     /**

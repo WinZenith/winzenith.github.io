@@ -80,8 +80,26 @@ public final class DashboardScanCoordinator {
             long overallTimeoutSecs,
             List<CancellationToken> perTaskTokens)
             throws InterruptedException, TimeoutException {
+        return awaitAllInterruptible(tasks, perTaskTimeoutSecs, isStale, token, isDisposed,
+                overallTimeoutSecs, perTaskTokens, 30, 100);
+    }
+
+    /**
+     * Package-visible for unit tests (shorter poll / overall floor).
+     */
+    static Set<Integer> awaitAllInterruptible(
+            List<Future<?>> tasks,
+            long[] perTaskTimeoutSecs,
+            BooleanSupplier isStale,
+            CancellationToken token,
+            BooleanSupplier isDisposed,
+            long overallTimeoutSecs,
+            List<CancellationToken> perTaskTokens,
+            long minOverallSeconds,
+            long pollIntervalMs)
+            throws InterruptedException, TimeoutException {
         Set<Integer> timedOut = new HashSet<>();
-        long overall = Math.max(30, overallTimeoutSecs);
+        long overall = Math.max(minOverallSeconds, overallTimeoutSecs);
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(overall);
         long startNanos = System.nanoTime();
 
@@ -138,7 +156,7 @@ public final class DashboardScanCoordinator {
                 break;
             }
             try {
-                Thread.sleep(100);
+                Thread.sleep(Math.max(1, pollIntervalMs));
             } catch (InterruptedException ie) {
                 cancelAll(tasks, timedOut);
                 Thread.currentThread().interrupt();

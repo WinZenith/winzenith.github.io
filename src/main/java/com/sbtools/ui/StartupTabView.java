@@ -62,6 +62,7 @@ public class StartupTabView extends BorderPane {
     });
     private volatile java.util.concurrent.Future<?> scanFuture;
     private final java.util.concurrent.atomic.AtomicBoolean scanCancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicInteger scanGeneration = new java.util.concurrent.atomic.AtomicInteger(0);
 
     private final ObservableList<StartupItem> registryItems = FXCollections.observableArrayList();
     private final ObservableList<StartupItem> taskItems = FXCollections.observableArrayList();
@@ -395,6 +396,8 @@ public class StartupTabView extends BorderPane {
         impactCol.setSortType(TableColumn.SortType.DESCENDING);
 
         table.getColumns().addAll(nameCol, publisherCol, locationCol, pathCol, statusCol, impactCol);
+        table.getSortOrder().setAll(impactCol);
+        table.sort();
 
         table.setRowFactory(tv -> {
             TableRow<StartupItem> row = new TableRow<>();
@@ -578,25 +581,19 @@ public class StartupTabView extends BorderPane {
         scanButton.setDisable(true);
         stopButton.setDisable(false);
         statusLabel.setText("Scanning startup items...");
-        registryItems.clear();
-        taskItems.clear();
-        serviceItems.clear();
-        updateTabCounts();
+        final int gen = scanGeneration.incrementAndGet();
 
         scanFuture = executor.submit(() -> {
             try {
                 List<StartupItem> allItems = service.listAllParallel();
-                if (scanCancelled.get() || Thread.currentThread().isInterrupted()) {
-                    // Status only — finally owns busy/progress/buttons. Touching
-                    // busy here double-decrements the shared BusyProperty and can
-                    // clear another tab's still-running busy state.
-                    Platform.runLater(() -> statusLabel.setText("Scan stopped."));
+                if (scanCancelled.get() || Thread.currentThread().isInterrupted() || gen != scanGeneration.get()) {
+                    Platform.runLater(() -> statusLabel.setText("Scan stopped; previous results kept."));
                     return;
                 }
 
                 for (StartupItem item : allItems) {
-                    if (scanCancelled.get() || Thread.currentThread().isInterrupted()) {
-                        Platform.runLater(() -> statusLabel.setText("Scan stopped."));
+                    if (scanCancelled.get() || Thread.currentThread().isInterrupted() || gen != scanGeneration.get()) {
+                        Platform.runLater(() -> statusLabel.setText("Scan stopped; previous results kept."));
                         return;
                     }
                     item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
@@ -609,8 +606,8 @@ public class StartupTabView extends BorderPane {
                 double totalMs = allItems.stream().filter(StartupItem::isEnabled).mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
                 final String formattedTotal = StartupImpactService.formatImpact(totalMs);
                 Platform.runLater(() -> {
-                    if (scanCancelled.get()) {
-                        statusLabel.setText("Scan stopped.");
+                    if (scanCancelled.get() || gen != scanGeneration.get()) {
+                        statusLabel.setText("Scan stopped; previous results kept.");
                         return;
                     }
                     registryItems.setAll(regItems);
@@ -633,8 +630,8 @@ public class StartupTabView extends BorderPane {
                     loadLastBootAsync();
                 });
             } catch (Exception e) {
-                if (scanCancelled.get() || Thread.currentThread().isInterrupted()) {
-                    Platform.runLater(() -> statusLabel.setText("Scan stopped."));
+                if (scanCancelled.get() || Thread.currentThread().isInterrupted() || gen != scanGeneration.get()) {
+                    Platform.runLater(() -> statusLabel.setText("Scan stopped; previous results kept."));
                 } else {
                     AppLogger.error("Failed to scan startup items", e);
                     Platform.runLater(() -> {
@@ -655,6 +652,7 @@ public class StartupTabView extends BorderPane {
 
     private void stopScan() {
         scanCancelled.set(true);
+        scanGeneration.incrementAndGet();
         java.util.concurrent.Future<?> f = scanFuture;
         if (f != null && !f.isDone()) {
             f.cancel(true);
@@ -702,62 +700,33 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> selected = new ArrayList<>(getSelectedTable().getSelectionModel().getSelectedItems());
         if (selected.isEmpty() || busy.get()) return;
 
-        List<StartupItem> serviceItems = selected.stream()
-                .filter(i -> i.getType() == StartupItemType.SERVICE).toList();
-        List<StartupItem> hklmItems = selected.stream()
-                .filter(i -> i.getType() == StartupItemType.REGISTRY && i.getLocation() != null && i.getLocation().contains("HKLM")).toList();
-        List<StartupItem> hkcuItems = selected.stream()
-                .filter(i -> i.getType() == StartupItemType.REGISTRY && i.getLocation() != null && i.getLocation().contains("HKCU")).toList();
-        List<StartupItem> commonFolderItems = selected.stream()
-                .filter(i -> i.getLocation() != null && i.getLocation().contains("Common")).toList();
-        List<StartupItem> systemTaskItems = selected.stream()
-                .filter(i -> i.getType() == StartupItemType.TASK && StartupSafety.isSystemTask(i)).toList();
-        List<StartupItem> nonServiceItems = selected.stream()
-                .filter(i -> i.getType() != StartupItemType.SERVICE).toList();
-
-        boolean needsAdmin = (!serviceItems.isEmpty() || !hklmItems.isEmpty() || !commonFolderItems.isEmpty() || !systemTaskItems.isEmpty()) && !adminCheck.getAsBoolean();
-        if (needsAdmin) {
-            long totalAdmin = serviceItems.size() + hklmItems.size() + commonFolderItems.size() + systemTaskItems.size();
-            // Deduplicate overlapping (service is not HKLM, but count may double if same item matches multiple categories)
-            // Use set semantics: count distinct items requiring admin
-            java.util.Set<StartupItem> adminSet = new java.util.HashSet<>();
-            adminSet.addAll(serviceItems); adminSet.addAll(hklmItems); adminSet.addAll(commonFolderItems); adminSet.addAll(systemTaskItems);
-            totalAdmin = adminSet.size();
-            if (adminSet.size() == selected.size()) {
+        List<StartupItem> adminNeeded = selected.stream().filter(StartupSafety::requiresAdmin).toList();
+        if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
+            if (adminNeeded.size() == selected.size()) {
                 Alert alert = new Alert(Alert.AlertType.WARNING);
                 alert.setTitle("Administrator Required");
                 alert.setHeaderText("Modification requires elevation");
-                String detail;
-                if (!serviceItems.isEmpty() && systemTaskItems.isEmpty() && hklmItems.isEmpty()) {
-                    detail = "Modifying Windows service start types requires administrator privileges.\n";
-                } else if (!systemTaskItems.isEmpty() && serviceItems.isEmpty() && hklmItems.isEmpty()) {
-                    detail = "Modifying system scheduled tasks (\\Microsoft\\Windows) requires administrator privileges.\n";
-                } else {
-                    detail = "Modifying HKLM / Common Startup items, services or system tasks requires administrator privileges.\n";
-                }
-                alert.setContentText(detail + "Please run the application as administrator.");
+                alert.setContentText("Modifying HKLM / Common Startup items, Windows services, or system scheduled tasks "
+                        + "requires administrator privileges.\nPlease run the application as administrator.");
                 alert.initModality(Modality.APPLICATION_MODAL);
                 alert.showAndWait();
                 return;
-            } else {
-                Alert alert = new Alert(Alert.AlertType.WARNING);
-                alert.setTitle("Administrator Required");
-                alert.setHeaderText("Some items require elevation");
-                alert.setContentText(totalAdmin + " item(s) require administrator privileges (HKLM/services/Common/system tasks) and will be skipped.\n"
-                        + "Only non-privileged items will be toggled. Run as administrator to modify all.");
-                alert.initModality(Modality.APPLICATION_MODAL);
-                alert.showAndWait();
-                // Keep only items that don't need admin: HKCU registry + non-system tasks
-                List<StartupItem> allowed = new ArrayList<>();
-                for (StartupItem it : selected) {
-                    if (it.getType() == StartupItemType.SERVICE) continue;
-                    if (it.getLocation() != null && (it.getLocation().contains("HKLM") || it.getLocation().contains("Common"))) continue;
-                    if (StartupSafety.isSystemTask(it)) continue;
+            }
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setTitle("Administrator Required");
+            alert.setHeaderText("Some items require elevation");
+            alert.setContentText(adminNeeded.size() + " item(s) require administrator privileges and will be skipped.\n"
+                    + "Only non-privileged items will be toggled. Run as administrator to modify all.");
+            alert.initModality(Modality.APPLICATION_MODAL);
+            alert.showAndWait();
+            List<StartupItem> allowed = new ArrayList<>();
+            for (StartupItem it : selected) {
+                if (!StartupSafety.requiresAdmin(it)) {
                     allowed.add(it);
                 }
-                if (allowed.isEmpty()) return;
-                selected = allowed;
             }
+            if (allowed.isEmpty()) return;
+            selected = allowed;
         }
 
         // RunOnce entries cannot be disabled via StartupApproved (Windows ignores it).
@@ -938,26 +907,36 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> selected = new ArrayList<>(getSelectedTable().getSelectionModel().getSelectedItems());
         if (selected.isEmpty() || busy.get()) return;
 
-        // Admin check for HKLM / Common items deletion + system tasks
-        List<StartupItem> adminNeeded = selected.stream()
-                .filter(i -> (i.getLocation() != null && (i.getLocation().contains("HKLM") || i.getLocation().contains("Common"))) || StartupSafety.isSystemTask(i))
-                .toList();
+        List<StartupItem> adminNeeded = selected.stream().filter(StartupSafety::requiresAdmin).toList();
         if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
             Alert warn = new Alert(Alert.AlertType.WARNING);
             warn.setTitle("Administrator Required");
             warn.setHeaderText("Deletion requires elevation");
-            warn.setContentText(adminNeeded.size() + " selected item(s) are HKLM / Common / system tasks and require administrator privileges.\n"
+            warn.setContentText(adminNeeded.size() + " selected item(s) require administrator privileges.\n"
                     + "Only non-privileged items will be deleted. Run as administrator to delete all.");
             warn.initModality(Modality.APPLICATION_MODAL);
             warn.showAndWait();
             List<StartupItem> allowed = new ArrayList<>();
             for (StartupItem it : selected) {
-                if (it.getLocation() != null && (it.getLocation().contains("HKLM") || it.getLocation().contains("Common"))) continue;
-                if (StartupSafety.isSystemTask(it)) continue;
-                allowed.add(it);
+                if (!StartupSafety.requiresAdmin(it)) {
+                    allowed.add(it);
+                }
             }
             if (allowed.isEmpty()) return;
             selected = allowed;
+        }
+
+        List<StartupItem> systemTasks = selected.stream().filter(StartupSafety::isSystemTask).toList();
+        if (!systemTasks.isEmpty()) {
+            Alert sysWarn = new Alert(Alert.AlertType.CONFIRMATION);
+            sysWarn.setTitle("System Scheduled Task");
+            sysWarn.setHeaderText("Delete system task(s)?");
+            sysWarn.setContentText(systemTasks.size() + " selected item(s) are under \\Microsoft\\ or \\Windows\\.\n"
+                    + "Deleting system tasks can affect Windows behavior. Continue?");
+            sysWarn.initModality(Modality.APPLICATION_MODAL);
+            if (sysWarn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                return;
+            }
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
@@ -983,7 +962,7 @@ public class StartupTabView extends BorderPane {
                 List<StartupItem> toRemoveTask = new ArrayList<>();
                 for (StartupItem item : toDelete) {
                     try {
-                        service.deleteItem(item);
+                        service.deleteItem(item, StartupSafety.isSystemTask(item));
                         if (item.getType() == StartupItemType.REGISTRY) {
                             toRemoveRegistry.add(item);
                         } else if (item.getType() == StartupItemType.TASK) {
@@ -1088,7 +1067,7 @@ public class StartupTabView extends BorderPane {
     private void showBackupsDialog() {
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("Startup Backups & Restore");
-        dialog.setHeaderText("Restore previously deleted or modified startup items.");
+        dialog.setHeaderText("Restore previously deleted startup items.");
         dialog.initModality(Modality.APPLICATION_MODAL);
 
         try {
@@ -1156,6 +1135,16 @@ public class StartupTabView extends BorderPane {
         restoreBtn.setOnAction(e -> {
             StartupBackupEntry selected = backupTable.getSelectionModel().getSelectedItem();
             if (selected == null || busy.get()) return;
+            if (StartupSafety.requiresAdminForBackup(selected) && !adminCheck.getAsBoolean()) {
+                Alert warn = new Alert(Alert.AlertType.WARNING);
+                warn.setTitle("Administrator Required");
+                warn.setHeaderText("Restore requires elevation");
+                warn.setContentText("This backup targets HKLM, Common Startup, or a system scheduled task.\n"
+                        + "Please run the application as administrator to restore it.");
+                warn.initModality(Modality.APPLICATION_MODAL);
+                warn.showAndWait();
+                return;
+            }
             restoreBtn.setDisable(true);
             deleteBackupBtn.setDisable(true);
             backupTable.setDisable(true);

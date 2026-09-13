@@ -461,13 +461,8 @@ public class StartupService {
         scanRegistryUnified(WinReg.HKEY_CURRENT_USER, "HKCU (32-bit) RunOnce", REG_WOW6432_RUN_ONCE, REG_WOW6432_APPROVED_RUNONCE, true, items);
         scanRegistryUnified(WinReg.HKEY_CURRENT_USER, "HKCU (32-bit) Run (Disabled)", REG_WOW6432_RUN_DISABLED, REG_WOW6432_APPROVED, false, items);
 
-        // Orphaned Approved entries – Run only. RunOnce has no Approved overlay
-        // consulted by Windows; RunOnce Approved orphans (including legacy writes
-        // from older versions) are ignored to avoid ghost Disabled rows.
-        scanOrphanedApprovedUnified(WinReg.HKEY_CURRENT_USER, "HKCU Run", REG_RUN, REG_STARTUP_APPROVED, items);
-        scanOrphanedApprovedUnified(WinReg.HKEY_LOCAL_MACHINE, "HKLM Run", REG_RUN, REG_STARTUP_APPROVED, items);
-        scanOrphanedApprovedUnified(WinReg.HKEY_LOCAL_MACHINE, "HKLM (32-bit) Run", REG_WOW6432_RUN, REG_WOW6432_APPROVED, items);
-        scanOrphanedApprovedUnified(WinReg.HKEY_CURRENT_USER, "HKCU (32-bit) Run", REG_WOW6432_RUN, REG_WOW6432_APPROVED, items);
+        // Stale StartupApproved-only values (no Run value) are Explorer metadata, not
+        // executable startup items — intentionally not listed.
 
         for (StartupItem item : items) {
             String key = item.getName() + "|" + item.getLocation();
@@ -534,33 +529,6 @@ public class StartupService {
             String msg = "Failed to scan registry for " + locationLabel + " " + keyPath + ": " + e.getMessage();
             AppLogger.warning(msg);
             scanErrors.add(locationLabel + ": " + e.getMessage() + " (partial listing)");
-        }
-    }
-
-    private void scanOrphanedApprovedUnified(HKEY hive, String locationLabel, String keyPath, String approvedPath, List<StartupItem> items) {
-        try {
-            if (!Advapi32Util.registryKeyExists(hive, approvedPath)) return;
-            Set<String> existing = new HashSet<>();
-            if (Advapi32Util.registryKeyExists(hive, keyPath)) {
-                existing.addAll(Advapi32Util.registryGetValues(hive, keyPath).keySet());
-            }
-            Map<String, Object> approved = Advapi32Util.registryGetValues(hive, approvedPath);
-            for (Map.Entry<String, Object> e : approved.entrySet()) {
-                String valName = e.getKey();
-                if (existing.contains(valName)) continue;
-                Object v = e.getValue();
-                if (v instanceof byte[] bytes && bytes.length > 0) {
-                    boolean enabled = StartupConstants.isEnabledByte(bytes);
-                    items.add(new StartupItem(valName, "Unknown", "", enabled, locationLabel, valName, "", "", StartupItemType.REGISTRY, null));
-                }
-            }
-        } catch (Exception e) {
-            if (e instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-            AppLogger.warning("Failed to scan orphaned " + approvedPath + " for " + locationLabel + ": " + e.getMessage());
-            scanErrors.add(locationLabel + " (orphaned): " + e.getMessage() + " (partial listing)");
         }
     }
 
@@ -758,10 +726,10 @@ public class StartupService {
             String taskName = item.getName();
             String taskPath = item.getTaskPath();
             if (taskPath == null || taskPath.isBlank()) taskPath = "\\";
-            boolean disabling = item.isEnabled();
-            String cmd = disabling ? "Disable-ScheduledTask" : "Enable-ScheduledTask";
-            ProcessResult result = processRunner.run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                    cmd + " -TaskName " + ProcessRunner.psQuote(taskName) + " -TaskPath " + ProcessRunner.psQuote(taskPath)));
+            String action = item.isEnabled() ? "Disable" : "Enable";
+            Path script = PowerShellScripts.resolve("set-startup-task-state.ps1");
+            ProcessResult result = processRunner.run(ProcessRunner.powershellScriptNonInteractive(
+                    script.toString(), "-TaskName", taskName, "-TaskPath", taskPath, "-Action", action));
             if (!result.success()) {
                 String err = result.combinedOutput();
                 String lower = err.toLowerCase(java.util.Locale.ROOT);
@@ -769,30 +737,6 @@ public class StartupService {
                     throw new IOException("Access denied. Please run as administrator to modify scheduled tasks. Details: " + err);
                 }
                 throw new IOException("Failed to toggle Scheduled Task: " + err);
-            }
-            if (!disabling) {
-                // Enable path must also re-enable startup triggers. The scan reports
-                // Enabled = taskEnabled && triggerEnabled, but Enable-ScheduledTask only
-                // flips the task flag — a trigger-disabled task would otherwise appear
-                // to toggle successfully yet still show Disabled (silent no-op).
-                String triggerScript =
-                        "$t = Get-ScheduledTask -TaskName " + ProcessRunner.psQuote(taskName)
-                                + " -TaskPath " + ProcessRunner.psQuote(taskPath) + " -ErrorAction Stop; "
-                                + "$c=$false; foreach ($tr in $t.Triggers) { try { if (-not $tr.Enabled) { $tr.Enabled=$true; $c=$true } } catch {} }; "
-                                + "if ($c) { $t | Set-ScheduledTask -ErrorAction Stop }";
-                ProcessResult trResult = processRunner.run(
-                        List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", triggerScript));
-                if (!trResult.success()) {
-                    String err = trResult.combinedOutput();
-                    String lower = err.toLowerCase(java.util.Locale.ROOT);
-                    if (lower.contains("access") || lower.contains("denied") || lower.contains("privileg")
-                            || err.contains("740") || err.contains("577")) {
-                        throw new IOException("Task enabled but triggers require administrator. "
-                                + "Re-run as administrator to fully enable \"" + taskName + "\". Details: " + err);
-                    }
-                    throw new IOException("Task enabled but failed to enable its triggers for \""
-                            + taskName + "\" (it may still show Disabled). Details: " + err);
-                }
             }
             item.setEnabled(!item.isEnabled());
         } else if (item.getType() == StartupItemType.REGISTRY) {
@@ -871,10 +815,18 @@ public class StartupService {
     }
 
     public void deleteItem(StartupItem item) throws Exception {
+        deleteItem(item, false);
+    }
+
+    public void deleteItem(StartupItem item, boolean allowSystemTaskDelete) throws Exception {
         if (item == null) throw new IllegalArgumentException("Startup item must not be null.");
         if (item.getType() == null) throw new IllegalArgumentException("Startup item type must not be null.");
         if (item.getType() == StartupItemType.SERVICE) {
             throw new UnsupportedOperationException("Windows services cannot be deleted.");
+        }
+        if (item.getType() == StartupItemType.TASK && StartupSafety.isSystemTask(item) && !allowSystemTaskDelete) {
+            throw new SecurityException("Refusing to delete system scheduled task \"" + item.getName()
+                    + "\" without explicit confirmation.");
         }
 
         createBackup(item);
@@ -890,86 +842,131 @@ public class StartupService {
         } else if (item.getType() == StartupItemType.REGISTRY) {
             String location = item.getLocation();
             if (location != null && location.startsWith("Startup Folder")) {
-                // Delete file (or .disabled variant)
-                Path p = item.getFilePath() != null && !item.getFilePath().isBlank() ? Path.of(item.getFilePath()) : null;
-                if (p != null) {
-                    Path disabled = p.resolveSibling(p.getFileName() + ".disabled");
-                    if (Files.exists(p)) {
-                        Files.deleteIfExists(p);
-                    } else if (Files.exists(disabled)) {
-                        Files.deleteIfExists(disabled);
-                    } else {
-                        // Try alternative path when filePath is stale (guard null/blank).
-                        try {
-                            String altRaw = item.getPath();
-                            if (altRaw != null && !altRaw.isBlank()) {
-                                Path alt = Path.of(altRaw);
-                                if (Files.exists(alt)) Files.deleteIfExists(alt);
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                }
-                // Clear approved entry if any (should not exist for folder)
+                deleteStartupFolderItemRequired(item);
             } else {
                 RegistryPaths paths = resolveRegistryPaths(item);
-                String valName = item.getRegistryValueName();
-
-                // A disabled item lives in exactly one value key. Delete only that key
-                // plus its matching Approved entry. Never sweep Run/RunOnce/Disabled
-                // together: the same value name can exist in Run and RunOnce as two
-                // distinct entries, and sweeping would destroy the unselected one
-                // while the backup only captures one.
-                String loc = location == null ? "" : location;
-                if (loc.contains("(Disabled)")) {
-                    String[] expected = fallbackPathsForLocation(loc);
-                    String expectedKey = expected[0];
-                    String deletedKey = null;
-                    try {
-                        if (Advapi32Util.registryValueExists(paths.hive(), expectedKey, valName)) {
-                            Advapi32Util.registryDeleteValue(paths.hive(), expectedKey, valName);
-                            deletedKey = expectedKey;
-                        }
-                    } catch (Exception ignored) {}
-                    if (deletedKey == null && !paths.keyPath().equals(expectedKey)) {
-                        // Legacy-moved value: label stale, actual value elsewhere.
-                        // Delete only the probed actual location, not every candidate.
-                        try {
-                            if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
-                                Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
-                                deletedKey = paths.keyPath();
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                    String approvedToClean = StartupConstants.toApprovedPath(
-                            deletedKey != null ? deletedKey : expectedKey);
-                    try {
-                        if (Advapi32Util.registryValueExists(paths.hive(), approvedToClean, valName)) {
-                            Advapi32Util.registryDeleteValue(paths.hive(), approvedToClean, valName);
-                        }
-                    } catch (Exception ignored) {}
-                } else {
-                    try {
-                        if (Advapi32Util.registryValueExists(paths.hive(), paths.keyPath(), valName)) {
-                            Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
-                        }
-                    } catch (Exception ignored) {}
-                    // RunOnce has no Approved overlay consulted by Windows. Never touch
-                    // Approved here: for 32-bit the RunOnce "approved" path IS the Run32
-                    // overlay, so deleting it would corrupt a same-named Run entry.
-                    if (!StartupConstants.isRunOnceKey(paths.keyPath())) {
-                        String approved = StartupConstants.toApprovedPath(paths.keyPath());
-                        try {
-                            if (Advapi32Util.registryValueExists(paths.hive(), approved, valName)) {
-                                Advapi32Util.registryDeleteValue(paths.hive(), approved, valName);
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                }
+                deleteRegistryStartupItem(item, location, paths);
             }
         }
 
         invalidateCache();
         StartupAuditLog.record(StartupAuditLog.Action.DELETE, item, "backup created automatically");
+    }
+
+    private void deleteStartupFolderItemRequired(StartupItem item) throws IOException {
+        String filePath = item.getFilePath();
+        if (filePath == null || filePath.isBlank()) {
+            filePath = item.getPath();
+        }
+        if (filePath == null || filePath.isBlank()) {
+            throw new IOException("Failed to delete startup folder item: path is missing.");
+        }
+        Path p = Path.of(filePath);
+        Path disabled = p.resolveSibling(p.getFileName() + ".disabled");
+        boolean deleted = false;
+        try {
+            if (Files.exists(p)) {
+                Files.delete(p);
+                deleted = true;
+            } else if (Files.exists(disabled)) {
+                Files.delete(disabled);
+                deleted = true;
+            }
+        } catch (IOException e) {
+            throw new IOException("Failed to delete startup folder item '" + item.getName() + "': " + e.getMessage(), e);
+        }
+        if (!deleted) {
+            throw new IOException("Failed to delete startup folder item: file '" + item.getName() + "' was not found.");
+        }
+        if (Files.exists(p) || Files.exists(disabled)) {
+            throw new IOException("Startup folder item '" + item.getName() + "' still exists after deletion.");
+        }
+    }
+
+    private void deleteRegistryStartupItem(StartupItem item, String location, RegistryPaths paths) throws IOException {
+        String valName = item.getRegistryValueName();
+        if (valName == null || valName.isBlank()) {
+            throw new IOException("Failed to delete registry startup item: value name is missing.");
+        }
+        String loc = location == null ? "" : location;
+        if (loc.contains("(Disabled)")) {
+            String[] expected = fallbackPathsForLocation(loc);
+            String expectedKey = expected[0];
+            String primaryKey = null;
+            if (registryValueExistsSafe(paths.hive(), expectedKey, valName)) {
+                primaryKey = expectedKey;
+            } else if (registryValueExistsSafe(paths.hive(), paths.keyPath(), valName)) {
+                primaryKey = paths.keyPath();
+            }
+            if (primaryKey != null) {
+                deleteRegistryValueRequired(paths.hive(), primaryKey, valName);
+                deleteApprovedBestEffort(paths.hive(), StartupConstants.toApprovedPath(primaryKey), valName);
+            }
+            return;
+        }
+        if (registryValueExistsSafe(paths.hive(), paths.keyPath(), valName)) {
+            deleteRegistryValueRequired(paths.hive(), paths.keyPath(), valName);
+            if (!StartupConstants.isRunOnceKey(paths.keyPath())) {
+                deleteApprovedBestEffort(paths.hive(), StartupConstants.toApprovedPath(paths.keyPath()), valName);
+            }
+        }
+    }
+
+    private static boolean registryValueExistsSafe(HKEY hive, String keyPath, String valName) {
+        try {
+            return Advapi32Util.registryValueExists(hive, keyPath, valName);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static void deleteRegistryValueRequired(HKEY hive, String keyPath, String valName) throws IOException {
+        try {
+            if (!Advapi32Util.registryValueExists(hive, keyPath, valName)) {
+                return;
+            }
+            Advapi32Util.registryDeleteValue(hive, keyPath, valName);
+        } catch (Exception e) {
+            throw new IOException("Failed to delete registry value '" + valName + "' at " + keyPath + ": " + e.getMessage(), e);
+        }
+        try {
+            if (Advapi32Util.registryValueExists(hive, keyPath, valName)) {
+                throw new IOException("Registry value '" + valName + "' still exists after deletion (access denied?).");
+            }
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Failed to verify registry deletion for '" + valName + "': " + e.getMessage(), e);
+        }
+    }
+
+    private static void deleteApprovedBestEffort(HKEY hive, String approvedPath, String valName) {
+        try {
+            if (Advapi32Util.registryValueExists(hive, approvedPath, valName)) {
+                Advapi32Util.registryDeleteValue(hive, approvedPath, valName);
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to clean StartupApproved for " + valName + ": " + e.getMessage());
+        }
+    }
+
+    private boolean scheduledTaskExists(String taskName, String taskPath) throws IOException {
+        if (taskPath == null || taskPath.isBlank()) {
+            taskPath = "\\";
+        }
+        try {
+            Path script = PowerShellScripts.resolve("set-startup-task-state.ps1");
+            ProcessResult result = processRunner.run(ProcessRunner.powershellScriptNonInteractive(
+                    script.toString(), "-TaskName", taskName, "-TaskPath", taskPath, "-Action", "TestExists"));
+            if (!result.success() || result.stdout() == null || result.stdout().isBlank()) {
+                throw new IOException("Failed to query scheduled task existence: " + result.combinedOutput());
+            }
+            JsonNode root = JsonMapper.parseTree(result.stdout());
+            return root.path("Exists").asBoolean(false);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Task existence check interrupted.");
+        }
     }
 
     private boolean toggleRegularItem(StartupItem item, RegistryPaths paths) throws Exception {
@@ -1266,26 +1263,24 @@ public class StartupService {
                     if (Files.exists(p)) src = p;
                     else if (Files.exists(disabled)) src = disabled;
                 }
-                if (src != null && Files.exists(src)) {
-                    Path dest = backupFolder.resolve(src.getFileName().toString());
-                    Files.copy(src, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                    entry.setBackupXmlName(src.getFileName().toString());
-                    entry.setCommand(src.toAbsolutePath().toString());
+                if (src == null || !Files.exists(src)) {
+                    throw new IOException("Cannot create backup: startup folder file is missing.");
                 }
-                // Also handle .disabled variant already
+                Path dest = backupFolder.resolve(src.getFileName().toString());
+                Files.copy(src, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                entry.setBackupXmlName(src.getFileName().toString());
+                entry.setCommand(src.toAbsolutePath().toString());
             } else {
                 entry.setType("Registry");
                 RegistryPaths paths = resolveRegistryPaths(item);
                 entry.setHive(paths.hive() == WinReg.HKEY_CURRENT_USER ? "HKCU" : "HKLM");
                 entry.setKeyPath(paths.keyPath());
                 entry.setValueName(item.getRegistryValueName());
-                // Re-read live registry value so backup is not stale if changed since scan
-                try {
-                    String live = getRegistryString(paths.hive(), paths.keyPath(), item.getRegistryValueName());
-                    if (live != null && !live.isBlank()) {
-                        entry.setCommand(live);
-                    }
-                } catch (Exception ignored) {}
+                String live = getRegistryString(paths.hive(), paths.keyPath(), item.getRegistryValueName());
+                if (live == null || live.isBlank()) {
+                    throw new IOException("Cannot create backup: registry value is missing or empty.");
+                }
+                entry.setCommand(live);
                 // Preserve REG_SZ vs REG_EXPAND_SZ so restore does not break %VAR% expansion
                 try {
                     int regType = queryRegistryValueType(paths.hive(), paths.keyPath(), item.getRegistryValueName());
@@ -1312,6 +1307,7 @@ public class StartupService {
                         .constructCollectionType(ArrayList.class, StartupBackupEntry.class);
                 index = JsonMapper.mapper().readValue(indexFile.toFile(), listType);
             }
+            StartupBackupValidation.validateEntryMetadata(entry);
             index.add(entry);
             saveBackupsIndex(index);
         } finally {
@@ -1327,23 +1323,21 @@ public class StartupService {
     }
 
     public void restoreBackup(StartupBackupEntry entry) throws Exception {
-        if (entry == null || entry.getId() == null || entry.getId().isBlank()) {
+        if (entry == null) {
             throw new IllegalArgumentException("Backup entry must not be null.");
         }
-        Path backupFolder = getBackupsDir().resolve(entry.getId());
+        StartupBackupValidation.validateEntryMetadata(entry);
+        if (StartupBackupValidation.requiresAdmin(entry) && !AdminCheck.isRunningAsAdmin()) {
+            throw new IOException("Restore requires administrator privileges. Please run the application as administrator.");
+        }
+        Path backupFolder = StartupBackupValidation.resolveConfinedBackupFolder(getBackupsDir(), entry.getId());
 
         if ("Registry".equals(entry.getType())) {
-            if (entry.getKeyPath() == null || entry.getKeyPath().isBlank()
-                    || entry.getValueName() == null || entry.getValueName().isBlank()) {
-                throw new IOException("Backup entry is corrupt (missing registry key/value). Backup kept.");
-            }
-            if (entry.getCommand() == null) {
-                throw new IOException("Backup entry is corrupt (missing command). Backup kept.");
-            }
-            if (!"HKCU".equals(entry.getHive()) && !"HKLM".equals(entry.getHive())) {
-                throw new IOException("Backup entry is corrupt (missing hive). Backup kept.");
-            }
             HKEY hive = "HKCU".equals(entry.getHive()) ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
+            if (registryValueExistsSafe(hive, entry.getKeyPath(), entry.getValueName())) {
+                throw new IOException("Cannot restore: registry value \"" + entry.getValueName()
+                        + "\" already exists. Remove it first. Backup kept.");
+            }
             if (!Advapi32Util.registryKeyExists(hive, entry.getKeyPath())) {
                 Advapi32Util.registryCreateKey(hive, entry.getKeyPath());
             }
@@ -1387,9 +1381,9 @@ public class StartupService {
                 if (dest.getParent() == null) {
                     throw new IOException("Backup entry has invalid file path (no parent). Backup kept.");
                 }
-                // dest is original file path (maybe without .disabled)
+                StartupBackupValidation.assertFolderRestoreTargetAbsent(entry.getKeyPath());
                 Files.createDirectories(dest.getParent());
-                Files.copy(src, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.copy(src, dest);
                 // If backup was enabled=true we leave as is; if disabled, rename to .disabled? Original file had enabled state; folder item enabled means file exists without .disabled
                 // Ensure correct enabled state – if backup says disabled, need to disable after restore
                 if (!entry.isEnabled()) {
@@ -1429,9 +1423,13 @@ public class StartupService {
                         + "Re-create it manually in Task Scheduler (import " + xmlPath.getFileName()
                         + " and re-enter credentials). Backup kept.");
             }
+            if (scheduledTaskExists(entry.getName(), tp)) {
+                throw new IOException("Cannot restore: scheduled task \"" + entry.getName()
+                        + "\" already exists. Remove it first. Backup kept.");
+            }
 
             ProcessResult result = processRunner.run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                    "Register-ScheduledTask -Xml (Get-Content " + ProcessRunner.psQuote(xmlPath.toAbsolutePath().toString()) + " -Raw) -TaskName " + ProcessRunner.psQuote(entry.getName()) + " -TaskPath " + ProcessRunner.psQuote(tp) + " -Force"));
+                    "Register-ScheduledTask -Xml (Get-Content " + ProcessRunner.psQuote(xmlPath.toAbsolutePath().toString()) + " -Raw) -TaskName " + ProcessRunner.psQuote(entry.getName()) + " -TaskPath " + ProcessRunner.psQuote(tp)));
             if (!result.success()) {
                 String out = result.combinedOutput();
                 String lower = out.toLowerCase(java.util.Locale.ROOT);
@@ -1443,6 +1441,8 @@ public class StartupService {
                 }
                 throw new IOException("Failed to restore Scheduled Task: " + out);
             }
+        } else {
+            throw new IOException("Backup entry has unsupported type \"" + entry.getType() + "\". Backup kept.");
         }
 
         // Update index first, then delete folder – ensures index/folder consistency on failure
@@ -1470,7 +1470,8 @@ public class StartupService {
     }
 
     public void removeBackup(StartupBackupEntry entry) throws IOException {
-        Path backupFolder = getBackupsDir().resolve(entry.getId());
+        StartupBackupValidation.validateEntryMetadata(entry);
+        Path backupFolder = StartupBackupValidation.resolveConfinedBackupFolder(getBackupsDir(), entry.getId());
         // Remove from index first for consistency
         backupIndexLock.lock();
         try {

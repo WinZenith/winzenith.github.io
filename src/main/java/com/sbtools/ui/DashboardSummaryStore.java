@@ -61,7 +61,12 @@ public final class DashboardSummaryStore {
     }
 
     public static void save(Instant scannedAt, List<DashboardTabView.IssueCategory> issues) {
-        if (scannedAt == null || issues == null) return;
+        save(path(), scannedAt, issues);
+    }
+
+    /** Package-visible for tests; production {@link #save(Instant, List)} uses {@link #path()}. */
+    static void save(Path target, Instant scannedAt, List<DashboardTabView.IssueCategory> issues) {
+        if (target == null || scannedAt == null || issues == null) return;
         try {
             List<IssueSnapshot> rows = new ArrayList<>();
             int n = Math.min(issues.size(), MAX_ROWS);
@@ -85,7 +90,7 @@ public final class DashboardSummaryStore {
                         copy));
             }
             Snapshot snap = new Snapshot(scannedAt.toEpochMilli(), rows);
-            Path p = path();
+            Path p = target;
             if (p.getParent() != null) Files.createDirectories(p.getParent());
             Path tmp = p.resolveSibling("." + p.getFileName() + ".tmp");
             JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), snap);
@@ -106,8 +111,12 @@ public final class DashboardSummaryStore {
     }
 
     public static Snapshot load() {
+        return load(path());
+    }
+
+    /** Package-visible for tests. */
+    static Snapshot load(Path p) {
         try {
-            Path p = path();
             if (p == null || !Files.isRegularFile(p)) return null;
             if (Files.size(p) <= 0 || Files.size(p) > 512 * 1024) return null;
             Snapshot snap = JsonMapper.mapper().readValue(p.toFile(), Snapshot.class);

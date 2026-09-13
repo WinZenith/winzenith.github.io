@@ -71,9 +71,9 @@ public class HelpTabView extends VBox {
                 "Be cautious with force uninstall — it kills processes and deletes files/registry/Start Menu entries and cannot be undone."));
 
         getChildren().add(createFaqSection("Startup Items/Services",
-                "This tab manages programs and services that run automatically when Windows starts. Items are organized into \"Startup apps\" (Registry Run/RunOnce + Startup Folder), \"Scheduled tasks\", and \"Windows services\" (with counts). " +
-                "Startup Folder items (User and Common) are merged into Startup apps and toggled by renaming the shortcut (.disabled). Services cannot be deleted, only toggled. " +
-                "Click \"Scan\" (\"Stop\" cancels), then select an item and click \"Enable/Disable\" or \"Delete\". \"Delete\" always creates a backup first; toggling does not. Disabling a critical system service asks for extra confirmation. " +
+                "This tab manages startup programs and Windows service start types. Items are organized into \"Startup apps\" (Registry Run/RunOnce + Startup Folder), \"Scheduled tasks\", and \"Windows services\" (with counts). " +
+                "The services tab lists all Windows services (Automatic, Manual, and Disabled); Manual services show zero estimated boot impact. Startup Folder items (User and Common) are merged into Startup apps and toggled by renaming the shortcut (.disabled). Services cannot be deleted, only toggled. " +
+                "Click \"Scan\" (\"Stop\" cancels and keeps the previous results), then select an item and click \"Enable/Disable\" or \"Delete\". Only \"Delete\" creates a backup in Backups & Restore; toggling does not. Disabling a critical system service asks for extra confirmation. " +
                 "Use per-tab search plus \"Status:\" / \"Impact:\" filters, \"Select high-impact\" to select heavy enabled items, and right-click / double-click for \"Open file location\", \"Copy command\", \"Show details\" and online search. " +
                 "The footer shows total estimated boot delay (enabled items only) and last boot time. Use \"Backups & Restore\" to restore or permanently delete backups, and \"Export CSV\" for the visible tab. " +
                 "Modifying HKLM / Common Startup, system tasks or services requires administrator rights. Only modify items you recognize."));

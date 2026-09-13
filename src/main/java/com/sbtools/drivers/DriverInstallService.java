@@ -127,8 +127,14 @@ public class DriverInstallService {
         if (restoreRequested) {
             reportStatus("Creating system restore point…");
             AppLogger.info("Creating system restore point before driver update");
-            var rpResult = restoreService.createRestorePoint(
-                    "WinZenith driver update: " + candidate.installed().friendlyName());
+            com.sbtools.backup.SystemRestoreService.RestorePointResult rpResult;
+            try {
+                rpResult = restoreService.createRestorePoint(
+                        "WinZenith driver update: " + candidate.installed().friendlyName(),
+                        cancellationFlag);
+            } catch (java.util.concurrent.CancellationException cancelEx) {
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+            }
             if (rpResult.success()) {
                 restorePointSeq = rpResult.sequenceNumber();
                 restoreOk = true;

@@ -46,7 +46,9 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 public class BackupRestoreTabView extends BorderPane {
@@ -55,6 +57,8 @@ public class BackupRestoreTabView extends BorderPane {
     private final BooleanSupplier adminCheck;
     private final TabPane tabPane = new TabPane();
     private final BooleanProperty registryBusy = new SimpleBooleanProperty(false);
+    private final BooleanProperty rollbackRefreshBusy = new SimpleBooleanProperty(false);
+    private final AtomicInteger rollbackRefreshGen = new AtomicInteger(0);
 
     private DriverBackupService rollbackBackupService;
     private ObservableList<RestoreRow> rollbackRows;
@@ -118,7 +122,7 @@ public class BackupRestoreTabView extends BorderPane {
         rollbackRepairButton.setOnAction(e -> repairStaleBackups());
 
         // Disable buttons while busy (revert/delete) and keep table cells in sync
-        refreshButton.disableProperty().bind(busy);
+        refreshButton.disableProperty().bind(busy.or(rollbackRefreshBusy));
         deleteAllButton.disableProperty().bind(busy);
         rollbackVerifyButton.disableProperty().bind(busy);
         rollbackRepairButton.disableProperty().bind(busy);
@@ -259,12 +263,9 @@ public class BackupRestoreTabView extends BorderPane {
                     boolean win = AppPaths.isWindows();
                     RestoreRow row = getIndex() >= 0 && getIndex() < getTableView().getItems().size()
                             ? getTableView().getItems().get(getIndex()) : null;
-                    boolean healthy = row == null || row.getHealth() == com.sbtools.backup.BackupHealth.Status.MISSING
-                            ? true // health not computed yet — allow, revert() re-checks on disk
-                            : row.isHealthy();
-                    // Missing/Empty/Unreadable backups cannot be reverted; delete stays available.
-                    revertBtn.setDisable(isBusy || !win || !healthy);
-                    if (row != null && !healthy && row.getHealth() != com.sbtools.backup.BackupHealth.Status.MISSING) {
+                    boolean revertOk = row != null && row.isRevertAllowed();
+                    revertBtn.setDisable(isBusy || !win || !revertOk);
+                    if (row != null && row.healthComputedProperty().get() && !row.isHealthy()) {
                         Tooltip.install(revertBtn, new Tooltip("Cannot revert: backup is "
                                 + row.statusProperty().get() + " (" + row.entry().backupFolder() + ")"));
                     }
@@ -279,7 +280,9 @@ public class BackupRestoreTabView extends BorderPane {
     }
 
     private void refreshRollback() {
+        final int generation = rollbackRefreshGen.incrementAndGet();
         Platform.runLater(() -> {
+            rollbackRefreshBusy.set(true);
             if (rollbackSpinner != null) rollbackSpinner.setVisible(true);
             rollbackStatusLabel.setText("Loading backups...");
             if (rollbackWarningLabel != null) {
@@ -304,7 +307,6 @@ public class BackupRestoreTabView extends BorderPane {
                     RestoreRow row = new RestoreRow(e);
                     newRows.add(row);
                 }
-                RestoreRow.computeAllSizesAsync(newRows);
                 String sizeStr = RestoreRow.formatFileSize(totalBytes);
                 String dirTmp = "";
                 try {
@@ -341,6 +343,9 @@ public class BackupRestoreTabView extends BorderPane {
                 final String warnStr = warn.toString().trim();
                 final String freeStr = freeBytes >= 0 ? RestoreRow.formatFileSize(freeBytes) : null;
                 Platform.runLater(() -> {
+                    if (generation != rollbackRefreshGen.get()) {
+                        return;
+                    }
                     rollbackRows.setAll(newRows);
                     updateRollbackSelectionButtons();
                     if (entries.isEmpty()) {
@@ -360,13 +365,28 @@ public class BackupRestoreTabView extends BorderPane {
                             rollbackWarningLabel.setVisible(false);
                         }
                     }
-                    if (rollbackSpinner != null) rollbackSpinner.setVisible(false);
                 });
+                RestoreRow.computeAllSizesAsync(newRows).whenComplete((v, ex) -> Platform.runLater(() -> {
+                    if (generation != rollbackRefreshGen.get()) {
+                        return;
+                    }
+                    if (rollbackTable != null) {
+                        rollbackTable.refresh();
+                    }
+                    if (rollbackSpinner != null) {
+                        rollbackSpinner.setVisible(false);
+                    }
+                    rollbackRefreshBusy.set(false);
+                }));
             } catch (Exception ex) {
                 AppLogger.error("Failed to load backups", ex);
                 Platform.runLater(() -> {
+                    if (generation != rollbackRefreshGen.get()) {
+                        return;
+                    }
                     rollbackStatusLabel.setText("Failed to load backups: " + ex.getMessage());
                     if (rollbackSpinner != null) rollbackSpinner.setVisible(false);
+                    rollbackRefreshBusy.set(false);
                 });
             }
         });
@@ -394,7 +414,10 @@ public class BackupRestoreTabView extends BorderPane {
                                 + "\n\nUse Repair to clean stale entries, or pick a healthy backup.").showAndWait();
                 return;
             }
-        } catch (Exception ignored) {
+        } catch (Exception ex) {
+            new Alert(Alert.AlertType.WARNING,
+                    "Cannot verify backup health:\n" + ex.getMessage()).showAndWait();
+            return;
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Revert driver for:\n" + row.entry().friendlyName()
@@ -460,7 +483,9 @@ public class BackupRestoreTabView extends BorderPane {
             if (fresh == null) return "Device no longer found after restore.";
             String active = fresh.driverVersion() == null ? "" : fresh.driverVersion().trim();
             String expected = row.entry().version() == null ? "" : row.entry().version().trim();
-            if (!expected.isBlank() && active.equals(expected)) return null;
+            if (!expected.isBlank() && com.sbtools.util.VersionCompare.compare(active, expected) == 0) {
+                return null;
+            }
             return "Active version is " + (active.isBlank() ? "unknown" : active)
                     + ", expected " + (expected.isBlank() ? "backup version" : expected) + ".";
         } catch (Exception ex) {
@@ -974,14 +999,6 @@ public class BackupRestoreTabView extends BorderPane {
 
     // ── Registry backup tab ────────────────────────────────────────────────
 
-    /** Extended registry areas (unchecked by default; larger/slower). Added per user request. */
-    private static final String[] REGISTRY_EXTENDED_KEYS = {
-            "HKLM\\SYSTEM\\CurrentControlSet\\Services",
-            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-            "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-            "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32"
-    };
-
     /** Full-hive sources for the optional advanced `reg save` export. */
     private static final String[] REGISTRY_FULL_HIVES = {
             "HKLM\\SYSTEM",
@@ -1191,13 +1208,14 @@ public class BackupRestoreTabView extends BorderPane {
         CheckBox hkcuRunOnce = new CheckBox("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
         CheckBox hklmWowRun = new CheckBox("HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run");
         CheckBox hkcuRunServices = new CheckBox("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServices");
+        hkcuRunServices.setTooltip(new Tooltip("Legacy autostart area — often absent on Windows 10/11 (skipped if missing)"));
 
         Label coreLabel = new Label("Core autostart areas (recommended):");
         coreLabel.setStyle("-fx-font-weight: bold;");
         Label extLabel = new Label("Extended areas (optional, larger):");
         extLabel.setStyle("-fx-font-weight: bold;");
         List<CheckBox> extBoxes = new ArrayList<>();
-        for (String key : REGISTRY_EXTENDED_KEYS) {
+        for (String key : com.sbtools.backup.RegistryBackupSafety.EXTENDED_REGISTRY_KEYS) {
             CheckBox cb = new CheckBox(key);
             cb.setSelected(false);
             cb.setTooltip(new Tooltip("Optional extended area — export is larger/slower"));
@@ -1246,7 +1264,7 @@ public class BackupRestoreTabView extends BorderPane {
         final boolean doFullHive = fullHiveSelected[0];
         final List<String> selectedFinal = new ArrayList<>(selected);
 
-        registryBusy.set(true);
+        beginRegistryMutation();
         statusLabel.setText("Creating registry backup...");
 
         AppExecutors.ioPool().execute(() -> {
@@ -1262,24 +1280,22 @@ public class BackupRestoreTabView extends BorderPane {
 
                 int failedCount = 0;
                 List<String> exportedFiles = new ArrayList<>();
+                List<String> skippedMissing = new ArrayList<>();
+                List<String> failedAreas = new ArrayList<>();
                 for (String area : selectedFinal) {
                     String safeName = area.replace('\\', '_').replace(':', '_');
                     Path outputFile = backupDir.resolve(safeName + ".reg");
-                    List<String> exportArgs = new ArrayList<>(
-                            List.of("reg", "export", area, outputFile.toString(), "/y"));
-                    ProcessBuilder pb = new ProcessBuilder(exportArgs);
-                    pb.redirectErrorStream(true);
-                    Process process = ProcessManager.start(pb);
-                    boolean finished = process.waitFor(120, TimeUnit.SECONDS);
-                    if (!finished) {
-                        process.destroyForcibly();
-                        failedCount++;
-                        AppLogger.warning("reg export timed out for " + area);
-                    } else if (process.exitValue() == 0) {
+                    com.sbtools.backup.RegistryBackupSafety.RegExportOutcome outcome =
+                            com.sbtools.backup.RegistryBackupSafety.exportRegKeyIfPresent(area, outputFile);
+                    if (outcome == com.sbtools.backup.RegistryBackupSafety.RegExportOutcome.OK) {
                         exportedFiles.add(outputFile.getFileName().toString());
+                    } else if (outcome == com.sbtools.backup.RegistryBackupSafety.RegExportOutcome.MISSING) {
+                        skippedMissing.add(area);
+                        AppLogger.info("Registry backup skipped missing key: " + area);
                     } else {
                         failedCount++;
-                        AppLogger.warning("reg export failed for " + area + " (exit=" + process.exitValue() + ")");
+                        failedAreas.add(area);
+                        AppLogger.warning("reg export failed for " + area);
                     }
                 }
 
@@ -1324,7 +1340,9 @@ public class BackupRestoreTabView extends BorderPane {
 
                 int totalRequested = selectedFinal.size() + (doFullHive ? REGISTRY_FULL_HIVES.length : 0);
                 int totalOk = exportedFiles.size() + hivOk;
-                if (totalOk == 0) {
+                final List<String> skippedFinal = List.copyOf(skippedMissing);
+                final List<String> failedAreasFinal = List.copyOf(failedAreas);
+                if (totalOk == 0 && skippedMissing.size() == selectedFinal.size() && hivOk == 0) {
                     // Non-empty dirs throw on deleteIfExists: remove recursively
                     // so failed sessions do not pollute the backup list/disk.
                     try { deleteDirectoryRecursive(backupDir); } catch (Exception ignored) {}
@@ -1334,10 +1352,18 @@ public class BackupRestoreTabView extends BorderPane {
                                 "Failed to export any registry areas.").showAndWait();
                     });
                 } else {
-                    String msg = (failedCount == 0 && hivFailed == 0)
-                            ? "Registry exported to:\n" + backupDir
-                            : "Partial backup: " + totalOk + "/" + totalRequested
-                                    + " areas exported to:\n" + backupDir;
+                    boolean realPartial = failedCount > 0 || hivFailed > 0;
+                    String msg = realPartial
+                            ? "Partial backup: " + totalOk + "/" + totalRequested
+                                    + " areas exported to:\n" + backupDir
+                            : "Registry backup completed (" + totalOk + " file(s)):\n" + backupDir;
+                    if (!skippedFinal.isEmpty()) {
+                        msg += "\n\nSkipped (registry key not present on this PC):\n"
+                                + String.join("\n", skippedFinal);
+                    }
+                    if (!failedAreasFinal.isEmpty()) {
+                        msg += "\n\nFailed to export:\n" + String.join("\n", failedAreasFinal);
+                    }
                     if (doFullHive && hivOk > 0) {
                         msg += "\n\nNote: .hiv files require manual 'reg restore'. Only .reg files are auto-imported.";
                     }
@@ -1357,7 +1383,7 @@ public class BackupRestoreTabView extends BorderPane {
                             "Failed to create registry backup:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> registryBusy.set(false));
+                Platform.runLater(this::endRegistryMutation);
             }
         });
     }
@@ -1378,16 +1404,23 @@ public class BackupRestoreTabView extends BorderPane {
         confirm.setTitle("Restore Registry Backup");
         confirm.setHeaderText("Import registry session: " + selected.getFilename());
         confirm.setContentText("Windows MERGES .reg files: values added after the backup will NOT be removed.\n\n"
-                + "A safety backup of the current state will be created first so this restore can be undone.\n\n"
+                + "Existing registry keys targeted by this session will be exported first into a safety session. "
+                + "Keys that did not exist are recorded in the manifest only.\n\n"
                 + "Ensure all work is saved before proceeding.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
 
-        registryBusy.set(true);
+        beginRegistryMutation();
         statusLabel.setText("Restoring registry backup...");
 
         AppExecutors.ioPool().execute(() -> {
             Path safetyDir = null;
             try {
+                if (!com.sbtools.util.AdminCheck.isRunningAsAdminFresh()) {
+                    Platform.runLater(() -> new Alert(Alert.AlertType.WARNING,
+                            "Restoring registry backups requires administrator rights. Please restart as administrator.")
+                            .showAndWait());
+                    return;
+                }
                 // Validate the selected session BEFORE creating the safety net:
                 // a missing/.hiv-only session must not leave an orphan pre-restore dir.
                 Path dirPath = resolveRegistryBackupPath(selected.getFilename());
@@ -1417,18 +1450,11 @@ public class BackupRestoreTabView extends BorderPane {
                     });
                     return;
                 }
-                // Pre-restore safety net: export current state before merging,
-                // so a bad restore can be undone. Best-effort, never blocks.
-                try {
-                    Path base = registryBackupsBaseForWrite();
-                    Files.createDirectories(base);
-                    safetyDir = newUniqueRegistryBackupDir(base, "registry_backup_pre-restore_");
-                    Files.createDirectories(safetyDir);
-                    exportCurrentRegistryForSafety(safetyDir);
-                } catch (Exception safetyEx) {
-                    AppLogger.warning("Pre-restore safety backup failed: " + safetyEx.getMessage());
-                    safetyDir = null;
-                }
+                Set<String> targetKeys = com.sbtools.backup.RegistryBackupSafety.collectTargetKeys(regFiles);
+                Path base = registryBackupsBaseForWrite();
+                Files.createDirectories(base);
+                safetyDir = newUniqueRegistryBackupDir(base, "registry_backup_pre-restore_");
+                com.sbtools.backup.RegistryBackupSafety.createPreRestoreSnapshot(safetyDir, targetKeys);
                 int regFailed = 0;
                 for (Path regFile : regFiles) {
                     ProcessBuilder pb = new ProcessBuilder("reg", "import", regFile.toString());
@@ -1447,10 +1473,8 @@ public class BackupRestoreTabView extends BorderPane {
                 final int imported = regFiles.size() - regFailed;
                 final int regFailedFinal = regFailed;
                 final int totalFiles = regFiles.size();
-                final String safetyInfo = safetyDir != null
-                        ? "\n\nSafety backup of pre-restore state:\n" + safetyDir
-                          + "\n(Import it to undo this restore.)"
-                        : "\n\nNote: pre-restore safety backup could not be created.";
+                final String safetyInfo = "\n\nSafety backup of targeted pre-restore keys:\n" + safetyDir
+                        + "\n(Import those .reg files to undo this restore.)";
                 final String mergeNote = "\n\nNote: Windows merges .reg files — entries added after the backup were NOT removed.";
                 final String hivNote = hivFinal > 0
                         ? "\n\nSession also contains " + hivFinal + " .hiv file(s) which were NOT auto-imported (manual 'reg restore' required)."
@@ -1477,7 +1501,7 @@ public class BackupRestoreTabView extends BorderPane {
                             "Failed to restore registry backup:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
-                Platform.runLater(() -> registryBusy.set(false));
+                Platform.runLater(this::endRegistryMutation);
             }
         });
     }
@@ -1500,17 +1524,18 @@ public class BackupRestoreTabView extends BorderPane {
         confirm.setContentText("This will permanently delete all registry backup files in this session.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
 
-        registryBusy.set(true);
+        beginRegistryMutation();
         statusLabel.setText("Deleting backup...");
         AppExecutors.ioPool().execute(() -> {
             try {
                 Path dirPath = resolveRegistryBackupPath(selected.getFilename());
                 if (Files.isDirectory(dirPath)) {
                     deleteDirectoryRecursive(dirPath);
+                    if (Files.exists(dirPath)) {
+                        throw new IOException("Backup session folder still exists: " + dirPath);
+                    }
                 }
                 Platform.runLater(() -> {
-                    // Re-scan from disk: surfaces partial-delete leftovers
-                    // instead of claiming success on a ghost row.
                     refreshRegistryBackups(rows, statusLabel);
                     statusLabel.setText("Backup session deleted.");
                 });
@@ -1519,24 +1544,40 @@ public class BackupRestoreTabView extends BorderPane {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
                         "Failed to delete backup:\n" + e.getMessage()).showAndWait());
             } finally {
-                Platform.runLater(() -> registryBusy.set(false));
+                Platform.runLater(this::endRegistryMutation);
             }
         });
     }
 
+    private void beginRegistryMutation() {
+        registryBusy.set(true);
+        busy.set(true);
+    }
+
+    private void endRegistryMutation() {
+        registryBusy.set(false);
+        busy.set(false);
+    }
+
     private static void deleteDirectoryRecursive(Path directory) throws IOException {
-        if (Files.exists(directory)) {
-            try (var stream = Files.walk(directory)) {
-                stream.sorted(java.util.Comparator.reverseOrder())
-                        .forEach(path -> {
-                            try { Files.setAttribute(path, "dos:readonly", Boolean.FALSE); } catch (Exception ignored) {}
-                            try {
-                                Files.deleteIfExists(path);
-                            } catch (IOException e) {
-                                AppLogger.warning("Could not delete: " + path, e);
-                            }
-                        });
-            }
+        if (!Files.exists(directory)) {
+            return;
+        }
+        java.util.List<Path> failed = new java.util.ArrayList<>();
+        try (var stream = Files.walk(directory)) {
+            stream.sorted(java.util.Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try { Files.setAttribute(path, "dos:readonly", Boolean.FALSE); } catch (Exception ignored) {}
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException e) {
+                            failed.add(path);
+                            AppLogger.warning("Could not delete: " + path, e);
+                        }
+                    });
+        }
+        if (!failed.isEmpty() || Files.exists(directory)) {
+            throw new IOException("Could not delete folder completely: " + directory);
         }
     }
 
@@ -1644,40 +1685,6 @@ public class BackupRestoreTabView extends BorderPane {
         }
         sb.append("]\n}\n");
         Files.writeString(dir.resolve("manifest.json"), sb.toString());
-    }
-
-    /**
-     * Best-effort export of the current autostart/SharedDLLs state before a
-     * registry merge, so the restore can be undone. Never throws.
-     */
-    private static void exportCurrentRegistryForSafety(Path dir) {
-        List<String> keys = new ArrayList<>(List.of(
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
-                "HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServices",
-                "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs"
-        ));
-        // Cover extended areas on restore-undo as well (best-effort).
-        keys.addAll(List.of(REGISTRY_EXTENDED_KEYS));
-        for (String key : keys) {
-            try {
-                String safeName = key.replace('\\', '_').replace(':', '_');
-                Path out = dir.resolve("pre-restore_" + safeName + ".reg");
-                ProcessBuilder pb = new ProcessBuilder("reg", "export", key, out.toString(), "/y");
-                pb.redirectErrorStream(true);
-                Process p = ProcessManager.start(pb);
-                boolean finished = p.waitFor(60, TimeUnit.SECONDS);
-                if (!finished) {
-                    p.destroyForcibly();
-                    try { Files.deleteIfExists(out); } catch (Exception ignored) {}
-                } else if (p.exitValue() != 0) {
-                    try { Files.deleteIfExists(out); } catch (Exception ignored) {}
-                }
-            } catch (Exception ignored) {}
-        }
     }
 
 }

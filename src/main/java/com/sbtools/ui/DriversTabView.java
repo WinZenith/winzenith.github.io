@@ -1242,8 +1242,7 @@ public class DriversTabView extends BorderPane {
                     "Another operation is running. Please wait for it to finish.").showAndWait();
             return;
         }
-        boolean allowRestoreOnly = com.sbtools.backup.DriverBackupService.backupSupportIssue(c.installed()) != null
-                && pre.hasWarnings();
+        boolean allowRestoreOnly = com.sbtools.backup.DriverBackupService.backupSupportIssue(c.installed()) != null;
         if (cell != null) installCells.put(row, cell);
         installCancelFlag.set(false);
         installService.resetCancellation();

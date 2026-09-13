@@ -21,7 +21,11 @@ public class RestoreRow {
     private final StringProperty version = new SimpleStringProperty();
     private final StringProperty backedUpAt = new SimpleStringProperty();
     private final StringProperty size = new SimpleStringProperty();
-    private final StringProperty status = new SimpleStringProperty(BackupHealth.statusLabel(BackupHealth.Status.MISSING));
+    private static final String CHECKING_LABEL = "Checking\u2026";
+
+    private final StringProperty status = new SimpleStringProperty(CHECKING_LABEL);
+    private final javafx.beans.property.BooleanProperty healthComputed =
+            new javafx.beans.property.SimpleBooleanProperty(false);
     private volatile boolean sizeComputed = false;
     private volatile BackupHealth.Status health = BackupHealth.Status.MISSING;
     private volatile long fileCount = 0;
@@ -79,6 +83,7 @@ public class RestoreRow {
         Platform.runLater(() -> {
             size.set(sizeStr);
             status.set(statusStr);
+            healthComputed.set(true);
         });
     }
 
@@ -99,6 +104,7 @@ public class RestoreRow {
                 Platform.runLater(() -> {
                     row.size.set(sizeStr);
                     row.status.set(statusStr);
+                    row.healthComputed.set(true);
                 });
             }
         }, SIZE_CALC_POOL);
@@ -114,6 +120,8 @@ public class RestoreRow {
 
     public BackupHealth.Status getHealth() { return health; }
     public boolean isHealthy() { return BackupHealth.isHealthy(health); }
+    public javafx.beans.property.BooleanProperty healthComputedProperty() { return healthComputed; }
+    public boolean isRevertAllowed() { return healthComputed.get() && isHealthy(); }
     public long getFileCount() { return fileCount; }
     public long getInfCount() { return infCount; }
     public long getBytes() { return bytes; }
