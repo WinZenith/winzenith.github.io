@@ -13,7 +13,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$version = "1.3.0"
+$version = "1.3.1"
 $jarName = "win-zenith-$version-shaded.jar"
 $jar = Join-Path $root "target\$jarName"
 if (-not (Test-Path $jar)) {
