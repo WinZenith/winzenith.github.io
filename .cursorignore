@@ -1,0 +1,14 @@
+﻿# Build and release output (also in .gitignore; listed for explicit AI exclusion)
+target/
+dist/
+bin/
+
+# Static site backup snapshot — duplicate of docs/; not needed for Java work
+website-backup-2026-09-04/
+
+# Local portable/runtime artifacts (if present beside the repo)
+*.zip
+*.7z
+*.msi
+*.exe
+!src/main/resources/**

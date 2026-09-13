@@ -1,0 +1,5 @@
+{
+  "java.configuration.updateBuildConfiguration": "automatic",
+  "java.import.maven.enabled": true,
+  "java.compile.nullAnalysis.mode": "disabled"
+}
