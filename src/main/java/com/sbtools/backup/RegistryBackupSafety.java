@@ -277,14 +277,15 @@ public final class RegistryBackupSafety {
         if (safetyDir == null || !Files.isDirectory(safetyDir)) {
             throw new IOException("Safety snapshot folder missing: " + safetyDir);
         }
-        List<Path> safetyRegs = new ArrayList<>();
+        List<Path> safetyRegs;
         try (var stream = Files.list(safetyDir)) {
-            for (Path p : stream.sorted()) {
-                String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
-                if (name.startsWith("pre-restore_") && name.endsWith(".reg")) {
-                    safetyRegs.add(p);
-                }
-            }
+            safetyRegs = stream
+                    .filter(p -> {
+                        String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
+                        return name.startsWith("pre-restore_") && name.endsWith(".reg");
+                    })
+                    .sorted()
+                    .toList();
         }
         for (Path reg : safetyRegs) {
             if (!runRegImport(reg)) {
