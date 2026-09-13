@@ -211,6 +211,10 @@ public final class CleanerUtils {
         for (Path dir : dirs) {
             if (token != null && token.isCancelled()) break;
             if (dir != null && Files.isDirectory(dir)) {
+                if (!isSafeToCleanDirectory(dir)) {
+                    AppLogger.warning("Skipping unsafe scan directory: " + dir);
+                    continue;
+                }
                 try {
                     Files.walkFileTree(dir, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class),
                             depth, new SimpleFileVisitor<>() {
@@ -312,6 +316,11 @@ public final class CleanerUtils {
     }
 
     public static long cleanDirectoryPattern(List<Path> dirs, CancellationToken token) {
+        return cleanDirectoryPattern(dirs, DEFAULT_SCAN_MAX_DEPTH, token);
+    }
+
+    public static long cleanDirectoryPattern(List<Path> dirs, int maxDepth, CancellationToken token) {
+        int depth = maxDepth > 0 ? maxDepth : DEFAULT_SCAN_MAX_DEPTH;
         long cleaned = 0;
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
@@ -319,7 +328,7 @@ public final class CleanerUtils {
                     AppLogger.warning("Skipping unsafe clean directory: " + dir);
                     continue;
                 }
-                cleaned += deleteDirectoryContents(dir, token);
+                cleaned += deleteDirectoryContents(dir, depth, token);
             }
             if (token != null && token.isCancelled()) break;
         }
@@ -405,6 +414,10 @@ public final class CleanerUtils {
      * delegates here for backward compatibility.
      */
     public static DeleteStats deleteDirectoryContentsWithStats(Path dir, CancellationToken token) {
+        return deleteDirectoryContentsWithStats(dir, DEFAULT_SCAN_MAX_DEPTH, token);
+    }
+
+    public static DeleteStats deleteDirectoryContentsWithStats(Path dir, int maxDepth, CancellationToken token) {
         java.util.concurrent.atomic.AtomicLong cleaned = new java.util.concurrent.atomic.AtomicLong();
         java.util.concurrent.atomic.AtomicInteger deleted = new java.util.concurrent.atomic.AtomicInteger();
         java.util.concurrent.atomic.AtomicInteger skipped = new java.util.concurrent.atomic.AtomicInteger();
@@ -414,8 +427,13 @@ public final class CleanerUtils {
             }
             return new DeleteStats(0, 0, 0);
         }
+        if (!isSafeToCleanDirectory(dir)) {
+            AppLogger.warning("Skipping unsafe delete directory: " + dir);
+            return new DeleteStats(0, 0, 0);
+        }
+        int depth = maxDepth > 0 ? maxDepth : DEFAULT_SCAN_MAX_DEPTH;
         try {
-            Files.walkFileTree(dir, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), Integer.MAX_VALUE, new SimpleFileVisitor<>() {
+            Files.walkFileTree(dir, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), depth, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
@@ -487,7 +505,11 @@ public final class CleanerUtils {
     }
 
     public static long deleteDirectoryContents(Path dir, CancellationToken token) {
-        return deleteDirectoryContentsWithStats(dir, token).bytesFreed();
+        return deleteDirectoryContents(dir, DEFAULT_SCAN_MAX_DEPTH, token);
+    }
+
+    public static long deleteDirectoryContents(Path dir, int maxDepth, CancellationToken token) {
+        return deleteDirectoryContentsWithStats(dir, maxDepth, token).bytesFreed();
     }
 
     /**
@@ -499,7 +521,7 @@ public final class CleanerUtils {
         int skipped = 0;
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir) && isSafeToCleanDirectory(dir)) {
-                DeleteStats s = deleteDirectoryContentsWithStats(dir, token);
+                DeleteStats s = deleteDirectoryContentsWithStats(dir, DEFAULT_SCAN_MAX_DEPTH, token);
                 bytes += s.bytesFreed();
                 files += s.filesDeleted();
                 skipped += s.skippedLocked();

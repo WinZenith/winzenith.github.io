@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     private volatile CancellationToken activeCleanToken;
     private final ObservableList<CleanupRow> sessionRows = FXCollections.observableArrayList();
     private volatile boolean hasScanned = false;
+    private volatile boolean disposed = false;
     private final AtomicBoolean cancelling = new AtomicBoolean(false);
     private final java.util.concurrent.atomic.AtomicLong summaryGen = new java.util.concurrent.atomic.AtomicLong();
 
@@ -131,7 +132,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         });
         cleanButton.setOnAction(e -> startClean());
         historyButton.setOnAction(e -> {
-            CleanupHistoryDialog dialog = new CleanupHistoryDialog(historyStore);
+            CleanupHistoryDialog dialog = new CleanupHistoryDialog(historyStore, this::updateSummary);
             dialog.showAndWait();
         });
         cancelButton.setOnAction(e -> cancelActive());
@@ -241,6 +242,25 @@ import java.util.concurrent.atomic.AtomicInteger;
         return "\"" + s.replace("\"", "\"\"") + "\"";
     }
 
+    /** Long category lists must scroll so dialog buttons stay on screen. */
+    private static void applyScrollableAlertBody(Alert alert, String message) {
+        Label msgLabel = new Label(message);
+        msgLabel.setWrapText(true);
+        msgLabel.setMaxWidth(380);
+        ScrollPane scrollPane = new ScrollPane(msgLabel);
+        scrollPane.setFitToWidth(true);
+        double scrollMax = Math.min(
+                javafx.stage.Screen.getPrimary().getVisualBounds().getHeight() * 0.6, 450);
+        scrollPane.setPrefHeight(scrollMax);
+        scrollPane.setMaxHeight(scrollMax);
+        scrollPane.setMinHeight(100);
+        alert.setContentText(null);
+        alert.getDialogPane().setContent(scrollPane);
+        alert.getDialogPane().setMinWidth(400);
+        alert.getDialogPane().setMaxHeight(Math.min(
+                javafx.stage.Screen.getPrimary().getVisualBounds().getHeight() * 0.75, 600));
+    }
+
     private void saveCleanReport(String reportText) {
         javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
         chooser.setTitle("Save cleanup report");
@@ -284,6 +304,16 @@ import java.util.concurrent.atomic.AtomicInteger;
     private volatile CancellationToken activeRescanToken;
     private volatile java.util.concurrent.CompletableFuture<?> activeRestoreFuture;
     private volatile java.util.concurrent.atomic.AtomicBoolean activeRestoreCancel;
+
+    private void runOnFxIfActive(Runnable action) {
+        Platform.runLater(() -> {
+            if (disposed) {
+                busy.set(false);
+                return;
+            }
+            action.run();
+        });
+    }
 
     private void cancelActive() {
         cancelling.set(true);
@@ -562,7 +592,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         activeRescanToken = new CancellationToken();
         activeRescanFuture = service.scanCategoriesAsync(cats, () -> {}, activeRescanToken);
         final var myRescan = activeRescanFuture;
-        activeRescanFuture.whenComplete((results, ex) -> Platform.runLater(() -> {
+        activeRescanFuture.whenComplete((results, ex) -> runOnFxIfActive(() -> {
             if (myRescan != activeRescanFuture) return;
             if (ex != null) {
                 if (cancelling.get() || (activeRescanFuture != null && activeRescanFuture.isCancelled())) {
@@ -618,24 +648,29 @@ import java.util.concurrent.atomic.AtomicInteger;
         progressBar.setProgress(0);
         progressBar.setVisible(true);
 
-        int totalCategories = CleanupCategory.values().length;
+        AppSettings scanSettings = settingsStore.load();
+        java.util.List<CleanupCategory> activeCategories =
+                CleanupService.categoriesExcluding(scanSettings.ignoredCleanupCategories());
+        int totalCategories = activeCategories.size();
         AtomicInteger scanned = new AtomicInteger();
 
         activeScanToken = new CancellationToken();
         final var scanTok = activeScanToken;
-        activeScanFuture = service.scanAsync(() -> {
+        activeScanFuture = service.scanAsync(activeCategories, () -> {
             if (cancelling.get() || scanTok.isCancelled()) return;
             int done = scanned.incrementAndGet();
             Platform.runLater(() -> {
-                progressBar.setProgress((double) done / totalCategories);
+                if (disposed) return;
+                if (totalCategories > 0) {
+                    progressBar.setProgress((double) done / totalCategories);
+                }
                 statusLabel.setText("Scanning: " + done + "/" + totalCategories + "...");
             });
         }, activeScanToken);
         cancelButton.setDisable(false);
 
         final var myScan = activeScanFuture;
-        activeScanFuture.whenComplete((results, ex) -> {
-            Platform.runLater(() -> {
+        activeScanFuture.whenComplete((results, ex) -> runOnFxIfActive(() -> {
                 if (myScan != activeScanFuture) return;
                 if (ex != null) {
                     if (cancelling.get() || activeScanFuture.isCancelled()) {
@@ -662,18 +697,18 @@ import java.util.concurrent.atomic.AtomicInteger;
                         progressBar.setVisible(false);
                         cancelButton.setDisable(true);
                     } else {
-                    AppSettings settings = settingsStore.load();
-                    List<String> ignored = settings.ignoredCleanupCategories();
-                    List<CleanupRow> filtered = results.stream()
-                            .filter(r -> ignored == null || !ignored.contains(r.getCategory().name()))
-                            .toList();
+                    List<CleanupRow> filtered = results != null ? results : java.util.List.of();
                     sessionRows.setAll(filtered);
                     for (CleanupRow row : filtered) {
                         row.setSelected(row.getCategory().getRiskLevel() != CleanupCategory.RiskLevel.HIGH);
                     }
                     hasScanned = true;
                     long totalBytes = filtered.stream().mapToLong(CleanupRow::getTotalBytes).sum();
-                    statusLabel.setText("Scan complete - " + CleanupService.formatBytes(totalBytes) + " identified.");
+                    boolean partialTimeout = filtered.stream().anyMatch(r ->
+                            r.getErrorMessage() != null && r.getErrorMessage().contains("timed out"));
+                    statusLabel.setText(partialTimeout
+                            ? "Scan timed out (partial results) - " + CleanupService.formatBytes(totalBytes) + " identified."
+                            : "Scan complete - " + CleanupService.formatBytes(totalBytes) + " identified.");
                     cleanButton.setDisable(getSelectedCount() == 0);
                     progressBar.setVisible(false);
                     cancelButton.setDisable(true);
@@ -684,8 +719,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                 activeScanToken = null;
                 activeScanFuture = null;
                 busy.set(false);
-            });
-        });
+        }));
     }
 
     private void startClean() {
@@ -774,19 +808,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
         Alert confirmAlert = new Alert(Alert.AlertType.CONFIRMATION, null,
                 ButtonType.OK, ButtonType.CANCEL);
-        Label msgLabel = new Label(dialogMsg.toString());
-        msgLabel.setWrapText(true);
-        msgLabel.setMaxWidth(380);
-        ScrollPane scrollPane = new ScrollPane(msgLabel);
-        scrollPane.setFitToWidth(true);
-        scrollPane.setPrefHeight(Math.min(
-                javafx.stage.Screen.getPrimary().getVisualBounds().getHeight() * 0.6, 450));
-        scrollPane.setMinHeight(100);
-        confirmAlert.getDialogPane().setContent(scrollPane);
         confirmAlert.setHeaderText("Confirm Cleanup");
-        confirmAlert.getDialogPane().setMinWidth(400);
-        confirmAlert.getDialogPane().setMaxHeight(Math.min(
-                javafx.stage.Screen.getPrimary().getVisualBounds().getHeight() * 0.75, 600));
+        applyScrollableAlertBody(confirmAlert, dialogMsg.toString());
         if (confirmAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
             return;
         }
@@ -799,16 +822,17 @@ import java.util.concurrent.atomic.AtomicInteger;
                         || r.getCategory() == CleanupCategory.OLD_WINDOWS_INSTALL)
                 .toList();
         if (!destructive.isEmpty()) {
-            Alert destructiveAlert = new Alert(Alert.AlertType.WARNING,
-                    "You selected categories that PERMANENTLY delete user data or system rollback state:\n\n"
-                            + destructive.stream()
-                                    .map(r -> "  [!] " + r.getCategory().getDisplayName() + " — " + r.getCategory().getDescription())
-                                    .collect(java.util.stream.Collectors.joining("\n"))
-                            + "\n\niTunes backups cannot be recovered. Docker prune deletes unused images/containers. "
-                            + "Removing Windows.old prevents rollback to the previous Windows version.\n\n"
-                            + "Type-understanding: click OK only if you have independent backups.",
-                    ButtonType.OK, ButtonType.CANCEL);
+            String destructiveBody = "You selected categories that PERMANENTLY delete user data or system rollback state:\n\n"
+                    + destructive.stream()
+                            .map(r -> "  [!] " + r.getCategory().getDisplayName() + " — " + r.getCategory().getDescription())
+                            .collect(java.util.stream.Collectors.joining("\n"))
+                    + "\n\niTunes backups cannot be recovered. Docker prune removes dangling build cache "
+                    + "and unused networks (tagged images, containers, and volumes are preserved). "
+                    + "Removing Windows.old prevents rollback to the previous Windows version.\n\n"
+                    + "Type-understanding: click OK only if you have independent backups.";
+            Alert destructiveAlert = new Alert(Alert.AlertType.WARNING, null, ButtonType.OK, ButtonType.CANCEL);
             destructiveAlert.setHeaderText("Irreversible Deletion — Confirm Again");
+            applyScrollableAlertBody(destructiveAlert, destructiveBody);
             if (destructiveAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
                 return;
             }
@@ -866,7 +890,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
             activeCleanFuture.whenComplete((summary, ex) -> {
                 if (ex != null) {
-                    Platform.runLater(() -> {
+                    runOnFxIfActive(() -> {
                         if (cancelling.get() || activeCleanFuture.isCancelled()) {
                             statusLabel.setText("Cleanup canceled.");
                         } else {
@@ -897,7 +921,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                     // Canceled: skip the rescan (fresh token would ignore the
                     // cancel) and go straight to the canceled result dialog.
                     if (wasCanceled || cancelling.get()) {
-                        Platform.runLater(() -> {
+                        runOnFxIfActive(() -> {
                             StringBuilder sb = new StringBuilder();
                             sb.append("Cleanup canceled.\n\n");
                             sb.append("Total freed: ").append(CleanupService.formatBytes(summary.getTotalBytes()));
@@ -917,8 +941,9 @@ import java.util.concurrent.atomic.AtomicInteger;
                             progressBar.setVisible(false);
                             cancelButton.setDisable(true);
                             updateSummary();
-                            Alert resultAlert = new Alert(Alert.AlertType.WARNING, sb.toString());
+                            Alert resultAlert = new Alert(Alert.AlertType.WARNING);
                             resultAlert.setHeaderText("Cleanup Canceled");
+                            applyScrollableAlertBody(resultAlert, sb.toString());
                             ButtonType saveReportBtn = new ButtonType("Save report...");
                             resultAlert.getButtonTypes().add(saveReportBtn);
                             var chosen = resultAlert.showAndWait().orElse(ButtonType.OK);
@@ -935,7 +960,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                         return;
                     }
 
-                    Platform.runLater(() -> {
+                    runOnFxIfActive(() -> {
                         statusLabel.setText("Re-scanning cleaned categories...");
                         progressBar.setProgress(-1);
                     });
@@ -947,8 +972,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                     if (cancelling.get()) activeRescanToken.cancel();
                     activeRescanFuture = service.scanCategoriesAsync(cleanedCategories, () -> {}, activeRescanToken);
 
-                    activeRescanFuture.whenComplete((rescanResults, rescanEx) -> {
-                        Platform.runLater(() -> {
+                    activeRescanFuture.whenComplete((rescanResults, rescanEx) -> runOnFxIfActive(() -> {
                             if (rescanEx == null && rescanResults != null) {
                                 // Cooperative cancel delivers "Canceled" placeholders
                                 // normally — keep pre-clean values in that case.
@@ -997,8 +1021,14 @@ import java.util.concurrent.atomic.AtomicInteger;
                                 summary.getErrors().forEach(err ->
                                         sb.append("  - ").append(err).append("\n"));
                             }
-                            if (rescanEx != null && !(rescanEx instanceof java.util.concurrent.CancellationException)) {
-                                sb.append("\nNote: Post-clean rescan failed (").append(java.util.Objects.toString(rescanEx.getMessage(), rescanEx.toString())).append(") — table may show stale sizes. Click Scan to refresh.\n");
+                            if ((rescanEx != null && !(rescanEx instanceof java.util.concurrent.CancellationException))
+                                    || (activeRescanToken != null && activeRescanToken.isCancelled())
+                                    || cancelling.get()) {
+                                sb.append("\nNote: Post-clean refresh was canceled or failed — table may show stale sizes. Click Scan or Refresh selected.\n");
+                            } else if (rescanEx != null) {
+                                sb.append("\nNote: Post-clean rescan failed (")
+                                        .append(java.util.Objects.toString(rescanEx.getMessage(), rescanEx.toString()))
+                                        .append(") — table may show stale sizes. Click Scan to refresh.\n");
                             }
                             if (!wasCanceled) statusLabel.setText("Cleanup completed - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
                             else statusLabel.setText("Cleanup canceled - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed before cancel.");
@@ -1006,8 +1036,10 @@ import java.util.concurrent.atomic.AtomicInteger;
                             cancelButton.setDisable(true);
                             updateSummary();
 
-                            Alert resultAlert = new Alert(wasCanceled ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION, sb.toString());
+                            Alert resultAlert = new Alert(
+                                    wasCanceled ? Alert.AlertType.WARNING : Alert.AlertType.INFORMATION);
                             resultAlert.setHeaderText(wasCanceled ? "Cleanup Canceled" : "Cleanup Results");
+                            applyScrollableAlertBody(resultAlert, sb.toString());
                             ButtonType saveReportBtn = new ButtonType("Save report...");
                             resultAlert.getButtonTypes().add(saveReportBtn);
                             var chosen = resultAlert.showAndWait().orElse(ButtonType.OK);
@@ -1021,8 +1053,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                             activeRescanToken = null;
                             activeRescanFuture = null;
                             busy.set(false);
-                        });
-                    });
+                    }));
                 }
             });
         };
@@ -1106,6 +1137,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     }
 
     public void dispose() {
+        disposed = true;
         cancelActive();
     }
 }

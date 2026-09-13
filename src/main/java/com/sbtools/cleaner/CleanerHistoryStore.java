@@ -20,6 +20,8 @@ import java.util.Map;
  */
 public class CleanerHistoryStore {
 
+    private Path historyFileOverride;
+
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .enable(SerializationFeature.INDENT_OUTPUT);
     private static final int MAX_HISTORY_ENTRIES = 50;
@@ -46,7 +48,12 @@ public class CleanerHistoryStore {
         }
     }
 
+    void setHistoryFileForTests(Path path) {
+        historyFileOverride = path;
+    }
+
     private Path getHistoryFile() {
+        if (historyFileOverride != null) return historyFileOverride;
         return AppPaths.dataDir().resolve("cleanup-history.json");
     }
 
@@ -70,11 +77,11 @@ public class CleanerHistoryStore {
         }
     }
 
-    public synchronized void append(CleanupService.CleanSummary summary) {
+    public synchronized void append(CleanupService.CleanSummary summary) throws IOException {
         List<HistoryEntry> history = load();
         Map<String, Long> perCategory = new java.util.HashMap<>();
         summary.getPerCategory().forEach((cat, bytes) ->
-                perCategory.put(cat.getDisplayName(), bytes));
+                perCategory.put(cat.name(), bytes));
 
         String version = "";
         try {
@@ -111,6 +118,7 @@ public class CleanerHistoryStore {
             }
         } catch (IOException e) {
             AppLogger.warning("Failed to save cleanup history: " + e.getMessage());
+            throw e;
         }
     }
 
@@ -118,7 +126,7 @@ public class CleanerHistoryStore {
         return load().stream().mapToLong(HistoryEntry::totalBytesFreed).sum();
     }
 
-    public synchronized void clear() {
+    public synchronized void clear() throws IOException {
         try {
             Path file = getHistoryFile();
             Files.createDirectories(file.getParent());
@@ -136,6 +144,17 @@ public class CleanerHistoryStore {
             }
         } catch (IOException e) {
             AppLogger.warning("Failed to clear cleanup history: " + e.getMessage());
+            throw e;
+        }
+    }
+
+    /** Display name for history keys (enum id or legacy label). */
+    public static String formatCategoryHistoryKey(String storedKey) {
+        if (storedKey == null || storedKey.isBlank()) return storedKey;
+        try {
+            return CleanupCategory.valueOf(storedKey).getDisplayName();
+        } catch (IllegalArgumentException e) {
+            return storedKey;
         }
     }
 }

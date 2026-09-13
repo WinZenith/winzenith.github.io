@@ -113,7 +113,9 @@ public class BrowserTracesCleaner implements CleanerExtension {
             if (!browserRunning) {
                 for (Path dir : profile.cacheDirs()) {
                     if (token != null && token.isCancelled()) break;
-                    if (Files.isDirectory(dir) && CleanerUtils.isSafeToCleanDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
+                    if (Files.isDirectory(dir) && CleanerUtils.isSafeToCleanDirectory(dir)) {
+                        cleaned += CleanerUtils.deleteDirectoryContents(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH, token);
+                    }
                 }
             }
 

@@ -390,7 +390,7 @@ public class DashboardTabView extends BorderPane {
                 createInfoCard("\uD83D\uDD0C", "Outdated Drivers",
                         "Detect drivers that have newer versions available from OEM catalogs", 1),
                 createInfoCard("\uD83D\uDD14", "Software Updates",
-                        "Find installed applications with pending updates via winget", 3),
+                        "Find winget apps and Windows Update items with pending updates (Store apps not checked)", 3),
                 createInfoCard("\uD83E\uDDF9", "System Cleanup",
                         "Identify temporary files, caches, and junk that waste disk space", 7)
         );
@@ -1480,13 +1480,14 @@ public class DashboardTabView extends BorderPane {
             // mirroring SoftwareUpdateViewModel so dashboard counts match the Software tab.
             List<SoftwareUpdateEntry> filteredUpdates = filterSoftwareLikeViewModel(updates);
             if (isCancelledAny(generation, parent, child)) return;
-            if (!filteredUpdates.isEmpty()) {
-                long totalSize = filteredUpdates.stream().mapToLong(SoftwareUpdateEntry::sizeBytes).sum();
-                toAdd = new IssueCategory(
-                        "Outdated Software", filteredUpdates.size(), totalSize, "Software",
-                        topSoftwareDetails(filteredUpdates));
+            String wingetError = softwareServices().getLastWingetError();
+            String wuError = softwareServices().getLastWindowsUpdateError();
+            SoftwareScanDashboardBuild built = resolveSoftwareScanCategory(
+                    filteredUpdates, wingetError, wuError, topSoftwareDetails(filteredUpdates));
+            if (built != null && built.category != null) {
+                toAdd = built.category;
             }
-            updateCategoryProgress(1, "done", generation);
+            updateCategoryProgress(1, built != null && built.categoryFailed ? "failed" : "done", generation);
         } catch (CancellationException ex) {
             AppLogger.info("Dashboard software scan cancelled");
             updateCategoryProgress(1, "failed", generation);
@@ -1574,6 +1575,47 @@ public class DashboardTabView extends BorderPane {
         return new ArrayList<>(byId.values());
     }
 
+    static record SoftwareScanDashboardBuild(IssueCategory category, boolean categoryFailed) {}
+
+    /**
+     * Package-visible for unit tests — mirrors Software tab partial-failure semantics.
+     */
+    static SoftwareScanDashboardBuild resolveSoftwareScanCategory(
+            List<SoftwareUpdateEntry> filteredUpdates,
+            String wingetError,
+            String wuError,
+            List<String> softwareDetails) {
+        boolean wuFailed = wuError != null && !wuError.isBlank();
+        boolean wingetFailed = wingetError != null && !wingetError.isBlank();
+        boolean sourceFailed = wuFailed || wingetFailed;
+        List<SoftwareUpdateEntry> filtered = filteredUpdates == null ? List.of() : filteredUpdates;
+        if (filtered.isEmpty()) {
+            if (!sourceFailed) {
+                return new SoftwareScanDashboardBuild(null, false);
+            }
+            String err = wuFailed && wingetFailed
+                    ? "winget: " + wingetError + "; Windows Update: " + wuError
+                    : (wuFailed ? wuError : wingetError);
+            if (err.length() > 200) err = err.substring(0, 200) + "...";
+            return new SoftwareScanDashboardBuild(
+                    IssueCategory.error("Outdated Software", err, "", "Software", 0), true);
+        }
+        long totalSize = filtered.stream().mapToLong(SoftwareUpdateEntry::sizeBytes).sum();
+        List<String> details = softwareDetails == null ? List.of() : new ArrayList<>(softwareDetails);
+        if (sourceFailed) {
+            String err = wuFailed && wingetFailed
+                    ? "Partial scan (winget and Windows Update had errors)"
+                    : (wuFailed ? "Partial scan (Windows Update error)" : "Partial scan (winget error)");
+            details.add(err);
+            return new SoftwareScanDashboardBuild(
+                    new IssueCategory("Outdated Software", filtered.size(), totalSize, "Software", List.copyOf(details)),
+                    true);
+        }
+        return new SoftwareScanDashboardBuild(
+                new IssueCategory("Outdated Software", filtered.size(), totalSize, "Software", List.copyOf(details)),
+                false);
+    }
+
     private List<String> topSoftwareDetails(List<SoftwareUpdateEntry> updates) {
         try {
             List<String> rows = updates.stream()
@@ -1614,9 +1656,12 @@ public class DashboardTabView extends BorderPane {
         });
         CancellationToken effectiveCleanupToken = child != null ? child : parent;
         try {
-            int totalCategories = CleanupCategory.values().length;
+            java.util.List<CleanupCategory> activeCategories = CleanupService.categoriesExcluding(
+                    settingsStore.load().ignoredCleanupCategories());
+            int totalCategories = activeCategories.size();
             AtomicInteger cleanupDone = new AtomicInteger();
             List<CleanupRow> results = cleanupServices().scan(
+                    activeCategories,
                     () -> updateCleanupProgress(cleanupDone.incrementAndGet(), totalCategories, generation),
                     cleanupExec, effectiveCleanupToken);
             if (isCancelledAny(generation, parent, child)) return;

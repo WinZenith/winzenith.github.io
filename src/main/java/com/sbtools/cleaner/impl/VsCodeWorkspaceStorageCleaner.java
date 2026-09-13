@@ -133,7 +133,7 @@ public class VsCodeWorkspaceStorageCleaner implements CleanerExtension {
                             || fresh.newestModified >= System.currentTimeMillis() - MAX_AGE.toMillis()) {
                         continue;
                     }
-                    long freed = CleanerUtils.deleteDirectoryContents(entry, token);
+                    long freed = CleanerUtils.deleteDirectoryContents(entry, Integer.MAX_VALUE, token);
                     // deleteDirectoryContents removes contents but keeps the root;
                     // remove the now-empty entry dir itself atomically per entry.
                     CleanerUtils.deleteDirectoryIfEmptySafe(entry, token);
@@ -155,7 +155,7 @@ public class VsCodeWorkspaceStorageCleaner implements CleanerExtension {
         AtomicLong newest = new AtomicLong(0);
         try {
             Files.walkFileTree(entry, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class),
-                    CleanerUtils.DEFAULT_SCAN_MAX_DEPTH, new SimpleFileVisitor<>() {
+                    Integer.MAX_VALUE, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;

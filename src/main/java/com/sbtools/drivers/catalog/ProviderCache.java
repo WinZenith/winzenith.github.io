@@ -117,7 +117,8 @@ public final class ProviderCache {
                 // Negative cache: transient failures (e.g. scrape 403, WU timeout)
                 // are cached briefly to avoid hammering, but expire quickly
                 // so the next scan retries the network.
-                if (age > EMPTY_RESULT_TTL_SECONDS) {
+                long emptyTtl = Math.min(EMPTY_RESULT_TTL_SECONDS, ttlForProvider(providerId));
+                if (age > emptyTtl) {
                     try { Files.deleteIfExists(file); } catch (Exception ignored) {}
                     return Optional.empty();
                 }

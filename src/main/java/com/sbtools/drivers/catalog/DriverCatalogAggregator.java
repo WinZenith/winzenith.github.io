@@ -48,20 +48,26 @@ public class DriverCatalogAggregator {
 
     public static DriverCatalogAggregator createDefault() {
         DriverCatalogDatabase catalog = DriverCatalogDatabase.load();
-        return new DriverCatalogAggregator(List.of(
-                new OemNvidiaCatalogProvider(catalog),
-                new OemAmdCatalogProvider(catalog),
-                new OemIntelCatalogProvider(catalog),
-                new OemRealtekCatalogProvider(catalog),
-                new OemBroadcomCatalogProvider(catalog),
-                new OemQualcommCatalogProvider(catalog),
-                new OemSynapticsCatalogProvider(catalog),
-                new OemLenovoCatalogProvider(catalog),
-                new OemDellCatalogProvider(catalog),
-                new OemHpCatalogProvider(catalog),
-                new OemAsusCatalogProvider(catalog),
-                new WindowsUpdateCatalogProvider()
-        ), new ProviderCache(), catalog, com.sbtools.util.AppExecutors.ioPool());
+        java.time.Instant now = java.time.Instant.now();
+        List<DriverCatalogProvider> providers = new ArrayList<>();
+        providers.add(new OemNvidiaCatalogProvider(catalog));
+        providers.add(new OemIntelCatalogProvider(catalog));
+        if (catalog.hasFreshEntriesForProvider("AMD", now)) {
+            providers.add(new OemAmdCatalogProvider(catalog));
+        }
+        if (catalog.hasFreshEntriesForProvider("Realtek", now)) {
+            providers.add(new OemRealtekCatalogProvider(catalog));
+        }
+        if (catalog.hasFreshEntriesForProvider("Broadcom", now)) {
+            providers.add(new OemBroadcomCatalogProvider(catalog));
+        }
+        if (catalog.hasFreshEntriesForProvider("Synaptics", now)) {
+            providers.add(new OemSynapticsCatalogProvider(catalog));
+        }
+        providers.add(new WindowsUpdateCatalogProvider());
+        AppLogger.info("CatalogAggregator: active providers: " + providers.size()
+                + " (catalog freshness gate applied; configure WINZENITH_CATALOG_URL to extend OEM coverage)");
+        return new DriverCatalogAggregator(providers, new ProviderCache(), catalog, com.sbtools.util.AppExecutors.ioPool());
     }
 
     public int providerCount() {
@@ -285,14 +291,24 @@ public class DriverCatalogAggregator {
                         }
                     })))
                     .toList();
+            long deadlineNanos = System.nanoTime()
+                    + java.util.concurrent.TimeUnit.SECONDS.toNanos(PROVIDER_TIMEOUT_SECONDS);
             for (var task : futures) {
                 var future = task.future();
                 if (token.isCancelled() || Thread.currentThread().isInterrupted()) {
                     future.cancel(true);
                     continue;
                 }
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    future.cancel(true);
+                    if (!token.isCancelled() && !Thread.currentThread().isInterrupted()) {
+                        deliverOnce.accept(task.id(), List.of());
+                    }
+                    continue;
+                }
                 try {
-                    future.get(PROVIDER_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+                    future.get(remainingNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
                 } catch (java.util.concurrent.TimeoutException e) {
                     future.cancel(true);
                     AppLogger.warning("CatalogAggregator: Provider timed out after " + PROVIDER_TIMEOUT_SECONDS + "s");

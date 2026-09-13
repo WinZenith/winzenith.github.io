@@ -302,7 +302,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 if (empty || value == null || value.isBlank()) {
                     setText(null);
                     setStyle(null);
-                } else if ("Failed".equals(value)) {
+                } else if (SoftwareUpdateEntry.isTerminalFailureStatus(value)) {
                     setText(value);
                     setStyle("-fx-text-fill: #ff5555;");
                 } else if (value.startsWith("Installing")) {
@@ -379,8 +379,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     return;
                 }
                 boolean isBusy = viewModel.busyProperty().get() || busy.get();
+                boolean manualRepair = SoftwareUpdateEntry.requiresManualRepair(entry.getStatus());
                 boolean disabled = isBusy;
-                updateBtn.setDisable(disabled);
+                updateBtn.setDisable(disabled || manualRepair);
                 ignoreBtn.setDisable(disabled);
 
                 unbindEntry();
@@ -393,14 +394,17 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 statusListener = (obs, oldVal, newVal) -> Platform.runLater(() -> {
                     // Progress views belong to an active install only: a terminal
                     // "Failed" status must not keep showing "Installing...".
-                    boolean show = newVal != null && !newVal.isBlank() && !"Failed".equals(newVal);
+                    boolean show = newVal != null && !newVal.isBlank()
+                            && !SoftwareUpdateEntry.isTerminalFailureStatus(newVal);
                     downloadProgress.setVisible(show);
                     installingLabel.setVisible(show);
                     sizeLabel.setVisible(show);
+                    boolean busyNow = viewModel.busyProperty().get() || busy.get();
+                    updateBtn.setDisable(busyNow || SoftwareUpdateEntry.requiresManualRepair(newVal));
                 });
                 entry.statusProperty().addListener(statusListener);
                 boolean showNow = entry.getStatus() != null && !entry.getStatus().isBlank()
-                        && !"Failed".equals(entry.getStatus());
+                        && !SoftwareUpdateEntry.isTerminalFailureStatus(entry.getStatus());
                 downloadProgress.setVisible(showNow);
                 installingLabel.setVisible(showNow);
                 sizeLabel.setVisible(showNow);
@@ -435,7 +439,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 if (event.getButton() != javafx.scene.input.MouseButton.PRIMARY) return;
                 if (isFromInteractiveControl(event.getTarget(), row)) return;
                 if (event.getClickCount() == 2 && !row.isEmpty() && row.getItem() != null
-                        && "Failed".equals(row.getItem().getStatus())) {
+                        && SoftwareUpdateEntry.isTerminalFailureStatus(row.getItem().getStatus())) {
                     showErrorDetailsDialog(row.getItem());
                     return;
                 }
@@ -499,7 +503,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         boolean failedOnly = failedOnlyCheck.isSelected();
         filteredRows.setPredicate(e -> {
             if (e == null) return false;
-            if (failedOnly && !"Failed".equals(e.getStatus())) return false;
+            if (failedOnly && !SoftwareUpdateEntry.isTerminalFailureStatus(e.getStatus())) return false;
             if (src != null && !"All sources".equals(src) && !src.equals(e.source())) return false;
             if (!q.isEmpty()) {
                 String name = e.getName() == null ? "" : e.getName().toLowerCase();

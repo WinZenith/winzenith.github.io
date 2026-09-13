@@ -317,23 +317,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
      * @return direct download URL, or null if unable to resolve
      */
     protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
-        if (vendorPageUrl == null || vendorPageUrl.isBlank()) {
-            return null;
-        }
-        // Quote- and query-tolerant: minified pages use single quotes and CDN
-        // links carry ?download=1 tails (which the old "...exe" pattern missed).
-        // The query stays INSIDE the capture: signed CDN links 403 without it.
-        Pattern linkPattern = Pattern.compile("(?:href|data-href)\\s*=\\s*[\"'](https?://[^\"']+\\.(?:exe|zip|msi|inf|cab)(?:[?#][^\"']*)?)[\"']",
-                Pattern.CASE_INSENSITIVE);
-        String body = httpGet(vendorPageUrl);
-        String found = findFirstMatchingLink(body, linkPattern);
-        // Vendor-host gate: the first exe on a support page can be an ad or a
-        // third-party tool. Only same-vendor hosts are accepted (mirrors the
-        // install-time trusted-source list); anything else falls to manual flow.
-        if (found != null && isLikelyStable(found) && isVendorHost(found)) {
-            AppLogger.debug(vendor.label() + ": Resolved direct download URL: " + found);
-            return found;
-        }
+        // Generic support-page scraping cannot prove package-to-device identity — manual only.
         return null;
     }
 
@@ -343,27 +327,23 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
      * the install gate re-validates before any download.
      */
     protected boolean isVendorHost(String url) {
-        if (url == null || url.isBlank()) return false;
-        try {
-            String host = new URI(url).getHost();
-            if (host == null || host.isBlank()) return false;
-            host = host.toLowerCase();
-            return switch (vendor) {
-                case NVIDIA -> host.contains("nvidia.com") || host.contains("geforce.com") || host.contains("nvdlcdn.com");
-                case AMD -> host.contains("amd.com");
-                case INTEL -> host.contains("intel.com");
-                case REALTEK -> host.contains("realtek.com");
-                case BROADCOM -> host.contains("broadcom.com");
-                case QUALCOMM -> host.contains("qualcomm.com");
-                case SYNAPTICS -> host.contains("synaptics.com") || host.contains("hp.com") || host.contains("lenovo.com");
-                case LENOVO -> host.contains("lenovo.com") || host.contains("lenovo-images.com") || host.contains("lenovo.net");
-                case DELL -> host.contains("dell.com") || host.contains("dellcdn.com") || host.contains("dell-cdn.com");
-                case HP -> host.contains("hp.com") || host.contains("hpe.com");
-                case ASUS -> host.contains("asus.com") || host.contains("asusnet.net");
-            };
-        } catch (Exception e) {
-            return false;
-        }
+        return com.sbtools.drivers.DriverInstallTrust.isTrustedHttpsUrl(url, vendorSourceId());
+    }
+
+    private String vendorSourceId() {
+        return switch (vendor) {
+            case NVIDIA -> "Nvidia";
+            case AMD -> "AMD";
+            case INTEL -> "Intel";
+            case REALTEK -> "Realtek";
+            case BROADCOM -> "Broadcom";
+            case QUALCOMM -> "Qualcomm";
+            case SYNAPTICS -> "Synaptics";
+            case LENOVO -> "Lenovo";
+            case DELL -> "Dell";
+            case HP -> "HP";
+            case ASUS -> "ASUS";
+        };
     }
 
     protected String findFirstMatchingLink(String html, Pattern pattern) {

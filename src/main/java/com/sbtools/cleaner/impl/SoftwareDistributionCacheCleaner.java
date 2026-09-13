@@ -22,19 +22,29 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
     @Override
     public boolean requiresAdmin() { return true; }
 
-    @Override
-    public void scan(CleanupRow row) {
+    record BlockReason(boolean blocked, String message) {}
+
+    BlockReason eligibilityForScanOrClean() {
         if (WindowsServicingSafety.isServicingPending()) {
             String reasons = String.join("; ", WindowsServicingSafety.getPendingReasons());
-            row.setTotalBytes(0);
-            row.setItemCount(0);
-            row.setSizeOrCountText("Skipped (pending system restart: " + reasons + ")");
-            return;
+            return new BlockReason(true, "Skipped (pending system restart: " + reasons + ")");
         }
         if (isWindowsUpdateRunning()) {
+            return new BlockReason(true, "Skipped (Windows Update active)");
+        }
+        if (isDismRunning()) {
+            return new BlockReason(true, "Skipped (DISM is running)");
+        }
+        return new BlockReason(false, null);
+    }
+
+    @Override
+    public void scan(CleanupRow row) {
+        BlockReason block = eligibilityForScanOrClean();
+        if (block.blocked()) {
             row.setTotalBytes(0);
             row.setItemCount(0);
-            row.setSizeOrCountText("Skipped (Windows Update active)");
+            row.setSizeOrCountText(block.message());
             return;
         }
         long totalSize = 0;
@@ -67,13 +77,9 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
-        if (WindowsServicingSafety.isServicingPending()) {
-            AppLogger.info("Skipping SoftwareDistribution cache: pending system restart ("
-                    + String.join("; ", WindowsServicingSafety.getPendingReasons()) + ")");
-            return 0;
-        }
-        if (isWindowsUpdateRunning() || isDismRunning()) {
-            AppLogger.info("Skipping SoftwareDistribution cache: Windows Update or DISM is running");
+        BlockReason block = eligibilityForScanOrClean();
+        if (block.blocked()) {
+            AppLogger.info("Skipping SoftwareDistribution cache: " + block.message());
             return 0;
         }
         if (token != null && token.isCancelled()) return 0L;
@@ -85,7 +91,9 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
             for (Path dir : dirs) {
                 if (token != null && token.isCancelled()) break;
                 if (dir != null && Files.isDirectory(dir)
-                        && CleanerUtils.isSafeToCleanDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
+                        && CleanerUtils.isSafeToCleanDirectory(dir)) {
+                    cleaned += CleanerUtils.deleteDirectoryContents(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH, token);
+                }
             }
         }
         return cleaned;

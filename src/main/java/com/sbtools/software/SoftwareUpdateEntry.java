@@ -13,6 +13,9 @@ import javafx.beans.property.StringProperty;
  */
 public class SoftwareUpdateEntry {
 
+    public static final String STATUS_FAILED = "Failed";
+    public static final String STATUS_MANUAL_REPAIR = "Manual repair required; repair and Scan again";
+
     private final String id;
     private final String source;
     private final String updateId;
@@ -137,5 +140,16 @@ public class SoftwareUpdateEntry {
 
     public void setLastError(String error) {
         this.lastError.set(error == null ? "" : error);
+    }
+
+    /** Terminal install outcome: retryable failure or manual repair required. */
+    public static boolean isTerminalFailureStatus(String status) {
+        if (status == null || status.isBlank()) return false;
+        if (STATUS_FAILED.equals(status)) return true;
+        return status.startsWith("Manual repair");
+    }
+
+    public static boolean requiresManualRepair(String status) {
+        return status != null && status.startsWith("Manual repair");
     }
 }

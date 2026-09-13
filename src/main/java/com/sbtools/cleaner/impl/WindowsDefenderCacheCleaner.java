@@ -34,6 +34,6 @@ public class WindowsDefenderCacheCleaner implements CleanerExtension {
         if (token != null && token.isCancelled()) return 0L;
         List<Path> dirs = new ArrayList<>();
         CleanerUtils.addEnvPath(dirs, "PROGRAMDATA", "Microsoft", "Windows Defender", "Scans", "History");
-        return CleanerUtils.cleanDirectoryPattern(dirs, token);
+        return CleanerUtils.cleanDirectoryPattern(dirs, 4, token);
     }
 }

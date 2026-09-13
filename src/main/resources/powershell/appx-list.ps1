@@ -1,8 +1,4 @@
-try {
-    $apps = Get-AppxPackage -AllUsers -ErrorAction Stop | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.InstallLocation }
-} catch {
-    $apps = Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.InstallLocation }
-}
+$apps = Get-AppxPackage -ErrorAction Stop | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.InstallLocation }
 
 $results = $apps | ForEach-Object {
     $installDate = ""

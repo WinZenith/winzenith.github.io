@@ -32,7 +32,12 @@ public class NativeFileHelper {
      * @return true if deleted immediately, false if scheduled for reboot.
      */
     public static boolean deleteOrQueue(File file) {
-        if (file == null) return false;
+        DeleteOutcome o = deleteOrQueueWithOutcome(file);
+        return o == DeleteOutcome.DELETED;
+    }
+
+    public static DeleteOutcome deleteOrQueueWithOutcome(File file) {
+        if (file == null) return DeleteOutcome.FAILED;
         // B5 FIX: never follow symlinks/junctions — delete the link itself.
         // File.isDirectory() follows links, so recursing into a junction (e.g.
         // AppData junctions) would wipe the link TARGET outside the intended tree.
@@ -42,22 +47,23 @@ public class NativeFileHelper {
                 try {
                     Files.deleteIfExists(p);
                     AppLogger.info("Deleted link (not followed): " + file.getAbsolutePath());
-                    return true;
+                    return DeleteOutcome.DELETED;
                 } catch (Exception e) {
                     AppLogger.debug("Link deletion failed for: " + file.getAbsolutePath()
                             + " (" + e.getMessage() + "). Scheduling for reboot...");
                     boolean scheduled = queueForReboot(file.getAbsolutePath());
                     if (!scheduled) {
                         AppLogger.warning("Failed to queue link for reboot deletion: " + file.getAbsolutePath());
+                        return DeleteOutcome.FAILED;
                     }
-                    return false;
+                    return DeleteOutcome.QUEUED_FOR_REBOOT;
                 }
             }
         } catch (Exception ignored) {
             // Fall through to normal handling if attribute read fails
         }
         if (!file.exists()) {
-            return true;
+            return DeleteOutcome.DELETED;
         }
 
         if (file.isDirectory()) {
@@ -69,7 +75,8 @@ public class NativeFileHelper {
                 allChildrenDeleted = false;
             } else {
                 for (File child : children) {
-                    if (!deleteOrQueue(child)) {
+                    DeleteOutcome o = deleteOrQueueWithOutcome(child);
+                    if (o != DeleteOutcome.DELETED) {
                         allChildrenDeleted = false;
                     }
                 }
@@ -80,10 +87,11 @@ public class NativeFileHelper {
                 boolean scheduled = queueForReboot(file.getAbsolutePath());
                 if (scheduled) {
                     AppLogger.info("Queued directory for deletion on next reboot (contains locked children): " + file.getAbsolutePath());
+                    return DeleteOutcome.QUEUED_FOR_REBOOT;
                 } else {
                     AppLogger.warning("Failed to queue directory for reboot deletion: " + file.getAbsolutePath());
+                    return DeleteOutcome.FAILED;
                 }
-                return false;
             }
         }
 
@@ -92,17 +100,18 @@ public class NativeFileHelper {
             Path path = file.toPath();
             Files.delete(path);
             AppLogger.info("Deleted filesystem leftover immediately: " + file.getAbsolutePath());
-            return true;
+            return DeleteOutcome.DELETED;
         } catch (Exception e) {
             // Log warning and try to schedule deletion for next reboot
             AppLogger.debug("Immediate deletion failed for: " + file.getAbsolutePath() + " (" + e.getMessage() + "). Scheduling for reboot...");
             boolean scheduled = queueForReboot(file.getAbsolutePath());
             if (scheduled) {
                 AppLogger.info("Queued filesystem leftover for deletion on next reboot: " + file.getAbsolutePath());
+                return DeleteOutcome.QUEUED_FOR_REBOOT;
             } else {
                 AppLogger.warning("Failed to queue file for reboot deletion: " + file.getAbsolutePath());
+                return DeleteOutcome.FAILED;
             }
-            return false;
         }
     }
 
@@ -132,15 +141,11 @@ public class NativeFileHelper {
                         + " (" + t.getMessage() + ") — falling back to permanent delete.");
             }
         }
-        boolean ok = deleteOrQueue(file);
-        if (ok) {
-            // deleteOrQueue returns true both for immediate delete and already-gone.
-            // If the file is gone now and we did not recycle, treat as DELETED.
-            return DeleteOutcome.DELETED;
+        DeleteOutcome o = deleteOrQueueWithOutcome(file);
+        if (o == DeleteOutcome.DELETED || o == DeleteOutcome.QUEUED_FOR_REBOOT || o == DeleteOutcome.FAILED) {
+            return o;
         }
-        // deleteOrQueue queued for reboot when it returns false after attempting
-        // MoveFileEx; distinguish queued vs hard failure by existence + best effort.
-        return DeleteOutcome.QUEUED_FOR_REBOOT;
+        return DeleteOutcome.FAILED;
     }
 
     /**

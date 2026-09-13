@@ -18,11 +18,27 @@ import javafx.collections.ObservableList;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
+import javafx.geometry.HPos;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.ChoiceDialog;
+import javafx.scene.control.Label;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.TitledPane;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
+import javafx.scene.layout.FlowPane;
+import javafx.scene.layout.VBox;
 
+import java.awt.Desktop;
+import java.net.URI;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -62,6 +78,9 @@ public class SoftwareUpdateViewModel {
     private final AtomicBoolean installRunning = new AtomicBoolean(false);
     private final AtomicBoolean restorePointCreatedThisBatch = new AtomicBoolean(false);
     private final List<SoftwareUpdateEntry> failedEntries = new ArrayList<>();
+    private final Map<String, SoftwareInstallFailure.Result> lastFailureByPackageId = new ConcurrentHashMap<>();
+
+    private record RepairFailureRecord(SoftwareUpdateEntry entry, SoftwareInstallFailure.Result result) {}
     // Ownership epoch for the failure/retry state: every full invalidation (fresh scan,
     // new batch, new retry owner) bumps it. Delayed retry dispatches carry the epoch they
     // captured and die silently when it no longer matches instead of resurrecting stale rows.
@@ -127,6 +146,7 @@ public class SoftwareUpdateViewModel {
         // after a re-scan would reinstall orphaned entries from the old scan (wrong versions,
         // rows no longer displayed) and a maxed-out retryCount would block retries forever.
         synchronized (failedEntries) { failedEntries.clear(); }
+        lastFailureByPackageId.clear();
         failureEpoch.incrementAndGet();
         retryCount.set(0);
         // Set busy synchronously when already on FX thread to close the race where a second
@@ -405,6 +425,7 @@ public class SoftwareUpdateViewModel {
             });
             return;
         }
+        installCancelled.set(false);
         // Defensive snapshot: scan may replace rows while the restore-point dialog is open.
         List<SoftwareUpdateEntry> snapshot = new ArrayList<>(selected);
         // Disable UI immediately to close the race before the async chain sets busy.
@@ -422,28 +443,22 @@ public class SoftwareUpdateViewModel {
 
         restorePointCreatedThisBatch.set(false);
         try {
-            maybeCreateRestorePointAsync().thenRunAsync(() -> {
-            if (disposed) {
-                installRunning.set(false);
-                Platform.runLater(() -> {
-                    showBatchProgress.set(false);
-                    busy.set(false);
-                });
+            maybeCreateRestorePointAsync()
+                    .thenComposeAsync(this::finalizePrepareOutcome, executor)
+                    .thenAcceptAsync(proceed -> {
+            if (!proceed || shouldAbortInstallPreparation()) {
+                abortInstallPreparation(installCancelled.get()
+                        ? "Update cancelled."
+                        : "Update aborted (restore point not created).");
                 return;
             }
             synchronized (failedEntries) { failedEntries.clear(); }
             failureEpoch.incrementAndGet();
             if (!isRetry) retryCount.set(0);
             int total = snapshot.size();
-            // Reset synchronously on this worker thread BEFORE submitting the batch:
-            // the previous reset lived inside the runLater below, so a batch worker
-            // starting before the FX thread ran saw the stale true from an earlier
-            // cancel and aborted immediately ("0 of N completed" without user input).
-            installCancelled.set(false);
             Platform.runLater(() -> {
                 if (disposed) return;
                 busy.set(true);
-                installCancelled.set(false);
                 statusText.set("Installing " + total + " update(s)...");
                 showBatchProgress.set(true);
                 batchProgress.set(0);
@@ -455,11 +470,7 @@ public class SoftwareUpdateViewModel {
                 executor.submit(() -> runBatchInstall(snapshot, total), "SoftwareUpdate-BatchOrchestrator");
             } catch (Exception ex) {
                 AppLogger.warning("Failed to submit batch install: " + ex.getMessage());
-                installRunning.set(false);
-                Platform.runLater(() -> {
-                    showBatchProgress.set(false);
-                    if (!disposed) busy.set(false);
-                });
+                abortInstallPreparation(null);
             }
             }, executor);
         } catch (Exception ex) {
@@ -475,6 +486,8 @@ public class SoftwareUpdateViewModel {
     private void runBatchInstall(List<SoftwareUpdateEntry> selected, int total) {
         AtomicInteger completed = new AtomicInteger(0);
         List<SoftwareUpdateEntry> failedPackages = new ArrayList<>();
+        List<SoftwareUpdateEntry> manualRepairEntries = new ArrayList<>();
+        List<RepairFailureRecord> manualRepairDetails = new ArrayList<>();
         List<SoftwareUpdateEntry> techMismatchEntries = new ArrayList<>();
         List<SoftwareUpdateEntry> successfulEntries = new ArrayList<>();
         Instant batchStartTime = Instant.now();
@@ -489,7 +502,8 @@ public class SoftwareUpdateViewModel {
                 break;
             }
             try {
-                boolean needsReboot = installOne(e, total, completed, failedPackages, techMismatchEntries, successfulEntries, batchStartTime);
+                boolean needsReboot = installOne(e, total, completed, failedPackages, manualRepairEntries,
+                        manualRepairDetails, techMismatchEntries, successfulEntries, batchStartTime);
                 if (needsReboot) {
                     rebootRequiredAbort.set(true);
                     AppLogger.info("Reboot required after " + e.id() + " – aborting remaining batch items");
@@ -504,6 +518,8 @@ public class SoftwareUpdateViewModel {
         final List<SoftwareUpdateEntry> finalSuccessful = new ArrayList<>(successfulEntries);
         final int finalCompleted = completed.get();
         List<SoftwareUpdateEntry> finalFailed = new ArrayList<>(failedPackages);
+        List<SoftwareUpdateEntry> finalManualRepair = new ArrayList<>(manualRepairEntries);
+        List<RepairFailureRecord> finalManualRepairDetails = new ArrayList<>(manualRepairDetails);
         List<SoftwareUpdateEntry> finalTechMismatch = new ArrayList<>(techMismatchEntries);
 
         final boolean rebootAbort = rebootRequiredAbort.get();
@@ -540,50 +556,34 @@ public class SoftwareUpdateViewModel {
                         statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
                         // Items that failed BEFORE the cancel still deserve a retry path:
                         // without this their rows show Failed but Retry Failed stays hidden.
-                        if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
-                            for (SoftwareUpdateEntry fe : finalFailed) {
-                                synchronized (failedEntries) { if (!failedEntries.contains(fe)) failedEntries.add(fe); }
-                                fe.setStatus("Failed");
-                                fe.setProgress(0.0);
-                                fe.setSelected(false);
-                                rows.remove(fe);
-                                rows.add(fe);
-                            }
+                        if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty() || !finalManualRepair.isEmpty()) {
+                            refreshFailedRows(finalFailed, finalManualRepair);
                             for (SoftwareUpdateEntry te : finalTechMismatch) {
                                 synchronized (failedEntries) { if (!failedEntries.contains(te)) failedEntries.add(te); }
                             }
-                            showRetryFailed.set(true);
+                            showRetryFailed.set(!finalFailed.isEmpty());
+                            if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty() || !finalManualRepair.isEmpty()) {
+                                showBatchResultDialog(finalFailed, finalTechMismatch, finalManualRepair, finalManualRepairDetails);
+                            }
                         }
                     } else if (rebootAbort) {
                         statusText.set("Reboot required – " + finalCompleted + " installed, " + skippedDueToReboot + " skipped. Please reboot and re-scan.");
-                        if (!finalFailed.isEmpty()) {
-                            for (SoftwareUpdateEntry fe : finalFailed) {
-                                synchronized (failedEntries) { failedEntries.add(fe); }
-                                fe.setStatus("Failed");
-                                fe.setProgress(0.0);
-                                fe.setSelected(false);
-                                rows.remove(fe);
-                                rows.add(fe);
-                            }
-                            showRetryFailed.set(true);
+                        if (!finalFailed.isEmpty() || !finalManualRepair.isEmpty()) {
+                            refreshFailedRows(finalFailed, finalManualRepair);
+                            showRetryFailed.set(!finalFailed.isEmpty());
                         }
-                        if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
-                            showBatchResultDialog(finalFailed, finalTechMismatch);
+                        if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty() || !finalManualRepair.isEmpty()) {
+                            showBatchResultDialog(finalFailed, finalTechMismatch, finalManualRepair, finalManualRepairDetails);
                         } else {
                             new Alert(Alert.AlertType.INFORMATION, "A restart is required to finish installation. Remaining updates were skipped – please reboot first.").showAndWait();
                         }
-                    } else if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
-                        statusText.set("Completed with " + finalFailed.size() + " failure(s). Use \"Retry Failed\" or re-scan.");
-                        for (SoftwareUpdateEntry fe : finalFailed) {
-                            synchronized (failedEntries) { failedEntries.add(fe); }
-                            fe.setStatus("Failed");
-                            fe.setProgress(0.0);
-                            fe.setSelected(false);
-                            rows.remove(fe);
-                            rows.add(fe);
-                        }
-                        showRetryFailed.set(true);
-                        showBatchResultDialog(finalFailed, finalTechMismatch);
+                    } else if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty() || !finalManualRepair.isEmpty()) {
+                        int problemCount = finalFailed.size() + finalManualRepair.size();
+                        statusText.set("Completed with " + problemCount + " failure(s). "
+                                + (finalFailed.isEmpty() ? "Repair required items and re-scan." : "Use \"Retry Failed\" or re-scan."));
+                        refreshFailedRows(finalFailed, finalManualRepair);
+                        showRetryFailed.set(!finalFailed.isEmpty());
+                        showBatchResultDialog(finalFailed, finalTechMismatch, finalManualRepair, finalManualRepairDetails);
                     } else {
                         statusText.set("All selected updates installed successfully.");
                         showRetryFailed.set(false);
@@ -594,6 +594,22 @@ public class SoftwareUpdateViewModel {
 
     public void updateSingle(SoftwareUpdateEntry entry) {
         if (disposed || entry == null) return;
+        if (SoftwareUpdateEntry.requiresManualRepair(entry.getStatus())) {
+            SoftwareInstallFailure.Result cached = lastFailureByPackageId.get(entry.id());
+            Platform.runLater(() -> {
+                if (disposed) return;
+                if (cached != null) {
+                    showInstallFailureDialog(entry, cached);
+                } else {
+                    new Alert(Alert.AlertType.WARNING,
+                            entry.getLastError() != null && !entry.getLastError().isBlank()
+                                    ? entry.getLastError()
+                                    : "Manual repair is required before this update can run. Repair the installed product, then press Scan.")
+                            .showAndWait();
+                }
+            });
+            return;
+        }
         if (installRunning.get() || busy.get() || globalBusy.get()) {
             Platform.runLater(() -> {
                 if (!disposed) new Alert(Alert.AlertType.INFORMATION, "Another operation is already in progress. Please wait.").showAndWait();
@@ -622,6 +638,7 @@ public class SoftwareUpdateViewModel {
             });
             return;
         }
+        installCancelled.set(false);
         if (Platform.isFxApplicationThread()) {
             busy.set(true);
             statusText.set("Preparing to install update for " + entry.getName() + "...");
@@ -636,23 +653,19 @@ public class SoftwareUpdateViewModel {
 
         restorePointCreatedThisBatch.set(false);
         try {
-            maybeCreateRestorePointAsync().thenRunAsync(() -> {
-            if (disposed) {
-                installRunning.set(false);
-                Platform.runLater(() -> {
-                    if (!disposed) busy.set(false);
-                    else { try { busy.set(false); } catch (Exception ignored2) {} }
-                });
+            maybeCreateRestorePointAsync()
+                    .thenComposeAsync(this::finalizePrepareOutcome, executor)
+                    .thenAcceptAsync(proceed -> {
+            if (!proceed || shouldAbortInstallPreparation()) {
+                abortInstallPreparation(installCancelled.get()
+                        ? "Update cancelled."
+                        : "Update aborted (restore point not created).");
                 return;
             }
             synchronized (failedEntries) { failedEntries.clear(); }
-            // Same stale-flag race as the batch path: reset on this worker thread
-            // before submitting, not only inside the runLater below.
-            installCancelled.set(false);
             Platform.runLater(() -> {
                 if (disposed) return;
                 busy.set(true);
-                installCancelled.set(false);
                 statusText.set("Installing update for " + entry.getName() + "...");
             });
 
@@ -660,10 +673,7 @@ public class SoftwareUpdateViewModel {
                 installExecutor.submit(() -> runSingleInstall(entry), "SoftwareUpdate-SingleInstall-" + entry.id());
             } catch (Exception ex) {
                 AppLogger.warning("Failed to submit single install: " + ex.getMessage());
-                installRunning.set(false);
-                Platform.runLater(() -> {
-                    if (!disposed) busy.set(false);
-                });
+                abortInstallPreparation(null);
             }
             }, executor);
         } catch (Exception ex) {
@@ -738,7 +748,7 @@ public class SoftwareUpdateViewModel {
             }
             // Exit 0 or reboot-required (3010/1641, reboot phrasing) counts as installed; a 3010 must
             // not be reported as Failed.
-            if (SoftwareUpdateService.isSuccessOrRebootRequired(res)) {
+            if (isInstallSuccess(entry, res)) {
                 // Non-blocking cleanup: the old synchronous promptAndCleanup() held the
                 // single install worker on a 60s latch while busy/installRunning stayed
                 // true (app appeared hung, Stop/shutdown delayed). Fire-and-forget async
@@ -763,7 +773,7 @@ public class SoftwareUpdateViewModel {
                     entry.setStatus("");
                     entry.setProgress(0.0);
                 });
-                if (SoftwareUpdateService.isRebootRequired(res)) {
+                if (isInstallRebootRequired(entry, res)) {
                     Platform.runLater(() -> {
                         if (!disposed) {
                             new Alert(Alert.AlertType.INFORMATION, "Restart required to finish installation.").showAndWait();
@@ -771,34 +781,7 @@ public class SoftwareUpdateViewModel {
                     });
                 }
             } else {
-                String errorMsg = res.combinedOutput();
-                String safeError = errorMsg;
-                // Must set FX property on FX thread
-                Platform.runLater(() -> entry.setLastError(safeError));
-                synchronized (failedEntries) {
-                    if (!failedEntries.contains(entry)) failedEntries.add(entry);
-                }
-                recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, errorMsg);
-                if (isMsiCorruptionError(errorMsg)) {
-                    errorMsg = "Windows Installer corruption detected.\n\n"
-                            + "The old version of this product cannot be removed because the installer cache is damaged.\n\n"
-                            + "To fix this:\n"
-                            + "1. Open Settings > Apps > Installed apps\n"
-                            + "2. Find and uninstall '" + (entry.getName() != null ? entry.getName() : entry.id()) + "'\n"
-                            + "3. Come back here and click 'Scan' to reinstall\n\n"
-                            + "Alternatively, download and run the Microsoft Program Install troubleshooter:\n"
-                            + "https://support.microsoft.com/en-us/topic/fix-problems-that-block-programs-from-being-installed-or-removed-cca7d1b6-65a9-3d98-426b-e9f927e1eb4d";
-                }
-                String finalMsg = errorMsg;
-                Platform.runLater(() -> {
-                    if (disposed) return;
-                    new Alert(Alert.AlertType.ERROR, "Install failed:\n" + finalMsg).showAndWait();
-                    entry.setStatus("Failed");
-                    entry.setProgress(0.0);
-                    // Single failures must also arm Retry Failed — previously only batch
-                    // failures did, leaving single-failure users with no retry path.
-                    showRetryFailed.set(true);
-                });
+                handleInstallFailure(entry, res, failedEntries, new ArrayList<>(), null, true);
             }
         } catch (Exception ex) {
             String msg = ex.getMessage();
@@ -1069,6 +1052,8 @@ public class SoftwareUpdateViewModel {
 
     private boolean installOne(SoftwareUpdateEntry entry, int total,
                              AtomicInteger completed, List<SoftwareUpdateEntry> failedPackages,
+                             List<SoftwareUpdateEntry> manualRepairPackages,
+                             List<RepairFailureRecord> manualRepairDetails,
                              List<SoftwareUpdateEntry> techMismatchEntries,
                              List<SoftwareUpdateEntry> successfulEntries, Instant batchStartTime) {
         if (installCancelled.get()) return false;
@@ -1123,7 +1108,7 @@ public class SoftwareUpdateViewModel {
             // Exit 0 or reboot-required (3010/1641, reboot phrasing) counts as installed; a 3010 must
             // not be reported as Failed, and the batch must abort so later installs are not layered
             // over a pending reboot.
-            if (SoftwareUpdateService.isSuccessOrRebootRequired(res)) {
+            if (isInstallSuccess(entry, res)) {
                 synchronized (successfulEntries) { successfulEntries.add(entry); }
                 recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), true, null);
                 Platform.runLater(() -> {
@@ -1133,7 +1118,7 @@ public class SoftwareUpdateViewModel {
                     entry.setStatus("");
                     entry.setProgress(0.0);
                 });
-                if (SoftwareUpdateService.isRebootRequired(res)) {
+                if (isInstallRebootRequired(entry, res)) {
                     rebootFlag.set(true);
                     Platform.runLater(() -> {
                         if (!disposed) {
@@ -1142,27 +1127,7 @@ public class SoftwareUpdateViewModel {
                     });
                 }
             } else {
-                String errorMsg = res.combinedOutput();
-                AppLogger.warning("Update failed for " + entry.id() + ": " + errorMsg);
-                if (isMsiCorruptionError(errorMsg)) {
-                    errorMsg = "Windows Installer corruption detected.\n\n"
-                            + "The old version of this product cannot be removed because the installer cache is damaged.\n\n"
-                            + "To fix this:\n"
-                            + "1. Open Settings > Apps > Installed apps\n"
-                            + "2. Find and uninstall '" + (entry.getName() != null ? entry.getName() : entry.id()) + "'\n"
-                            + "3. Come back here and click 'Scan' to reinstall\n\n"
-                            + "Alternatively, download and run the Microsoft Program Install troubleshooter:\n"
-                            + "https://support.microsoft.com/en-us/topic/fix-problems-that-block-programs-from-being-installed-or-removed-cca7d1b6-65a9-3d98-426b-e9f927e1eb4d";
-                }
-                String safeError = errorMsg;
-                Platform.runLater(() -> entry.setLastError(safeError));
-                synchronized (failedPackages) { failedPackages.add(entry); }
-                recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false, errorMsg);
-                Platform.runLater(() -> {
-                    if (disposed) return;
-                    entry.setStatus("Failed");
-                    entry.setProgress(0.0);
-                });
+                handleInstallFailure(entry, res, failedPackages, manualRepairPackages, manualRepairDetails, false);
             }
         } catch (CancellationException cex) {
             // Mid-item cancel must clear the "Installing..." row state, otherwise the
@@ -1204,81 +1169,276 @@ public class SoftwareUpdateViewModel {
         });
     }
 
-    private static boolean isMsiCorruptionError(String output) {
-        if (output == null) return false;
-        String lower = output.toLowerCase();
-        if (lower.contains("cannot be removed") || lower.contains("error 1714")) return true;
-        if (!lower.contains("exit code: 1603")) return false;
-        int logIdx = lower.indexOf("installer log is available at:");
-        if (logIdx < 0) return false;
-        String afterLog = output.substring(logIdx + "installer log is available at:".length());
-        String[] logLines = afterLog.split("\\r?\\n");
-        String logPath = "";
-        for (String line : logLines) {
-            String trimmed = line.trim();
-            if (!trimmed.isEmpty()) { logPath = trimmed; break; }
+    private void refreshFailedRows(List<SoftwareUpdateEntry> retryable, List<SoftwareUpdateEntry> manualRepair) {
+        for (SoftwareUpdateEntry fe : retryable) {
+            synchronized (failedEntries) { if (!failedEntries.contains(fe)) failedEntries.add(fe); }
+            fe.setStatus(SoftwareUpdateEntry.STATUS_FAILED);
+            fe.setProgress(0.0);
+            fe.setSelected(false);
+            rows.remove(fe);
+            rows.add(fe);
         }
-        if (logPath.isEmpty()) return false;
-        // Basic validation: must be absolute path under expected log locations and not too long
-        if (logPath.length() > 520 || logPath.contains("..")) return false;
-        java.nio.file.Path p;
-        try { p = java.nio.file.Paths.get(logPath); } catch (Exception e) { return false; }
-        if (!p.isAbsolute()) return false;
-        // Only allow files under %TEMP% or %LOCALAPPDATA% or Windows Logs to avoid arbitrary read
-        String lowerPath = p.toString().toLowerCase();
-        boolean allowed = lowerPath.contains("\\temp\\") || lowerPath.contains("\\tmp\\")
-                || lowerPath.contains("appdata\\local") || lowerPath.contains("windows\\logs")
-                || lowerPath.contains("installer");
-        if (!allowed) {
-            AppLogger.warning("MSI log path not in allowed location: " + p);
-            return false;
+        for (SoftwareUpdateEntry me : manualRepair) {
+            me.setSelected(false);
+            rows.remove(me);
+            rows.add(me);
+        }
+    }
+
+    private void handleInstallFailure(SoftwareUpdateEntry entry, ProcessResult res,
+                                      List<SoftwareUpdateEntry> retryList,
+                                      List<SoftwareUpdateEntry> manualRepairList,
+                                      List<RepairFailureRecord> manualRepairDetails,
+                                      boolean showDialog) {
+        SoftwareInstallFailure.Result failure = SoftwareInstallFailure.classify(entry, res);
+        AppLogger.warning("Update failed for " + entry.id() + " (" + failure.kind() + "): "
+                + (failure.installerExitCode() != null ? "msi " + failure.installerExitCode() : "no msi code"));
+        if (entry.id() != null && !entry.id().isBlank()) {
+            lastFailureByPackageId.put(entry.id(), failure);
+        }
+        recordHistory(entry, entry.getCurrentVersion(), entry.getAvailableVersion(), false,
+                SoftwareInstallFailure.historyPayload(failure));
+        String status = failure.immediateRetryUseful()
+                ? SoftwareUpdateEntry.STATUS_FAILED
+                : SoftwareUpdateEntry.STATUS_MANUAL_REPAIR;
+        if (failure.immediateRetryUseful()) {
+            synchronized (retryList) { retryList.add(entry); }
+        } else {
+            synchronized (manualRepairList) { manualRepairList.add(entry); }
+            if (manualRepairDetails != null) {
+                synchronized (manualRepairDetails) {
+                    manualRepairDetails.add(new RepairFailureRecord(entry, failure));
+                }
+            }
+        }
+        Platform.runLater(() -> {
+            if (disposed) return;
+            entry.setLastError(failure.formattedUserMessage());
+            entry.setStatus(status);
+            entry.setProgress(0.0);
+            if (showDialog) {
+                showInstallFailureDialog(entry, failure);
+                if (failure.immediateRetryUseful()) showRetryFailed.set(true);
+            }
+        });
+    }
+
+    private void showInstallFailureDialog(SoftwareUpdateEntry entry, SoftwareInstallFailure.Result failure) {
+        String name = entry.getName() != null ? entry.getName() : entry.id();
+        String header = name + " — " + failure.title();
+        if (failure.installerExitCode() != null) {
+            header += " (installer exit " + failure.installerExitCode() + ")";
+        }
+        StringBuilder steps = new StringBuilder();
+        for (int i = 0; i < failure.recoverySteps().size(); i++) {
+            steps.append(i + 1).append(". ").append(failure.recoverySteps().get(i)).append("\n");
+        }
+        Label explain = new Label(failure.explanation());
+        explain.setWrapText(true);
+        Label stepsLbl = new Label(steps.toString().trim());
+        stepsLbl.setWrapText(true);
+        TextArea details = new TextArea(failure.rawOutput() != null ? failure.rawOutput() : "");
+        details.setEditable(false);
+        details.setWrapText(true);
+        details.setPrefRowCount(10);
+        TitledPane detailsPane = new TitledPane("Technical details", details);
+        detailsPane.setExpanded(false);
+        final int dialogWidth = 760;
+        FlowPane actions = new FlowPane(10, 8);
+        actions.setPrefWrapLength(dialogWidth);
+        actions.setColumnHalignment(HPos.LEFT);
+        actions.setAlignment(Pos.CENTER_LEFT);
+        Button copyBtn = new Button("Copy details");
+        copyBtn.setOnAction(e -> copyInstallFailureDetails(failure));
+        actions.getChildren().add(copyBtn);
+        if (failure.trustedLogPath() != null) {
+            Button logBtn = new Button("Open installer log");
+            logBtn.setOnAction(e -> openTrustedInstallerLog(failure.trustedLogPath()));
+            actions.getChildren().add(logBtn);
+        }
+        if (failure.showInstalledAppsSettings()) {
+            Button appsBtn = new Button("Open Installed apps");
+            appsBtn.setOnAction(e -> openInstalledAppsSettings());
+            actions.getChildren().add(appsBtn);
+        }
+        if (failure.showTroubleshooter()) {
+            Button troubleBtn = new Button("Open Microsoft troubleshooter");
+            troubleBtn.setOnAction(e -> openSupportUrl(SoftwareInstallFailure.MICROSOFT_INSTALL_TROUBLESHOOTER_URL));
+            actions.getChildren().add(troubleBtn);
+        }
+
+        VBox content = new VBox(10, explain, new Label("Suggested steps:"), stepsLbl, detailsPane, actions);
+        content.setPrefWidth(dialogWidth);
+        content.setMinWidth(dialogWidth);
+
+        Alert a = new Alert(Alert.AlertType.ERROR);
+        a.setTitle(AppInfo.DISPLAY_NAME);
+        a.setHeaderText(header);
+        a.getDialogPane().setContent(content);
+        a.getDialogPane().setMinWidth(dialogWidth);
+        a.getButtonTypes().setAll(new ButtonType("OK", ButtonBar.ButtonData.OK_DONE));
+        a.showAndWait();
+    }
+
+    private static void copyInstallFailureDetails(SoftwareInstallFailure.Result failure) {
+        String copy = failure.formattedUserMessage() + "\n\n---\n\n"
+                + (failure.rawOutput() != null ? failure.rawOutput() : "");
+        ClipboardContent cc = new ClipboardContent();
+        cc.putString(copy);
+        Clipboard.getSystemClipboard().setContent(cc);
+        new Alert(Alert.AlertType.INFORMATION, "Details copied to clipboard.").showAndWait();
+    }
+
+    private void showRepairStepsForBatch(List<RepairFailureRecord> records) {
+        if (records == null || records.isEmpty()) return;
+        if (records.size() == 1) {
+            RepairFailureRecord r = records.get(0);
+            showInstallFailureDialog(r.entry(), r.result());
+            return;
+        }
+        List<String> choices = new ArrayList<>();
+        for (RepairFailureRecord r : records) {
+            SoftwareUpdateEntry e = r.entry();
+            String name = e.getName() != null ? e.getName() : e.id();
+            choices.add(name);
+        }
+        ChoiceDialog<String> picker = new ChoiceDialog<>(choices.get(0), choices);
+        picker.setTitle(AppInfo.DISPLAY_NAME);
+        picker.setHeaderText("Select a program to view repair steps");
+        picker.setContentText("Program:");
+        picker.showAndWait().ifPresent(selected -> {
+            for (RepairFailureRecord r : records) {
+                SoftwareUpdateEntry e = r.entry();
+                String name = e.getName() != null ? e.getName() : e.id();
+                if (name.equals(selected)) {
+                    showInstallFailureDialog(e, r.result());
+                    break;
+                }
+            }
+        });
+    }
+
+    private static void openInstalledAppsSettings() {
+        try {
+            if (Desktop.isDesktopSupported()) {
+                Desktop.getDesktop().browse(new URI(SoftwareInstallFailure.INSTALLED_APPS_SETTINGS_URI));
+            } else {
+                new Alert(Alert.AlertType.INFORMATION, "Open Settings > Apps > Installed apps.").showAndWait();
+            }
+        } catch (Exception ex) {
+            try {
+                new ProcessBuilder("cmd.exe", "/c", "start", "", SoftwareInstallFailure.INSTALLED_APPS_SETTINGS_URI).start();
+            } catch (Exception ex2) {
+                new Alert(Alert.AlertType.WARNING,
+                        "Could not open Installed apps settings. Open Settings > Apps > Installed apps manually.")
+                        .showAndWait();
+            }
+        }
+    }
+
+    private static void openTrustedInstallerLog(Path path) {
+        Path trusted = SoftwareInstallFailure.revalidateLogForOpen(path);
+        if (trusted == null) {
+            new Alert(Alert.AlertType.WARNING, "Installer log is no longer available or is not in a trusted location.").showAndWait();
+            return;
         }
         try {
-            // Cap read to 1 MB to avoid OOM
-            long size = java.nio.file.Files.size(p);
-            if (size > 1024 * 1024) size = 1024 * 1024;
-            try (java.io.InputStream in = java.nio.file.Files.newInputStream(p)) {
-                byte[] buf = in.readNBytes((int) size);
-                String logContent = decodeInstallerLog(buf).toLowerCase();
-                return logContent.contains("error 1714") || logContent.contains("cannot be removed");
+            if (Desktop.isDesktopSupported()) {
+                Desktop.getDesktop().open(trusted.toFile());
+            } else {
+                new Alert(Alert.AlertType.WARNING, "Cannot open files on this system.").showAndWait();
             }
-        } catch (Exception e) {
-            return false;
+        } catch (Exception ex) {
+            new Alert(Alert.AlertType.WARNING, "Could not open installer log: " + ex.getMessage()).showAndWait();
         }
     }
 
-    /**
-     * Decodes an installer log with BOM sniffing. MSI logs are usually UTF-16LE (with BOM);
-     * plain UTF-8 decoding leaves NULs between every char so markers like "error 1714"
-     * never match and the corruption guidance below never fires (Edge 1714 case).
-     */
-    private static String decodeInstallerLog(byte[] buf) {
-        if (buf == null || buf.length == 0) return "";
-        if (buf.length >= 2) {
-            int b0 = buf[0] & 0xFF, b1 = buf[1] & 0xFF;
-            if (b0 == 0xFF && b1 == 0xFE) return new String(buf, java.nio.charset.StandardCharsets.UTF_16);
-            if (b0 == 0xFE && b1 == 0xFF) return new String(buf, java.nio.charset.StandardCharsets.UTF_16BE);
+    private static void openSupportUrl(String url) {
+        try {
+            if (Desktop.isDesktopSupported()) {
+                Desktop.getDesktop().browse(new URI(url));
+            } else {
+                new Alert(Alert.AlertType.INFORMATION, url).showAndWait();
+            }
+        } catch (Exception ex) {
+            new Alert(Alert.AlertType.WARNING, "Could not open link. Copy this URL:\n" + url).showAndWait();
         }
-        if (buf.length >= 3 && (buf[0] & 0xFF) == 0xEF && (buf[1] & 0xFF) == 0xBB && (buf[2] & 0xFF) == 0xBF) {
-            return new String(buf, java.nio.charset.StandardCharsets.UTF_8);
-        }
-        // No BOM: NULs on odd positions dominate in UTF-16LE ASCII text.
-        int sample = Math.min(buf.length, 512);
-        int nulOdd = 0, checks = 0;
-        for (int i = 1; i < sample; i += 2) { checks++; if (buf[i] == 0) nulOdd++; }
-        if (checks > 0 && nulOdd * 2 > checks) {
-            return new String(buf, java.nio.charset.StandardCharsets.UTF_16LE);
-        }
-        return new String(buf, java.nio.charset.StandardCharsets.UTF_8);
     }
 
-    private CompletableFuture<Void> maybeCreateRestorePointAsync() {
+    private enum PrepareOutcome { PROCEED, CANCELLED, RESTORE_FAILED }
+
+    private boolean shouldAbortInstallPreparation() {
+        return disposed || installCancelled.get();
+    }
+
+    private void abortInstallPreparation(String statusMessage) {
+        installRunning.set(false);
+        Platform.runLater(() -> {
+            showBatchProgress.set(false);
+            busy.set(false);
+            if (!disposed && statusMessage != null && !statusMessage.isBlank()) {
+                statusText.set(statusMessage);
+            }
+        });
+    }
+
+    private CompletableFuture<Boolean> finalizePrepareOutcome(PrepareOutcome outcome) {
+        if (outcome == PrepareOutcome.CANCELLED) {
+            return CompletableFuture.completedFuture(false);
+        }
+        if (outcome == PrepareOutcome.PROCEED) {
+            return CompletableFuture.completedFuture(true);
+        }
+        CompletableFuture<Boolean> proceed = new CompletableFuture<>();
+        try {
+            Platform.runLater(() -> {
+                try {
+                    if (disposed || installCancelled.get()) {
+                        proceed.complete(false);
+                        return;
+                    }
+                    Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                            "System Restore Point creation failed or was skipped.\n\n"
+                                    + "Continue installing updates without a restore point?");
+                    confirm.setHeaderText("Restore point unavailable");
+                    confirm.showAndWait().ifPresentOrElse(
+                            result -> proceed.complete(result == ButtonType.OK),
+                            () -> proceed.complete(false));
+                    if (!proceed.isDone()) {
+                        proceed.complete(false);
+                    }
+                } catch (Exception ex) {
+                    AppLogger.warning("Restore failure confirmation failed: " + ex.getMessage());
+                    proceed.complete(false);
+                }
+            });
+        } catch (Exception ex) {
+            proceed.complete(false);
+        }
+        return proceed;
+    }
+
+    private static boolean isInstallSuccess(SoftwareUpdateEntry entry, ProcessResult res) {
+        if (entry != null && "WindowsUpdate".equals(entry.source())) {
+            return SoftwareUpdateService.isWindowsUpdateInstallSuccess(res);
+        }
+        return SoftwareUpdateService.isWingetInstallSuccess(res);
+    }
+
+    private static boolean isInstallRebootRequired(SoftwareUpdateEntry entry, ProcessResult res) {
+        if (entry != null && "WindowsUpdate".equals(entry.source())) {
+            return SoftwareUpdateService.isWindowsUpdateRebootRequired(res);
+        }
+        return SoftwareUpdateService.isWingetRebootRequired(res);
+    }
+
+    private CompletableFuture<PrepareOutcome> maybeCreateRestorePointAsync() {
         AppSettings settings = settingsStore.load();
         if (!settings.createSystemRestorePoint()) {
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.completedFuture(PrepareOutcome.PROCEED);
         }
         if (restorePointCreatedThisBatch.get()) {
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.completedFuture(PrepareOutcome.PROCEED);
         }
         // Stage 1 (FX thread only): ask the user. Stage 2 (background): run the blocking
         // restore-point creation. Never run ProcessRunner on the FX thread (UI freeze, #2).
@@ -1350,37 +1510,42 @@ public class SoftwareUpdateViewModel {
             });
         } catch (Exception ex) {
             AppLogger.warning("Restore point prompt scheduling failed: " + ex.getMessage());
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.completedFuture(PrepareOutcome.CANCELLED);
         }
         try {
             return confirmed.thenApplyAsync(wantsRestore -> {
-                // Stop pressed while the dialog was open: skip restore AND skip install.
                 if (installCancelled.get() || disposed) {
                     AppLogger.info("Restore skipped: install was cancelled during prompt");
-                    return null;
+                    return PrepareOutcome.CANCELLED;
                 }
-                if (Boolean.TRUE.equals(wantsRestore) && !disposed) {
-                    try {
-                        boolean created = restoreService.createRestorePoint("WinZenith software update").success();
-                        if (!created) AppLogger.warning("Restore point creation failed or skipped.");
-                        else restorePointCreatedThisBatch.set(true);
-                    } catch (Exception ex) {
-                        AppLogger.warning("Restore point creation failed: " + ex.getMessage());
+                if (!Boolean.TRUE.equals(wantsRestore)) {
+                    return PrepareOutcome.PROCEED;
+                }
+                try {
+                    boolean created = restoreService.createRestorePoint("WinZenith software update").success();
+                    if (created) {
+                        restorePointCreatedThisBatch.set(true);
+                        return PrepareOutcome.PROCEED;
                     }
+                    AppLogger.warning("Restore point creation failed or skipped.");
+                    return PrepareOutcome.RESTORE_FAILED;
+                } catch (Exception ex) {
+                    AppLogger.warning("Restore point creation failed: " + ex.getMessage());
+                    return PrepareOutcome.RESTORE_FAILED;
                 }
-                return null;
             }, executor);
         } catch (Exception ex) {
-            // Executor shutting down: skip the restore point rather than hanging the install chain.
             AppLogger.warning("Restore point background stage rejected (shutting down?): " + ex.getMessage());
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.completedFuture(PrepareOutcome.CANCELLED);
         }
     }
 
-    private void showBatchResultDialog(List<SoftwareUpdateEntry> failedEntries, List<SoftwareUpdateEntry> techMismatchEntries) {
+    private void showBatchResultDialog(List<SoftwareUpdateEntry> failedEntries, List<SoftwareUpdateEntry> techMismatchEntries,
+                                       List<SoftwareUpdateEntry> manualRepairEntries,
+                                       List<RepairFailureRecord> manualRepairDetails) {
         StringBuilder msg = new StringBuilder();
         if (!failedEntries.isEmpty()) {
-            msg.append("The following updates failed:\n\n");
+            msg.append("The following updates failed (you can use Retry Failed):\n\n");
             // Cap the dialog list: mass failures would otherwise build a giant modal.
             // Full per-item errors stay in Update History.
             int shown = Math.min(failedEntries.size(), 10);
@@ -1400,6 +1565,26 @@ public class SoftwareUpdateViewModel {
                         .append(" more (see Update History for details).\n\n");
             }
         }
+        if (!manualRepairEntries.isEmpty()) {
+            if (!msg.isEmpty()) msg.append("\n");
+            msg.append("Manual repair required before these can update (Retry Failed will not re-run them):\n\n");
+            int shown = Math.min(manualRepairEntries.size(), 10);
+            for (SoftwareUpdateEntry me : manualRepairEntries.subList(0, shown)) {
+                String displayName = me.getName() != null ? me.getName() : me.id();
+                msg.append("  - ").append(displayName).append("\n");
+                String error = me.getLastError();
+                if (error != null && !error.isBlank()) {
+                    String shortError = error.strip();
+                    if (shortError.length() > 200) shortError = shortError.substring(0, 200) + "...";
+                    msg.append("    ").append(shortError).append("\n");
+                }
+                msg.append("\n");
+            }
+            if (manualRepairEntries.size() > shown) {
+                msg.append("  ...and ").append(manualRepairEntries.size() - shown)
+                        .append(" more (see Update History for details).\n\n");
+            }
+        }
         if (!techMismatchEntries.isEmpty()) {
             if (!msg.isEmpty()) msg.append("\n");
             msg.append("The following programs cannot be updated automatically\n");
@@ -1415,6 +1600,7 @@ public class SoftwareUpdateViewModel {
 
         List<ButtonType> buttons = new ArrayList<>();
         if (!failedEntries.isEmpty()) buttons.add(new ButtonType("Retry Failed"));
+        if (!manualRepairEntries.isEmpty()) buttons.add(new ButtonType("Show repair steps"));
         if (!techMismatchEntries.isEmpty()) buttons.add(new ButtonType("Add to Ignore List"));
         buttons.add(new ButtonType("OK", ButtonBar.ButtonData.OK_DONE));
         a.getButtonTypes().setAll(buttons);
@@ -1422,6 +1608,8 @@ public class SoftwareUpdateViewModel {
         ButtonType result = a.showAndWait().orElse(new ButtonType("OK", ButtonBar.ButtonData.OK_DONE));
         if (result.getText().equals("Retry Failed")) {
             retryFailed();
+        } else if (result.getText().equals("Show repair steps")) {
+            showRepairStepsForBatch(manualRepairDetails);
         } else if (result.getText().equals("Add to Ignore List")) {
             for (SoftwareUpdateEntry e : techMismatchEntries) skipEntry(e);
         }

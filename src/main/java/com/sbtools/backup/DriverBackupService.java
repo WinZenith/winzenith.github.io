@@ -62,6 +62,26 @@ public class DriverBackupService {
         }
     }
 
+    /**
+     * @return human-readable reason when automatic backup is not supported, or null when supported
+     */
+    public static String backupSupportIssue(InstalledDriver driver) {
+        if (driver == null) {
+            return "device information unavailable";
+        }
+        String inf = driver.infName();
+        if (inf == null || inf.isBlank()) {
+            return "INF name not available for " + driver.friendlyName();
+        }
+        if (!inf.matches("(?i)[\\w\\-]+\\.inf")) {
+            return "unexpected INF name \"" + inf + "\"";
+        }
+        if (driver.deviceId() == null || driver.deviceId().isBlank()) {
+            return "device ID not available";
+        }
+        return null;
+    }
+
     public DriverBackupEntry backupBeforeUpdate(InstalledDriver driver, AppSettings settings)
             throws IOException, InterruptedException {
         return backupBeforeUpdate(driver, settings, null);
@@ -70,18 +90,13 @@ public class DriverBackupService {
     public DriverBackupEntry backupBeforeUpdate(InstalledDriver driver, AppSettings settings,
             java.util.concurrent.atomic.AtomicBoolean cancelled)
             throws IOException, InterruptedException {
-        String inf = driver.infName();
-        if (inf == null || inf.isBlank()) {
-            throw new IOException("Cannot backup driver: INF name not available for "
+        String supportIssue = backupSupportIssue(driver);
+        if (supportIssue != null) {
+            throw new IOException("Cannot backup driver: " + supportIssue + " for "
                     + driver.friendlyName() + " (" + driver.deviceId()
                     + "). Automatic backup is not supported for this device.");
         }
-        // Strict INF shape: the name flows into pnputil arguments and wildcard
-        // -Filter probes — path separators or glob chars must never reach them.
-        if (!inf.matches("(?i)[\\w\\-]+\\.inf")) {
-            throw new IOException("Cannot backup driver: unexpected INF name \"" + inf + "\" for "
-                    + driver.friendlyName() + ". Automatic backup is not supported for this device.");
-        }
+        String inf = driver.infName();
         if (driver.deviceId() == null || driver.deviceId().isBlank()) {
             throw new IOException("Cannot backup driver: device ID not available.");
         }

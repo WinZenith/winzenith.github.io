@@ -6,6 +6,7 @@ import com.sbtools.util.JsonMapper;
 import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
+import com.sbtools.util.WindowsUpdateInstallResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import javafx.application.Platform;
 
@@ -551,25 +552,42 @@ public class SoftwareUpdateService {
         return null;
     }
 
+    /**
+     * Disposable winget download cache only — never {@code Microsoft\WinGet\Packages}
+     * (installed portable apps) or the user's Downloads folder.
+     */
+    static Path wingetDownloadCacheRoot() {
+        String localApp = System.getenv("LOCALAPPDATA");
+        if (localApp == null || localApp.isBlank()) return null;
+        Path wingetCache = Paths.get(localApp, "Packages",
+                "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe", "LocalState", "Downloads");
+        if (!Files.isDirectory(wingetCache)) return null;
+        return wingetCache;
+    }
+
+    static boolean isUnderWingetDownloadCache(Path file) {
+        if (file == null) return false;
+        Path root = wingetDownloadCacheRoot();
+        if (root == null) return false;
+        try {
+            Path realFile = file.toRealPath();
+            Path realRoot = root.toRealPath();
+            return realFile.startsWith(realRoot);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public List<Path> findCandidateInstallersForPackage(SoftwareUpdateEntry pkg, Instant since) {
         List<Path> candidates = new ArrayList<>();
         Set<String> exts = Set.of(".exe", ".msi", ".msix", ".msixbundle", ".zip", ".msu");
         String idToken = pkg.id() == null ? "" : pkg.id().toLowerCase().replace("-", "").replace("_", "");
         String name = pkg.getName() == null ? "" : pkg.getName().toLowerCase();
-        // Collect roots: Downloads (recursive depth 2) + Winget cache
-        List<Path> roots = new ArrayList<>();
-        Path downloads = Paths.get(System.getProperty("user.home"), "Downloads");
-        if (Files.isDirectory(downloads)) roots.add(downloads);
-        String localApp = System.getenv("LOCALAPPDATA");
-        if (localApp != null && !localApp.isBlank()) {
-            Path wingetCache = Paths.get(localApp, "Packages", "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe", "LocalState", "Downloads");
-            if (Files.isDirectory(wingetCache)) roots.add(wingetCache);
-            Path genericWinget = Paths.get(localApp, "Microsoft", "WinGet", "Packages");
-            if (Files.isDirectory(genericWinget)) roots.add(genericWinget);
-        }
-        if (roots.isEmpty()) return candidates;
-        for (Path root : roots) {
-            try (var stream = Files.walk(root, 2)) {
+        Path root = wingetDownloadCacheRoot();
+        if (root == null) return candidates;
+        List<Path> roots = List.of(root);
+        for (Path walkRoot : roots) {
+            try (var stream = Files.walk(walkRoot, 2)) {
                 var it = stream.filter(Files::isRegularFile).iterator();
                 while (it.hasNext()) {
                     Path p = it.next();
@@ -633,7 +651,7 @@ public class SoftwareUpdateService {
                     }
                 }
             } catch (IOException e) {
-                AppLogger.warning("Failed to enumerate candidates in " + root + ": " + e.getMessage());
+                AppLogger.warning("Failed to enumerate candidates in " + walkRoot + ": " + e.getMessage());
             }
         }
         return candidates;
@@ -653,28 +671,15 @@ public class SoftwareUpdateService {
 
     public List<Path> deleteInstallerFiles(List<Path> files) {
         List<Path> deleted = new ArrayList<>();
-        // Allowed roots for safety – never delete outside these
-        Set<Path> allowedRoots = new java.util.HashSet<>();
-        try {
-            Path dl = Paths.get(System.getProperty("user.home"), "Downloads");
-            if (Files.isDirectory(dl)) allowedRoots.add(dl.toRealPath());
-        } catch (Exception ignored) {}
-        String localApp = System.getenv("LOCALAPPDATA");
-        if (localApp != null && !localApp.isBlank()) {
-            try {
-                Path wc = Paths.get(localApp, "Packages", "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe", "LocalState", "Downloads");
-                if (Files.isDirectory(wc)) allowedRoots.add(wc.toRealPath());
-                Path gw = Paths.get(localApp, "Microsoft", "WinGet", "Packages");
-                if (Files.isDirectory(gw)) allowedRoots.add(gw.toRealPath());
-            } catch (Exception ignored) {}
-        }
         for (Path p : files) {
             try {
-                // Safety: ensure file is still under allowed roots
+                if (!isUnderWingetDownloadCache(p)) {
+                    AppLogger.warning("Skipping delete outside winget download cache: " + p);
+                    continue;
+                }
                 Path real = p.toRealPath();
-                boolean underAllowed = allowedRoots.stream().anyMatch(root -> real.startsWith(root));
-                if (!underAllowed) {
-                    AppLogger.warning("Skipping delete outside allowed roots: " + p);
+                if (!Files.isRegularFile(real)) {
+                    AppLogger.warning("Skipping non-regular file: " + p);
                     continue;
                 }
                 // Double-check extension and size
@@ -711,7 +716,7 @@ public class SoftwareUpdateService {
             Path script = PowerShellScripts.resolve("wu-search-updates.ps1");
             ProcessResult result;
             try {
-                result = runner.run(ProcessRunner.powershellScript(script.toString()), 120, cancelled);
+                result = runner.run(ProcessRunner.powershellScriptNonInteractive(script.toString()), 120, cancelled);
             } catch (java.util.concurrent.CancellationException ce) {
                 AppLogger.info("Windows Update scan cancelled");
                 return results;
@@ -825,11 +830,11 @@ public class SoftwareUpdateService {
         }
         Path script = PowerShellScripts.resolve("wu-install.ps1");
         if (cancelled == null && entry == null) {
-            return runner.run(ProcessRunner.powershellScript(script.toString(), updateId), timeoutSeconds);
+            return runner.run(ProcessRunner.powershellScriptNonInteractive(script.toString(), updateId), timeoutSeconds);
         }
         AtomicLong lastStatusUpdate = new AtomicLong(0);
         return runner.runStreaming(
-                ProcessRunner.powershellScript(script.toString(), updateId),
+                ProcessRunner.powershellScriptNonInteractive(script.toString(), updateId),
                 line -> {
                     if (entry == null || line == null) return;
                     long now = System.currentTimeMillis();
@@ -968,6 +973,26 @@ public class SoftwareUpdateService {
     public static boolean isSuccessOrRebootRequired(ProcessResult result) {
         if (result == null) return false;
         return result.success() || isRebootRequired(result);
+    }
+
+    /** Winget/MSI install success (exit 0 or reboot exit codes / phrasing). */
+    public static boolean isWingetInstallSuccess(ProcessResult result) {
+        return isSuccessOrRebootRequired(result);
+    }
+
+    public static boolean isWingetRebootRequired(ProcessResult result) {
+        return isRebootRequired(result);
+    }
+
+    /** Windows Update: process exit 0 and strict JSON from {@code wu-install.ps1}. */
+    public static boolean isWindowsUpdateInstallSuccess(ProcessResult result) {
+        if (result == null || !result.success()) return false;
+        return WindowsUpdateInstallResult.parse(result.stdout()).success();
+    }
+
+    public static boolean isWindowsUpdateRebootRequired(ProcessResult result) {
+        if (!isWindowsUpdateInstallSuccess(result)) return false;
+        return WindowsUpdateInstallResult.parse(result.stdout()).rebootRequired();
     }
 
     private static JsonNode tryParseRebootJson(String output) {

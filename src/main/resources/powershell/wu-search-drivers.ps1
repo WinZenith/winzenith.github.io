@@ -4,6 +4,8 @@ param(
     [int]$TimeoutSec = 120
 )
 $ErrorActionPreference = 'Stop'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $OutputEncoding
 
 # Fullest dotted version across the given fields (most parts wins, longest
 # breaks ties). Replaces the old ordered cascade that let a short DriverModel
@@ -46,10 +48,22 @@ try {
             if (-not $ti -or -not $ti.Trim()) { continue }
             $kb = ''
             try { $kb = $u.KBArticleIDs | Select-Object -First 1 } catch { }
+            $driverHw = ''
+            $driverModel = ''
+            $driverProvider = ''
+            $driverClass = ''
+            try { $driverHw = [string]$u.DriverHardwareID } catch { }
+            try { $driverModel = [string]$u.DriverModel } catch { }
+            try { $driverProvider = [string]$u.DriverProviderName } catch { }
+            try { $driverClass = [string]$u.DriverClass } catch { }
             $updates += [ordered]@{
                 updateId    = $id
                 title       = $ti
                 description = $u.Description
+                driverHardwareId = $driverHw
+                driverModel = $driverModel
+                driverProvider = $driverProvider
+                driverClass = $driverClass
                 # Fullest version across DriverModel and Title: a short
                 # DriverModel ("6.0.9678") must not shadow the full Title
                 # ("6.0.9678.1") into missed updates / false VERIFIEDs.

@@ -148,43 +148,67 @@ public final class VersionCompare {
      * era. Never inverts: unparseable input abstains (0 = no update).
      */
     static int compareNvidiaMixed(String a, String b) {
-        try {
-            boolean aDch = isNvidiaDch(a.trim());
-            String dch = aDch ? a.trim() : b.trim();
-            String pub = aDch ? b.trim() : a.trim();
-            String[] dchParts = dch.split("\\.");
-            long dchEra = Long.parseLong(dchParts[0].replaceAll("[^0-9]", ""));
-            long dchTail = Long.parseLong(dchParts[dchParts.length - 1].replaceAll("[^0-9]", ""));
-            String pubDigits = pub.replaceAll("[^0-9]", "");
-            // Single-digit minors ("560.9") yield 4 digits; public minors are
-            // always 2 digits, so pad ("560.9" -> "56090") instead of
-            // abstaining (abstain hides real updates and reads as VERIFIED).
-            if (pubDigits.length() == 4) pubDigits = pubDigits + "0";
-            if (pubDigits.length() < 5) return 0;
-            long pubMajor = Long.parseLong(pubDigits.substring(0, pubDigits.length() - 2));
-            long pubTail = Long.parseLong(pubDigits.substring(pubDigits.length() - 4));
-            // Best-effort era mapping (DCH major per public branch). Wrong
-            // guesses near a boundary can only miss an update, never invert:
-            // the installed DCH major is fact, and tails increase with
-            // releases, so a cross-era decision always follows release order
-            // except exactly at a misguessed boundary — where equal-era tail
-            // comparison still matches the true digit order.
-            long pubEra = pubMajor >= 560 ? 32 : pubMajor >= 520 ? 31 : pubMajor >= 470 ? 30 : 27;
-            long keyA;
-            long keyB;
-            long keyDch = dchEra * 1_000_000L + dchTail;
-            long keyPub = pubEra * 1_000_000L + pubTail;
-            if (aDch) {
-                keyA = keyDch;
-                keyB = keyPub;
-            } else {
-                keyA = keyPub;
-                keyB = keyDch;
-            }
-            return Long.compare(keyA, keyB);
-        } catch (Exception ignored) {
+        Long keyA = nvidiaNormalizedKey(a.trim());
+        Long keyB = nvidiaNormalizedKey(b.trim());
+        if (keyA == null || keyB == null) {
             return 0;
         }
+        return Long.compare(keyA, keyB);
+    }
+
+    /**
+     * Canonical NVIDIA build key: DCH {@code NN.N.1X.YYYY} → digit {@code X} + zero-padded
+     * {@code YYYY}; public {@code AAA.BB} → {@code AAA * 100 + BB}.
+     */
+    static Long nvidiaNormalizedKey(String v) {
+        if (v == null || v.isBlank()) {
+            return null;
+        }
+        String t = v.trim();
+        if (isNvidiaDch(t)) {
+            String[] parts = t.split("\\.");
+            if (parts.length != 4) {
+                return null;
+            }
+            try {
+                char eraCh = parts[2].charAt(parts[2].length() - 1);
+                int eraDigit = Character.digit(eraCh, 10);
+                if (eraDigit < 0) {
+                    return null;
+                }
+                long tail = Long.parseLong(parts[3].replaceAll("[^0-9]", ""));
+                if (tail < 0 || tail > 9999) {
+                    return null;
+                }
+                return eraDigit * 10_000L + tail;
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        if (isNvidiaPublic(t)) {
+            String[] parts = t.split("\\.");
+            if (parts.length != 2) {
+                return null;
+            }
+            try {
+                long major = Long.parseLong(parts[0].replaceAll("[^0-9]", ""));
+                String minorRaw = parts[1].replaceAll("[^0-9]", "");
+                if (minorRaw.length() < 1 || minorRaw.length() > 2) {
+                    return null;
+                }
+                if (minorRaw.length() == 1) {
+                    minorRaw = minorRaw + "0";
+                }
+                long minor = Long.parseLong(minorRaw);
+                if (minor < 0 || minor > 99) {
+                    return null;
+                }
+                return major * 100L + minor;
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static long parsePart(String part) {        String digits = part.replaceAll("[^0-9]", "");

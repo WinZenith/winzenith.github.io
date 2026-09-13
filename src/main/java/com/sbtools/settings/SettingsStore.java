@@ -29,36 +29,19 @@ public class SettingsStore {
                 AppLogger.warning("Failed to load settings from " + p + ": " + e.getMessage());
             }
         }
-        // Merge from legacy if different location and legacy exists
+        if (primary != null) {
+            return primary;
+        }
         if (!p.equals(legacy) && Files.exists(legacy)) {
             try {
                 AppSettings legacySettings = mapper.readValue(legacy.toFile(), AppSettings.class);
                 if (legacySettings != null) {
-                    legacySettings = normalize(legacySettings);
-                    if (primary == null) {
-                        return legacySettings;
-                    }
-                    // Merge excluded/skipped lists without duplicates
-                    java.util.Set<String> ex = new java.util.LinkedHashSet<>(primary.excludedDriverIds());
-                    ex.addAll(legacySettings.excludedDriverIds());
-                    java.util.Set<String> sk = new java.util.LinkedHashSet<>(primary.skippedSoftwareIds());
-                    sk.addAll(legacySettings.skippedSoftwareIds());
-                    java.util.Set<String> br = new java.util.LinkedHashSet<>(primary.ignoredBrowserExtensionIds());
-                    br.addAll(legacySettings.ignoredBrowserExtensionIds());
-                    java.util.Set<String> cl = new java.util.LinkedHashSet<>(primary.ignoredCleanupCategories());
-                    cl.addAll(legacySettings.ignoredCleanupCategories());
-                    return primary.toBuilder()
-                            .excludedDriverIds(new java.util.ArrayList<>(ex))
-                            .skippedSoftwareIds(new java.util.ArrayList<>(sk))
-                            .ignoredBrowserExtensionIds(new java.util.ArrayList<>(br))
-                            .ignoredCleanupCategories(new java.util.ArrayList<>(cl))
-                            .build();
+                    return normalize(legacySettings);
                 }
             } catch (IOException ex) {
                 AppLogger.warning("Failed to load legacy settings: " + ex.getMessage());
             }
         }
-        if (primary != null) return primary;
         return AppSettings.defaults();
     }
 

@@ -7,3 +7,5 @@ dist/
 .settings/
 bin/
 dependency-reduced-pom.xml
+/ps-scripts/
+/software-update-history.json

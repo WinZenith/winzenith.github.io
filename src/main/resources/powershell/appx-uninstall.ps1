@@ -8,16 +8,9 @@ if ([string]::IsNullOrEmpty($PackageFullName)) {
 }
 
 try {
-    # Attempt to remove for all users
-    Remove-AppxPackage -Package $PackageFullName -AllUsers -ErrorAction Stop
+    Remove-AppxPackage -Package $PackageFullName -ErrorAction Stop
     Write-Output "SUCCESS"
 } catch {
-    # Fallback to current user
-    try {
-        Remove-AppxPackage -Package $PackageFullName -ErrorAction Stop
-        Write-Output "SUCCESS"
-    } catch {
-        Write-Error $_.Exception.Message
-        exit 1
-    }
+    Write-Error $_.Exception.Message
+    exit 1
 }

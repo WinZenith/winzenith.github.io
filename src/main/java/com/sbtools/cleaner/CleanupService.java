@@ -67,12 +67,18 @@ public class CleanupService {
     }
 
     public List<CleanupRow> scan(Runnable onProgress, ExecutorService sharedExecutor, CancellationToken token) {
-        CleanupCategory[] categories = CleanupCategory.values();
-        CleanupRow[] rows = new CleanupRow[categories.length];
-        for (int i = 0; i < categories.length; i++) {
-            rows[i] = new CleanupRow(categories[i]);
+        return scan(java.util.List.of(CleanupCategory.values()), onProgress, sharedExecutor, token);
+    }
+
+    public List<CleanupRow> scan(java.util.List<CleanupCategory> categories, Runnable onProgress,
+            ExecutorService sharedExecutor, CancellationToken token) {
+        CleanupCategory[] arr = categories.toArray(new CleanupCategory[0]);
+        CleanupRow[] rows = new CleanupRow[arr.length];
+        for (int i = 0; i < arr.length; i++) {
+            rows[i] = new CleanupRow(arr[i]);
         }
-        return scanWithExecutor(rows, categories, onProgress, sharedExecutor, token != null ? token : CancellationToken.NONE);
+        return scanWithExecutor(rows, arr, onProgress, sharedExecutor,
+                token != null ? token : CancellationToken.NONE);
     }
 
     private List<CleanupRow> scanWithExecutor(CleanupRow[] rows, CleanupCategory[] categories,
@@ -189,6 +195,9 @@ public class CleanupService {
             } else {
                 AppLogger.warning("No cleaner registered for " + row.getCategory().getDisplayName());
                 row.setSizeOrCountText("Not supported");
+                row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                row.setErrorMessage("No cleaner registered for this category");
+                return;
             }
             if (token != null && token.isCancelled()
                     && row.getScanStatus() != CleanupRow.ScanStatus.ERROR) {
@@ -247,6 +256,10 @@ public class CleanupService {
                     totalItems += scannedItems;
                 }
                 perCategory.put(row.getCategory(), cleaned);
+                if (cleaned == 0 && scannedBytes > 0 && !token.isCancelled()) {
+                    errors.add(row.getCategory().getDisplayName()
+                            + ": nothing was cleaned (files may be locked or in use)");
+                }
                 if (onProgress != null) onProgress.run();
             } catch (Exception e) {
                 String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
@@ -258,95 +271,31 @@ public class CleanupService {
         return new CleanSummary(totalBytes, totalItems, perCategory, errors);
     }
 
+    public static java.util.List<CleanupCategory> categoriesExcluding(java.util.Collection<String> ignoredNames) {
+        java.util.Set<String> ignored = new java.util.HashSet<>();
+        if (ignoredNames != null) {
+            for (String name : ignoredNames) {
+                if (name != null && !name.isBlank()) ignored.add(name);
+            }
+        }
+        java.util.List<CleanupCategory> list = new java.util.ArrayList<>();
+        for (CleanupCategory c : CleanupCategory.values()) {
+            if (!ignored.contains(c.name())) list.add(c);
+        }
+        return list;
+    }
+
     public CancelableCompletableFuture<java.util.List<CleanupRow>> scanAsync(Runnable onProgress) {
         return scanAsync(onProgress, CancellationToken.NONE);
     }
 
     public CancelableCompletableFuture<java.util.List<CleanupRow>> scanAsync(Runnable onProgress, CancellationToken token) {
-        CleanupCategory[] categories = CleanupCategory.values();
-        CleanupRow[] rows = new CleanupRow[categories.length];
-        for (int i = 0; i < categories.length; i++) {
-            rows[i] = new CleanupRow(categories[i]);
-        }
+        return scanCategoriesAsync(java.util.List.of(CleanupCategory.values()), onProgress, token);
+    }
 
-        // Isolated pool per scan (same pattern as Dashboard's cleanup scan):
-        // Cancel/timeout can shutdownNow() to interrupt lingering walks
-        // without starving unrelated work on the shared clean pool, and the
-        // pool is always shut down when this scan settles (no thread leak).
-        ExecutorService executor = newScanExecutor("cleanup-scan", 4);
-        java.util.List<CompletableFuture<?>> futures = new java.util.ArrayList<>();
-        for (int i = 0; i < categories.length; i++) {
-            final CleanupRow row = rows[i];
-            CompletableFuture<Void> f = CompletableFuture.runAsync(() -> {
-                long startMs = System.currentTimeMillis();
-                try {
-                    if (token.isCancelled()) {
-                        row.setSizeOrCountText("Canceled");
-                        row.setScanStatus(CleanupRow.ScanStatus.ERROR);
-                        row.setErrorMessage("Scan canceled by user");
-                        return;
-                    }
-                    scanCategory(row, token);
-                } catch (Exception e) {
-                    String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
-                    AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + msg);
-                    row.setSizeOrCountText("Error");
-                    row.setScanStatus(CleanupRow.ScanStatus.ERROR);
-                    row.setErrorMessage(msg);
-                } finally {
-                    // Per-row bookkeeping must never fail the whole scan: a
-                    // single row's duration/status update or progress callback
-                    // throwing (e.g. toolkit teardown) completes only this row.
-                    try {
-                        long elapsed = System.currentTimeMillis() - startMs;
-                        row.setScanDurationMs(elapsed);
-                    } catch (Exception ignored) {}
-                    try {
-                        if (row.getScanStatus() != CleanupRow.ScanStatus.ERROR) {
-                            row.setScanStatus(CleanupRow.ScanStatus.DONE);
-                        }
-                    } catch (Exception ignored) {}
-                    try {
-                        if (onProgress != null) onProgress.run();
-                    } catch (Exception ignored) {}
-                }
-            }, executor);
-
-            futures.add(f);
-        }
-
-        CompletableFuture<java.util.List<CleanupRow>> finalFuture = CompletableFuture
-                .allOf(futures.toArray(new CompletableFuture[0]))
-                .orTimeout(SCAN_OVERALL_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-                .thenApply(v -> java.util.List.of(rows));
-        finalFuture.whenComplete((r, ex) -> {
-            if (ex != null) {
-                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                if (cause instanceof java.util.concurrent.TimeoutException) {
-                    if (token != null) token.cancel();
-                    for (CompletableFuture<?> f : futures) { try { f.cancel(true); } catch (Exception ignored) {} }
-                    try { executor.shutdownNow(); } catch (Exception ignored) {}
-                    for (CleanupRow row : rows) {
-                        if (row.getScanStatus() == CleanupRow.ScanStatus.PENDING || row.getScanStatus() == CleanupRow.ScanStatus.SCANNING) {
-                            row.setSizeOrCountText("Timed out");
-                            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
-                            row.setErrorMessage("Scan timed out");
-                        }
-                    }
-                }
-            }
-        });
-
-        CancelableCompletableFuture<java.util.List<CleanupRow>> result = new CancelableCompletableFuture<>(
-                futures, executor, true);
-        result.completeFrom(finalFuture);
-        // No thread leak: the dedicated pool dies with this scan. Cancel()
-        // already shutdownNow()s via ownExecutor; normal completion shuts down
-        // gracefully here (tasks are done when finalFuture settles).
-        result.whenComplete((r, ex) -> {
-            try { executor.shutdown(); } catch (Exception ignored) {}
-        });
-        return result;
+    public CancelableCompletableFuture<java.util.List<CleanupRow>> scanAsync(
+            java.util.List<CleanupCategory> categories, Runnable onProgress, CancellationToken token) {
+        return scanCategoriesAsync(categories, onProgress, token);
     }
 
     public CancelableCompletableFuture<java.util.List<CleanupRow>> scanCategoriesAsync(
@@ -363,7 +312,8 @@ public class CleanupService {
 
         // Isolated pool, same rationale as scanAsync (cancel interrupts only
         // this rescan's workers; the pool is shut down when it settles).
-        ExecutorService executor = newScanExecutor("cleanup-rescan",
+        String poolName = categories.size() >= CleanupCategory.values().length ? "cleanup-scan" : "cleanup-rescan";
+        ExecutorService executor = newScanExecutor(poolName,
                 Math.min(4, Math.max(1, categories.size())));
         java.util.List<CompletableFuture<?>> futures = new java.util.ArrayList<>();
         for (int i = 0; i < categories.size(); i++) {
@@ -407,24 +357,7 @@ public class CleanupService {
         CompletableFuture<java.util.List<CleanupRow>> finalFuture = CompletableFuture
                 .allOf(futures.toArray(new CompletableFuture[0]))
                 .orTimeout(SCAN_OVERALL_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-                .thenApply(v -> java.util.List.of(rows));
-        finalFuture.whenComplete((r, ex) -> {
-            if (ex != null) {
-                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                if (cause instanceof java.util.concurrent.TimeoutException) {
-                    if (token != null) token.cancel();
-                    for (CompletableFuture<?> f : futures) { try { f.cancel(true); } catch (Exception ignored) {} }
-                    try { executor.shutdownNow(); } catch (Exception ignored) {}
-                    for (CleanupRow row : rows) {
-                        if (row.getScanStatus() == CleanupRow.ScanStatus.PENDING || row.getScanStatus() == CleanupRow.ScanStatus.SCANNING) {
-                            row.setSizeOrCountText("Timed out");
-                            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
-                            row.setErrorMessage("Rescan timed out");
-                        }
-                    }
-                }
-            }
-        });
+                .handle((v, ex) -> completeScanAfterWait(rows, futures, executor, token, ex, "Scan timed out"));
 
         CancelableCompletableFuture<java.util.List<CleanupRow>> result = new CancelableCompletableFuture<>(
                 futures, executor, true);
@@ -488,40 +421,7 @@ public class CleanupService {
                     safeProgress(onProgress);
                 }
             }
-            long totalBytes = 0;
-            int totalItems = 0;
-            java.util.Map<CleanupCategory, Long> perCategory = new java.util.HashMap<>();
-            java.util.List<String> errors = new java.util.ArrayList<>();
-            boolean canceled = wasCanceled || token.isCancelled();
-            for (int i = 0; i < tasks.size(); i++) {
-                long cleaned = cleanedByIndex.getOrDefault(i, 0L);
-                CleanupRow r = tasks.get(i);
-                String taskErr = taskErrorMap.get(i);
-                if (taskErr != null) {
-                    errors.add(taskErr);
-                } else if (cleaned == 0 && r.getTotalBytes() > 0 && !canceled) {
-                    // Only generic if no specific error captured
-                    errors.add(r.getCategory().getDisplayName() + ": nothing was cleaned (files may be locked or in use)");
-                }
-                totalBytes += cleaned;
-                int scannedItems = r.getItemCount();
-                long scannedBytes = r.getTotalBytes();
-                if (cleaned == 0) {
-                    // Zero-byte categories (registry entries, empty folders) report
-                    // item counts with no bytes — credit scanned items on success.
-                    if (taskErr == null && !canceled && scannedBytes == 0 && scannedItems > 0) {
-                        totalItems += scannedItems;
-                    } else {
-                        totalItems += 0;
-                    }
-                } else if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
-                    totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
-                } else {
-                    totalItems += scannedItems;
-                }
-                perCategory.put(r.getCategory(), cleaned);
-            }
-            return new CleanSummary(totalBytes, totalItems, perCategory, errors);
+            return buildCleanSummary(tasks, cleanedByIndex, taskErrorMap, token, wasCanceled, null);
         }, executor);
 
         long timeoutSumTmp = 0;
@@ -533,27 +433,121 @@ public class CleanupService {
         }
         // Sequential wall-clock ~= sum of per-cleaner budgets; keep a sane cap.
         final long effectiveTimeout = Math.min(Math.max(CLEAN_OVERALL_TIMEOUT_SECONDS, timeoutSumTmp + 60), 5400);
+        final long effectiveTimeoutFinal = effectiveTimeout;
         CompletableFuture<CleanSummary> timedFuture = finalFuture
                 .orTimeout(effectiveTimeout, java.util.concurrent.TimeUnit.SECONDS);
-        timedFuture.whenComplete((r, ex) -> {
-            if (ex != null) {
-                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                if (cause instanceof java.util.concurrent.TimeoutException || ex instanceof java.util.concurrent.TimeoutException) {
-                    if (token != null) token.cancel();
-                    finalFuture.cancel(true);
-                    try { executor.shutdownNow(); } catch (Exception ignored) {}
-                    AppLogger.warning("Clean timed out after " + effectiveTimeout + "s for " + tasks.size() + " categories");
-                }
+        CompletableFuture<CleanSummary> delivered = timedFuture.handle((summary, ex) -> {
+            if (ex == null) {
+                return summary;
             }
+            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+            if (isTimeoutLike(cause) || isTimeoutLike(ex)) {
+                if (token != null) token.cancel();
+                finalFuture.cancel(true);
+                try { executor.shutdownNow(); } catch (Exception ignored) {}
+                AppLogger.warning("Clean timed out after " + effectiveTimeoutFinal + "s for " + tasks.size() + " categories");
+                java.util.List<String> extra = java.util.List.of(
+                        "Cleanup timed out after " + effectiveTimeoutFinal + "s (partial results shown)");
+                return buildCleanSummary(tasks, cleanedByIndex, taskErrorMap, token, true, extra);
+            }
+            if (cause instanceof java.util.concurrent.CompletionException) {
+                throw (java.util.concurrent.CompletionException) cause;
+            }
+            throw new java.util.concurrent.CompletionException(cause);
         });
 
         CancelableCompletableFuture<CleanSummary> result = new CancelableCompletableFuture<>(
                 java.util.List.of(finalFuture, timedFuture), executor, true);
-        result.completeFrom(timedFuture);
+        result.completeFrom(delivered);
         result.whenComplete((r, ex) -> {
             try { executor.shutdown(); } catch (Exception ignored) {}
         });
         return result;
+    }
+
+    private static boolean isTimeoutLike(Throwable t) {
+        while (t != null) {
+            if (t instanceof java.util.concurrent.TimeoutException) return true;
+            t = t.getCause();
+        }
+        return false;
+    }
+
+    private static java.util.List<CleanupRow> completeScanAfterWait(
+            CleanupRow[] rows,
+            java.util.List<CompletableFuture<?>> futures,
+            ExecutorService executor,
+            CancellationToken token,
+            Throwable ex,
+            String timeoutMessage) {
+        if (ex == null) {
+            return java.util.List.of(rows);
+        }
+        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+        if (isTimeoutLike(cause) || isTimeoutLike(ex)) {
+            if (token != null) token.cancel();
+            for (CompletableFuture<?> f : futures) {
+                try { f.cancel(true); } catch (Exception ignored) {}
+            }
+            try { executor.shutdownNow(); } catch (Exception ignored) {}
+            for (CleanupRow row : rows) {
+                if (row.getScanStatus() == CleanupRow.ScanStatus.PENDING
+                        || row.getScanStatus() == CleanupRow.ScanStatus.SCANNING) {
+                    row.setSizeOrCountText("Timed out");
+                    row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                    row.setErrorMessage(timeoutMessage);
+                }
+            }
+            AppLogger.warning("Cleanup scan timed out after " + SCAN_OVERALL_TIMEOUT_SECONDS
+                    + "s (partial results kept)");
+            return java.util.List.of(rows);
+        }
+        if (cause instanceof java.util.concurrent.CompletionException) {
+            throw (java.util.concurrent.CompletionException) cause;
+        }
+        throw new java.util.concurrent.CompletionException(cause);
+    }
+
+    private static CleanSummary buildCleanSummary(
+            java.util.List<CleanupRow> tasks,
+            java.util.Map<Integer, Long> cleanedByIndex,
+            java.util.Map<Integer, String> taskErrorMap,
+            CancellationToken token,
+            boolean wasCanceled,
+            java.util.List<String> extraErrors) {
+        long totalBytes = 0;
+        int totalItems = 0;
+        java.util.Map<CleanupCategory, Long> perCategory = new java.util.HashMap<>();
+        java.util.List<String> errors = new java.util.ArrayList<>();
+        if (extraErrors != null) {
+            errors.addAll(extraErrors);
+        }
+        boolean canceled = wasCanceled || (token != null && token.isCancelled());
+        for (int i = 0; i < tasks.size(); i++) {
+            long cleaned = cleanedByIndex.getOrDefault(i, 0L);
+            CleanupRow r = tasks.get(i);
+            String taskErr = taskErrorMap.get(i);
+            if (taskErr != null) {
+                errors.add(taskErr);
+            } else if (cleaned == 0 && r.getTotalBytes() > 0 && !canceled) {
+                errors.add(r.getCategory().getDisplayName()
+                        + ": nothing was cleaned (files may be locked or in use)");
+            }
+            totalBytes += cleaned;
+            int scannedItems = r.getItemCount();
+            long scannedBytes = r.getTotalBytes();
+            if (cleaned == 0) {
+                if (taskErr == null && !canceled && scannedBytes == 0 && scannedItems > 0) {
+                    totalItems += scannedItems;
+                }
+            } else if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
+                totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
+            } else {
+                totalItems += scannedItems;
+            }
+            perCategory.put(r.getCategory(), cleaned);
+        }
+        return new CleanSummary(totalBytes, totalItems, perCategory, errors);
     }
 
     /**

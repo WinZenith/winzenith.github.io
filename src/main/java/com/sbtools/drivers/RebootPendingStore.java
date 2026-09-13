@@ -77,7 +77,7 @@ public class RebootPendingStore {
     public synchronized void addPending(String deviceId, String friendlyName) {
         if (deviceId == null || deviceId.isBlank()) return;
         List<PendingEntry> entries = loadAll();
-        boolean exists = entries.stream().anyMatch(e -> e != null && deviceId.equals(e.deviceId()));
+        boolean exists = entries.stream().anyMatch(e -> e != null && sameDevice(deviceId, e.deviceId()));
         if (exists) return;
         entries.add(new PendingEntry(deviceId, friendlyName, Instant.now()));
         save(entries);
@@ -90,7 +90,7 @@ public class RebootPendingStore {
         // Null-guard: a corrupt null entry must not NPE the clear and leave
         // the REBOOT badge stuck forever. Nulls themselves are purged by
         // purgeMissingDevices on the next scan.
-        boolean removed = entries.removeIf(e -> e != null && deviceId.equals(e.deviceId()));
+        boolean removed = entries.removeIf(e -> e != null && sameDevice(deviceId, e.deviceId()));
         if (removed) {
             save(entries);
             AppLogger.info("Reboot pending cleared for " + deviceId);
@@ -99,7 +99,18 @@ public class RebootPendingStore {
 
     public synchronized boolean isPending(String deviceId) {
         if (deviceId == null) return false;
-        return loadPendingIds().contains(deviceId);
+        String key = DriverScanService.normalizeDeviceKey(deviceId);
+        for (String id : loadPendingIds()) {
+            if (DriverScanService.normalizeDeviceKey(id).equals(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean sameDevice(String a, String b) {
+        if (a == null || b == null) return false;
+        return DriverScanService.normalizeDeviceKey(a).equals(DriverScanService.normalizeDeviceKey(b));
     }
 
     /**
@@ -149,7 +160,12 @@ public class RebootPendingStore {
             List<PendingEntry> entries = loadAll();
             if (entries.isEmpty()) return 0;
             int before = entries.size();
-            entries.removeIf(e -> e == null || e.deviceId() == null || !installedIds.contains(e.deviceId()));
+            java.util.Set<String> normalized = new java.util.HashSet<>();
+            for (String id : installedIds) {
+                if (id != null) normalized.add(DriverScanService.normalizeDeviceKey(id));
+            }
+            entries.removeIf(e -> e == null || e.deviceId() == null
+                    || !normalized.contains(DriverScanService.normalizeDeviceKey(e.deviceId())));
             int purged = before - entries.size();
             if (purged > 0) {
                 save(entries);

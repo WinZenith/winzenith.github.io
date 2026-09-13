@@ -28,7 +28,7 @@ public class DriverScanService {
             return List.of();
         }
         Path script = PowerShellScripts.resolve("enumerate-devices.ps1");
-        ProcessResult result = processRunner.run(ProcessRunner.powershellScript(script.toString()));
+        ProcessResult result = processRunner.run(ProcessRunner.powershellScriptNonInteractive(script.toString()));
         if (!result.success()) {
             // Truncate: full WMI/PS dumps can be multi-MB and would freeze the
             // FX thread inside setStatus + Alert (other paths cap at 1500).
@@ -98,7 +98,7 @@ public class DriverScanService {
         return new ArrayList<>(byDeviceId.values());
     }
 
-    static String normalizeDeviceKey(String deviceId) {
+    public static String normalizeDeviceKey(String deviceId) {
         return deviceId == null ? "" : deviceId.trim().toUpperCase(java.util.Locale.ROOT);
     }
 
@@ -106,6 +106,10 @@ public class DriverScanService {
         String deviceId = text(n, "deviceId");
         if (deviceId.isBlank()) {
             return null;
+        }
+        Boolean signed = null;
+        if (n.has("isSigned") && !n.get("isSigned").isNull()) {
+            signed = n.get("isSigned").asBoolean();
         }
         return new InstalledDriver(
                 deviceId,
@@ -116,7 +120,8 @@ public class DriverScanService {
                 text(n, "infName"),
                 text(n, "driverKey"),
                 text(n, "status"),
-                parseDate(text(n, "releaseDate"))
+                parseDate(text(n, "releaseDate")),
+                signed
         );
     }
 

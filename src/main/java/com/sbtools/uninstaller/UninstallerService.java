@@ -21,11 +21,27 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class UninstallerService {
 
+    public record RegistryBackupResult(
+            java.util.Map<String, Path> exportedByKey,
+            java.util.List<String> failedKeys) {}
+
+    public record FilesystemCleanupResult(
+            int deleted,
+            int recycled,
+            int alreadyAbsent,
+            int queuedForReboot,
+            int failed,
+            java.util.List<String> failedDetails) {}
+
     private final Win32AppDiscoverer win32Discoverer = new Win32AppDiscoverer();
     private final ProcessRunner processRunner = new ProcessRunner(1800); // 30-minute timeout for uninstallers
 
     public List<InstalledApp> listWin32Apps() {
-        return win32Discoverer.discoverApps();
+        return listWin32Apps(null);
+    }
+
+    public List<InstalledApp> listWin32Apps(java.util.concurrent.atomic.AtomicBoolean cancelled) {
+        return win32Discoverer.discoverApps(cancelled);
     }
 
     public List<InstalledApp> listAppxApps() {
@@ -56,6 +72,8 @@ public class UninstallerService {
             fast = listAppxApps("appx-list-fast.ps1", cancelled);
         } catch (java.util.concurrent.CancellationException ce) {
             throw ce;
+        } catch (AppDiscoveryException e) {
+            throw e;
         } catch (Exception e) {
             AppLogger.debug("Fast AppX list unavailable, falling back: " + e.getMessage());
             fast = new ArrayList<>();
@@ -106,14 +124,19 @@ public class UninstallerService {
                     }
                 }
             } else {
-                AppLogger.warning("Appx package scan failed: " + result.combinedOutput());
+                String out = result.combinedOutput();
+                AppLogger.warning("Appx package scan failed: " + out);
+                throw new AppDiscoveryException("AppX scan failed: " + truncate(out, 400));
             }
         } catch (java.util.concurrent.CancellationException ce) {
             // Cancel must propagate so the tab exits quietly without an error
             // dialog and without falling back to the slow full scan.
             throw ce;
+        } catch (AppDiscoveryException e) {
+            throw e;
         } catch (Exception e) {
             AppLogger.error("Failed to list Appx packages", e);
+            throw new AppDiscoveryException("AppX scan failed: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
         }
 
         // Sort alphabetically
@@ -126,6 +149,11 @@ public class UninstallerService {
      * Runs off the FX thread; capped traversal to avoid long stalls.
      */
     public int computeAppxSizeKB(InstalledApp app) {
+        return computeAppxSizeKB(app, null);
+    }
+
+    public int computeAppxSizeKB(InstalledApp app, AtomicBoolean cancelled) {
+        if (cancelled != null && cancelled.get()) return 0;
         if (app == null || app.getInstallLocation() == null
                 || app.getInstallLocation().isBlank()) return 0;
         try {
@@ -139,6 +167,7 @@ public class UninstallerService {
                          java.nio.file.Files.walk(dir.toPath())) {
                 java.util.Iterator<java.nio.file.Path> it = stream.limit(20000).iterator();
                 while (it.hasNext()) {
+                    if (cancelled != null && cancelled.get()) return 0;
                     if (files[0] > 20000) break;
                     java.nio.file.Path p = it.next();
                     try {
@@ -1353,35 +1382,55 @@ public class UninstallerService {
      * the Recycle Bin first (recoverable); locked items fall back to reboot queue.
      * {@code recycled} (nullable) collects paths that were recycled for summary UI.
      */
-    public void deleteFilesystemLeftovers(List<String> paths, List<String> failedDeletions,
+    public FilesystemCleanupResult deleteFilesystemLeftovers(List<String> paths, List<String> failedDeletions,
                                           List<String> recycled, boolean preferRecycle) {
-        if (paths == null) return;
+        int deleted = 0, recycledCount = 0, absent = 0, queued = 0, failed = 0;
+        if (paths == null) {
+            return new FilesystemCleanupResult(0, 0, 0, 0, 0, List.of());
+        }
         for (String pathStr : paths) {
             if (pathStr == null || pathStr.isBlank()) continue;
             File file = new File(pathStr);
-            if (!file.exists()) continue;
+            if (!file.exists()) {
+                absent++;
+                continue;
+            }
             if (isProtectedPath(pathStr)) {
                 AppLogger.warning("Refused to delete protected path: " + pathStr);
-                if (failedDeletions != null) failedDeletions.add(pathStr + " (protected — skipped)");
+                String msg = pathStr + " (protected — skipped)";
+                if (failedDeletions != null) failedDeletions.add(msg);
+                failed++;
                 continue;
             }
             if (preferRecycle) {
                 NativeFileHelper.DeleteOutcome outcome =
                         NativeFileHelper.deleteWithOutcome(file, true);
                 if (outcome == NativeFileHelper.DeleteOutcome.RECYCLED) {
+                    recycledCount++;
                     if (recycled != null) recycled.add(pathStr);
                 } else if (outcome == NativeFileHelper.DeleteOutcome.DELETED) {
-                    // gone — nothing to report as failure
+                    deleted++;
+                } else if (outcome == NativeFileHelper.DeleteOutcome.QUEUED_FOR_REBOOT) {
+                    queued++;
+                    if (failedDeletions != null) failedDeletions.add(pathStr + " (scheduled for reboot)");
                 } else {
+                    failed++;
                     if (failedDeletions != null) failedDeletions.add(pathStr);
                 }
             } else {
-                boolean success = NativeFileHelper.deleteOrQueue(file);
-                if (!success && failedDeletions != null) {
-                    failedDeletions.add(pathStr);
+                NativeFileHelper.DeleteOutcome outcome = NativeFileHelper.deleteOrQueueWithOutcome(file);
+                if (outcome == NativeFileHelper.DeleteOutcome.DELETED) {
+                    deleted++;
+                } else if (outcome == NativeFileHelper.DeleteOutcome.QUEUED_FOR_REBOOT) {
+                    queued++;
+                    if (failedDeletions != null) failedDeletions.add(pathStr + " (scheduled for reboot)");
+                } else {
+                    failed++;
+                    if (failedDeletions != null) failedDeletions.add(pathStr);
                 }
             }
         }
+        return new FilesystemCleanupResult(deleted, recycledCount, absent, queued, failed, failedDeletions == null ? List.of() : List.copyOf(failedDeletions));
     }
 
     /**
@@ -1389,18 +1438,27 @@ public class UninstallerService {
      * {@code reg export <key> <file> /y} into {@code backupDir}. Mirrors the
      * Backup tab pattern. Never throws; returns files that were written.
      */
-    public List<Path> exportRegistryKeysForBackup(List<String> registryPaths, Path backupDir) {
-        List<Path> exported = new ArrayList<>();
-        if (registryPaths == null || registryPaths.isEmpty()) return exported;
+    public RegistryBackupResult exportRegistryKeysForBackup(List<String> registryPaths, Path backupDir) {
+        java.util.Map<String, Path> exportedByKey = new java.util.LinkedHashMap<>();
+        java.util.List<String> failedKeys = new ArrayList<>();
+        if (registryPaths == null || registryPaths.isEmpty()) {
+            return new RegistryBackupResult(exportedByKey, failedKeys);
+        }
         try {
             java.nio.file.Files.createDirectories(backupDir);
         } catch (Exception e) {
             AppLogger.warning("Could not create registry backup dir: " + e.getMessage());
-            return exported;
+            for (String fullPath : registryPaths) {
+                if (fullPath != null && !fullPath.isBlank()) failedKeys.add(fullPath);
+            }
+            return new RegistryBackupResult(exportedByKey, failedKeys);
         }
         int idx = 0;
         for (String fullPath : registryPaths) {
-            if (fullPath == null || fullPath.isBlank() || !fullPath.contains("\\")) continue;
+            if (fullPath == null || fullPath.isBlank() || !fullPath.contains("\\")) {
+                if (fullPath != null && !fullPath.isBlank()) failedKeys.add(fullPath);
+                continue;
+            }
             try {
                 String safe = fullPath.replace('\\', '_').replace('/', '_')
                         .replace(':', '_').replaceAll("[^A-Za-z0-9_\\-\\.]+", "_");
@@ -1414,19 +1472,22 @@ public class UninstallerService {
                 if (!done) {
                     p.destroyForcibly();
                     AppLogger.warning("reg export timed out for " + fullPath);
+                    failedKeys.add(fullPath);
                 } else if (p.exitValue() == 0 && java.nio.file.Files.exists(out)) {
-                    exported.add(out);
+                    exportedByKey.put(fullPath, out);
                 } else {
                     AppLogger.warning("reg export failed for " + fullPath
                             + " (exit=" + p.exitValue() + ")");
+                    failedKeys.add(fullPath);
                 }
             } catch (Exception e) {
                 AppLogger.warning("reg export error for " + fullPath + ": " + e.getMessage());
+                failedKeys.add(fullPath);
             }
         }
-        AppLogger.info("Registry pre-delete backup: " + exported.size()
+        AppLogger.info("Registry pre-delete backup: " + exportedByKey.size()
                 + "/" + registryPaths.size() + " exported to " + backupDir);
-        return exported;
+        return new RegistryBackupResult(exportedByKey, failedKeys);
     }
 
     /**

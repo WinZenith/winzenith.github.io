@@ -41,9 +41,9 @@
 | Tool | Description |
 |------|-------------|
 | **Dashboard** | System health overview at a glance. Scan for issues across drivers, software, and cleanup. |
-| **Drivers** | Scan and update outdated drivers from 12+ major providers including Intel, NVIDIA, and Realtek. |
+| **Drivers** | Scan and update drivers via Windows Update plus live NVIDIA/Intel checks; optional refreshed catalog (`WINZENITH_CATALOG_URL`) adds OEM entries when configured. |
 | **Backup / Rollback** | Create driver backups and system restore points. Easily rollback when needed. |
-| **Software Update** | Keep your applications up to date via winget. Batch updates with progress tracking. |
+| **Software Update** | Keep winget apps and Windows Update items current (Microsoft Store apps not checked). Batch updates with progress tracking. |
 | **System Information** | Detailed hardware and software information: OS, CPU, GPU, RAM, storage, BIOS, and more. |
 | **Uninstaller** | Remove desktop and store apps with leftover file, folder, and registry cleanup. |
 | **Startup Manager** | Manage startup items, scheduled tasks, and Windows services. Backup and restore configs. |

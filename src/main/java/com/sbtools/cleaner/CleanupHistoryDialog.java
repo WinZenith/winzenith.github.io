@@ -24,6 +24,10 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
             .withZone(ZoneId.systemDefault());
 
     public CleanupHistoryDialog(CleanerHistoryStore store) {
+        this(store, null);
+    }
+
+    public CleanupHistoryDialog(CleanerHistoryStore store, Runnable onHistoryChanged) {
         setTitle(AppInfo.DISPLAY_NAME + " - Cleanup History");
         setHeaderText("Past cleanup sessions");
 
@@ -69,7 +73,8 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
             StringBuilder sb = new StringBuilder();
             c.getValue().perCategoryBytes().forEach((cat, bytes) -> {
                 if (!sb.isEmpty()) sb.append(", ");
-                sb.append(cat).append(": ").append(CleanupService.formatBytes(bytes));
+                sb.append(CleanerHistoryStore.formatCategoryHistoryKey(cat)).append(": ")
+                        .append(CleanupService.formatBytes(bytes));
             });
             return new javafx.beans.property.SimpleStringProperty(sb.toString());
         });
@@ -99,7 +104,7 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
             if (newV.perCategoryBytes() != null && !newV.perCategoryBytes().isEmpty()) {
                 sb.append("Per-category:\n");
                 newV.perCategoryBytes().forEach((cat, bytes) ->
-                        sb.append("  - ").append(cat).append(": ")
+                        sb.append("  - ").append(CleanerHistoryStore.formatCategoryHistoryKey(cat)).append(": ")
                                 .append(CleanupService.formatBytes(bytes)).append("\n"));
             }
             if (newV.errors() != null && !newV.errors().isEmpty()) {
@@ -125,7 +130,8 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
                     if (en.perCategoryBytes() != null) {
                         en.perCategoryBytes().forEach((cat, bytes) -> {
                             if (cats.length() > 0) cats.append("; ");
-                            cats.append(cat).append(": ").append(CleanupService.formatBytes(bytes));
+                            cats.append(CleanerHistoryStore.formatCategoryHistoryKey(cat))
+                                    .append(": ").append(CleanupService.formatBytes(bytes));
                         });
                     }
                     String errs = en.errors() != null ? String.join("; ", en.errors()) : "";
@@ -145,10 +151,17 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
                     ButtonType.OK, ButtonType.CANCEL);
             confirm.setHeaderText("Clear History");
             if (confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
-                store.clear();
+                try {
+                    store.clear();
+                } catch (Exception ex) {
+                    new Alert(Alert.AlertType.ERROR, "Could not clear history:\n"
+                            + java.util.Objects.toString(ex.getMessage(), ex.toString())).showAndWait();
+                    return;
+                }
                 data.clear();
                 totalLabel.setText("Total freed since install: " + CleanupService.formatBytes(0));
                 detailArea.setText("History cleared.");
+                if (onHistoryChanged != null) onHistoryChanged.run();
             }
         });
 

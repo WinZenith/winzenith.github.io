@@ -8,6 +8,7 @@ import com.sbtools.util.AppLogger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Win32AppDiscoverer {
 
@@ -15,11 +16,18 @@ public class Win32AppDiscoverer {
     private static final String WOW6432_UNINSTALL_PATH = "SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 
     public List<InstalledApp> discoverApps() {
+        return discoverApps(null);
+    }
+
+    public List<InstalledApp> discoverApps(AtomicBoolean cancelled) {
         List<InstalledApp> apps = new ArrayList<>();
 
-        scanRegistryPath(WinReg.HKEY_LOCAL_MACHINE, UNINSTALL_PATH, "HKLM", "64-bit", apps);
-        scanRegistryPath(WinReg.HKEY_LOCAL_MACHINE, WOW6432_UNINSTALL_PATH, "HKLM", "32-bit", apps);
-        scanRegistryPath(WinReg.HKEY_CURRENT_USER, UNINSTALL_PATH, "HKCU", "Per-User", apps);
+        if (cancelled != null && cancelled.get()) return apps;
+        scanRegistryPath(WinReg.HKEY_LOCAL_MACHINE, UNINSTALL_PATH, "HKLM", "64-bit", apps, cancelled);
+        if (cancelled != null && cancelled.get()) return apps;
+        scanRegistryPath(WinReg.HKEY_LOCAL_MACHINE, WOW6432_UNINSTALL_PATH, "HKLM", "32-bit", apps, cancelled);
+        if (cancelled != null && cancelled.get()) return apps;
+        scanRegistryPath(WinReg.HKEY_CURRENT_USER, UNINSTALL_PATH, "HKCU", "Per-User", apps, cancelled);
 
         List<InstalledApp> deduped = new ArrayList<>();
         TreeSet<String> seen = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
@@ -37,8 +45,10 @@ public class Win32AppDiscoverer {
         return deduped;
     }
 
-    private void scanRegistryPath(HKEY hive, String parentPath, String hiveLabel, String archLabel, List<InstalledApp> apps) {
+    private void scanRegistryPath(HKEY hive, String parentPath, String hiveLabel, String archLabel,
+                                  List<InstalledApp> apps, AtomicBoolean cancelled) {
         try {
+            if (cancelled != null && cancelled.get()) return;
             if (!Advapi32Util.registryKeyExists(hive, parentPath)) {
                 return;
             }
@@ -48,6 +58,7 @@ public class Win32AppDiscoverer {
             }
 
             for (String subkeyName : subkeys) {
+                if (cancelled != null && cancelled.get()) return;
                 String fullPath = parentPath + "\\" + subkeyName;
                 try {
                     if (isRealApp(hive, fullPath)) {

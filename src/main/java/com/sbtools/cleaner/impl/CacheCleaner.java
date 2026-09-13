@@ -5,35 +5,25 @@ import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
 
 public class CacheCleaner implements CleanerExtension {
+
+    private static final int SCAN_DEPTH = 8;
 
     @Override
     public CleanupCategory getCategory() { return CleanupCategory.CACHE; }
 
     @Override
     public void scan(CleanupRow row) {
-        List<Path> dirs = getCacheDirs();
-        long totalSize = 0;
-        int itemCount = 0;
-        for (Path dir : dirs) {
-            if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> walk = Files.walk(dir, 8)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                    totalSize += stats.getSum();
-                    itemCount += (int) stats.getCount();
-                } catch (Exception ignored) {}
-            }
-        }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        CleanerUtils.scanDirectorySizes(row, getCacheDirs(), SCAN_DEPTH, token);
     }
 
     @Override
@@ -44,7 +34,7 @@ public class CacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
-        return CleanerUtils.cleanDirectoryPattern(getCacheDirs(), token);
+        return CleanerUtils.cleanDirectoryPattern(getCacheDirs(), SCAN_DEPTH, token);
     }
 
     private List<Path> getCacheDirs() {

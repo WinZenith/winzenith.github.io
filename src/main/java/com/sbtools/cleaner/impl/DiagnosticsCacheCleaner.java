@@ -38,6 +38,6 @@ public class DiagnosticsCacheCleaner implements CleanerExtension {
         CleanerUtils.addEnvPath(dirs, "LOCALAPPDATA", "Microsoft", "Windows", "Diagnosis");
         CleanerUtils.addEnvPath(dirs, "PROGRAMDATA", "Microsoft", "Windows", "Diagnosis");
         CleanerUtils.addEnvPath(dirs, "LOCALAPPDATA", "Microsoft", "Windows", "PowerShell", "Diagnosis");
-        return CleanerUtils.cleanDirectoryPattern(dirs, token);
+        return CleanerUtils.cleanDirectoryPattern(dirs, 4, token);
     }
 }

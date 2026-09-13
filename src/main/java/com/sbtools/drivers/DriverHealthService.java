@@ -11,28 +11,25 @@ public class DriverHealthService {
         int score = 100;
         StringBuilder details = new StringBuilder();
 
-        int agePenalty = estimateAgePenalty(driver);
-        if (agePenalty > 0) {
-            score -= agePenalty;
-            details.append("Age penalty: -").append(agePenalty).append(" pts\n");
+        if (driver.releaseDate() != null) {
+            int agePenalty = estimateAgePenaltyFromDate(driver.releaseDate());
+            if (agePenalty > 0) {
+                score -= agePenalty;
+                details.append("Age penalty: -").append(agePenalty).append(" pts\n");
+            }
+        } else {
+            details.append("Driver age: unknown (no release date)\n");
         }
 
-        String provider = driver.provider() != null ? driver.provider().toLowerCase() : "";
-        if (provider.contains("microsoft") || provider.contains("windows")) {
-            score -= 0;
-            details.append("WHQL: Microsoft signed (0 penalty)\n");
-        } else if (provider.contains("advanced micro devices") || provider.contains("nvidia")
-                || provider.contains("intel") || provider.contains("realtek")
-                || provider.contains("lenovo") || provider.contains("dell")
-                || provider.contains("hewlett") || provider.matches(".*\\bhp\\b.*")
-                || provider.contains("asus")
-                || provider.contains("synaptics") || provider.contains("broadcom")
-                || provider.contains("qualcomm")) {
+        Boolean signed = driver.signed();
+        if (signed == null) {
             score -= 5;
-            details.append("WHQL: OEM signed (-5 pts)\n");
+            details.append("Signature: unknown (-5 pts)\n");
+        } else if (signed) {
+            details.append("Windows reports driver as signed\n");
         } else {
-            score -= 15;
-            details.append("WHQL: Unknown provider (-15 pts)\n");
+            score -= 25;
+            details.append("Windows reports driver as unsigned (-25 pts)\n");
         }
 
         if (driver.status() != null && !driver.status().isEmpty() && !"OK".equalsIgnoreCase(driver.status())) {
@@ -41,8 +38,6 @@ public class DriverHealthService {
         }
 
         if (driver.hardwareIds() != null && !driver.hardwareIds().isEmpty()) {
-            // NOTE: CC_xxxx class codes ride along in every PCI HWID list, so
-            // they must not count — only a bare GENERIC marker means generic.
             if (driver.hardwareIds().contains("GENERIC")) {
                 score -= 15;
                 details.append("Generic driver detected (-15 pts)\n");
@@ -50,13 +45,6 @@ public class DriverHealthService {
         }
 
         return new DriverHealthScore(Math.max(0, Math.min(100, score)), details.toString().trim());
-    }
-
-    private static int estimateAgePenalty(InstalledDriver driver) {
-        if (driver.releaseDate() != null) {
-            return estimateAgePenaltyFromDate(driver.releaseDate());
-        }
-        return estimateAgePenaltyFromVersion(driver.driverVersion());
     }
 
     private static int estimateAgePenaltyFromDate(LocalDate releaseDate) {
@@ -69,26 +57,6 @@ public class DriverHealthService {
         return 25;
     }
 
-    private static int estimateAgePenaltyFromVersion(String ver) {
-        if (ver == null || ver.isEmpty()) return 10;
-
-        String[] parts = ver.split("\\.");
-        if (parts.length >= 2) {
-            try {
-                String majorStr = parts[0].replaceAll("[^0-9]", "");
-                String minorStr = parts[1].replaceAll("[^0-9]", "");
-                if (majorStr.isEmpty() || minorStr.isEmpty()) return 3;
-                int major = Integer.parseInt(majorStr);
-                int minor = Integer.parseInt(minorStr);
-                if (major == 0) return 10;
-                if (major < 5 && minor == 0) return 8;
-                if (major < 10) return 5;
-                return 0;
-            } catch (NumberFormatException ignored) {}
-        }
-        return 3;
-    }
-
     public record DriverHealthScore(int score, String details) {
         public String getLabel() {
             if (score >= 80) return "Excellent";
@@ -98,10 +66,10 @@ public class DriverHealthService {
         }
 
         public String getColorStyle() {
-            if (score >= 80) return "-fx-text-fill: #50fa7b; -fx-font-weight: bold;";
-            if (score >= 60) return "-fx-text-fill: #f1fa8c; -fx-font-weight: bold;";
-            if (score >= 40) return "-fx-text-fill: #ffb86c; -fx-font-weight: bold;";
-            return "-fx-text-fill: #ff5555; -fx-font-weight: bold;";
+            if (score >= 80) return "-fx-text-fill: #50fa7b;";
+            if (score >= 60) return "-fx-text-fill: #8be9fd;";
+            if (score >= 40) return "-fx-text-fill: #ffb86c;";
+            return "-fx-text-fill: #ff5555;";
         }
     }
 }

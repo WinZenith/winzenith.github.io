@@ -48,6 +48,7 @@ public final class DriverCatalogDatabase {
             .enable(DeserializationFeature.READ_UNKNOWN_ENUM_VALUES_USING_DEFAULT_VALUE);
 
     private static final TypeReference<List<CatalogEntry>> LIST_TYPE = new TypeReference<>() {};
+    static final long CATALOG_FRESHNESS_DAYS = 180;
 
     private final List<CatalogEntry> entries;
     private final Map<String, List<CatalogEntry>> byProvider;
@@ -75,6 +76,73 @@ public final class DriverCatalogDatabase {
 
     public int entryCount() {
         return entries.size();
+    }
+
+    public static boolean isFresh(CatalogEntry entry, java.time.Instant now) {
+        if (entry == null || entry.lastVerified() == null || now == null) {
+            return false;
+        }
+        long days = java.time.temporal.ChronoUnit.DAYS.between(entry.lastVerified(), now);
+        return days >= 0 && days <= CATALOG_FRESHNESS_DAYS;
+    }
+
+    public boolean hasFreshEntriesForProvider(String providerId, java.time.Instant now) {
+        if (providerId == null || providerId.isBlank()) {
+            return false;
+        }
+        List<CatalogEntry> list = byProvider.get(providerId);
+        if (list == null) {
+            return false;
+        }
+        for (CatalogEntry e : list) {
+            if (e != null && !e.testOnly() && isFresh(e, now)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Stamp for reload when refreshed catalog file changes (path, size, mtime). */
+    public static long currentSourceStamp() {
+        long stamp = 0;
+        for (Path p : refreshedCandidates()) {
+            try {
+                if (p != null && Files.exists(p)) {
+                    stamp = stamp * 31 + p.toAbsolutePath().hashCode();
+                    stamp = stamp * 31 + Files.size(p);
+                    stamp = stamp * 31 + Files.getLastModifiedTime(p).toMillis();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return stamp;
+    }
+
+    /**
+     * True when a Windows Update (or catalog) hardware ID is compatible with the installed device.
+     */
+    public static boolean hardwareCompatible(InstalledDriver driver, String offerHardwareId) {
+        if (driver == null || offerHardwareId == null || offerHardwareId.isBlank()) {
+            return false;
+        }
+        String offerNorm = normalizeHardwareId(offerHardwareId);
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        if (driver.deviceId() != null && !driver.deviceId().isBlank()) {
+            parts.add(driver.deviceId());
+        }
+        if (driver.hardwareIds() != null && !driver.hardwareIds().isBlank()) {
+            for (String p : driver.hardwareIds().split("[;\\s]+")) {
+                if (p != null && !p.isBlank()) {
+                    parts.add(p);
+                }
+            }
+        }
+        for (String part : parts) {
+            if (matchesHardwareId(normalizeHardwareId(part), offerNorm)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -176,6 +244,7 @@ public final class DriverCatalogDatabase {
         if (ver == null || ver.isBlank() || ver.length() > 64) return false;
         if (!AbstractOemCatalogProvider.isPlausibleVersion(ver)) return false;
         if (e.confidence() < 0 || e.confidence() > 1) return false;
+        if (!isFresh(e, java.time.Instant.now())) return false;
         // URLs must stay https (sanitizeSourceUrl enforces; reject non-https here).
         for (String url : new String[]{e.sourceUrl(), e.vendorPageUrl()}) {
             if (url != null && !url.isBlank()) {
@@ -235,9 +304,11 @@ public final class DriverCatalogDatabase {
         }
 
         List<CatalogEntry> filtered = new ArrayList<>();
+        java.time.Instant now = java.time.Instant.now();
         for (CatalogEntry e : combined) {
             // Skip test entries in normal matching
             if (e.testOnly()) continue;
+            if (!isFresh(e, now)) continue;
             // Blank installed version with a capped range: the true version is
             // unknown, so a range cannot be honored — skip rather than risk a
             // downgrade. Exception: problem devices (e.g. Code 28, no driver

@@ -118,3 +118,10 @@ Sep 13, 2026 9:26:55 AM com.sbtools.util.AppLogger init
 INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
 Sep 13, 2026 9:44:49 AM com.sbtools.util.AppLogger init
 INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 1:32:23 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 1:32:23 PM com.sbtools.util.AppLogger warning
+WARNING: Installer emitted Windows Installer usage help (exit 8): Windows Installer
+Install Options
+	</package | /i> <Product.msi>
+Setting Public Properties

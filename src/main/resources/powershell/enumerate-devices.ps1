@@ -5,6 +5,8 @@
 #   3. Get-PnpDevice -Class Display (direct PnP tree query, most reliable for DCH GPU drivers)
 #   4. Get-PnpDevice problem devices (non-OK status not seen above, e.g. Code 28)
 $ErrorActionPreference = 'Continue'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $OutputEncoding
 $seen = @{}
 $drivers = @()
 
@@ -77,6 +79,10 @@ Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
                 $driverDate = ''
             }
         }
+        $isSigned = $null
+        try {
+            if ($null -ne $_.IsSigned) { $isSigned = [bool]$_.IsSigned }
+        } catch { }
         $entry = [ordered]@{
             deviceId       = $_.DeviceID
             friendlyName   = if ($_.DeviceName) { $_.DeviceName } else { $_.DeviceID }
@@ -87,6 +93,7 @@ Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
             driverKey      = if ($_.Driver) { $_.Driver } else { '' }
             status         = Get-DevStatus $_.DeviceID
             releaseDate    = $driverDate
+            isSigned       = $isSigned
         }
         $seen[$_.DeviceID] = $true
         $drivers += $entry

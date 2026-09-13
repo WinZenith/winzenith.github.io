@@ -11,7 +11,8 @@ public record InstalledDriver(
         String infName,
         String driverKey,
         String status,
-        LocalDate releaseDate
+        LocalDate releaseDate,
+        Boolean signed
 ) {
     public boolean isHealthy() {
         return status == null || status.isBlank() || "OK".equalsIgnoreCase(status);

@@ -1,5 +1,6 @@
 package com.sbtools.drivers.catalog;
 
+import com.sbtools.drivers.DriverScanService;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
 import com.sbtools.drivers.model.InstalledDriver;
 import com.sbtools.drivers.model.UpdateSeverity;
@@ -18,6 +19,8 @@ import java.util.List;
 import java.util.Locale;
 
 public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
+
+    private record MatchProposal(InstalledDriver driver, WuDriverOffer offer, int titleStrength, int hwRank) {}
 
     private static final long WU_SEARCH_TIMEOUT_SECONDS = 120;
 
@@ -41,7 +44,8 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
             try {
                 Path script = PowerShellScripts.resolve("wu-search-drivers.ps1");
                 ProcessResult result = processRunner.run(
-                        ProcessRunner.powershellScript(script.toString(), String.valueOf(WU_SEARCH_TIMEOUT_SECONDS)));
+                        ProcessRunner.powershellScriptNonInteractive(
+                                script.toString(), String.valueOf(WU_SEARCH_TIMEOUT_SECONDS)));
                 if (!result.success()) {
                     AppLogger.debug("WindowsUpdate: PowerShell script failed (attempt " + attempt + "/2): " + result.combinedOutput());
                     if (attempt == 1 && !Thread.currentThread().isInterrupted()) {
@@ -99,20 +103,37 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
 
         List<DriverUpdateCandidate> candidates = new ArrayList<>();
         if (installed == null) return candidates;
+
+        List<MatchProposal> proposals = new ArrayList<>();
         for (InstalledDriver driver : installed) {
             if (driver == null) continue;
-            WuDriverOffer best = null;
-            int bestStrength = 0;
             for (WuDriverOffer offer : offers) {
-                int strength = matchStrength(driver, offer);
-                if (strength == 0) continue;
-                if (best == null || strength > bestStrength
-                        || (strength == bestStrength && compareOffers(offer, best) > 0)) {
-                    best = offer;
-                    bestStrength = strength;
+                if (offer.driverHardwareId == null || offer.driverHardwareId.isBlank()) {
+                    AppLogger.debug("WindowsUpdate: Skipping offer without hardware ID: " + offer.updateId);
+                    continue;
                 }
+                if (!DriverCatalogDatabase.hardwareCompatible(driver, offer.driverHardwareId)) {
+                    continue;
+                }
+                int titleStrength = matchStrength(driver, offer);
+                int hwRank = hardwareMatchRank(driver, offer.driverHardwareId);
+                proposals.add(new MatchProposal(driver, offer, titleStrength, hwRank));
             }
-            if (best != null && VersionCompare.isOlder(driver.driverVersion(), best.version)) {
+        }
+
+        java.util.Map<String, MatchProposal> bestPerUpdateId = new java.util.HashMap<>();
+        for (MatchProposal p : proposals) {
+            String uid = p.offer.updateId;
+            MatchProposal existing = bestPerUpdateId.get(uid);
+            if (existing == null || compareProposals(p, existing) > 0) {
+                bestPerUpdateId.put(uid, p);
+            }
+        }
+
+        for (MatchProposal p : bestPerUpdateId.values()) {
+            InstalledDriver driver = p.driver;
+            WuDriverOffer best = p.offer;
+            if (VersionCompare.isOlder(driver.driverVersion(), best.version)) {
                 candidates.add(new DriverUpdateCandidate(
                         driver,
                         best.version,
@@ -127,6 +148,31 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
             }
         }
         return candidates;
+    }
+
+    private static int compareProposals(MatchProposal a, MatchProposal b) {
+        int c = Integer.compare(a.hwRank, b.hwRank);
+        if (c != 0) return c;
+        c = Integer.compare(a.titleStrength, b.titleStrength);
+        if (c != 0) return c;
+        c = compareOffers(a.offer, b.offer);
+        if (c != 0) return c;
+        String da = a.driver.deviceId() == null ? "" : DriverScanService.normalizeDeviceKey(a.driver.deviceId());
+        String db = b.driver.deviceId() == null ? "" : DriverScanService.normalizeDeviceKey(b.driver.deviceId());
+        return da.compareTo(db);
+    }
+
+    private static int hardwareMatchRank(InstalledDriver driver, String offerHw) {
+        if (driver == null || offerHw == null) return 0;
+        String offerNorm = offerHw.toUpperCase(Locale.ROOT);
+        if (driver.deviceId() != null && offerNorm.equals(driver.deviceId().toUpperCase(Locale.ROOT))) {
+            return 4;
+        }
+        String hw = driver.hardwareIds() == null ? "" : driver.hardwareIds().toUpperCase(Locale.ROOT);
+        if (hw.contains(offerNorm)) {
+            return 3;
+        }
+        return 2;
     }
 
     /**
@@ -281,7 +327,11 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                 text(n, "title"),
                 text(n, "description"),
                 version,
-                UpdateSeverity.fromString(text(n, "severity"))
+                UpdateSeverity.fromString(text(n, "severity")),
+                text(n, "driverHardwareId"),
+                text(n, "driverModel"),
+                text(n, "driverProvider"),
+                text(n, "driverClass")
         );
     }
 
@@ -329,6 +379,8 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
         return true;
     }
 
-    private record WuDriverOffer(String updateId, String title, String description, String version, UpdateSeverity severity) {
+    private record WuDriverOffer(String updateId, String title, String description, String version,
+                                 UpdateSeverity severity, String driverHardwareId, String driverModel,
+                                 String driverProvider, String driverClass) {
     }
 }

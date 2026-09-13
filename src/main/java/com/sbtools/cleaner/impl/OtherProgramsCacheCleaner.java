@@ -298,7 +298,6 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
                             Path ac = pkg.resolve("AC");
                             if (Files.isDirectory(ac)) scanAppCache(row, collectDirs(
                                     ac.resolve("INetCache").toString(),
-                                    ac.resolve("INetCookies").toString(),
                                     ac.resolve("Cache").toString()));
                         }
                     }
@@ -334,7 +333,6 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
                             // AC holds auth/settings — only cache subdirs are safe.
                             if (Files.isDirectory(ac)) cleaned += cleanAppCacheDirs(collectDirs(
                                     ac.resolve("INetCache").toString(),
-                                    ac.resolve("INetCookies").toString(),
                                     ac.resolve("Cache").toString()), token);
                         }
                     }

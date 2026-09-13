@@ -11,6 +11,7 @@ import com.sbtools.util.AppLogger;
 import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
+import com.sbtools.util.WindowsUpdateInstallResult;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -81,6 +82,12 @@ public class DriverInstallService {
 
     public InstallResult install(DriverUpdateCandidate candidate, AppSettings settings)
             throws IOException, InterruptedException {
+        return install(candidate, settings, false);
+    }
+
+    public InstallResult install(DriverUpdateCandidate candidate, AppSettings settings,
+            boolean allowRestoreOnlyForUnsupportedBackup)
+            throws IOException, InterruptedException {
         if (candidate == null || candidate.installed() == null) {
             return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Invalid driver candidate.");
         }
@@ -105,7 +112,7 @@ public class DriverInstallService {
         boolean earlyHasUrl = earlyUrl != null && !earlyUrl.isBlank();
         boolean earlyIsWU = "WindowsUpdate".equals(candidate.source())
                 && candidate.packageId() != null && !candidate.packageId().isBlank();
-        if (earlyHasUrl && !isTrustedSource(earlyUrl, candidate.source())) {
+        if (earlyHasUrl && !DriverInstallTrust.isTrustedHttpsUrl(earlyUrl, candidate.source())) {
             return new InstallResult(InstallStatus.BLOCKED_UNTRUSTED, false,
                     "Blocked: download URL is not from a trusted vendor. URL: " + earlyUrl);
         }
@@ -146,8 +153,21 @@ public class DriverInstallService {
 
         com.sbtools.backup.DriverBackupEntry backupEntry = null;
         boolean backupOk = false;
+        String backupSupportIssue = backupRequested
+                ? com.sbtools.backup.DriverBackupService.backupSupportIssue(candidate.installed()) : null;
+        boolean backupSupported = backupSupportIssue == null;
         if (backupRequested) {
-            try {
+            if (!backupSupported) {
+                if (!allowRestoreOnlyForUnsupportedBackup || !restoreOk) {
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                            "Aborted: automatic driver backup is not supported for this device ("
+                                    + backupSupportIssue + "). "
+                                    + (restoreOk ? "Acknowledge the warning and retry, or disable automatic backup."
+                                    : "No system restore point is available."));
+                }
+                AppLogger.warning("Proceeding without driver backup (unsupported INF) — restore point seq="
+                        + restorePointSeq + " available");
+            } else try {
                 backupEntry = backupService.backupBeforeUpdate(candidate.installed(), settings, cancellationFlag);
                 backupOk = backupEntry != null;
             } catch (java.util.concurrent.CancellationException | InterruptedException cancelEx) {
@@ -164,16 +184,13 @@ public class DriverInstallService {
             if (cancellationFlag.get()) {
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
             }
-            if (!backupOk) {
-                // Fail closed when the user asked for a safety net: never
-                // proceed to a destructive install with no backup. If restore
-                // also failed/unrequested, there is no rollback at all.
-                if (!restoreOk) {
-                    return new InstallResult(InstallStatus.INSTALL_FAILED, false,
-                            "Aborted: pre-install driver backup failed and no system restore point is available. "
-                            + "No changes were made. Free disk space / run as administrator and retry.");
-                }
-                AppLogger.warning("Proceeding without driver backup (restore point seq=" + restorePointSeq + " available)");
+            if (backupSupported && !backupOk) {
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                        restoreOk
+                                ? "Aborted: pre-install driver backup failed. A system restore point exists (seq="
+                                + restorePointSeq + ") but the requested driver backup did not complete. No install was started."
+                                : "Aborted: pre-install driver backup failed and no system restore point is available. "
+                                + "No changes were made. Free disk space / run as administrator and retry.");
             }
         } else if (!restoreOk && restoreRequested) {
             // Restore requested but failed, backup disabled: no safety net.
@@ -218,57 +235,25 @@ public class DriverInstallService {
                     return new InstallResult(InstallStatus.INSTALL_FAILED, false,
                             "Windows Update install failed: " + result.combinedOutput());
                 }
-                boolean reboot = false;
-                String message = "Driver installed via Windows Update.";
-                if (result.stdout() != null && !result.stdout().isBlank()) {
-                    // stdout carries progress lines ("Searching…") ahead of the
-                    // JSON payload, so parse from the last '{' — whole-stdout
-                    // parsing always throws and reboot detection degrades to a
-                    // whitespace-fragile substring fallback.
-                    String jsonPart = result.stdout();
-                    int brace = jsonPart.lastIndexOf('{');
-                    if (brace > 0) jsonPart = jsonPart.substring(brace);
-                    try {
-                        com.fasterxml.jackson.databind.JsonNode root = com.sbtools.util.JsonMapper.parseTree(jsonPart);
-                        // Per-update result: overall success with a blocked /
-                        // superseded entry (ResultCode 3/4/5) must not report
-                        // SUCCESS — the row would flip to Up-to-Date wrongly.
-                        int overall = root.path("resultCode").asInt(-1);
-                        int perUpdate = root.path("installed").asInt(-1);
-                        if (overall != 2 || perUpdate != 2) {
-                            return new InstallResult(InstallStatus.INSTALL_FAILED, false,
-                                    "Windows Update install failed: resultCode=" + overall
-                                            + " updateResult=" + perUpdate + ". " + result.combinedOutput());
-                        }
-                        if (root.has("rebootRequired")) {
-                            reboot = root.get("rebootRequired").asBoolean(false);
-                        }
-                        if (reboot) {
-                            message = "Driver installed via Windows Update. A restart is required to complete the installation.";
-                        }
-                    } catch (Exception parseEx) {
-                        if (result.stdout().contains("\"rebootRequired\":true")) {
-                            reboot = true;
-                            message = "Driver installed via Windows Update. A restart is required to complete the installation.";
-                        }
-                    }
+                WindowsUpdateInstallResult.Parsed wu = WindowsUpdateInstallResult.parse(result.stdout());
+                if (!wu.success()) {
+                    return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                            "Windows Update install failed: " + wu.diagnostic() + ". " + result.combinedOutput());
                 }
+                boolean reboot = wu.rebootRequired();
+                String message = reboot
+                        ? "Driver installed via Windows Update. A restart is required to complete the installation."
+                        : "Driver installed via Windows Update.";
                 return new InstallResult(InstallStatus.SUCCESS, reboot, message);
             } catch (Exception e) {
-                // Clear a stuck interrupt: ProcessRunner rethrows with the
-                // flag set, and this pooled installExecutor thread is reused —
-                // a swallowed flag would instantly fail the next install.
-                if (e instanceof InterruptedException) {
-                    Thread.interrupted();
-                }
                 // KEEP rollback on exception (partial apply possible).
-                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
+                return installFailure("Windows Update install", e);
             }
         }
 
         if (candidate.downloadUrl() != null && !candidate.downloadUrl().isBlank()) {
             String downloadUrl = candidate.downloadUrl();
-            if (!isTrustedSource(downloadUrl, candidate.source())) {
+            if (!DriverInstallTrust.isTrustedHttpsUrl(downloadUrl, candidate.source())) {
                 removeBackupIfPresent(backupEntry);
                 // Keep any restore point created above (never auto-delete).
                 return new InstallResult(InstallStatus.BLOCKED_UNTRUSTED, false,
@@ -280,7 +265,7 @@ public class DriverInstallService {
                 // succeed: the device may be partially updated.
                 return result;
             } catch (Exception e) {
-                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Error: " + e.getMessage());
+                return installFailure("download and install", e);
             }
         }
 
@@ -311,7 +296,16 @@ public class DriverInstallService {
         }
     }
 
+    private InstallResult installFailure(String stage, Throwable e) {
+        DriverInstallFailure.restoreInterruptFlag(e);
+        String user = DriverInstallFailure.userMessage(stage, e, cancellationFlag.get());
+        AppLogger.warning("Driver install failed at stage [" + stage + "]: "
+                + DriverInstallFailure.deepestMessage(e), e);
+        return new InstallResult(DriverInstallFailure.failureStatus(), false, user);
+    }
+
     private InstallResult downloadAndInstallDriver(DriverUpdateCandidate candidate, AppSettings settings) {
+        String stage = "resolving download destination";
         try {
             String configuredDir = settings.downloadDirectory();
             Path downloadsDir = (configuredDir != null && !configuredDir.isBlank())
@@ -332,7 +326,8 @@ public class DriverInstallService {
 
             AppLogger.info("Downloading driver from: " + downloadUrl);
             reportProgress(0, 0, 0);
-            
+
+            stage = "download";
             try {
                 driverFile = downloadFileWithProgress(downloadUrl, driverFile, candidate.source());
             } catch (IOException e) {
@@ -340,7 +335,7 @@ public class DriverInstallService {
                     AppLogger.info("Download returned HTML, attempting to scrape actual download URL from: " + downloadUrl);
                     String scrapedUrl = scrapeDownloadUrlFromPage(downloadUrl);
                     if (scrapedUrl != null && !scrapedUrl.equals(downloadUrl)) {
-                        if (!isTrustedSource(scrapedUrl, candidate.source())) {
+                        if (!DriverInstallTrust.isTrustedHttpsUrl(scrapedUrl, candidate.source())) {
                             cleanupTempFiles(driverFile);
                             return new InstallResult(InstallStatus.BLOCKED_UNTRUSTED, false,
                                     "Blocked: scraped download URL is not from a trusted vendor host. URL: " + scrapedUrl);
@@ -374,6 +369,7 @@ public class DriverInstallService {
             reportProgress(fileSize, fileSize, 1.0);
 
             reportStatus("Verifying driver integrity…");
+            stage = "checksum verification";
 
             java.util.Optional<CatalogEntry> catalogEntry = java.util.Optional.empty();
             if (catalogDatabase != null) {
@@ -393,6 +389,7 @@ public class DriverInstallService {
             }
 
             reportStatus("Verifying driver signature…");
+            stage = "signature verification";
 
             String lowerForVerify = driverFile.getFileName().toString().toLowerCase();
             boolean isArchive = lowerForVerify.endsWith(".zip") || lowerForVerify.endsWith(".cab")
@@ -442,6 +439,7 @@ public class DriverInstallService {
             }
 
             reportStatus("Installing driver. Please wait…");
+            stage = "installer launch";
 
             if (cancellationFlag.get()) {
                 cleanupTempFiles(driverFile);
@@ -479,16 +477,20 @@ public class DriverInstallService {
             } else if ((lowerName.endsWith(".exe") || sfxExecutable) && magicArchiveExt == null) {
                 AppLogger.info("Launching silent installer: " + driverFile);
 
-                Path msiFile = extractMsiFromExe(driverFile);
+                DriverSilentInstallerArgs.IntelPackageFamily intelFamily =
+                        DriverSilentInstallerArgs.detectIntelPackageFamily(driverFile, candidate);
+                Path msiFile = null;
+                if (!DriverSilentInstallerArgs.usesIntelSingleShotSilent(intelFamily)) {
+                    msiFile = extractMsiFromExe(driverFile);
+                }
                 if (msiFile != null) {
                     if (cancellationFlag.get()) {
                         cleanupTempFiles(driverFile);
                         return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
                     }
                     AppLogger.info("Extracted MSI: " + msiFile);
-                    ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
-                            "msiexec.exe", "/i", msiFile.toString(), "/qn", "/norestart"
-                    ).command().toArray(new String[0])), cancellationFlag);
+                    stage = "MSI installation";
+                    ProcessResult result = runMsiexecQuietInstall(msiFile);
                     boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
                     if (result.success() || msiReboot) {
                         cleanupTempFiles(driverFile);
@@ -500,107 +502,28 @@ public class DriverInstallService {
                         cleanupTempFiles(driverFile);
                         return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
                     }
-                    AppLogger.warning("MSI install failed, falling back to EXE: " + result.combinedOutput());
-                    // No EXE fallback: the payload is OLE MSI bytes (and the
-                    // original path was moved to the .msi name), so launching
-                    // it with /S//quiet can only fail — report the MSI error.
+                    AppLogger.warning("MSI install failed: " + result.combinedOutput());
                     cleanupTempFiles(driverFile);
                     return new InstallResult(InstallStatus.INSTALL_FAILED, false,
-                            "MSI installation failed: " + result.combinedOutput());
+                            "MSI installation failed: " + truncateInstallerOutput(result.combinedOutput()));
                 }
 
-                // AMD Adrenalin and chipset installers use /S (silent) whereas Intel/Nvidia use /quiet.
-                // Try vendor-specific order to reduce failed attempts and timeout.
-                boolean isAmd = "AMD".equals(candidate.source());
-                String[] primaryArgs = isAmd ? new String[]{"/S"} : new String[]{"/quiet"};
-                String[] secondaryArgs = isAmd ? new String[]{"/quiet"} : new String[]{"/S"};
-                String[] tertiaryArgs = isAmd ? new String[]{"/INSTALL"} : new String[]{"/passive", "/silent"};
-
-                if (cancellationFlag.get()) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
+                if (intelFamily == DriverSilentInstallerArgs.IntelPackageFamily.BLUETOOTH_CONSUMER) {
+                    stage = "Intel Bluetooth installer launch";
+                    reportStatus("Installing Intel Bluetooth (/quiet). Intel may reboot automatically when finished.");
+                    AppLogger.info("Intel Bluetooth consumer package: /quiet may reboot automatically per vendor docs; "
+                            + "file=" + driverFile.getFileName());
                 }
-                ProcessResult result;
-                try {
-                    result = processRunner.run(java.util.List.of(new ProcessBuilder(
-                            driverFile.toString(), primaryArgs[0]
-                    ).command().toArray(new String[0])), cancellationFlag);
-                } catch (java.util.concurrent.CancellationException ce) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
-                }
-                boolean exeReboot = isRebootRequiredExitCode(result.exitCode());
-                if (result.success() || exeReboot) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.SUCCESS, exeReboot,
-                            exeReboot ? "Driver installed silently. A restart is required."
-                                    : "Driver installed silently.");
-                }
-
-                if (cancellationFlag.get()) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
-                }
-                AppLogger.warning("EXE " + primaryArgs[0] + " failed (" + result.exitCode() + "), trying " + secondaryArgs[0] + ": " + result.combinedOutput());
-                ProcessResult fallbackResult;
-                try {
-                    fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
-                            driverFile.toString(), secondaryArgs[0]
-                    ).command().toArray(new String[0])), cancellationFlag);
-                } catch (java.util.concurrent.CancellationException ce) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
-                }
-                boolean fallbackReboot = isRebootRequiredExitCode(fallbackResult.exitCode());
-                if (fallbackResult.success() || fallbackReboot) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.SUCCESS, fallbackReboot,
-                            fallbackReboot ? "Driver installed silently via fallback installer. A restart is required."
-                                    : "Driver installed silently via fallback installer.");
-                }
-                if (cancellationFlag.get()) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
-                }
-                AppLogger.warning("EXE " + secondaryArgs[0] + " failed, trying tertiary args " + java.util.Arrays.toString(tertiaryArgs) + ": " + fallbackResult.combinedOutput());
-                // Try every tertiary arg (non-AMD has two: /passive and /silent;
-                // the old code only ever ran tertiaryArgs[0]).
-                ProcessResult thirdResult = null;
-                for (String tertiaryArg : tertiaryArgs) {
-                    if (cancellationFlag.get()) {
-                        cleanupTempFiles(driverFile);
-                        return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
-                    }
-                    try {
-                        thirdResult = processRunner.run(java.util.List.of(new ProcessBuilder(
-                                driverFile.toString(), tertiaryArg
-                        ).command().toArray(new String[0])), cancellationFlag);
-                    } catch (java.util.concurrent.CancellationException ce) {
-                        cleanupTempFiles(driverFile);
-                        return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
-                    }
-                    if (thirdResult.success() || isRebootRequiredExitCode(thirdResult.exitCode())) {
-                        break;
-                    }
-                    AppLogger.warning("EXE " + tertiaryArg + " failed (" + thirdResult.exitCode() + "): " + thirdResult.combinedOutput());
-                }
-                if (thirdResult == null) {
-                    return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Silent installation failed: no installer arguments available.");
-                }
-                boolean thirdReboot = isRebootRequiredExitCode(thirdResult.exitCode());
-                if (thirdResult.success() || thirdReboot) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.SUCCESS, thirdReboot,
-                            thirdReboot ? "Driver installed silently via tertiary installer. A restart is required."
-                                    : "Driver installed silently via tertiary installer.");
-                }
-                return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Silent installation failed: " + thirdResult.combinedOutput());
+                InstallResult silentExe = installSilentExeInstaller(driverFile, candidate, stage, intelFamily);
+                cleanupTempFiles(driverFile);
+                return silentExe;
             }
 
             if (cancellationFlag.get()) {
                 cleanupTempFiles(driverFile);
                 return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation cancelled by user.");
             }
+            stage = "driver package installation";
             ProcessResult installResult = installDriverFile(driverFile, candidate);
             if (!installResult.success()) {
                 cleanupTempFiles(driverFile);
@@ -611,11 +534,7 @@ public class DriverInstallService {
             cleanupTempFiles(driverFile);
             return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed from " + driverFile.toString());
         } catch (Exception e) {
-            if (e instanceof InterruptedException) {
-                Thread.interrupted();
-            }
-            AppLogger.warning("Error during download and install: " + e.getMessage());
-            return new InstallResult(InstallStatus.UNKNOWN_ERROR, false, "Error: " + e.getMessage());
+            return installFailure(stage, e);
         }
     }
 
@@ -803,14 +722,15 @@ public class DriverInstallService {
         // we would then execute as admin. The final host must still be trusted.
         try {
             String finalUrl = response.uri() != null ? response.uri().toString() : url;
-            if (source != null && !source.isBlank() && !isTrustedSource(finalUrl, source)) {
+            if (source != null && !source.isBlank() && !DriverInstallTrust.isTrustedHttpsUrl(finalUrl, source)) {
                 try { response.body().close(); } catch (Exception ignored) {}
                 throw new IOException("Blocked: download redirected to untrusted host: " + finalUrl);
             }
         } catch (IOException blocked) {
             throw blocked;
         } catch (Exception ex) {
-            AppLogger.warning("Redirect trust check failed: " + ex.getMessage());
+            try { response.body().close(); } catch (Exception ignored) {}
+            throw new IOException("Redirect trust check failed: " + ex.getMessage());
         }
 
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
@@ -1046,11 +966,9 @@ public class DriverInstallService {
             deleteDirectoryQuietly(extractDir);
             Files.createDirectories(extractDir);
 
-            ProcessResult extractResult = processRunner.run(java.util.List.of(new ProcessBuilder(
-                    "powershell", "-NoProfile", "-Command",
-                    "Expand-Archive -Path " + ProcessRunner.psQuote(driverFile.toString())
-                            + " -DestinationPath " + ProcessRunner.psQuote(extractDir.toString()) + " -Force"
-            ).command().toArray(new String[0])), cancellationFlag);
+            Path extractScript = PowerShellScripts.resolve("extract-driver-archive.ps1");
+            ProcessResult extractResult = processRunner.run(ProcessRunner.powershellScriptNonInteractive(
+                    extractScript.toString(), driverFile.toString(), extractDir.toString()), cancellationFlag);
 
             if (!extractResult.success()) {
                 return new ProcessResult(1, "", "Failed to extract zip: " + extractResult.combinedOutput());
@@ -1106,20 +1024,11 @@ public class DriverInstallService {
             deleteDirectoryQuietly(extractDir);
             Files.createDirectories(extractDir);
 
-            ProcessResult extractResult = processRunner.run(java.util.List.of(new ProcessBuilder(
-                    "powershell", "-NoProfile", "-Command",
-                    "Expand-Archive -Path " + ProcessRunner.psQuote(driverFile.toString())
-                            + " -DestinationPath " + ProcessRunner.psQuote(extractDir.toString()) + " -Force"
-            ).command().toArray(new String[0])), cancellationFlag);
-
+            Path extractScript = PowerShellScripts.resolve("extract-driver-archive.ps1");
+            ProcessResult extractResult = processRunner.run(ProcessRunner.powershellScriptNonInteractive(
+                    extractScript.toString(), driverFile.toString(), extractDir.toString()), cancellationFlag);
             if (!extractResult.success()) {
-                if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
-                ProcessResult expandResult = processRunner.run(java.util.List.of(new ProcessBuilder(
-                        "expand.exe", driverFile.toString(), "-F:*", extractDir.toString()
-                ).command().toArray(new String[0])), cancellationFlag);
-                if (!expandResult.success()) {
-                    return new ProcessResult(1, "", "Failed to extract cab: " + expandResult.combinedOutput());
-                }
+                return new ProcessResult(1, "", "Failed to extract cab: " + extractResult.combinedOutput());
             }
 
             Path setupExe = findBestSetupExe(extractDir);
@@ -1169,12 +1078,7 @@ public class DriverInstallService {
         } else if (filename.endsWith(".msi")) {
             if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.info("Installing MSI driver package: " + driverFile);
-            // /norestart: exit 1641 means the installer already forced a
-            // reboot (data loss). Never allow a silent driver install to
-            // reboot the machine out from under the user.
-            ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
-                    "msiexec.exe", "/i", driverFile.toString(), "/qn", "/norestart"
-            ).command().toArray(new String[0])), cancellationFlag);
+            ProcessResult result = runMsiexecQuietInstall(driverFile);
             boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
             if (result.success() || msiReboot) {
                 return new ProcessResult(0, "", msiReboot
@@ -1183,9 +1087,7 @@ public class DriverInstallService {
             }
             if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.warning("MSI /qn failed, trying /quiet: " + result.combinedOutput());
-            ProcessResult fallbackResult = processRunner.run(java.util.List.of(new ProcessBuilder(
-                    "msiexec.exe", "/i", driverFile.toString(), "/quiet", "/norestart"
-            ).command().toArray(new String[0])), cancellationFlag);
+            ProcessResult fallbackResult = runMsiexecQuietInstallAlt(driverFile);
             boolean fallbackReboot = isRebootRequiredExitCode(fallbackResult.exitCode());
             if (fallbackResult.success() || fallbackReboot) {
                 return new ProcessResult(0, "", fallbackReboot
@@ -1306,7 +1208,12 @@ public class DriverInstallService {
             }
             // Single-INF archives with no HW strings: allow (nothing to mismatch).
             // Multi-INF archives require at least one HW token hit.
-            if (tokens.isEmpty()) return true;
+            String infName = candidate.installed().infName();
+            if (infName != null && !infName.isBlank()
+                    && inf.getFileName().toString().equalsIgnoreCase(infName)) {
+                return true;
+            }
+            if (tokens.isEmpty()) return false;
             for (String tok : tokens) {
                 // Vendor-only tokens (bare VEN_xxxx / VID_xxxx) match every
                 // same-vendor INF in a family bundle: require a
@@ -1315,10 +1222,6 @@ public class DriverInstallService {
                 if (tok.matches("(VEN|VID)_[0-9A-F]{4}")) continue;
                 if (tok.length() >= 8 && content.contains(tok)) return true;
             }
-            // Fallback: INF filename hint matches device infName
-            String infName = candidate.installed().infName();
-            if (infName != null && !infName.isBlank()
-                    && inf.getFileName().toString().equalsIgnoreCase(infName)) return true;
             return false;
         } catch (Exception e) {
             return false;
@@ -1414,6 +1317,155 @@ public class DriverInstallService {
             AppLogger.debug("Not an MSI-in-EXE: " + e.getMessage());
             return null;
         }
+    }
+
+    private InstallResult installSilentExeInstaller(Path driverFile, DriverUpdateCandidate candidate, String stage,
+            DriverSilentInstallerArgs.IntelPackageFamily intelFamily)
+            throws IOException, InterruptedException {
+        if (DriverSilentInstallerArgs.usesIntelSingleShotSilent(intelFamily)) {
+            String[] args = DriverSilentInstallerArgs.exeArgsFor(intelFamily);
+            AppLogger.info("Intel single-shot install family=" + intelFamily
+                    + " file=" + driverFile.getFileName()
+                    + " args=[" + String.join(" ", args) + "]");
+            return runSilentExeOnce(driverFile, args, candidate.source(), stage, intelFamily);
+        }
+        boolean isAmd = "AMD".equals(candidate.source());
+        String[] primaryArgs = isAmd ? new String[]{"/S"} : new String[]{"/quiet"};
+        String[] secondaryArgs = isAmd ? new String[]{"/quiet"} : new String[]{"/S"};
+        String[] tertiaryArgs = isAmd ? new String[]{"/INSTALL"} : new String[]{"/passive", "/silent"};
+
+        InstallResult lastFailed = runSilentExeOnce(driverFile, primaryArgs, candidate.source(), stage, null);
+        if (lastFailed.installed()) {
+            return lastFailed;
+        }
+        AppLogger.warning("EXE " + primaryArgs[0] + " failed, trying " + secondaryArgs[0]);
+        lastFailed = runSilentExeOnce(driverFile, secondaryArgs, candidate.source(), stage, null);
+        if (lastFailed.installed()) {
+            return new InstallResult(lastFailed.status(), lastFailed.rebootRequired(),
+                    "Driver installed silently via fallback installer."
+                            + (lastFailed.rebootRequired() ? " A restart is required." : ""));
+        }
+        for (String tertiaryArg : tertiaryArgs) {
+            AppLogger.warning("EXE trying tertiary arg " + tertiaryArg);
+            lastFailed = runSilentExeOnce(driverFile, new String[]{tertiaryArg}, candidate.source(), stage, null);
+            if (lastFailed.installed()) {
+                return new InstallResult(lastFailed.status(), lastFailed.rebootRequired(),
+                        "Driver installed silently via tertiary installer."
+                                + (lastFailed.rebootRequired() ? " A restart is required." : ""));
+            }
+        }
+        return lastFailed;
+    }
+
+    private InstallResult runSilentExeOnce(Path driverFile, String[] args, String source, String stage,
+            DriverSilentInstallerArgs.IntelPackageFamily intelFamily)
+            throws IOException, InterruptedException {
+        if (cancellationFlag.get()) {
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false, DriverInstallFailure.CANCELLED_MESSAGE);
+        }
+        java.util.List<String> command = new java.util.ArrayList<>();
+        command.add(driverFile.toString());
+        for (String arg : args) {
+            command.add(arg);
+        }
+        long startNanos = System.nanoTime();
+        boolean intelBluetooth = intelFamily == DriverSilentInstallerArgs.IntelPackageFamily.BLUETOOTH_CONSUMER;
+        String waitStage = intelBluetooth ? "installer wait" : (stage == null ? "installer wait" : stage);
+        AppLogger.info("Launching silent installer (" + source + "): "
+                + driverFile.getFileName() + " " + String.join(" ", args));
+        ProcessResult result;
+        try {
+            result = processRunner.run(command, cancellationFlag);
+        } catch (java.util.concurrent.CancellationException ce) {
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false, DriverInstallFailure.CANCELLED_MESSAGE);
+        } catch (InterruptedException ie) {
+            DriverInstallFailure.restoreInterruptFlag(ie);
+            if (cancellationFlag.get()) {
+                return new InstallResult(InstallStatus.INSTALL_FAILED, false, DriverInstallFailure.CANCELLED_MESSAGE);
+            }
+            String msg = intelBluetooth
+                    ? DriverInstallFailure.intelInstallerWaitInterrupted(source)
+                    : DriverInstallFailure.interruptedMessage(waitStage);
+            AppLogger.warning(msg, ie);
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false, msg);
+        } catch (IOException ioe) {
+            String msg = intelBluetooth
+                    ? DriverInstallFailure.intelInstallerLaunchFailure(source, driverFile, args, ioe)
+                    : DriverInstallFailure.stageFailureMessage(stage, DriverInstallFailure.deepestMessage(ioe));
+            AppLogger.warning(msg, ioe);
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false, msg);
+        }
+        logInstallerResult(source, driverFile, args, result, startNanos);
+        return classifySilentExeOutcome(result, intelFamily);
+    }
+
+    static InstallResult classifySilentExeOutcome(ProcessResult result,
+            DriverSilentInstallerArgs.IntelPackageFamily intelFamily) {
+        if (WindowsInstallerInvoke.isUsageHelpOutput(result.stdout(), result.stderr())) {
+            AppLogger.warning("Installer emitted Windows Installer usage help (exit " + result.exitCode() + "): "
+                    + truncateInstallerOutput(result.combinedOutput()));
+            String msg = intelFamily == DriverSilentInstallerArgs.IntelPackageFamily.BLUETOOTH_CONSUMER
+                    ? WindowsInstallerInvoke.INTEL_BLUETOOTH_INVALID_CMD_MESSAGE
+                    : WindowsInstallerInvoke.INVALID_INVOCATION_MESSAGE;
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false, msg);
+        }
+        boolean reboot = isRebootRequiredExitCode(result.exitCode());
+        if (result.success() || reboot) {
+            return new InstallResult(InstallStatus.SUCCESS, reboot,
+                    reboot ? "Driver installed silently. A restart is required."
+                            : "Driver installed silently.");
+        }
+        if (WindowsInstallerInvoke.isUsageHelpOutput(result.combinedOutput())) {
+            AppLogger.warning("Installer failed with usage help in output (exit " + result.exitCode() + "): "
+                    + truncateInstallerOutput(result.combinedOutput()));
+            String msg = intelFamily == DriverSilentInstallerArgs.IntelPackageFamily.BLUETOOTH_CONSUMER
+                    ? WindowsInstallerInvoke.INTEL_BLUETOOTH_INVALID_CMD_MESSAGE
+                    : WindowsInstallerInvoke.INVALID_INVOCATION_MESSAGE;
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false, msg);
+        }
+        String detail = truncateInstallerOutput(result.combinedOutput());
+        return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                "Silent installation failed (exit " + result.exitCode() + "): " + detail);
+    }
+
+    private static void logInstallerResult(String source, Path driverFile, String[] args,
+                                           ProcessResult result, long startNanos) {
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
+        AppLogger.info("Installer " + source + " " + driverFile.getFileName()
+                + " args=[" + String.join(" ", args) + "] exit=" + result.exitCode()
+                + " elapsedMs=" + elapsedMs + " output=" + truncateInstallerOutput(result.combinedOutput()));
+    }
+
+    private static String truncateInstallerOutput(String output) {
+        if (output == null || output.isBlank()) {
+            return "";
+        }
+        String trimmed = output.trim();
+        return trimmed.length() > 1500 ? trimmed.substring(0, 1500) + "… [truncated]" : trimmed;
+    }
+
+    private ProcessResult runMsiexecQuietInstall(Path msiPackage) throws IOException, InterruptedException {
+        return runMsiexecInstall(msiPackage, "/qn");
+    }
+
+    private ProcessResult runMsiexecQuietInstallAlt(Path msiPackage) throws IOException, InterruptedException {
+        return runMsiexecInstall(msiPackage, "/quiet");
+    }
+
+    private ProcessResult runMsiexecInstall(Path msiPackage, String quietFlag)
+            throws IOException, InterruptedException {
+        String validationError = WindowsInstallerInvoke.validateMsiPackage(msiPackage);
+        if (validationError != null) {
+            AppLogger.warning("MSI validation failed: " + validationError);
+            return new ProcessResult(1, "", validationError);
+        }
+        ProcessResult result = processRunner.run(java.util.List.of(new ProcessBuilder(
+                "msiexec.exe", "/i", msiPackage.toString(), quietFlag, "/norestart"
+        ).command().toArray(new String[0])), cancellationFlag);
+        if (WindowsInstallerInvoke.isUsageHelpOutput(result.stdout(), result.stderr())) {
+            return new ProcessResult(1, "", WindowsInstallerInvoke.INVALID_INVOCATION_MESSAGE);
+        }
+        return result;
     }
 
     private static boolean isRebootRequiredExitCode(int exitCode) {
@@ -1525,48 +1577,6 @@ public class DriverInstallService {
         }
     }
 
-    private boolean isTrustedSource(String url, String source) {
-        if (url == null || source == null) return false;
-        try {
-            java.net.URL u = new java.net.URL(url);
-            String host = u.getHost().toLowerCase();
-            return switch (source) {
-                case "Intel" -> host.equals("intel.com") || host.endsWith(".intel.com")
-                        || host.equals("downloadmirror.intel.com");
-                case "Nvidia" -> host.equals("nvidia.com") || host.endsWith(".nvidia.com")
-                        || host.equals("geforce.com") || host.endsWith(".geforce.com")
-                        || host.endsWith(".nvdlcdn.com");
-                case "AMD" -> host.equals("amd.com") || host.endsWith(".amd.com")
-                        || host.equals("drivers.amd.com") || host.endsWith(".drivers.amd.com");
-                case "Realtek" -> host.equals("realtek.com") || host.endsWith(".realtek.com")
-                        || host.equals("realtek.com.tw") || host.endsWith(".realtek.com.tw");
-                case "Broadcom" -> host.equals("broadcom.com") || host.endsWith(".broadcom.com");
-                case "Qualcomm" -> host.equals("qualcomm.com") || host.endsWith(".qualcomm.com");
-                case "Synaptics" -> host.equals("synaptics.com") || host.endsWith(".synaptics.com")
-                        || host.endsWith(".hp.com") || host.equals("hp.com") || host.equals("ftp.hp.com") || host.endsWith(".ftp.hp.com")
-                        || host.endsWith(".lenovo.com") || host.equals("lenovo.com");
-                case "Lenovo" -> host.equals("lenovo.com") || host.endsWith(".lenovo.com")
-                        || host.equals("lenovo-images.com") || host.endsWith(".lenovo-images.com")
-                        || host.equals("lenovo.net") || host.endsWith(".lenovo.net");
-                case "Dell" -> host.equals("dell.com") || host.endsWith(".dell.com")
-                        || host.equals("dellcdn.com") || host.endsWith(".dellcdn.com")
-                        || host.equals("dell-cdn.com") || host.endsWith(".dell-cdn.com");
-                case "HP" -> host.equals("hp.com") || host.endsWith(".hp.com")
-                        || host.equals("hpe.com") || host.endsWith(".hpe.com")
-                        || host.equals("hp.com.cn") || host.endsWith(".hp.com.cn");
-                case "ASUS" -> host.equals("asus.com") || host.endsWith(".asus.com")
-                        || host.equals("asusnet.net") || host.endsWith(".asusnet.net")
-                        || host.equals("asus.com.cn") || host.endsWith(".asus.com.cn");
-                case "WindowsUpdate" -> host.equals("microsoft.com") || host.endsWith(".microsoft.com")
-                        || host.equals("windowsupdate.com") || host.endsWith(".windowsupdate.com")
-                        || host.endsWith(".windowsupdate.microsoft.com");
-                default -> false;
-            };
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     public void cancel() {
         cancellationFlag.set(true);
         // Unblock a stalled body read (see activeDownloadStream): the loop
@@ -1587,6 +1597,7 @@ public class DriverInstallService {
     }
 
     public record InstallResult(InstallStatus status, boolean rebootRequired, String message) {
+        /** Installer/WU finished without a failure status — not a verified on-disk version bump. */
         public boolean installed() {
             return status.isSuccess();
         }

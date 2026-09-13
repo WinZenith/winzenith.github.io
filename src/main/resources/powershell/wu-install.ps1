@@ -49,15 +49,16 @@ try {
     $installer = $session.CreateUpdateInstaller()
     $installer.Updates = $toInstall
     $installResult = $installer.Install()
+    $perUpdateCode = [int]$installResult.GetUpdateResult(0).ResultCode
 
     @{
         resultCode     = [int]$installResult.ResultCode
         rebootRequired = [bool]$installResult.RebootRequired
-        installed      = [int]$installResult.GetUpdateResult(0).ResultCode
+        installed      = $perUpdateCode
     } | ConvertTo-Json -Compress
 
-    if ($installResult.ResultCode -ne 2) {
-        [Console]::Error.WriteLine("Windows Update install failed: ResultCode=$([int]$installResult.ResultCode)")
+    if ($installResult.ResultCode -ne 2 -or $perUpdateCode -ne 2) {
+        [Console]::Error.WriteLine("Windows Update install failed: ResultCode=$([int]$installResult.ResultCode) updateResult=$perUpdateCode")
         exit 4
     }
 } catch {

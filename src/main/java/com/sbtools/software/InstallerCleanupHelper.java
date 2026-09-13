@@ -1,8 +1,10 @@
 package com.sbtools.software;
 
+import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.util.Duration;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -16,17 +18,13 @@ import java.util.concurrent.CompletableFuture;
  */
 public final class InstallerCleanupHelper {
 
+    private static final long CLEANUP_DIALOG_TIMEOUT_MS = 90_000L;
+
     private InstallerCleanupHelper() {
     }
 
     /**
-     * Asynchronously prompts the user to delete installer files detected in the Downloads folder.
-     * Runs the dialog on the JavaFX thread and returns a CompletableFuture with the result.
-     *
-     * @param service   the update service (for finding/deleting files)
-     * @param entry     the update entry that was installed
-     * @param since     timestamp to search for candidate files (typically install start time)
-     * @return CompletableFuture that completes with true if files were deleted
+     * Asynchronously prompts the user to delete installer files detected in the winget download cache.
      */
     public static CompletableFuture<Boolean> promptAndCleanupAsync(SoftwareUpdateService service,
                                                                    SoftwareUpdateEntry entry,
@@ -41,17 +39,12 @@ public final class InstallerCleanupHelper {
             Platform.runLater(() -> {
                 try {
                     StringBuilder sb = new StringBuilder();
-                    for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
+                    for (Path p : candidates) sb.append(p.toString()).append("\n");
                     Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                            "The following installer files were detected in your Downloads folder:\n\n"
+                            "The following file(s) were detected in the winget download cache:\n\n"
                                     + sb + "\nDelete these files?\n\n(Auto-declines after 90 seconds.)");
-                    del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
-                    autoDeclineAfter(del, result, 90_000L);
-                    boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
-                    if (confirmed) {
-                        service.deleteInstallerFiles(candidates);
-                    }
-                    result.complete(confirmed);
+                    del.setHeaderText("Clean winget cache for " + (entry.getName() != null ? entry.getName() : entry.id()));
+                    runCleanupDialog(del, result, () -> service.deleteInstallerFiles(candidates));
                 } catch (Exception ex) {
                     com.sbtools.util.AppLogger.warning("promptAndCleanupAsync failed: " + ex.getMessage());
                     result.complete(false);
@@ -60,23 +53,9 @@ public final class InstallerCleanupHelper {
         } catch (Exception ex) {
             result.complete(false);
         }
-        // Safety: timeout after 90s so callers don't hang forever; do NOT double-complete original future (B3 fix)
-        return result.orTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
-                .exceptionally(ex -> {
-                    com.sbtools.util.AppLogger.warning("promptAndCleanupAsync timeout: " + ex.getMessage());
-                    return false;
-                });
+        return result;
     }
 
-    /**
-     * Asynchronously prompts the user to delete installer files for all successfully
-     * updated packages in a batch. Shows a single consolidated dialog.
-     *
-     * @param service   the update service (for finding/deleting files)
-     * @param packages  the list of successfully installed packages
-     * @param since     timestamp to search for candidate files (typically batch start time)
-     * @return CompletableFuture that completes with true if files were deleted
-     */
     public static CompletableFuture<Boolean> promptAndCleanupBatchAsync(SoftwareUpdateService service,
                                                                         List<SoftwareUpdateEntry> packages,
                                                                         Instant since) {
@@ -96,23 +75,20 @@ public final class InstallerCleanupHelper {
                         String name = entry.getKey().getName() != null ? entry.getKey().getName() : entry.getKey().id();
                         sb.append(name).append(":\n");
                         for (Path p : entry.getValue()) {
-                            sb.append("  ").append(p.getFileName().toString()).append("\n");
+                            sb.append("  ").append(p.toString()).append("\n");
                             totalFiles++;
                         }
                         sb.append("\n");
                     }
                     Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                            "The following installer files (" + totalFiles + " file(s)) were detected in your Downloads folder:\n\n"
+                            "The following file(s) (" + totalFiles + ") were detected in the winget download cache:\n\n"
                                     + sb + "Delete these files?\n\n(Auto-declines after 90 seconds.)");
-                    del.setHeaderText("Clean up installer files");
-                    autoDeclineAfter(del, result, 90_000L);
-                    boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
-                    if (confirmed) {
+                    del.setHeaderText("Clean winget download cache");
+                    runCleanupDialog(del, result, () -> {
                         for (List<Path> files : allCandidates.values()) {
                             service.deleteInstallerFiles(files);
                         }
-                    }
-                    result.complete(confirmed);
+                    });
                 } catch (Exception ex) {
                     com.sbtools.util.AppLogger.warning("promptAndCleanupBatchAsync failed: " + ex.getMessage());
                     result.complete(false);
@@ -121,46 +97,32 @@ public final class InstallerCleanupHelper {
         } catch (Exception ex) {
             result.complete(false);
         }
-        return result.orTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
-                .exceptionally(ex -> {
-                    com.sbtools.util.AppLogger.warning("promptAndCleanupBatchAsync timeout: " + ex.getMessage());
-                    return false;
-                });
+        return result;
     }
 
-    /**
-     * Auto-closes a modal cleanup dialog after {@code timeoutMs} (or immediately
-     * when its future already completed) so a walk-away can never hold FX --
-     * and therefore {@code globalBusy} -- indefinitely. The orTimeout() on the
-     * future alone is NOT enough because showAndWait() blocks the FX thread and
-     * queues all later runLater work behind the open dialog.
-     */
-    private static void autoDeclineAfter(Alert dialog, CompletableFuture<Boolean> future, long timeoutMs) {
-        Thread watcher = new Thread(() -> {
-            try {
-                long deadline = System.currentTimeMillis() + Math.max(5_000L, timeoutMs);
-                while (!future.isDone() && System.currentTimeMillis() < deadline) {
-                    try {
-                        Thread.sleep(500);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
+    private static void runCleanupDialog(Alert del, CompletableFuture<Boolean> result, Runnable onConfirmDelete) {
+        PauseTransition timeout = new PauseTransition(Duration.millis(CLEANUP_DIALOG_TIMEOUT_MS));
+        timeout.setOnFinished(e -> {
+            if (!result.isDone()) {
+                com.sbtools.util.AppLogger.warning("Cleanup dialog auto-declined after timeout");
+                try {
+                    del.setResult(ButtonType.CANCEL);
+                    del.hide();
+                } catch (Exception ignored) {}
+                result.complete(false);
+            }
+        });
+        timeout.play();
+        try {
+            boolean confirmed = del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
+            if (!result.isDone()) {
+                if (confirmed && onConfirmDelete != null) {
+                    onConfirmDelete.run();
                 }
-                if (!future.isDone()) {
-                    Platform.runLater(() -> {
-                        try {
-                            if (!future.isDone()) {
-                                com.sbtools.util.AppLogger.warning("Cleanup dialog auto-declined after timeout");
-                                dialog.setResult(ButtonType.CANCEL);
-                                dialog.hide();
-                            }
-                        } catch (Exception ignored) {}
-                    });
-                }
-            } catch (Exception ignored) {}
-        }, "installer-cleanup-watcher");
-        watcher.setDaemon(true);
-        watcher.start();
+                result.complete(confirmed);
+            }
+        } finally {
+            timeout.stop();
+        }
     }
 }

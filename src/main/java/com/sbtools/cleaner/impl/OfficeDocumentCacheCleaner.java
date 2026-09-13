@@ -62,7 +62,10 @@ public class OfficeDocumentCacheCleaner implements CleanerExtension {
                         if (Files.isDirectory(versionDir)) {
                             Path fileCache = versionDir.resolve("OfficeFileCache");
                             if (Files.isDirectory(fileCache)
-                                    && CleanerUtils.isSafeToCleanDirectory(fileCache)) cleaned += CleanerUtils.deleteDirectoryContents(fileCache, token);
+                                    && CleanerUtils.isSafeToCleanDirectory(fileCache)) {
+                                cleaned += CleanerUtils.deleteDirectoryContents(fileCache,
+                                        CleanerUtils.DEFAULT_SCAN_MAX_DEPTH, token);
+                            }
                         }
                     }
                 } catch (Exception ignored) {}

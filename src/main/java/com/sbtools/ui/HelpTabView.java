@@ -31,9 +31,9 @@ public class HelpTabView extends VBox {
                 "The Dashboard is read-only — it never changes your system. It honors excluded drivers and skipped software."));
 
         getChildren().add(createFaqSection("Drivers",
-                "The Drivers tab scans installed devices and compares them against catalogs for Nvidia, AMD, Intel, Realtek, Broadcom, Qualcomm, Synaptics, Lenovo, Dell, HP, ASUS and Windows Update. " +
+                "The Drivers tab scans installed devices and checks Windows Update, live NVIDIA/Intel sources, and catalog-backed vendors when fresh catalog data is available (configure WINZENITH_CATALOG_URL to refresh). " +
                 "Click \"Scan\" to detect updates. Each outdated row shows Device, Current vs Available version, Severity (Critical / Important / Recommended / Optional / Unknown, plus REBOOT and ISSUE badges) and Health (Excellent / Good / Fair / Poor). " +
-                "Tick rows and click \"Update Selected\" or \"Update All\", or use per-row \"Update\". Use per-row \"Ignore\" and \"Ignored\" to hide drivers, \"History\" to audit installs, \"Details\" / \"Compare\" for full info, \"Refresh Catalog\" for the latest catalog, and \"Search...\" to filter. \"Backup\" backs up all drivers. \"Stop\" / \"Stop Install\" / \"Stop Backup\" cancel the running operation. " +
+                "Tick rows and click \"Update Selected\" or \"Update All\", or use per-row \"Update\". Use per-row \"Ignore\" and \"Ignored\" to hide drivers, \"History\" to audit installs, \"Details\" / \"Compare\" for full info, and \"Search...\" to filter. \"Backup\" backs up all drivers. \"Stop\" / \"Stop Install\" / \"Stop Backup\" cancel the running operation. Set WINZENITH_CATALOG_URL to download a refreshed driver catalog. " +
                 "Admin rights are required. Before install the app runs pre-checks, can auto-backup drivers and create a restore point if enabled, blocks pre-release / untrusted / unsigned packages, and may ask for a manual vendor download. " +
                 "Drivers awaiting restart stay listed with a REBOOT badge until you reboot."));
 
@@ -61,7 +61,7 @@ public class HelpTabView extends VBox {
                 "This tab is read-only and does not modify any system settings."));
 
         getChildren().add(createFaqSection("Uninstaller",
-                "The Uninstaller tab lists installed apps. Toggle \"Desktop Apps\" / \"Windows Store Apps\", click \"Scan\" (\"Cancel\" stops it), and use \"Search apps...\" to filter. " +
+                "The Uninstaller tab lists installed apps. Toggle \"Desktop Apps\" / \"Windows Store Apps\" (Store list/removal is for the current Windows user), click \"Scan\" (\"Cancel\" stops listing and size loading; an active vendor uninstall is left to finish safely), and use \"Search apps...\" to filter. " +
                 "Select an app and click \"Uninstall\" (runs the vendor uninstaller, Interactive or Silent), or \"Force Uninstall\" as a last resort without it. " +
                 "Select 2+ apps and click \"Uninstall Selected (N)\" to remove them one-by-one — each app still asks for confirmation, mode, and restore point. " +
                 "After uninstallation, the app scans for leftover files, folders, and registry entries. Review them in the leftovers dialog: files go to the Recycle Bin by default (recoverable), registry keys are backed up to .reg first (checked by default). " +

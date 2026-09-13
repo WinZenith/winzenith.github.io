@@ -1,5 +1,6 @@
 package com.sbtools.ui;
 
+import com.sbtools.uninstaller.AppDiscoveryException;
 import com.sbtools.uninstaller.InstalledApp;
 import com.sbtools.uninstaller.LeftoverItem;
 import com.sbtools.uninstaller.UninstallHistoryEntry;
@@ -43,6 +44,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 public class UninstallerTabView extends BorderPane {
 
@@ -99,6 +101,9 @@ public class UninstallerTabView extends BorderPane {
     private volatile boolean disposed = false;
     // Batch queue state (sequential with per-app prompts)
     private volatile boolean queueStopRequested = false;
+    private volatile boolean queueActive = false;
+    private final UninstallerOperationGate operationGate = new UninstallerOperationGate();
+    private volatile Consumer<UninstallerOperationGate.WorkflowOutcome> pendingWorkflowCallback;
 
     public UninstallerTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -479,6 +484,10 @@ public class UninstallerTabView extends BorderPane {
                     app.getVersion().toLowerCase().contains(lower) ||
                     app.getArchitecture().toLowerCase().contains(lower)
             );
+            var sel = table.getSelectionModel().getSelectedItems();
+            if (sel != null && !sel.isEmpty()) {
+                sel.retainAll(filteredApps);
+            }
         }
         updateCountLabel();
     }
@@ -529,17 +538,36 @@ public class UninstallerTabView extends BorderPane {
     }
 
     private void cancelCurrentOperation() {
+        if (queueActive && !operationGate.cancelStopsWorkImmediately()) {
+            queueStopRequested = true;
+            statusLabel.setText("Queue will stop after the current app.");
+            return;
+        }
         try {
             scanCancellationToken.cancel();
         } catch (Exception ignored) {}
         try {
+            operationGate.requestCancel();
+        } catch (Exception ignored) {}
+        try {
             leftoverCancel.set(true);
         } catch (Exception ignored) {}
-        // SECOND-PASS FIX: Cancel must also stop a running batch queue after the
-        // current app settles. Previously Cancel only aborted scans/leftover
-        // enumeration, so a 20-app queue could not be stopped mid-flight.
         queueStopRequested = true;
         statusLabel.setText("Cancelling...");
+    }
+
+    private void finishWorkflow(UninstallerOperationGate.WorkflowOutcome outcome) {
+        Consumer<UninstallerOperationGate.WorkflowOutcome> cb = pendingWorkflowCallback;
+        pendingWorkflowCallback = null;
+        if (cb != null) {
+            Platform.runLater(() -> cb.accept(outcome));
+        }
+    }
+
+    private void recordLeftoverScanCancelled(InstalledApp app, String mode,
+                                           ProcessResult uninstallResult, int exitCode) {
+        recordHistory(app, mode, uninstallResult != null && uninstallResult.succeeded(),
+                exitCode, 0, "leftover scan cancelled");
     }
 
     private void updateDetailsBar() {
@@ -691,12 +719,14 @@ public class UninstallerTabView extends BorderPane {
         scanCancellationToken.cancel();
         CancellationToken ct = new CancellationToken();
         scanCancellationToken = ct;
+        operationGate.begin(UninstallerOperationGate.Phase.LIST_SCAN);
+        AtomicBoolean scanCancel = ct.asAtomicBoolean();
 
         Thread t = new Thread(() -> {
             try {
                 List<InstalledApp> apps;
                 if (scanWin32) {
-                    apps = service.listWin32Apps();
+                    apps = service.listWin32Apps(scanCancel);
                 } else {
                     // Fast list first for instant display; sizes enriched lazily below.
                     // BLOCKER FIX: forward the scan token so Cancel taskkills the
@@ -704,33 +734,29 @@ public class UninstallerTabView extends BorderPane {
                     apps = service.listAppxAppsFast(ct.asAtomicBoolean());
                 }
 
-                if (ct.isCancelled()) return;
+                if (ct.isCancelled() || scanCancel.get()) return;
 
                 Platform.runLater(() -> {
-                    if (ct.isCancelled()) return;
+                    if (ct.isCancelled() || scanCancel.get()) return;
                     allApps.setAll(apps);
                     applyFilter();
                     statusLabel.setText("Found " + apps.size() + " app(s).");
                 });
 
-                // Lazy AppX size enrichment (background, cancellable, non-blocking).
-                // Release busy right after the instant list so the tab stays usable
-                // while sizes resolve; enrichment is cancelled by a new scan/dispose.
                 if (!scanWin32 && !apps.isEmpty()) {
+                    operationGate.begin(UninstallerOperationGate.Phase.SIZE_ENRICHMENT);
                     Platform.runLater(() -> {
                         if (scanCancellationToken == ct) {
-                            busy.set(false);
-                            progress.setVisible(false);
-                            cancelButton.setDisable(true);
+                            statusLabel.setText("Found " + apps.size() + " app(s). Loading sizes...");
                         }
                     });
                     for (int i = 0; i < apps.size(); i++) {
-                        if (ct.isCancelled() || disposed) break;
+                        if (ct.isCancelled() || scanCancel.get() || disposed) break;
                         InstalledApp a = apps.get(i);
                         if (a.getEstimatedSize() > 0) continue;
                         int kb = 0;
                         try {
-                            kb = service.computeAppxSizeKB(a);
+                            kb = service.computeAppxSizeKB(a, scanCancel);
                         } catch (Exception ignored) {}
                         if (kb > 0 && !ct.isCancelled()) {
                             final int idx = i;
@@ -764,20 +790,25 @@ public class UninstallerTabView extends BorderPane {
                     });
                 }
             } catch (java.util.concurrent.CancellationException ce) {
-                // User pressed Cancel (or tab disposed): exit quietly, no error dialog.
-                // busy/progress are cleared by the finally block below.
                 return;
+            } catch (AppDiscoveryException e) {
+                if (ct.isCancelled() || scanCancel.get()) return;
+                AppLogger.error("Failed to scan apps", e);
+                Platform.runLater(() -> {
+                    statusLabel.setText("Scan failed.");
+                    new Alert(Alert.AlertType.ERROR, "Failed to scan installed apps:\n" + e.getMessage()).showAndWait();
+                });
             } catch (Exception e) {
-                if (ct.isCancelled()) return;
+                if (ct.isCancelled() || scanCancel.get()) return;
                 AppLogger.error("Failed to scan apps", e);
                 Platform.runLater(() -> {
                     statusLabel.setText("Scan failed.");
                     new Alert(Alert.AlertType.ERROR, "Failed to scan installed apps:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
+                operationGate.end(UninstallerOperationGate.Phase.SIZE_ENRICHMENT);
+                operationGate.end(UninstallerOperationGate.Phase.LIST_SCAN);
                 Platform.runLater(() -> {
-                    // Always clear busy/progress when this scan finishes unless a newer scan
-                    // has already replaced the token (in which case newer scan owns busy).
                     if (scanCancellationToken == ct) {
                         busy.set(false);
                         progress.setVisible(false);
@@ -824,6 +855,7 @@ public class UninstallerTabView extends BorderPane {
                 + "You can stop the queue after any app.");
         info.initModality(Modality.APPLICATION_MODAL);
         if (info.showAndWait().orElse(null) != ButtonType.OK) return;
+        queueActive = true;
         queueProgress.setVisible(true);
         queueProgress.setProgress(0);
         processQueueNext(new ArrayList<>(sel), 0, sel.size());
@@ -833,6 +865,7 @@ public class UninstallerTabView extends BorderPane {
         if (queueStopRequested || index >= queue.size()) {
             queueProgress.setVisible(false);
             queueStopRequested = false;
+            queueActive = false;
             statusLabel.setText("Queue finished (" + index + "/" + total + "). Refreshing...");
             scan();
             return;
@@ -865,9 +898,17 @@ public class UninstallerTabView extends BorderPane {
         }
         // Hook completion: run single flow but chain to next item afterwards.
         // uninstallSingleApp is dialog-driven; we wrap by monitoring busy transitions.
-        uninstallSingleAppWithCompletion(app, () -> {
+        uninstallSingleAppWithCompletion(app, outcome -> {
+            if (outcome == UninstallerOperationGate.WorkflowOutcome.CANCELLED) {
+                queueProgress.setVisible(false);
+                queueActive = false;
+                statusLabel.setText("Queue stopped.");
+                scan();
+                return;
+            }
             if (queueStopRequested) {
                 queueProgress.setVisible(false);
+                queueActive = false;
                 scan();
                 return;
             }
@@ -901,38 +942,24 @@ public class UninstallerTabView extends BorderPane {
      * leftover review / cancellation / rescan trigger) settles. Implemented by
      * polling the shared busy flag rather than changing existing flows.
      */
-    private void uninstallSingleAppWithCompletion(InstalledApp app, Runnable onDone) {
+    private void uninstallSingleAppWithCompletion(InstalledApp app,
+                                                  Consumer<UninstallerOperationGate.WorkflowOutcome> onDone) {
+        pendingWorkflowCallback = onDone;
         uninstallSingleApp(app);
-        // If user cancelled at a pre-busy dialog, busy never went high — call back immediately.
-        javafx.animation.PauseTransition probe = new javafx.animation.PauseTransition(Duration.millis(500));
-        probe.setOnFinished(ev -> {
-            if (!busy.get()) {
-                Platform.runLater(onDone);
-            } else {
-                // Wait until busy clears (workflow finished), then callback.
-                Thread waiter = new Thread(() -> {
-                    try {
-                        for (int i = 0; i < 3600; i++) {
-                            Thread.sleep(1000);
-                            if (!busy.get()) break;
-                            if (queueStopRequested) break;
-                        }
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                    Platform.runLater(onDone);
-                }, "uninstall-queue-waiter");
-                waiter.setDaemon(true);
-                waiter.start();
-            }
-        });
-        probe.play();
     }
 
     private void uninstallSingleApp(InstalledApp selected) {
-        if (selected == null || busy.get()) return;
-        if (!selected.canUninstall()) {
+        uninstallSingleApp(selected, false);
+    }
+
+    private void uninstallSingleApp(InstalledApp selected, boolean forcePath) {
+        if (selected == null || busy.get()) {
+            finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
+            return;
+        }
+        if (!forcePath && !selected.canUninstall()) {
             offerWingetFallback(selected);
+            finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
             return;
         }
 
@@ -943,7 +970,15 @@ public class UninstallerTabView extends BorderPane {
             adminWarn.setContentText("Some uninstall operations may fail without administrator privileges.\n\n" +
                     "Consider restarting the application as administrator.\n\nContinue anyway?");
             adminWarn.initModality(Modality.APPLICATION_MODAL);
-            if (adminWarn.showAndWait().orElse(null) != ButtonType.OK) return;
+            if (adminWarn.showAndWait().orElse(null) != ButtonType.OK) {
+                finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
+                return;
+            }
+        }
+
+        if (forcePath) {
+            runForceUninstallAfterRestorePrompt(selected);
+            return;
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
@@ -952,12 +987,30 @@ public class UninstallerTabView extends BorderPane {
         confirm.setContentText("Are you sure you want to run the default uninstaller for " + selected.getName() + "?");
         confirm.initModality(Modality.APPLICATION_MODAL);
 
-        if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
-            // When the vendor provides both interactive and silent uninstallers,
-            // let the user choose. Interactive is the default — silent skips
-            // vendor prompts (e.g. "keep user data") and must never run by surprise.
-            boolean preferQuiet = false;
-            if (selected.isWin32() && selected.hasQuietUninstallString() && selected.hasUninstallString()
+        if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
+            finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
+            return;
+        }
+        // When the vendor provides both interactive and silent uninstallers,
+        // let the user choose. Interactive is the default — silent skips
+        // vendor prompts (e.g. "keep user data") and must never run by surprise.
+        boolean preferQuiet = false;
+        if (selected.isWin32() && selected.isQuietOnlyUninstall()) {
+            Alert quietWarn = new Alert(Alert.AlertType.WARNING);
+            quietWarn.setTitle("Silent Uninstall");
+            quietWarn.setHeaderText("This app only provides a silent uninstaller");
+            quietWarn.setContentText("Continuing will run the uninstaller without vendor prompts "
+                    + "(user data may be removed without asking).\n\nContinue with silent uninstall?");
+            quietWarn.initModality(Modality.APPLICATION_MODAL);
+            ButtonType cont = new ButtonType("Continue");
+            ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+            quietWarn.getButtonTypes().setAll(cont, cancelBtn);
+            if (quietWarn.showAndWait().orElse(cancelBtn) != cont) {
+                finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
+                return;
+            }
+            preferQuiet = true;
+        } else if (selected.isWin32() && selected.hasQuietUninstallString() && selected.hasInteractiveUninstallString()
                     && !selected.getQuietUninstallString().equals(selected.getUninstallString())) {
                 Alert modeDialog = new Alert(Alert.AlertType.CONFIRMATION);
                 modeDialog.setTitle("Uninstall Mode");
@@ -970,14 +1023,21 @@ public class UninstallerTabView extends BorderPane {
                 ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
                 modeDialog.getButtonTypes().setAll(interactiveBtn, silentBtn, cancelBtn);
                 ButtonType mode = modeDialog.showAndWait().orElse(cancelBtn);
-                if (mode == cancelBtn) return;
+                if (mode == cancelBtn) {
+                    finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
+                    return;
+                }
                 preferQuiet = (mode == silentBtn);
             }
-            final boolean useQuiet = preferQuiet;
+        final boolean useQuiet = preferQuiet;
+        offerRestoreThenRun(selected, useQuiet, () -> runUninstallWizard(selected, useQuiet));
+    }
+
+    private void offerRestoreThenRun(InstalledApp app, boolean preferQuiet, Runnable continuation) {
             Alert restorePointDialog = new Alert(Alert.AlertType.CONFIRMATION);
             restorePointDialog.setTitle("System Restore Point");
             restorePointDialog.setHeaderText("Create a restore point?");
-            restorePointDialog.setContentText("Would you like to create a System Restore point before uninstalling " + selected.getName() + "?");
+            restorePointDialog.setContentText("Would you like to create a System Restore point before uninstalling " + app.getName() + "?");
             restorePointDialog.initModality(Modality.APPLICATION_MODAL);
 
             ButtonType yesBtn = new ButtonType("Yes");
@@ -986,15 +1046,34 @@ public class UninstallerTabView extends BorderPane {
 
             ButtonType result = restorePointDialog.showAndWait().orElse(null);
             if (result == yesBtn) {
-                runUninstallWithRestorePoint(selected, useQuiet);
+                runUninstallWithRestorePoint(app, preferQuiet, continuation);
             } else if (result == noBtn) {
-                runUninstallWizard(selected, useQuiet);
+                continuation.run();
+            } else {
+                finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
             }
-        }
     }
 
-    private void runUninstallWithRestorePoint(InstalledApp app) {
-        runUninstallWithRestorePoint(app, false);
+    private void runForceUninstallAfterRestorePrompt(InstalledApp selected) {
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Confirm Force Uninstall");
+        confirm.setHeaderText("Force remove " + selected.getName() + "?");
+        if (selected.isWin32()) {
+            confirm.setContentText("This will forcefully remove all traces of " + selected.getName() + " without running the standard uninstaller.\n\n" +
+                    "This includes: killing processes, deleting files, removing registry entries, and deleting Start Menu shortcuts.\n\n" +
+                    "This action cannot be undone!");
+        } else {
+            confirm.setContentText("This will forcefully remove the Store package " + selected.getName() + " via Remove-AppxPackage "
+                    + "without running any vendor uninstaller, then clean its Start Menu shortcuts.\n\n"
+                    + "The protected WindowsApps folder is never deleted directly.\n\n"
+                    + "This action cannot be undone!");
+        }
+        confirm.initModality(Modality.APPLICATION_MODAL);
+        if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
+            finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
+            return;
+        }
+        offerRestoreThenRun(selected, false, () -> executeForceUninstall(selected));
     }
 
     private void offerWingetFallback(InstalledApp app) {
@@ -1013,7 +1092,7 @@ public class UninstallerTabView extends BorderPane {
         if (choice == wingetBtn) {
             runWingetUninstall(app);
         } else if (choice == forceBtn) {
-            triggerForceUninstallForApp(app);
+            runForceUninstallAfterRestorePrompt(app);
         }
     }
 
@@ -1089,38 +1168,30 @@ public class UninstallerTabView extends BorderPane {
         }
     }
 
-    private void runUninstallWithRestorePoint(InstalledApp app, boolean preferQuiet) {
+    private void runUninstallWithRestorePoint(InstalledApp app, boolean preferQuiet, Runnable continuation) {
         busy.set(true);
         progress.setVisible(true);
         statusLabel.setText("Creating System Restore point...");
+        operationGate.begin(UninstallerOperationGate.Phase.RESTORE_POINT);
+        AtomicBoolean restoreCancel = operationGate.cancelFlag();
 
         Thread t = new Thread(() -> {
             try {
-                // Reuse the shared Backup restore service (checkpoint-restore.ps1 with
-                // JSON result + frequency-limit / protection-disabled detection).
                 com.sbtools.backup.SystemRestoreService.RestorePointResult rp =
-                        restoreService.createRestorePoint("Before uninstalling " + app.getName());
+                        restoreService.createRestorePoint("Before uninstalling " + app.getName(), restoreCancel);
                 if (!rp.success()) {
                     String err = rp.error() == null ? "" : rp.error();
-                    boolean freqLimit = err.contains("FREQUENCY_LIMIT");
-                    boolean disabled = err.contains("PROTECTION_DISABLED")
-                            || err.toLowerCase().contains("restore")
-                            || err.toLowerCase().contains("protection");
-                    String friendly = err.replace("FREQUENCY_LIMIT:", "").replace("PROTECTION_DISABLED:", "").trim();
-                    if (friendly.isBlank()) friendly = "(no details)";
-                    final String msg = friendly;
-                    final boolean showFreq = freqLimit;
+                    var presentation = UninstallerOperationGate.classifyRestorePointError(err);
+                    String msg = UninstallerOperationGate.stripRestoreErrorPrefixes(err);
                     Platform.runLater(() -> {
                         progress.setVisible(false);
+                        operationGate.end(UninstallerOperationGate.Phase.RESTORE_POINT);
                         Alert errorAlert = new Alert(Alert.AlertType.WARNING);
                         errorAlert.setTitle("Restore Point Failed");
-                        errorAlert.setHeaderText(showFreq ? "Restore point skipped (Windows 24h limit)"
-                                : (disabled ? "System Restore is disabled" : "Could not create restore point"));
+                        errorAlert.setHeaderText(presentation.headerText());
                         errorAlert.setContentText("Failed to create a System Restore point:\n" + msg
-                                + (disabled ? "\n\nTip: Enable System Protection for the system drive to use restore points." : "")
-                                + (showFreq ? "\n\nWindows allows one restore point per 24h by default. "
-                                        + "You can still continue safely." : "")
-                                + "\n\nDo you want to continue with the uninstall?");
+                                + presentation.tipSuffix()
+                                + "\n\nDo you want to continue?");
                         errorAlert.initModality(Modality.APPLICATION_MODAL);
 
                         ButtonType yesBtn = new ButtonType("Yes");
@@ -1128,34 +1199,51 @@ public class UninstallerTabView extends BorderPane {
                         errorAlert.getButtonTypes().setAll(yesBtn, noBtn);
 
                         if (errorAlert.showAndWait().orElse(noBtn) == yesBtn) {
-                            runUninstallWizard(app, preferQuiet);
+                            continuation.run();
                         } else {
                             busy.set(false);
                             progress.setVisible(false);
                             statusLabel.setText("Uninstallation cancelled.");
                             recordHistory(app, preferQuiet ? "Silent" : "Standard",
                                     false, -1, 0, "cancelled at restore-point prompt");
+                            finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
                         }
                     });
                     return;
                 }
 
                 Platform.runLater(() -> {
-                    statusLabel.setText("Restore point created. Starting uninstaller...");
-                    runUninstallWizard(app, preferQuiet);
+                    operationGate.end(UninstallerOperationGate.Phase.RESTORE_POINT);
+                    statusLabel.setText("Restore point created. Starting...");
+                    continuation.run();
+                });
+            } catch (java.util.concurrent.CancellationException ce) {
+                Platform.runLater(() -> {
+                    operationGate.end(UninstallerOperationGate.Phase.RESTORE_POINT);
+                    busy.set(false);
+                    progress.setVisible(false);
+                    statusLabel.setText("Cancelled.");
+                    finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
                 });
             } catch (Exception e) {
                 AppLogger.error("Failed to create restore point", e);
                 Platform.runLater(() -> {
+                    operationGate.end(UninstallerOperationGate.Phase.RESTORE_POINT);
                     progress.setVisible(false);
                     busy.set(false);
                     statusLabel.setText("Restore point failed.");
                     new Alert(Alert.AlertType.ERROR, "Failed to create System Restore point:\n" + e.getMessage()).showAndWait();
+                    finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
                 });
             }
         }, "restore-point");
         t.setDaemon(true);
         t.start();
+    }
+
+    private void refreshAfterUninstallWorkflow() {
+        scan();
+        finishWorkflow(UninstallerOperationGate.WorkflowOutcome.COMPLETED);
     }
 
     private void runUninstallWizard(InstalledApp app) {
@@ -1168,6 +1256,7 @@ public class UninstallerTabView extends BorderPane {
         if (!alreadyBusy) {
             busy.set(true);
         }
+        operationGate.begin(UninstallerOperationGate.Phase.VENDOR_UNINSTALL);
         progress.setVisible(true);
         statusLabel.setText("Running uninstaller for " + app.getName() + "...");
 
@@ -1211,12 +1300,15 @@ public class UninstallerTabView extends BorderPane {
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         Platform.runLater(() -> {
+                            operationGate.end(UninstallerOperationGate.Phase.VENDOR_UNINSTALL);
                             busy.set(false);
                             progress.setVisible(false);
                             statusLabel.setText("Uninstallation cancelled.");
+                            finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
                         });
                         return;
                     }
+                    operationGate.end(UninstallerOperationGate.Phase.VENDOR_UNINSTALL);
                     if (userChoice.get() == scanBtn) {
                         Platform.runLater(() -> {
                             progress.setVisible(true);
@@ -1234,11 +1326,13 @@ public class UninstallerTabView extends BorderPane {
                             busy.set(false);
                             progress.setVisible(false);
                             statusLabel.setText("Uninstallation cancelled.");
+                            refreshAfterUninstallWorkflow();
                         });
                     }
                     return;
                 }
 
+                operationGate.end(UninstallerOperationGate.Phase.VENDOR_UNINSTALL);
                 if (rebootRequired) {
                     final String rebootNote = "Uninstaller reported success but a reboot is required to finish removal (exit code "
                             + result.exitCode() + ").";
@@ -1251,10 +1345,12 @@ public class UninstallerTabView extends BorderPane {
             } catch (Exception e) {
                 AppLogger.error("Error during uninstallation workflow", e);
                 Platform.runLater(() -> {
+                    operationGate.end(UninstallerOperationGate.Phase.VENDOR_UNINSTALL);
                     busy.set(false);
                     progress.setVisible(false);
                     statusLabel.setText("Workflow interrupted.");
                     new Alert(Alert.AlertType.ERROR, "An error occurred during uninstallation:\n" + e.getMessage()).showAndWait();
+                    finishWorkflow(UninstallerOperationGate.WorkflowOutcome.FAILED);
                 });
             }
         }, "uninstallation-workflow");
@@ -1279,6 +1375,7 @@ public class UninstallerTabView extends BorderPane {
                                       ProcessResult uninstallResult, int exitCode, boolean rebootRequired,
                                       String mode) {
         leftoverCancel.set(false);
+        operationGate.begin(UninstallerOperationGate.Phase.LEFTOVER_SCAN);
         Platform.runLater(() -> {
             statusLabel.setText("Scanning leftovers for " + app.getName() + "... (Cancel to skip)");
             progress.setVisible(true);
@@ -1293,10 +1390,9 @@ public class UninstallerTabView extends BorderPane {
                 statusLabel.setText("Leftover scan cancelled.");
                 busy.set(false);
                 cancelButton.setDisable(true);
-                recordHistory(app, mode, uninstallResult != null && uninstallResult.succeeded(),
-                        exitCode, 0, cancelFlag.get() ? "leftover scan cancelled"
-                                : ("rebootRequired=" + rebootRequired));
-                scan();
+                recordLeftoverScanCancelled(app, mode, uninstallResult, exitCode);
+                operationGate.end(UninstallerOperationGate.Phase.LEFTOVER_SCAN);
+                refreshAfterUninstallWorkflow();
             });
             return;
         }
@@ -1309,7 +1405,9 @@ public class UninstallerTabView extends BorderPane {
             if (cancelFlag.get()) {
                 statusLabel.setText("Leftover scan cancelled.");
                 busy.set(false);
-                scan();
+                recordLeftoverScanCancelled(app, mode, uninstallResult, exitCode);
+                operationGate.end(UninstallerOperationGate.Phase.LEFTOVER_SCAN);
+                refreshAfterUninstallWorkflow();
                 return;
             }
             statusLabel.setText("Scanning completed.");
@@ -1366,7 +1464,7 @@ public class UninstallerTabView extends BorderPane {
                 warn.showAndWait();
             }
             busy.set(false);
-            scan();
+            refreshAfterUninstallWorkflow();
             return;
         }
 
@@ -1521,7 +1619,7 @@ public class UninstallerTabView extends BorderPane {
             busy.set(false);
             progress.setVisible(false);
             statusLabel.setText("Cancelled — refreshing list...");
-            scan();
+            refreshAfterUninstallWorkflow();
             return;
         }
 
@@ -1532,6 +1630,7 @@ public class UninstallerTabView extends BorderPane {
         progress.setVisible(true);
         statusLabel.setText("Deleting leftovers...");
 
+        operationGate.begin(UninstallerOperationGate.Phase.CLEANUP);
         Thread cleanupThread = new Thread(() -> {
                     List<String> registryKeysToDelete = new ArrayList<>();
                     for (LeftoverItem item : registryItems) {
@@ -1547,9 +1646,10 @@ public class UninstallerTabView extends BorderPane {
                         }
                     }
 
-                    // Safety net: export registry keys before deleting
                     java.nio.file.Path backupDir = null;
                     int backedUp = 0;
+                    List<String> regKeysForDelete = new ArrayList<>(registryKeysToDelete);
+                    List<String> failedDeletions = new ArrayList<>();
                     if (backupReg && !registryKeysToDelete.isEmpty()) {
                         try {
                             java.nio.file.Path base = com.sbtools.util.AppPaths.ensureBackupsRoot()
@@ -1557,34 +1657,48 @@ public class UninstallerTabView extends BorderPane {
                             String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss")
                                     .format(new java.util.Date());
                             backupDir = base.resolve(sanitizeFileName(app.getName()) + "-" + stamp);
-                            List<java.nio.file.Path> outs =
+                            UninstallerService.RegistryBackupResult backupResult =
                                     service.exportRegistryKeysForBackup(registryKeysToDelete, backupDir);
-                            backedUp = outs.size();
+                            regKeysForDelete = new ArrayList<>(backupResult.exportedByKey().keySet());
+                            backedUp = backupResult.exportedByKey().size();
+                            for (String failedKey : backupResult.failedKeys()) {
+                                failedDeletions.add(failedKey + " (backup failed — not deleted)");
+                            }
                         } catch (Exception ex) {
                             AppLogger.warning("Registry pre-delete backup failed: " + ex.getMessage());
+                            regKeysForDelete = List.of();
+                            for (String k : registryKeysToDelete) {
+                                failedDeletions.add(k + " (backup failed — not deleted)");
+                            }
                         }
                     }
 
-                    List<String> failedDeletions = new ArrayList<>();
                     List<String> recycled = new ArrayList<>();
-                    service.deleteRegistryLeftovers(registryKeysToDelete, failedDeletions);
-                    service.deleteFilesystemLeftovers(filePathsToDelete, failedDeletions, recycled, preferRecycle);
+                    List<String> regFailures = new ArrayList<>();
+                    service.deleteRegistryLeftovers(regKeysForDelete, regFailures);
+                    failedDeletions.addAll(regFailures);
+                    UninstallerService.FilesystemCleanupResult fsResult =
+                            service.deleteFilesystemLeftovers(filePathsToDelete, failedDeletions, recycled, preferRecycle);
 
-                    int deletedCount = registryKeysToDelete.size() + filePathsToDelete.size()
-                            - failedDeletions.size();
+                    int regDeleted = Math.max(0, regKeysForDelete.size() - regFailures.size());
+                    int deletedCount = regDeleted + fsResult.deleted() + fsResult.recycled();
                     boolean ok = uninstallResult == null || uninstallResult.succeeded();
                     String detail = "leftovers " + deletedCount + " removed"
                             + (recycled.isEmpty() ? "" : (" (" + recycled.size() + " recycled)"))
-                            + (failedDeletions.isEmpty() ? "" : ("; " + failedDeletions.size() + " failed"))
+                            + (fsResult.queuedForReboot() > 0 ? ("; " + fsResult.queuedForReboot() + " queued for reboot") : "")
+                            + (failedDeletions.isEmpty() ? "" : ("; " + failedDeletions.size() + " failed/skipped"))
                             + (backedUp > 0 ? ("; reg backup " + backedUp + " keys") : "")
                             + (rebootRequired ? "; reboot required" : "");
                     recordHistory(app, mode,
-                            ok && failedDeletions.isEmpty(), exitCode, Math.max(0, deletedCount), detail);
+                            ok && regFailures.isEmpty() && fsResult.failed() == 0, exitCode,
+                            Math.max(0, deletedCount), detail);
 
                     final java.nio.file.Path backupDirFinal = backupDir;
                     final int backedUpFinal = backedUp;
                     final List<String> recycledFinal = new ArrayList<>(recycled);
+                    final int deletedCountFinal = deletedCount;
                     Platform.runLater(() -> {
+                        operationGate.end(UninstallerOperationGate.Phase.CLEANUP);
                         busy.set(false);
                         progress.setVisible(false);
                         statusLabel.setText("Cleanup completed.");
@@ -1599,24 +1713,26 @@ public class UninstallerTabView extends BorderPane {
                             failedAlert.setTitle("Partial Cleanup");
                             failedAlert.setHeaderText("Some items could not be deleted"
                                     + (recycledFinal.isEmpty() ? "" : " (" + recycledFinal.size() + " recycled)"));
+                            String backupNote = backupDirFinal != null && backedUpFinal > 0
+                                    ? ("\n\nRegistry backup: " + backupDirFinal) : "";
                             failedAlert.setContentText("The following items could not be deleted immediately " +
                                     "(e.g. locked files or permission-denied registry keys). " +
-                                    "Files have been scheduled for deletion on next reboot where possible"
-                                    + (backupDirFinal != null ? ("- Registry backup: " + backupDirFinal) : "") + ":\n\n" + sb.toString());
+                                    "Files may be scheduled for deletion on next reboot where possible."
+                                    + backupNote + "\n\n" + sb.toString());
                             failedAlert.initModality(Modality.APPLICATION_MODAL);
                             failedAlert.showAndWait();
                         } else {
                             Alert successAlert = new Alert(Alert.AlertType.INFORMATION);
                             successAlert.setTitle("Leftovers Deleted");
                             successAlert.setHeaderText("Cleanup Successful");
-                            successAlert.setContentText("Removed " + deletedCount + " item(s)"
+                            successAlert.setContentText("Removed " + deletedCountFinal + " item(s)"
                                     + (recycledFinal.isEmpty() ? "." : (" (" + recycledFinal.size() + " moved to Recycle Bin)."))
                                     + (backedUpFinal > 0 ? "\nRegistry backup (" + backedUpFinal + " keys):\n" + backupDirFinal : "")
                                     + (rebootRequired ? "\n\nPlease reboot to finish removal (exit " + exitCode + ")." : ""));
                             successAlert.initModality(Modality.APPLICATION_MODAL);
                             successAlert.showAndWait();
                         }
-                        scan();
+                        refreshAfterUninstallWorkflow();
                     });
                 }, "leftovers-cleanup");
         cleanupThread.setDaemon(true);
@@ -1720,10 +1836,12 @@ public class UninstallerTabView extends BorderPane {
                     boolean highConf = app == null || isHighConfidenceLeftover(item.getPath(), app, item.isRegistry());
                     if (highConf) {
                         badge.setText("Exact");
-                        badge.setStyle(badge.getStyle() + "-fx-background-color: #2e7d32; -fx-text-fill: white;");
+                        badge.setStyle("-fx-font-size: 10px; -fx-padding: 1 6 1 6; -fx-background-radius: 8; "
+                                + "-fx-background-color: #2e7d32; -fx-text-fill: white;");
                     } else {
                         badge.setText("Heuristic");
-                        badge.setStyle(badge.getStyle() + "-fx-background-color: #6d4c00; -fx-text-fill: #ffe082;");
+                        badge.setStyle("-fx-font-size: 10px; -fx-padding: 1 6 1 6; -fx-background-radius: 8; "
+                                + "-fx-background-color: #6d4c00; -fx-text-fill: #ffe082;");
                     }
                     badge.setTooltip(new Tooltip(highConf
                             ? "Exact match — safe to remove"
@@ -1737,34 +1855,13 @@ public class UninstallerTabView extends BorderPane {
 
     private void triggerForceUninstallForApp(InstalledApp app) {
         if (app == null || busy.get()) return;
+        pendingWorkflowCallback = null;
+        uninstallSingleApp(app, true);
+    }
 
-        if (!adminCheck.getAsBoolean()) {
-            Alert adminWarn = new Alert(Alert.AlertType.WARNING);
-            adminWarn.setTitle("Administrator Privileges Required");
-            adminWarn.setHeaderText("Not running as administrator");
-            adminWarn.setContentText("Force uninstall requires administrator privileges to kill processes and delete files.\n\n" +
-                    "Consider restarting the application as administrator.\n\nContinue anyway?");
-            adminWarn.initModality(Modality.APPLICATION_MODAL);
-            if (adminWarn.showAndWait().orElse(null) != ButtonType.OK) return;
-        }
-
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle("Confirm Force Uninstall");
-        confirm.setHeaderText("Force remove " + app.getName() + "?");
-        if (app.isWin32()) {
-            confirm.setContentText("This will forcefully remove all traces of " + app.getName() + " without running the standard uninstaller.\n\n" +
-                    "This includes: killing processes, deleting files, removing registry entries, and deleting Start Menu shortcuts.\n\n" +
-                    "This action cannot be undone!");
-        } else {
-            confirm.setContentText("This will forcefully remove the Store package " + app.getName() + " via Remove-AppxPackage "
-                    + "without running any vendor uninstaller, then clean its Start Menu shortcuts.\n\n"
-                    + "The protected WindowsApps folder is never deleted directly.\n\n"
-                    + "This action cannot be undone!");
-        }
-        confirm.initModality(Modality.APPLICATION_MODAL);
-        if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
-
+    private void executeForceUninstall(InstalledApp app) {
         busy.set(true);
+        operationGate.begin(UninstallerOperationGate.Phase.FORCE_UNINSTALL);
         progress.setVisible(true);
         statusLabel.setText("Force uninstalling " + app.getName() + "...");
 
@@ -1777,17 +1874,18 @@ public class UninstallerTabView extends BorderPane {
             }
             final UninstallerService.ForceUninstallResult finalResult = result;
             boolean ok = finalResult.errors().isEmpty();
+            int removedActions = finalResult.summary().size();
             String detail = (!finalResult.summary().isEmpty()
                     ? String.join("; ", finalResult.summary().subList(0, Math.min(3, finalResult.summary().size())))
                     : "no actions")
                     + (ok ? "" : ("; errors: " + truncate(String.join("; ", finalResult.errors()), 200)));
-            recordHistory(app, "Force", ok, ok ? 0 : -1,
-                    finalResult.summary().size(), detail);
+            recordHistory(app, "Force", ok, ok ? 0 : -1, removedActions, detail);
             Platform.runLater(() -> {
+                operationGate.end(UninstallerOperationGate.Phase.FORCE_UNINSTALL);
                 busy.set(false);
                 progress.setVisible(false);
                 showForceUninstallSummary(finalResult);
-                scan();
+                refreshAfterUninstallWorkflow();
             });
         }, "force-uninstall");
         ft.setDaemon(true);

@@ -36,6 +36,6 @@ public class WindowsErrorReportingCleaner implements CleanerExtension {
         List<Path> dirs = new ArrayList<>();
         CleanerUtils.addEnvPath(dirs, "LOCALAPPDATA", "Microsoft", "Windows", "WER");
         CleanerUtils.addEnvPath(dirs, "PROGRAMDATA", "Microsoft", "Windows", "WER");
-        return CleanerUtils.cleanDirectoryPattern(dirs, token);
+        return CleanerUtils.cleanDirectoryPattern(dirs, 4, token);
     }
 }

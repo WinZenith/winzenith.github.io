@@ -86,6 +86,15 @@ public class InstalledApp implements Comparable<InstalledApp> {
     public int getEstimatedSize() { return estimatedSize; }
     public String getArchitecture() { return architecture; }
     public boolean hasUninstallString() { return (uninstallString != null && !uninstallString.isBlank()) || hasQuietUninstallString(); }
+
+    public boolean hasInteractiveUninstallString() {
+        return uninstallString != null && !uninstallString.isBlank();
+    }
+
+    /** Registry entry provides only QuietUninstallString — silent path needs explicit consent. */
+    public boolean isQuietOnlyUninstall() {
+        return hasQuietUninstallString() && !hasInteractiveUninstallString();
+    }
     public boolean hasAppxIdentity() { return appxPackageFullName != null && !appxPackageFullName.isBlank(); }
     /**
      * Whether the normal Uninstall action can run for this entry: Win32 needs an
