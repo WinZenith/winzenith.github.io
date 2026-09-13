@@ -254,32 +254,32 @@ public class SoftwareUpdatesTabView extends BorderPane {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         table.setPlaceholder(new Label("No winget / Windows updates to show. Press Scan. (Microsoft Store apps are not checked here.)"));
 
-        TableColumn<SoftwareUpdateEntry, Boolean> selCol = new TableColumn<>("Install");
+        TableColumn<SoftwareUpdateEntry, Boolean> selCol = UiColumn.of("Install");
         selCol.setCellValueFactory(c -> c.getValue().selectedProperty());
         selCol.setCellFactory(CheckBoxTableCell.forTableColumn(selCol));
         selCol.setPrefWidth(60);
         selCol.setSortable(false);
 
-        TableColumn<SoftwareUpdateEntry, String> nameCol = new TableColumn<>("Program");
+        TableColumn<SoftwareUpdateEntry, String> nameCol = UiColumn.of("Program");
         nameCol.setCellValueFactory(c -> c.getValue().nameProperty());
         nameCol.setComparator(String::compareToIgnoreCase);
 
-        TableColumn<SoftwareUpdateEntry, String> currentCol = new TableColumn<>("Current Version");
+        TableColumn<SoftwareUpdateEntry, String> currentCol = UiColumn.of("Current Version");
         currentCol.setCellValueFactory(c -> c.getValue().currentVersionProperty());
         currentCol.setPrefWidth(120);
         currentCol.setComparator(VersionCompare::compare);
 
-        TableColumn<SoftwareUpdateEntry, String> availCol = new TableColumn<>("Available Version");
+        TableColumn<SoftwareUpdateEntry, String> availCol = UiColumn.of("Available Version");
         availCol.setCellValueFactory(c -> c.getValue().availableVersionProperty());
         availCol.setPrefWidth(120);
         availCol.setComparator(VersionCompare::compare);
 
-        TableColumn<SoftwareUpdateEntry, String> sourceCol = new TableColumn<>("Source");
+        TableColumn<SoftwareUpdateEntry, String> sourceCol = UiColumn.of("Source");
         sourceCol.setCellValueFactory(c -> c.getValue().sourceProperty());
         sourceCol.setPrefWidth(100);
         sourceCol.setComparator(String::compareToIgnoreCase);
 
-        TableColumn<SoftwareUpdateEntry, SoftwareUpdateEntry> sizeCol = new TableColumn<>("Size");
+        TableColumn<SoftwareUpdateEntry, SoftwareUpdateEntry> sizeCol = UiColumn.of("Size");
         sizeCol.setCellValueFactory(c -> new javafx.beans.property.ReadOnlyObjectWrapper<>(c.getValue()));
         sizeCol.setPrefWidth(80);
         sizeCol.setComparator(java.util.Comparator.comparingLong(SoftwareUpdateEntry::sizeBytes));
@@ -291,7 +291,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
             }
         });
 
-        TableColumn<SoftwareUpdateEntry, String> statusCol = new TableColumn<>("Status");
+        TableColumn<SoftwareUpdateEntry, String> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c -> c.getValue().statusProperty());
         statusCol.setPrefWidth(100);
         statusCol.setSortable(false);
@@ -315,7 +315,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
             }
         });
 
-        TableColumn<SoftwareUpdateEntry, Void> actionCol = new TableColumn<>("Action");
+        TableColumn<SoftwareUpdateEntry, Void> actionCol = UiColumn.of("Action");
         actionCol.setSortable(false);
         actionCol.setPrefWidth(350);
         actionCol.setCellFactory(col -> new TableCell<>() {

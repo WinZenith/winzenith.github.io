@@ -1,5 +1,7 @@
 package com.sbtools.netoptimizer;
 
+import com.sbtools.util.UiText;
+
 public enum OptimizationPreset {
 
     DEFAULT("Default (Windows defaults)", "Reset all TCP/IP settings to Windows defaults", "Default"),
@@ -17,7 +19,7 @@ public enum OptimizationPreset {
         this.scriptName = scriptName;
     }
 
-    public String getDisplayName() { return displayName; }
+    public String getDisplayName() { return UiText.label(displayName); }
     public String getDescription() { return description; }
     public String getScriptName() { return scriptName; }
 }

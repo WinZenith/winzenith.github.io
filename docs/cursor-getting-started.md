@@ -20,4 +20,4 @@ Use this repo root (`pom.xml` + `AGENTS.md`) as the Cursor workspace. Search/ind
 - `@src/main/java/com/sbtools/App.java` — “Summarize startup and tab layout.”
 - `@src/main/java/com/sbtools/ui/DriversTabView.java` — “Trace install button to `DriverInstallService`.”
 
-After agent edits: `mvn -q test` (or your IntelliJ test run).
+After agent edits: `mvn -q compile` (or your IntelliJ build).

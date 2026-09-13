@@ -1,5 +1,7 @@
 package com.sbtools.cleaner;
 
+import com.sbtools.util.UiText;
+
 public enum CleanupCategory {
     REGISTRY("Registry", "Invalid or unused registry entries", RiskLevel.MEDIUM),
     EMPTY_RECYCLE_BIN("Empty Recycle Bin", "Files in the Recycle Bin", RiskLevel.LOW),
@@ -70,7 +72,7 @@ public enum CleanupCategory {
     }
 
     public String getDisplayName() {
-        return displayName;
+        return UiText.label(displayName);
     }
 
     public String getDescription() {

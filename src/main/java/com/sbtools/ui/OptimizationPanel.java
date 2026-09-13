@@ -67,7 +67,7 @@ class OptimizationPanel extends VBox {
         VBox box = new VBox(8);
         box.setPadding(new Insets(12, 16, 12, 16));
 
-        Label header = new Label("Select Optimization Preset:");
+        Label header = new Label("Select optimization preset:");
         header.getStyleClass().addAll("label", "large");
         box.getChildren().add(header);
 
@@ -161,8 +161,8 @@ class OptimizationPanel extends VBox {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Apply " + preset.getDisplayName() + "?\n\n" + preset.getDescription()
                         + "\n\nA snapshot of current TCP settings is captured first for guided restore.");
-        confirm.setTitle("Confirm Optimization");
-        confirm.setHeaderText("Apply Optimization Preset");
+        confirm.setTitle(com.sbtools.util.UiText.label("Confirm optimization"));
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Apply optimization preset"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         boolean wantRestorePoint = restorePointCheck != null && restorePointCheck.isSelected();
@@ -327,8 +327,8 @@ class OptimizationPanel extends VBox {
                         settings.settings().forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
                     }
                     Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                    alert.setTitle("Current TCP/IP Settings");
-                    alert.setHeaderText("Active TCP Global Settings");
+                    alert.setTitle(com.sbtools.util.UiText.label("Current TCP/IP settings"));
+                    alert.setHeaderText(com.sbtools.util.UiText.label("Active TCP global settings"));
                     javafx.scene.control.TextArea area = new javafx.scene.control.TextArea(sb.toString());
                     area.setEditable(false);
                     area.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 12px;");
@@ -435,7 +435,7 @@ class OptimizationPanel extends VBox {
                         var info = service.describeRestore(first);
                         if (info.details() != null) sb.append("\n--- Newest snapshot detail ---\n").append(info.details());
                         Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                        alert.setTitle("Network Snapshots");
+                        alert.setTitle(com.sbtools.util.UiText.label("Network snapshots"));
                         alert.setHeaderText(snaps.size() + " snapshot(s) stored (portable .winzenith/network-snapshots.json)");
                         javafx.scene.control.TextArea area = new javafx.scene.control.TextArea(sb.toString());
                         area.setEditable(false);

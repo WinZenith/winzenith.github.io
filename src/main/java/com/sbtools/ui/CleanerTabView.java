@@ -79,10 +79,10 @@ import java.util.concurrent.atomic.AtomicInteger;
         statusLabel = new Label("Click Scan to analyze cleanup opportunities.");
         progressBar = new ProgressBar(0);
         scanButton = new Button("Scan");
-        selectAllButton = new Button("Select All");
-        deselectAllButton = new Button("Deselect All");
+        selectAllButton = new Button("Select all");
+        deselectAllButton = new Button("Deselect all");
         presetButton = new Button("Presets...");
-        cleanButton = new Button("Clean Selected");
+        cleanButton = new Button("Clean selected");
         historyButton = new Button("History");
         cancelButton = new Button("Cancel");
         exportButton = new Button("Export...");
@@ -340,7 +340,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     private void buildTable() {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<CleanupRow, CleanupRow> checkCol = new TableColumn<>(" ");
+        TableColumn<CleanupRow, CleanupRow> checkCol = UiColumn.of(" ");
         checkCol.setPrefWidth(40);
         checkCol.setMinWidth(40);
         checkCol.setMaxWidth(40);
@@ -390,11 +390,11 @@ import java.util.concurrent.atomic.AtomicInteger;
             }
         });
 
-        TableColumn<CleanupRow, String> categoryCol = new TableColumn<>("Category");
+        TableColumn<CleanupRow, String> categoryCol = UiColumn.of("Category");
         categoryCol.setCellValueFactory(c -> c.getValue().categoryNameProperty());
         categoryCol.setPrefWidth(170);
 
-        TableColumn<CleanupRow, String> descCol = new TableColumn<>("Description");
+        TableColumn<CleanupRow, String> descCol = UiColumn.of("Description");
         descCol.setCellValueFactory(c -> c.getValue().descriptionProperty());
         descCol.setPrefWidth(250);
         descCol.setCellFactory(col -> new TableCell<>() {
@@ -416,11 +416,11 @@ import java.util.concurrent.atomic.AtomicInteger;
             }
         });
 
-        TableColumn<CleanupRow, String> sizeCol = new TableColumn<>("Size / Count");
+        TableColumn<CleanupRow, String> sizeCol = UiColumn.of("Size / count");
         sizeCol.setCellValueFactory(c -> c.getValue().sizeOrCountTextProperty());
         sizeCol.setPrefWidth(140);
 
-        TableColumn<CleanupRow, String> riskCol = new TableColumn<>("Risk");
+        TableColumn<CleanupRow, String> riskCol = UiColumn.of("Risk");
         riskCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
                 c.getValue().getCategory().getRiskLevel().getDisplayName()));
         riskCol.setPrefWidth(70);
@@ -448,11 +448,11 @@ import java.util.concurrent.atomic.AtomicInteger;
             }
         });
 
-        TableColumn<CleanupRow, String> statusCol = new TableColumn<>("Status");
+        TableColumn<CleanupRow, String> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c -> c.getValue().statusTextProperty());
         statusCol.setPrefWidth(90);
 
-        TableColumn<CleanupRow, String> durationCol = new TableColumn<>("Took");
+        TableColumn<CleanupRow, String> durationCol = UiColumn.of("Took");
         // Bound to the row's duration property so Refresh / post-clean rescan
         // updates are reflected. A snapshot string here would stay stale ("-")
         // forever because the cell value would never re-evaluate.
@@ -759,7 +759,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                                 + adminBlocked.stream().map(r -> "  - " + r.getCategory().getDisplayName())
                                 .collect(java.util.stream.Collectors.joining("\n"))
                                 + "\n\nPlease run as administrator to clean these categories.");
-                a.setHeaderText("Administrator Rights Required");
+                a.setHeaderText(com.sbtools.util.UiText.label("Administrator rights required"));
                 a.showAndWait();
             }
             return;
@@ -771,7 +771,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                             + "The following categories require administrator rights and will be skipped:\n"
                             + adminBlocked.stream().map(r -> "  - " + r.getCategory().getDisplayName())
                             .collect(java.util.stream.Collectors.joining("\n")));
-            a.setHeaderText("Some Categories Skipped");
+            a.setHeaderText(com.sbtools.util.UiText.label("Some categories skipped"));
             a.showAndWait();
         }
 
@@ -808,7 +808,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
         Alert confirmAlert = new Alert(Alert.AlertType.CONFIRMATION, null,
                 ButtonType.OK, ButtonType.CANCEL);
-        confirmAlert.setHeaderText("Confirm Cleanup");
+        confirmAlert.setHeaderText(com.sbtools.util.UiText.label("Confirm cleanup"));
         applyScrollableAlertBody(confirmAlert, dialogMsg.toString());
         if (confirmAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
             return;
@@ -843,7 +843,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         // RegistryCleaner). There is intentionally no "delete without backup".
         if (registrySelected) {
             Alert backupPrompt = new Alert(Alert.AlertType.CONFIRMATION);
-            backupPrompt.setTitle("Registry Backup");
+            backupPrompt.setTitle(com.sbtools.util.UiText.label("Registry backup"));
             backupPrompt.setHeaderText("Registry backup will be created automatically");
             backupPrompt.setContentText("Invalid registry entries will be exported to a .reg file before deletion.\n\n"
                     + "If the backup cannot be created, registry deletion is skipped for safety.\n\n"
@@ -1120,7 +1120,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                                 + "You can enable System Protection in System Properties > System Protection.\n\n"
                                 + "Do you want to continue WITHOUT a restore point?",
                         ButtonType.OK, ButtonType.CANCEL);
-                alert.setHeaderText("Restore Point Unavailable");
+                alert.setHeaderText(com.sbtools.util.UiText.label("Restore point unavailable"));
                 if (alert.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
                     statusLabel.setText("Cleanup canceled (no restore point).");
                     progressBar.setVisible(false);

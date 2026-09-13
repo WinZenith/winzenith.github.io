@@ -94,7 +94,7 @@ class WiFiPanel extends VBox {
     private VBox buildSignalHistorySection() {
         VBox section = new VBox(4);
         section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
-        Label h = new Label("Signal History (%, sampled on each Refresh)");
+        Label h = new Label("Signal history (%, sampled on each refresh)");
         h.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
         section.getChildren().add(h);
         javafx.scene.chart.NumberAxis x = new javafx.scene.chart.NumberAxis();
@@ -116,7 +116,7 @@ class WiFiPanel extends VBox {
     private VBox buildSurveySection() {
         VBox section = new VBox(4);
         section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
-        Label h = new Label("Nearby Networks (read-only survey)");
+        Label h = new Label("Nearby networks (read-only survey)");
         h.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
         section.getChildren().add(h);
 
@@ -180,7 +180,7 @@ class WiFiPanel extends VBox {
         VBox section = new VBox(4);
         section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
 
-        Label sectionHeader = new Label("Current Connection");
+        Label sectionHeader = new Label("Current connection");
         sectionHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
         section.getChildren().add(sectionHeader);
 
@@ -202,7 +202,7 @@ class WiFiPanel extends VBox {
         VBox section = new VBox(4);
         section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
 
-        Label sectionHeader = new Label("Saved Profiles");
+        Label sectionHeader = new Label("Saved profiles");
         sectionHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
         section.getChildren().add(sectionHeader);
 
@@ -339,7 +339,7 @@ class WiFiPanel extends VBox {
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Forget Wi-Fi profile '" + profile + "'?", ButtonType.YES, ButtonType.NO);
-        confirm.setTitle("Forget Profile");
+        confirm.setTitle(com.sbtools.util.UiText.label("Forget profile"));
         confirm.setHeaderText(null);
         if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
 
@@ -380,7 +380,7 @@ class WiFiPanel extends VBox {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Disable the Wi-Fi adapter?\n\nYou will lose wireless connectivity until it is re-enabled.",
                     ButtonType.YES, ButtonType.NO);
-            confirm.setTitle("Confirm Disable");
+            confirm.setTitle(com.sbtools.util.UiText.label("Confirm disable"));
             confirm.setHeaderText(null);
             if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
         }

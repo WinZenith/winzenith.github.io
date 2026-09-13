@@ -180,7 +180,7 @@ public class BackupRestoreTabView extends BorderPane {
             rollbackStatusLabel.setText("Driver backup is available on Windows only.");
         }
 
-        Tab tab = new Tab("Rollback drivers");
+        Tab tab = UiTab.tab("Rollback drivers");
         tab.setContent(pane);
         return tab;
     }
@@ -210,26 +210,26 @@ public class BackupRestoreTabView extends BorderPane {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         VBox.setVgrow(table, Priority.ALWAYS);
 
-        TableColumn<RestoreRow, String> deviceCol = new TableColumn<>("Device");
+        TableColumn<RestoreRow, String> deviceCol = UiColumn.of("Device");
         deviceCol.setCellValueFactory(c -> c.getValue().deviceNameProperty());
 
-        TableColumn<RestoreRow, String> versionCol = new TableColumn<>("Version");
+        TableColumn<RestoreRow, String> versionCol = UiColumn.of("Version");
         versionCol.setCellValueFactory(c -> c.getValue().versionProperty());
         versionCol.setPrefWidth(100);
 
-        TableColumn<RestoreRow, String> dateCol = new TableColumn<>("Backed up");
+        TableColumn<RestoreRow, String> dateCol = UiColumn.of("Backed up");
         dateCol.setCellValueFactory(c -> c.getValue().backedUpAtProperty());
         dateCol.setPrefWidth(140);
 
-        TableColumn<RestoreRow, String> sizeCol = new TableColumn<>("Size");
+        TableColumn<RestoreRow, String> sizeCol = UiColumn.of("Size");
         sizeCol.setCellValueFactory(c -> c.getValue().sizeProperty());
         sizeCol.setPrefWidth(80);
 
-        TableColumn<RestoreRow, String> statusCol = new TableColumn<>("Health");
+        TableColumn<RestoreRow, String> statusCol = UiColumn.of("Health");
         statusCol.setCellValueFactory(c -> c.getValue().statusProperty());
         statusCol.setPrefWidth(90);
 
-        TableColumn<RestoreRow, Void> actionCol = new TableColumn<>("Action");
+        TableColumn<RestoreRow, Void> actionCol = UiColumn.of("Action");
         actionCol.setPrefWidth(150);
         actionCol.setCellFactory(col -> new TableCell<>() {
             private final UIButton revertBtn = UIButton.small("Revert");
@@ -829,7 +829,7 @@ public class BackupRestoreTabView extends BorderPane {
             launchButton.setDisable(true);
         }
 
-        Tab tab = new Tab("System restore");
+        Tab tab = UiTab.tab("System restore");
         tab.setContent(pane);
         return tab;
     }
@@ -841,15 +841,15 @@ public class BackupRestoreTabView extends BorderPane {
         // Note: no selection checkbox column — system restore points are
         // read-only here (scan/create/launch only, never delete).
 
-        TableColumn<SystemRestoreRow, String> descCol = new TableColumn<>("Description");
+        TableColumn<SystemRestoreRow, String> descCol = UiColumn.of("Description");
         descCol.setCellValueFactory(c -> c.getValue().descriptionProperty());
         descCol.setPrefWidth(300);
 
-        TableColumn<SystemRestoreRow, String> dateCol = new TableColumn<>("Creation Date/Time");
+        TableColumn<SystemRestoreRow, String> dateCol = UiColumn.of("Creation Date/Time");
         dateCol.setCellValueFactory(c -> c.getValue().creationTimeProperty());
         dateCol.setPrefWidth(160);
 
-        TableColumn<SystemRestoreRow, String> typeCol = new TableColumn<>("Type");
+        TableColumn<SystemRestoreRow, String> typeCol = UiColumn.of("Type");
         typeCol.setCellValueFactory(c -> c.getValue().eventTypeProperty());
         typeCol.setPrefWidth(140);
 
@@ -921,7 +921,7 @@ public class BackupRestoreTabView extends BorderPane {
         }
 
         TextInputDialog dialog = new TextInputDialog("Manual Restore Point");
-        dialog.setTitle("Create Restore Point");
+        dialog.setTitle(com.sbtools.util.UiText.label("Create restore point"));
         dialog.setHeaderText("Enter a description for the new restore point:");
         dialog.setContentText("Description:");
         String description = dialog.showAndWait().orElse(null);
@@ -982,8 +982,8 @@ public class BackupRestoreTabView extends BorderPane {
 
     private void launchSystemRestore(SystemRestoreService service, Label statusLabel) {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle("Launch System Restore");
-        confirm.setHeaderText("Start Windows System Restore?");
+        confirm.setTitle(com.sbtools.util.UiText.label("Launch system restore"));
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Start Windows system restore?"));
         confirm.setContentText("This will launch the System Restore wizard and may reboot your computer.\n\n"
                 + "Ensure all work is saved before proceeding.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
@@ -1017,8 +1017,8 @@ public class BackupRestoreTabView extends BorderPane {
         TableView<RegistryBackupRow> table = buildRegistryBackupTable(rows);
 
         UIButton backupNowBtn = UIButton.primary("Backup Now");
-        UIButton restoreBtn = UIButton.secondary("Restore Selected");
-        UIButton deleteBtn = UIButton.danger("Delete Backup");
+        UIButton restoreBtn = UIButton.secondary("Restore selected");
+        UIButton deleteBtn = UIButton.danger("Delete backup");
         TextField searchField = new TextField();
         searchField.setPromptText("Search sessions...");
 
@@ -1073,7 +1073,7 @@ public class BackupRestoreTabView extends BorderPane {
 
         refreshRegistryBackups(rows, statusLabel);
 
-        Tab tab = new Tab("Registry backup");
+        Tab tab = UiTab.tab("Registry backup");
         tab.setContent(pane);
         return tab;
     }
@@ -1083,15 +1083,15 @@ public class BackupRestoreTabView extends BorderPane {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         VBox.setVgrow(table, Priority.ALWAYS);
 
-        TableColumn<RegistryBackupRow, String> fileCol = new TableColumn<>("Filename");
+        TableColumn<RegistryBackupRow, String> fileCol = UiColumn.of("Filename");
         fileCol.setCellValueFactory(c -> c.getValue().filenameProperty());
         fileCol.setPrefWidth(300);
 
-        TableColumn<RegistryBackupRow, String> dateCol = new TableColumn<>("Date");
+        TableColumn<RegistryBackupRow, String> dateCol = UiColumn.of("Date");
         dateCol.setCellValueFactory(c -> c.getValue().dateProperty());
         dateCol.setPrefWidth(160);
 
-        TableColumn<RegistryBackupRow, String> sizeCol = new TableColumn<>("Size");
+        TableColumn<RegistryBackupRow, String> sizeCol = UiColumn.of("Size");
         sizeCol.setCellValueFactory(c -> c.getValue().sizeProperty());
         sizeCol.setPrefWidth(100);
 
@@ -1193,7 +1193,7 @@ public class BackupRestoreTabView extends BorderPane {
         }
 
         Dialog<List<String>> dialog = new Dialog<>();
-        dialog.setTitle("Registry Backup");
+        dialog.setTitle(com.sbtools.util.UiText.label("Registry backup"));
         dialog.setHeaderText("Select registry areas to back up:");
         dialog.initModality(Modality.APPLICATION_MODAL);
         try {
@@ -1401,7 +1401,7 @@ public class BackupRestoreTabView extends BorderPane {
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle("Restore Registry Backup");
+        confirm.setTitle(com.sbtools.util.UiText.label("Restore registry backup"));
         confirm.setHeaderText("Import registry session: " + selected.getFilename());
         confirm.setContentText("Windows MERGES .reg files: values added after the backup will NOT be removed.\n\n"
                 + "Existing registry keys targeted by this session will be exported first into a safety session. "
@@ -1519,7 +1519,7 @@ public class BackupRestoreTabView extends BorderPane {
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle("Delete Registry Backup");
+        confirm.setTitle(com.sbtools.util.UiText.label("Delete registry backup"));
         confirm.setHeaderText("Delete backup session: " + selected.getFilename());
         confirm.setContentText("This will permanently delete all registry backup files in this session.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;

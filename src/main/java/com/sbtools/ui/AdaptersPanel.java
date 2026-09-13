@@ -173,15 +173,15 @@ class AdaptersPanel extends VBox {
     private TableView<NetworkAdapterRow> buildTable() {
         adapterTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<NetworkAdapterRow, String> nameCol = new TableColumn<>("Name");
+        TableColumn<NetworkAdapterRow, String> nameCol = UiColumn.of("Name");
         nameCol.setCellValueFactory(c -> c.getValue().nameProperty());
         nameCol.setPrefWidth(140);
 
-        TableColumn<NetworkAdapterRow, String> descCol = new TableColumn<>("Description");
+        TableColumn<NetworkAdapterRow, String> descCol = UiColumn.of("Description");
         descCol.setCellValueFactory(c -> c.getValue().descriptionProperty());
         descCol.setPrefWidth(180);
 
-        TableColumn<NetworkAdapterRow, String> statusCol = new TableColumn<>("Status");
+        TableColumn<NetworkAdapterRow, String> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c -> c.getValue().statusProperty());
         statusCol.setPrefWidth(80);
         statusCol.setCellFactory(col -> new TableCell<>() {
@@ -199,27 +199,27 @@ class AdaptersPanel extends VBox {
             }
         });
 
-        TableColumn<NetworkAdapterRow, String> speedCol = new TableColumn<>("Speed");
+        TableColumn<NetworkAdapterRow, String> speedCol = UiColumn.of("Speed");
         speedCol.setCellValueFactory(c -> c.getValue().linkSpeedProperty());
         speedCol.setPrefWidth(100);
 
-        TableColumn<NetworkAdapterRow, String> macCol = new TableColumn<>("MAC Address");
+        TableColumn<NetworkAdapterRow, String> macCol = UiColumn.of("MAC Address");
         macCol.setCellValueFactory(c -> c.getValue().macAddressProperty());
         macCol.setPrefWidth(130);
 
-        TableColumn<NetworkAdapterRow, String> ipCol = new TableColumn<>("IP Address");
+        TableColumn<NetworkAdapterRow, String> ipCol = UiColumn.of("IP Address");
         ipCol.setCellValueFactory(c -> c.getValue().ipAddressProperty());
         ipCol.setPrefWidth(110);
 
-        TableColumn<NetworkAdapterRow, String> dhcpCol = new TableColumn<>("DHCP");
+        TableColumn<NetworkAdapterRow, String> dhcpCol = UiColumn.of("DHCP");
         dhcpCol.setCellValueFactory(c -> c.getValue().dhcpProperty());
         dhcpCol.setPrefWidth(70);
 
-        TableColumn<NetworkAdapterRow, String> gwCol = new TableColumn<>("Gateway");
+        TableColumn<NetworkAdapterRow, String> gwCol = UiColumn.of("Gateway");
         gwCol.setCellValueFactory(c -> c.getValue().gatewayProperty());
         gwCol.setPrefWidth(110);
 
-        TableColumn<NetworkAdapterRow, String> dnsCol = new TableColumn<>("DNS");
+        TableColumn<NetworkAdapterRow, String> dnsCol = UiColumn.of("DNS");
         dnsCol.setCellValueFactory(c -> c.getValue().dnsServersProperty());
         dnsCol.setPrefWidth(140);
 
@@ -243,7 +243,7 @@ class AdaptersPanel extends VBox {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Disable adapter '" + selected.getName() + "'?\n\nYou may lose network connectivity until it is re-enabled.",
                     javafx.scene.control.ButtonType.YES, javafx.scene.control.ButtonType.NO);
-            confirm.setTitle("Confirm Disable");
+            confirm.setTitle(com.sbtools.util.UiText.label("Confirm disable"));
             confirm.setHeaderText(null);
             if (confirm.showAndWait().orElse(javafx.scene.control.ButtonType.NO) != javafx.scene.control.ButtonType.YES) return;
         }

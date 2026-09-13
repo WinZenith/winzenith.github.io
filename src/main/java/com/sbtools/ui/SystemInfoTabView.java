@@ -79,12 +79,12 @@ public class SystemInfoTabView extends BorderPane {
 
     private final Label statusLabel = new Label("Click Load to query system information.");
     private final Label adminWarningLabel = new Label("Not running as admin. Some data (temperatures, NVMe) may be unavailable.");
-    private final Button loadButton = new Button("Load System Info");
+    private final Button loadButton = new Button("Load system info");
     private final Button refreshButton = new Button("Refresh");
     private final Button cancelButton = new Button("Cancel");
     private final Button exportButton = new Button("Export...");
-    private final Button copyButton = new Button("Copy All");
-    private final Button copyTabButton = new Button("Copy Tab");
+    private final Button copyButton = new Button("Copy all");
+    private final Button copyTabButton = new Button("Copy tab");
     private final ProgressIndicator spinner = new ProgressIndicator();
     private final ProgressBar progressBar = new ProgressBar(0);
     private final TabPane tabPane = new TabPane();
@@ -457,7 +457,7 @@ public class SystemInfoTabView extends BorderPane {
         retry.setOnAction(e -> { service.invalidateCache(); loadInfo(true); });
         box.getChildren().add(retry);
         ScrollableContainer scroll = new ScrollableContainer(box);
-        Tab tab = new Tab("Overview");
+        Tab tab = UiTab.tab("Overview");
         tab.setContent(scroll);
         return tab;
     }
@@ -481,9 +481,9 @@ public class SystemInfoTabView extends BorderPane {
         row = addRow(grid, row, "Stepping", cpu.stepping());
         row = addRow(grid, row, "Revision", cpu.revision());
         if (row == 0) {
-            return new Tab("CPU", placeholderCard("No CPU data available (WMI query returned empty). Try running as Administrator."));
+            return UiTab.tab("CPU", placeholderCard("No CPU data available (WMI query returned empty). Try running as Administrator."));
         }
-        return new Tab("CPU", wrapGrid(grid));
+        return UiTab.tab("CPU", wrapGrid(grid));
     }
 
     // â”€â”€ GPU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -516,7 +516,7 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("GPU");
+        Tab tab = UiTab.tab("GPU");
         tab.setContent(scroll);
         return tab;
     }
@@ -550,7 +550,7 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("RAM");
+        Tab tab = UiTab.tab("RAM");
         tab.setContent(scroll);
         return tab;
     }
@@ -570,9 +570,9 @@ public class SystemInfoTabView extends BorderPane {
         row = addRow(grid, row, "Windows Directory", os.windowsDir());
         row = addRow(grid, row, "BIOS Serial Number", os.serialNumber());
         if (row == 0) {
-            return new Tab("OS", placeholderCard("No OS data available."));
+            return UiTab.tab("OS", placeholderCard("No OS data available."));
         }
-        return new Tab("OS", wrapGrid(grid));
+        return UiTab.tab("OS", wrapGrid(grid));
     }
 
     // â”€â”€ Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -656,7 +656,7 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Storage");
+        Tab tab = UiTab.tab("Storage");
         tab.setContent(scroll);
         return tab;
     }
@@ -692,7 +692,7 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Motherboard");
+        Tab tab = UiTab.tab("Motherboard");
         tab.setContent(scroll);
         return tab;
     }
@@ -827,7 +827,7 @@ public class SystemInfoTabView extends BorderPane {
         VBox.setVgrow(splitPane, Priority.ALWAYS);
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Others");
+        Tab tab = UiTab.tab("Others");
         tab.setContent(scroll);
         // auto-select first category if available
         if (!filteredCategories.isEmpty()) {
@@ -925,7 +925,7 @@ public class SystemInfoTabView extends BorderPane {
         container.getChildren().add(wrapGrid(grid));
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Overview");
+        Tab tab = UiTab.tab("Overview");
         tab.setContent(scroll);
         return tab;
     }
@@ -1013,7 +1013,7 @@ public class SystemInfoTabView extends BorderPane {
         container.setPadding(new Insets(12));
         VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Network");
+        Tab tab = UiTab.tab("Network");
         tab.setContent(scroll);
         return tab;
     }
@@ -1067,7 +1067,7 @@ public class SystemInfoTabView extends BorderPane {
         container.setPadding(new Insets(12));
         VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Audio");
+        Tab tab = UiTab.tab("Audio");
         tab.setContent(scroll);
         return tab;
     }
@@ -1122,7 +1122,7 @@ public class SystemInfoTabView extends BorderPane {
         container.setPadding(new Insets(12));
         VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("USB Devices");
+        Tab tab = UiTab.tab("USB Devices");
         tab.setContent(scroll);
         return tab;
     }
@@ -1179,7 +1179,7 @@ public class SystemInfoTabView extends BorderPane {
         container.setPadding(new Insets(12));
         VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Monitors");
+        Tab tab = UiTab.tab("Monitors");
         tab.setContent(scroll);
         return tab;
     }
@@ -1237,7 +1237,7 @@ public class SystemInfoTabView extends BorderPane {
         container.setPadding(new Insets(12));
         VBox.setVgrow(table, Priority.ALWAYS);
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Printers");
+        Tab tab = UiTab.tab("Printers");
         tab.setContent(scroll);
         return tab;
     }
@@ -1264,7 +1264,7 @@ public class SystemInfoTabView extends BorderPane {
         container.getChildren().add(wrapGrid(grid));
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Battery");
+        Tab tab = UiTab.tab("Battery");
         tab.setContent(scroll);
         return tab;
     }
@@ -1289,7 +1289,7 @@ public class SystemInfoTabView extends BorderPane {
         container.getChildren().add(wrapGrid(grid));
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Temperatures");
+        Tab tab = UiTab.tab("Temperatures");
         tab.setContent(scroll);
         return tab;
     }
@@ -1369,7 +1369,7 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         ScrollableContainer scroll = new ScrollableContainer(container);
-        Tab tab = new Tab("Warnings");
+        Tab tab = UiTab.tab("Warnings");
         tab.setContent(scroll);
         return tab;
     }
@@ -1389,7 +1389,7 @@ public class SystemInfoTabView extends BorderPane {
 
     private static <T> TableColumn<T, String> tableColumn(String title, double prefWidth,
                                                           java.util.function.Function<T, String> extractor) {
-        TableColumn<T, String> col = new TableColumn<>(title);
+        TableColumn<T, String> col = new TableColumn<>(com.sbtools.util.UiText.label(title));
         col.setPrefWidth(prefWidth);
         col.setSortable(true);
         col.setCellValueFactory(cd -> {
@@ -1425,7 +1425,7 @@ public class SystemInfoTabView extends BorderPane {
     private static int addRow(GridPane grid, int row, String label, String value) {
         if (value == null || value.isBlank()) return row;
 
-        Label keyLabel = new Label(label);
+        Label keyLabel = new Label(com.sbtools.util.UiText.label(label));
         keyLabel.getStyleClass().addAll("label", "sysinfo-label");
         keyLabel.setMaxWidth(Double.MAX_VALUE);
 
@@ -1562,7 +1562,7 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         FileChooser fileChooser = new FileChooser();
-        fileChooser.setTitle("Export System Information");
+        fileChooser.setTitle(com.sbtools.util.UiText.label("Export system information"));
         fileChooser.setInitialFileName("system-info");
 
         FileChooser.ExtensionFilter txtFilter = new FileChooser.ExtensionFilter("Plain Text (*.txt)", "*.txt");

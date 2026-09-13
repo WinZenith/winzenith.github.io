@@ -253,7 +253,7 @@ public class StartupTabView extends BorderPane {
     }
 
     private void addServiceStateColumn() {
-        TableColumn<StartupItem, String> stateCol = new TableColumn<>("State");
+        TableColumn<StartupItem, String> stateCol = UiColumn.of("State");
         stateCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().getServiceState() == null ? "" : c.getValue().getServiceState()));
         stateCol.setPrefWidth(100);
@@ -267,7 +267,7 @@ public class StartupTabView extends BorderPane {
     }
 
     private Tab createTab(String title, TableView<StartupItem> table, TextField searchField) {
-        Tab tab = new Tab(title);
+        Tab tab = UiTab.tab(title);
         Button selectHigh = new Button("Select high-impact");
         selectHigh.setTooltip(new Tooltip("Select all visible high-impact enabled items"));
         selectHigh.getStyleClass().add("button-outlined");
@@ -295,23 +295,23 @@ public class StartupTabView extends BorderPane {
                             String locationHeader, String pathHeader) {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<StartupItem, String> nameCol = new TableColumn<>(nameHeader);
+        TableColumn<StartupItem, String> nameCol = UiColumn.of(nameHeader);
         nameCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getName()));
         nameCol.setPrefWidth(220);
 
-        TableColumn<StartupItem, String> publisherCol = new TableColumn<>(publisherHeader);
+        TableColumn<StartupItem, String> publisherCol = UiColumn.of(publisherHeader);
         publisherCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getPublisher()));
         publisherCol.setPrefWidth(180);
 
-        TableColumn<StartupItem, String> locationCol = new TableColumn<>(locationHeader);
+        TableColumn<StartupItem, String> locationCol = UiColumn.of(locationHeader);
         locationCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getLocation()));
         locationCol.setPrefWidth(160);
 
-        TableColumn<StartupItem, String> pathCol = new TableColumn<>(pathHeader);
+        TableColumn<StartupItem, String> pathCol = UiColumn.of(pathHeader);
         pathCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getPath()));
         pathCol.setPrefWidth(300);
 
-        TableColumn<StartupItem, String> statusCol = new TableColumn<>("Status");
+        TableColumn<StartupItem, String> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().isEnabled() ? "Enabled" : "Disabled"));
         statusCol.setPrefWidth(100);
         statusCol.setCellFactory(col -> new TableCell<>() {
@@ -332,7 +332,7 @@ public class StartupTabView extends BorderPane {
             }
         });
 
-        TableColumn<StartupItem, String> impactCol = new TableColumn<>("Boot Impact");
+        TableColumn<StartupItem, String> impactCol = UiColumn.of("Boot impact");
         impactCol.setCellValueFactory(c -> {
             double ms = c.getValue().getEstimatedBootImpactMs();
             String label;
@@ -704,7 +704,7 @@ public class StartupTabView extends BorderPane {
         if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
             if (adminNeeded.size() == selected.size()) {
                 Alert alert = new Alert(Alert.AlertType.WARNING);
-                alert.setTitle("Administrator Required");
+                alert.setTitle(com.sbtools.util.UiText.label("Administrator required"));
                 alert.setHeaderText("Modification requires elevation");
                 alert.setContentText("Modifying HKLM / Common Startup items, Windows services, or system scheduled tasks "
                         + "requires administrator privileges.\nPlease run the application as administrator.");
@@ -713,7 +713,7 @@ public class StartupTabView extends BorderPane {
                 return;
             }
             Alert alert = new Alert(Alert.AlertType.WARNING);
-            alert.setTitle("Administrator Required");
+            alert.setTitle(com.sbtools.util.UiText.label("Administrator required"));
             alert.setHeaderText("Some items require elevation");
             alert.setContentText(adminNeeded.size() + " item(s) require administrator privileges and will be skipped.\n"
                     + "Only non-privileged items will be toggled. Run as administrator to modify all.");
@@ -768,7 +768,7 @@ public class StartupTabView extends BorderPane {
             // Guard critical system services even for single toggle (central policy)
             if (StartupSafety.isCriticalDisable(item)) {
                 Alert critical = new Alert(Alert.AlertType.CONFIRMATION);
-                critical.setTitle("Critical System Service");
+                critical.setTitle(com.sbtools.util.UiText.label("Critical system service"));
                 critical.setHeaderText("Disabling critical service: " + item.getName());
                 critical.setContentText("This service is required for Windows stability/boot.\n"
                         + "Disabling it may render the system unbootable or unstable.\n\n"
@@ -794,7 +794,7 @@ public class StartupTabView extends BorderPane {
             } else {
                 String action = item.isEnabled() ? "disable" : "enable";
                 Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-                confirm.setTitle("Confirm Toggle");
+                confirm.setTitle(com.sbtools.util.UiText.label("Confirm toggle"));
                 confirm.setHeaderText("Change startup item status");
                 confirm.setContentText("Are you sure you want to " + action + " \"" + item.getName() + "\"?");
                 confirm.initModality(Modality.APPLICATION_MODAL);
@@ -808,7 +808,7 @@ public class StartupTabView extends BorderPane {
                     .filter(StartupSafety::isCriticalDisable)
                     .toList();
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-            confirm.setTitle("Confirm Bulk Toggle");
+            confirm.setTitle(com.sbtools.util.UiText.label("Confirm bulk toggle"));
             confirm.setHeaderText("Toggle " + selected.size() + " startup item(s)?");
             StringBuilder msg = new StringBuilder("Are you sure you want to toggle the status of ")
                     .append(selected.size()).append(" item(s)?\n");
@@ -910,7 +910,7 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> adminNeeded = selected.stream().filter(StartupSafety::requiresAdmin).toList();
         if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
             Alert warn = new Alert(Alert.AlertType.WARNING);
-            warn.setTitle("Administrator Required");
+            warn.setTitle(com.sbtools.util.UiText.label("Administrator required"));
             warn.setHeaderText("Deletion requires elevation");
             warn.setContentText(adminNeeded.size() + " selected item(s) require administrator privileges.\n"
                     + "Only non-privileged items will be deleted. Run as administrator to delete all.");
@@ -929,7 +929,7 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> systemTasks = selected.stream().filter(StartupSafety::isSystemTask).toList();
         if (!systemTasks.isEmpty()) {
             Alert sysWarn = new Alert(Alert.AlertType.CONFIRMATION);
-            sysWarn.setTitle("System Scheduled Task");
+            sysWarn.setTitle(com.sbtools.util.UiText.label("System scheduled task"));
             sysWarn.setHeaderText("Delete system task(s)?");
             sysWarn.setContentText(systemTasks.size() + " selected item(s) are under \\Microsoft\\ or \\Windows\\.\n"
                     + "Deleting system tasks can affect Windows behavior. Continue?");
@@ -940,7 +940,7 @@ public class StartupTabView extends BorderPane {
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle("Confirm Deletion");
+        confirm.setTitle(com.sbtools.util.UiText.label("Confirm deletion"));
         if (selected.size() == 1) {
             confirm.setHeaderText("Delete Startup Item: " + selected.get(0).getName());
         } else {
@@ -1066,7 +1066,7 @@ public class StartupTabView extends BorderPane {
 
     private void showBackupsDialog() {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Startup Backups & Restore");
+        dialog.setTitle(com.sbtools.util.UiText.label("Startup backups & restore"));
         dialog.setHeaderText("Restore previously deleted startup items.");
         dialog.initModality(Modality.APPLICATION_MODAL);
 
@@ -1087,30 +1087,30 @@ public class StartupTabView extends BorderPane {
         TableView<StartupBackupEntry> backupTable = new TableView<>(backups);
         backupTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<StartupBackupEntry, String> nameCol = new TableColumn<>("Name");
+        TableColumn<StartupBackupEntry, String> nameCol = UiColumn.of("Name");
         nameCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getName()));
         nameCol.setPrefWidth(160);
 
-        TableColumn<StartupBackupEntry, String> typeCol = new TableColumn<>("Type");
+        TableColumn<StartupBackupEntry, String> typeCol = UiColumn.of("Type");
         typeCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getType()));
         typeCol.setPrefWidth(90);
 
-        TableColumn<StartupBackupEntry, String> dateCol = new TableColumn<>("Backup Date");
+        TableColumn<StartupBackupEntry, String> dateCol = UiColumn.of("Backup date");
         dateCol.setCellValueFactory(c -> {
             SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             return new SimpleStringProperty(df.format(new Date(c.getValue().getBackupTime())));
         });
         dateCol.setPrefWidth(140);
 
-        TableColumn<StartupBackupEntry, String> originalCol = new TableColumn<>("Original Location");
+        TableColumn<StartupBackupEntry, String> originalCol = UiColumn.of("Original location");
         originalCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getLocation()));
         originalCol.setPrefWidth(160);
 
-        TableColumn<StartupBackupEntry, String> commandCol = new TableColumn<>("Command");
+        TableColumn<StartupBackupEntry, String> commandCol = UiColumn.of("Command");
         commandCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getCommand()));
         commandCol.setPrefWidth(200);
 
-        TableColumn<StartupBackupEntry, String> enabledCol = new TableColumn<>("Was Enabled");
+        TableColumn<StartupBackupEntry, String> enabledCol = UiColumn.of("Was enabled");
         enabledCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().isEnabled() ? "Yes" : "No"));
         enabledCol.setPrefWidth(90);
 
@@ -1119,8 +1119,8 @@ public class StartupTabView extends BorderPane {
         backupTable.getSortOrder().add(dateCol);
         backupTable.sort();
 
-        Button restoreBtn = new Button("Restore Selected");
-        Button deleteBackupBtn = new Button("Delete Backup");
+        Button restoreBtn = new Button("Restore selected");
+        Button deleteBackupBtn = new Button("Delete backup");
         Button exportBackupsBtn = new Button("Export CSV");
 
         restoreBtn.setDisable(true);
@@ -1137,7 +1137,7 @@ public class StartupTabView extends BorderPane {
             if (selected == null || busy.get()) return;
             if (StartupSafety.requiresAdminForBackup(selected) && !adminCheck.getAsBoolean()) {
                 Alert warn = new Alert(Alert.AlertType.WARNING);
-                warn.setTitle("Administrator Required");
+                warn.setTitle(com.sbtools.util.UiText.label("Administrator required"));
                 warn.setHeaderText("Restore requires elevation");
                 warn.setContentText("This backup targets HKLM, Common Startup, or a system scheduled task.\n"
                         + "Please run the application as administrator to restore it.");
@@ -1157,7 +1157,7 @@ public class StartupTabView extends BorderPane {
                     service.restoreBackup(selected);
                     Platform.runLater(() -> {
                         backups.remove(selected);
-                        restoreBtn.setText("Restore Selected");
+                        restoreBtn.setText("Restore selected");
                         backupTable.setDisable(false);
                         busy.set(false);
                         progress.setVisible(false);
@@ -1167,7 +1167,7 @@ public class StartupTabView extends BorderPane {
                 } catch (Exception ex) {
                     AppLogger.error("Failed to restore startup item", ex);
                     Platform.runLater(() -> {
-                        restoreBtn.setText("Restore Selected");
+                        restoreBtn.setText("Restore selected");
                         backupTable.setDisable(false);
                         restoreBtn.setDisable(false);
                         deleteBackupBtn.setDisable(backupTable.getSelectionModel().getSelectedItem() == null);
@@ -1184,8 +1184,8 @@ public class StartupTabView extends BorderPane {
             StartupBackupEntry selected = backupTable.getSelectionModel().getSelectedItem();
             if (selected == null) return;
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-            confirm.setTitle("Confirm Deletion");
-            confirm.setHeaderText("Delete Backup Entry");
+            confirm.setTitle(com.sbtools.util.UiText.label("Confirm deletion"));
+            confirm.setHeaderText(com.sbtools.util.UiText.label("Delete backup entry"));
             confirm.setContentText("Are you sure you want to permanently delete this backup? You will no longer be able to restore it.");
             if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
                 try {

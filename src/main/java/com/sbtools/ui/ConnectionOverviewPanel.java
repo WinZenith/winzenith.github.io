@@ -80,7 +80,7 @@ class ConnectionOverviewPanel extends VBox {
         content.setPadding(new Insets(12, 16, 12, 16));
         VBox.setVgrow(content, Priority.ALWAYS);
 
-        Label header = new Label("Connection Overview");
+        Label header = new Label(com.sbtools.util.UiText.label("Connection overview"));
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
 

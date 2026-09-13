@@ -38,7 +38,7 @@ public class SoftwareUpdateHistoryDialog {
     public static void show() {
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle(AppInfo.DISPLAY_NAME + " - Update History");
-        dialog.setHeaderText("Software Update History");
+        dialog.setHeaderText(com.sbtools.util.UiText.label("Software update history"));
 
         SoftwareUpdateHistoryStore store = new SoftwareUpdateHistoryStore();
         List<SoftwareUpdateHistoryEntry> entries = store.listAll();
@@ -71,31 +71,31 @@ public class SoftwareUpdateHistoryDialog {
         table.setPlaceholder(new Label("No history yet. Successful and failed installs will appear here."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<SoftwareUpdateHistoryEntry, String> dateCol = new TableColumn<>("Date");
+        TableColumn<SoftwareUpdateHistoryEntry, String> dateCol = UiColumn.of("Date");
         dateCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
                 formatInstalledAt(c.getValue())));
         dateCol.setPrefWidth(130);
 
-        TableColumn<SoftwareUpdateHistoryEntry, String> nameCol = new TableColumn<>("Program");
+        TableColumn<SoftwareUpdateHistoryEntry, String> nameCol = UiColumn.of("Program");
         nameCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().packageName() == null ? "" : c.getValue().packageName()));
 
-        TableColumn<SoftwareUpdateHistoryEntry, String> oldVerCol = new TableColumn<>("Old Version");
+        TableColumn<SoftwareUpdateHistoryEntry, String> oldVerCol = UiColumn.of("Old version");
         oldVerCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().oldVersion() == null ? "" : c.getValue().oldVersion()));
         oldVerCol.setPrefWidth(100);
 
-        TableColumn<SoftwareUpdateHistoryEntry, String> newVerCol = new TableColumn<>("New Version");
+        TableColumn<SoftwareUpdateHistoryEntry, String> newVerCol = UiColumn.of("New version");
         newVerCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().newVersion() == null ? "" : c.getValue().newVersion()));
         newVerCol.setPrefWidth(100);
 
-        TableColumn<SoftwareUpdateHistoryEntry, String> sourceCol = new TableColumn<>("Source");
+        TableColumn<SoftwareUpdateHistoryEntry, String> sourceCol = UiColumn.of("Source");
         sourceCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().source() == null ? "" : c.getValue().source()));
         sourceCol.setPrefWidth(100);
 
-        TableColumn<SoftwareUpdateHistoryEntry, Boolean> statusCol = new TableColumn<>("Status");
+        TableColumn<SoftwareUpdateHistoryEntry, Boolean> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c -> new javafx.beans.property.SimpleBooleanProperty(c.getValue().success()));
         statusCol.setPrefWidth(70);
         statusCol.setCellFactory(col -> new TableCell<>() {
@@ -115,7 +115,7 @@ public class SoftwareUpdateHistoryDialog {
             }
         });
 
-        TableColumn<SoftwareUpdateHistoryEntry, String> errorCol = new TableColumn<>("Error");
+        TableColumn<SoftwareUpdateHistoryEntry, String> errorCol = UiColumn.of("Error");
         errorCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().errorMessage() == null ? "" : c.getValue().errorMessage()));
         errorCol.setPrefWidth(200);

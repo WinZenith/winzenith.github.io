@@ -455,7 +455,7 @@ public class BrowserExtensionsTabView extends BorderPane {
     private void buildTable() {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<BrowserExtensionRow, BrowserExtensionRow> checkCol = new TableColumn<>(" ");
+        TableColumn<BrowserExtensionRow, BrowserExtensionRow> checkCol = UiColumn.of(" ");
         checkCol.setPrefWidth(40);
         checkCol.setMinWidth(40);
         checkCol.setMaxWidth(40);
@@ -503,7 +503,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             }
         });
 
-        TableColumn<BrowserExtensionRow, String> browserCol = new TableColumn<>("Browser");
+        TableColumn<BrowserExtensionRow, String> browserCol = UiColumn.of("Browser");
         browserCol.setCellValueFactory(c -> c.getValue().browserProperty());
         browserCol.setPrefWidth(100);
         browserCol.setCellFactory(col -> new TableCell<>() {
@@ -533,7 +533,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             }
         });
 
-        TableColumn<BrowserExtensionRow, String> nameCol = new TableColumn<>("Extension Name");
+        TableColumn<BrowserExtensionRow, String> nameCol = UiColumn.of("Extension name");
         nameCol.setCellValueFactory(c -> c.getValue().nameProperty());
         nameCol.setPrefWidth(200);
         nameCol.setCellFactory(col -> new TableCell<>() {
@@ -555,11 +555,11 @@ public class BrowserExtensionsTabView extends BorderPane {
             }
         });
 
-        TableColumn<BrowserExtensionRow, String> versionCol = new TableColumn<>("Version");
+        TableColumn<BrowserExtensionRow, String> versionCol = UiColumn.of("Version");
         versionCol.setCellValueFactory(c -> c.getValue().versionProperty());
         versionCol.setPrefWidth(80);
 
-        TableColumn<BrowserExtensionRow, String> statusCol = new TableColumn<>("Status");
+        TableColumn<BrowserExtensionRow, String> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c -> c.getValue().enabledProperty().asString());
         statusCol.setPrefWidth(100);
         statusCol.setCellFactory(col -> new TableCell<>() {
@@ -597,11 +597,11 @@ public class BrowserExtensionsTabView extends BorderPane {
             }
         });
 
-        TableColumn<BrowserExtensionRow, String> installDateCol = new TableColumn<>("Install Date");
+        TableColumn<BrowserExtensionRow, String> installDateCol = UiColumn.of("Install date");
         installDateCol.setCellValueFactory(c -> c.getValue().installDateProperty());
         installDateCol.setPrefWidth(130);
 
-        TableColumn<BrowserExtensionRow, String> profileCol = new TableColumn<>("Profile");
+        TableColumn<BrowserExtensionRow, String> profileCol = UiColumn.of("Profile");
         profileCol.setCellValueFactory(c -> c.getValue().profileNameProperty());
         profileCol.setPrefWidth(110);
         profileCol.setCellFactory(col -> new TableCell<>() {
@@ -623,7 +623,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             }
         });
 
-        TableColumn<BrowserExtensionRow, String> descCol = new TableColumn<>("Description");
+        TableColumn<BrowserExtensionRow, String> descCol = UiColumn.of("Description");
         descCol.setCellValueFactory(c -> c.getValue().descriptionProperty());
         descCol.setPrefWidth(200);
         descCol.setCellFactory(col -> new TableCell<>() {
@@ -641,7 +641,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             }
         });
 
-        TableColumn<BrowserExtensionRow, String> permsCol = new TableColumn<>("Permissions");
+        TableColumn<BrowserExtensionRow, String> permsCol = UiColumn.of("Permissions");
         permsCol.setCellValueFactory(c -> c.getValue().permissionsProperty());
         permsCol.setPrefWidth(180);
         permsCol.setCellFactory(col -> new TableCell<>() {
@@ -940,7 +940,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             return;
         }
         FileChooser fc = new FileChooser();
-        fc.setTitle("Export Browser Extensions");
+        fc.setTitle(com.sbtools.util.UiText.label("Export browser extensions"));
         fc.setInitialFileName("browser-extensions");
         FileChooser.ExtensionFilter csv = new FileChooser.ExtensionFilter("CSV (*.csv)", "*.csv");
         FileChooser.ExtensionFilter json = new FileChooser.ExtensionFilter("JSON (*.json)", "*.json");
@@ -1211,7 +1211,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Restore\n" + sel.getFileName() + "\nover its live file?\n\nClose all browsers first. This overwrites the current Preferences/extensions.json.",
                     ButtonType.OK, ButtonType.CANCEL);
-            confirm.setHeaderText("Restore Backup");
+            confirm.setHeaderText(com.sbtools.util.UiText.label("Restore backup"));
             if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
             boolean ok = com.sbtools.browserext.BrowserExtensionService.restoreProfileBackup(sel);
             if (ok) {
@@ -1691,7 +1691,7 @@ public class BrowserExtensionsTabView extends BorderPane {
 
         Alert dialog = new Alert(Alert.AlertType.CONFIRMATION);
         dialog.setTitle(AppInfo.DISPLAY_NAME);
-        dialog.setHeaderText("Ignored Extensions (" + ignored.size() + ")");
+        dialog.setHeaderText(com.sbtools.util.UiText.label("Ignored extensions (" + ignored.size() + ")"));
 
         StringBuilder msg = new StringBuilder();
         for (BrowserExtensionRow r : ignored) {

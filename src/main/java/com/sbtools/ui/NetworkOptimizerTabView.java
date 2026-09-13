@@ -84,13 +84,13 @@ public class NetworkOptimizerTabView extends BorderPane {
         connectionOverviewPanel = new ConnectionOverviewPanel(service, busy);
         changeLogPanel = new ChangeLogPanel(service, busy);
 
-        Tab adaptersTab = new Tab("Network Adapters", adaptersPanel);
-        Tab optimizationTab = new Tab("Optimization", optimizationPanel);
-        Tab dnsTab = new Tab("DNS & Cache", dnsCachePanel);
-        Tab adapterSettingsTab = new Tab("Adapter Settings", adapterSettingsPanel);
-        Tab wifiTab = new Tab("Wi-Fi", wiFiPanel);
-        Tab connectionOverviewTab = new Tab("Connection Overview", connectionOverviewPanel);
-        Tab changeHistoryTab = new Tab("Change History", changeLogPanel);
+        Tab adaptersTab = UiTab.tab("Network adapters", adaptersPanel);
+        Tab optimizationTab = UiTab.tab("Optimization", optimizationPanel);
+        Tab dnsTab = UiTab.tab("DNS & cache", dnsCachePanel);
+        Tab adapterSettingsTab = UiTab.tab("Adapter settings", adapterSettingsPanel);
+        Tab wifiTab = UiTab.tab("Wi-Fi", wiFiPanel);
+        Tab connectionOverviewTab = UiTab.tab("Connection overview", connectionOverviewPanel);
+        Tab changeHistoryTab = UiTab.tab("Change history", changeLogPanel);
 
         tabPane.getTabs().addAll(
                 adaptersTab, optimizationTab, dnsTab, adapterSettingsTab,

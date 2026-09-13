@@ -48,7 +48,7 @@ public class UninstallerHistoryDialog {
     public static void show() {
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle(AppInfo.DISPLAY_NAME + " - Uninstall History");
-        dialog.setHeaderText("Uninstall History");
+        dialog.setHeaderText(com.sbtools.util.UiText.label("Uninstall history"));
 
         UninstallHistoryStore store = new UninstallHistoryStore();
         List<UninstallHistoryEntry> entries = store.listAll();
@@ -78,21 +78,21 @@ public class UninstallerHistoryDialog {
         table.setPlaceholder(new Label("No uninstalls recorded yet."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<UninstallHistoryEntry, String> dateCol = new TableColumn<>("Date");
+        TableColumn<UninstallHistoryEntry, String> dateCol = UiColumn.of("Date");
         dateCol.setCellValueFactory(c -> new SimpleStringProperty(fmt(c.getValue())));
         dateCol.setPrefWidth(120);
 
-        TableColumn<UninstallHistoryEntry, String> nameCol = new TableColumn<>("Application");
+        TableColumn<UninstallHistoryEntry, String> nameCol = UiColumn.of("Application");
         nameCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().appName() == null ? "" : c.getValue().appName()));
         nameCol.setPrefWidth(200);
 
-        TableColumn<UninstallHistoryEntry, String> modeCol = new TableColumn<>("Mode");
+        TableColumn<UninstallHistoryEntry, String> modeCol = UiColumn.of("Mode");
         modeCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().mode() == null ? "" : c.getValue().mode()));
         modeCol.setPrefWidth(90);
 
-        TableColumn<UninstallHistoryEntry, Boolean> statusCol = new TableColumn<>("Status");
+        TableColumn<UninstallHistoryEntry, Boolean> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c ->
                 new javafx.beans.property.SimpleBooleanProperty(c.getValue().success()));
         statusCol.setPrefWidth(70);
@@ -113,7 +113,7 @@ public class UninstallerHistoryDialog {
             }
         });
 
-        TableColumn<UninstallHistoryEntry, String> detailCol = new TableColumn<>("Detail");
+        TableColumn<UninstallHistoryEntry, String> detailCol = UiColumn.of("Detail");
         detailCol.setCellValueFactory(c -> new SimpleStringProperty(
                 c.getValue().detail() == null ? "" : c.getValue().detail()));
 

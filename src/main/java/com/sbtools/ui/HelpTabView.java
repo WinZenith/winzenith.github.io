@@ -1,5 +1,6 @@
 package com.sbtools.ui;
 
+import com.sbtools.util.UiText;
 import javafx.geometry.Insets;
 import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
@@ -37,14 +38,14 @@ public class HelpTabView extends VBox {
                 "Admin rights are required. Before install the app runs pre-checks, can auto-backup drivers and create a restore point if enabled, blocks pre-release / untrusted / unsigned packages, and may ask for a manual vendor download. " +
                 "Drivers awaiting restart stay listed with a REBOOT badge until you reboot."));
 
-        getChildren().add(createFaqSection("Backup/Rollback",
+        getChildren().add(createFaqSection("Backup/rollback",
                 "This tab has three sub-tabs. \"Rollback drivers\" lists driver backups created automatically before driver updates. " +
                 "Use \"Refresh\", \"Search backups...\", \"Details\", \"Open Folder\", \"Verify\" and \"Repair\" to manage them. Select a row and click \"Revert\" to restore that driver version (admin required, restart may be needed). " +
                 "\"Delete\" removes one backup; \"Delete All\" removes all (two-step confirmation — rollback is then impossible). Nothing is deleted automatically. " +
                 "\"System restore\" is read-only: click \"Scan\" to list points, \"Create new restore point\" to create one (admin required), and \"Launch restore point\" to open the Windows System Restore wizard — the app never restores or deletes points itself. " +
                 "\"Registry backup\" backs up startup-related registry areas: click \"Backup Now\", pick core / extended areas plus optional full-hive export, then \"Restore Selected\" (merges .reg files; .hiv files need manual reg restore) or \"Delete Backup\"."));
 
-        getChildren().add(createFaqSection("Software Update",
+        getChildren().add(createFaqSection("Software update",
                 "This tab uses winget plus Windows Update to scan for app and Windows updates. Click \"Scan\" to check (\"Stop scan\" cancels). " +
                 "Results show Program, Current / Available Version, Source (winget / WindowsUpdate), Size and Status (no severity levels). " +
                 "Use Search, Source filter and \"Failed only\" to narrow results, then \"Select All\" / \"Deselect All\" and \"Update Selected\", or per-row \"Update\". Failed items can be retried with \"Retry Failed\" (max 3 attempts). " +
@@ -52,7 +53,7 @@ public class HelpTabView extends VBox {
                 "After a successful install you are prompted to delete detected installer files from Downloads to save space. " +
                 "Per-row \"Ignore\" or \"Ignored List\" hides apps until unignored. \"History\" audits OK / Failed installs."));
 
-        getChildren().add(createFaqSection("System Information",
+        getChildren().add(createFaqSection("System information",
                 "The System Information tab displays detailed hardware and software data. Click \"Load System Info\" to query, \"Refresh\" for latest, \"Cancel\" to stop. Your last snapshot is shown instantly on open. " +
                 "Information is organized into tabs shown only when data exists: Overview, CPU, GPU, RAM, OS, Storage, Motherboard, Network, Audio, Battery, Temperatures, Others, USB Devices, Monitors, Printers, plus Warnings (with collection timings) if anything failed. " +
                 "Others uses a category list; Network, Audio, USB, Monitors and Printers each have their own search box (e.g. \"Search adapters...\"). " +
@@ -70,7 +71,7 @@ public class HelpTabView extends VBox {
                 "If an entry has no uninstaller, the app offers a winget fallback (with confirmation). " +
                 "Be cautious with force uninstall — it kills processes and deletes files/registry/Start Menu entries and cannot be undone."));
 
-        getChildren().add(createFaqSection("Startup Items/Services",
+        getChildren().add(createFaqSection("Startup items/services",
                 "This tab manages startup programs and Windows service start types. Items are organized into \"Startup apps\" (Registry Run/RunOnce + Startup Folder), \"Scheduled tasks\", and \"Windows services\" (with counts). " +
                 "The services tab lists all Windows services (Automatic, Manual, and Disabled); Manual services show zero estimated boot impact. Startup Folder items (User and Common) are merged into Startup apps and toggled by renaming the shortcut (.disabled). Services cannot be deleted, only toggled. " +
                 "Click \"Scan\" (\"Stop\" cancels and keeps the previous results), then select an item and click \"Enable/Disable\" or \"Delete\". Only \"Delete\" creates a backup in Backups & Restore; toggling does not. Disabling a critical system service asks for extra confirmation. " +
@@ -78,7 +79,7 @@ public class HelpTabView extends VBox {
                 "The footer shows total estimated boot delay (enabled items only) and last boot time. Use \"Backups & Restore\" to restore or permanently delete backups, and \"Export CSV\" for the visible tab. " +
                 "Modifying HKLM / Common Startup, system tasks or services requires administrator rights. Only modify items you recognize."));
 
-        getChildren().add(createFaqSection("System Cleanup",
+        getChildren().add(createFaqSection("System cleanup",
                 "The System Cleanup tab scans for unnecessary files. Click \"Scan\" (\"Cancel\" stops it) to analyze 40 categories such as temporary files, browser caches, Windows update leftovers, and log files. " +
                 "Each category shows reclaimable Size / Count plus Risk (Low / Medium / High), Status, and Took time. Use Search and the Risk filter to narrow results. " +
                 "Double-click a row (or right-click > \"View details...\") to preview what will be cleaned. Select categories and click \"Clean Selected\" (HIGH-risk categories start unchecked and ask for extra confirmation; iTunes backups / Docker / Windows.old need a second irreversible-delete confirm). " +
@@ -86,7 +87,7 @@ public class HelpTabView extends VBox {
                 "If Registry is selected you are offered a .reg backup; a System Restore point can be created automatically if enabled. Some categories require admin. " +
                 "There is no registry-defragmentation tool. Always review results before cleaning."));
 
-        getChildren().add(createFaqSection("Disk Tools",
+        getChildren().add(createFaqSection("Disk tools",
                 "The Disk Tools tab has four inner tabs: Defrag, Disk Health, Benchmark and Secure Erase. " +
                 "Defrag: click \"Refresh\", select drives, click \"Analyze Selected\", then \"Intelligent Defrag\" (Mode Auto / Quick / Deep, Filter All / HDD / SSD). Auto runs ReTrim on SSDs and full defrag on HDDs — SSDs are never defragmented. A color-coded grid visualizes fragmentation. Admin required. " +
                 "Disk Health: click \"Refresh\" for SMART data (model, temperature, power-on hours, SSD wear, reallocated / pending sectors, host reads/writes). " +
@@ -94,7 +95,7 @@ public class HelpTabView extends VBox {
                 "Secure Erase: \"Secure File / Folder Deletion\" (Browse / Add Files, Overwrite Quick 1-pass / Standard 3-pass / Deep 7-pass, \"Secure Delete\" / \"Secure Delete Folder\" / \"Delete All\"), \"Recycle Bin Cleanup\" (\"Refresh\" + \"Secure Wipe Recycle Bin\"), and \"Free Space Wiping\" (\"Start\" / \"Stop\", 1 GB reserve kept, SSD / Unknown types blocked, system drive needs double confirmation, admin required). " +
                 "Shredding and wiping are irreversible — in-use files can be scheduled for deletion on next reboot."));
 
-        getChildren().add(createFaqSection("Browser Extensions",
+        getChildren().add(createFaqSection("Browser extensions",
                 "This tab scans installed browsers — Chrome, Chrome Canary, Edge, Edge Beta, Edge Dev, Edge Canary, Firefox, Brave, Opera, Opera GX and Vivaldi (plus extra browsers from browser-catalog.json) — for installed extensions. " +
                 "Click \"Scan All Browsers\" for a full parallel scan with determinate progress, or pick a browser in the Browser filter and click \"Rescan Browser\" for a fast single-browser refresh. Use \"Cancel\" to stop a running scan or toggle. " +
                 "Filter by Browser, Status (Enabled / Disabled / Managed / Ignored), Profile (Default, Profile 1, ...) and free-text search (name, description, ID, permissions, version). Tick \"Auto-scan on open\" to scan automatically. " +
@@ -104,7 +105,7 @@ public class HelpTabView extends VBox {
                 "Use \"Export...\" to save the filtered list as CSV/JSON, \"Restore Backup...\" to roll back a Preferences / extensions.json backup created during a toggle, and \"Manage Ignored\" to review ignored items. " +
                 "Changes take effect after restarting the browser. Only store-installed extensions are scanned; unpacked developer-mode extensions are not."));
 
-        getChildren().add(createFaqSection("Network Optimizer",
+        getChildren().add(createFaqSection("Network optimizer",
                 "The Network Optimizer has seven sub-tabs (admin required for changes; a \"Reboot required\" banner appears after stack / Winsock resets). "
                 + "\"Network Adapters\" lists interfaces with status, speed, IP, DHCP, gateway and DNS; use Filter, \"Refresh\", \"Enable\" / \"Disable\", \"Renew IP\" and \"Export CSV\". "
                 + "\"Optimization\" applies TCP/IP presets (Default, Maximum Performance, Maximum Stability, Gaming). "
@@ -154,7 +155,7 @@ public class HelpTabView extends VBox {
         container.setStyle("-fx-background-color: #21222c;");
         container.setPadding(new Insets(4, 8, 8, 8));
 
-        TitledPane pane = new TitledPane(title, container);
+        TitledPane pane = new TitledPane(UiText.label(title), container);
         pane.setAnimated(true);
         pane.setExpanded(false);
         pane.setCollapsible(true);

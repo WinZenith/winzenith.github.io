@@ -92,7 +92,7 @@ class ChangeLogPanel extends VBox {
     private VBox buildContent() {
         VBox content = new VBox(8);
 
-        Label header = new Label("Change History");
+        Label header = new Label("Change history");
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
 
@@ -121,11 +121,11 @@ class ChangeLogPanel extends VBox {
         Button refreshBtn = UIButton.primary("Refresh");
         refreshBtn.setOnAction(e -> loadEntries());
 
-        Button clearBtn = UIButton.secondary("Clear History");
+        Button clearBtn = UIButton.secondary("Clear history");
         clearBtn.setOnAction(e -> {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Clear all change history?", ButtonType.YES, ButtonType.NO);
-            confirm.setTitle("Clear History");
+            confirm.setTitle("Clear history");
             confirm.setHeaderText(null);
             if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
                 AppExecutors.ioPool().submit(() -> {
@@ -203,7 +203,7 @@ class ChangeLogPanel extends VBox {
                     var info = service.describeRestore(snaps.get(0));
                     if (info.details() != null) sb.append("\n--- Newest ---\n").append(info.details());
                     Alert a = new Alert(Alert.AlertType.INFORMATION);
-                    a.setTitle("Network Snapshots");
+                    a.setTitle(com.sbtools.util.UiText.label("Network snapshots"));
                     a.setHeaderText(snaps.size() + " snapshot(s)");
                     TextArea area = new TextArea(sb.toString());
                     area.setEditable(false);
@@ -227,7 +227,7 @@ class ChangeLogPanel extends VBox {
     private void buildTable() {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<NetworkChangeEntry, String> timeCol = new TableColumn<>("Time");
+        TableColumn<NetworkChangeEntry, String> timeCol = UiColumn.of("Time");
         timeCol.setCellValueFactory(c -> {
             String raw = c.getValue().timestamp();
             String formatted;
@@ -240,20 +240,20 @@ class ChangeLogPanel extends VBox {
         });
         timeCol.setPrefWidth(150);
 
-        TableColumn<NetworkChangeEntry, String> opCol = new TableColumn<>("Operation");
+        TableColumn<NetworkChangeEntry, String> opCol = UiColumn.of("Operation");
         opCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().operation()));
         opCol.setPrefWidth(160);
 
-        TableColumn<NetworkChangeEntry, String> targetCol = new TableColumn<>("Target");
+        TableColumn<NetworkChangeEntry, String> targetCol = UiColumn.of("Target");
         targetCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(c.getValue().target()));
         targetCol.setPrefWidth(140);
 
-        TableColumn<NetworkChangeEntry, String> detailsCol = new TableColumn<>("Details");
+        TableColumn<NetworkChangeEntry, String> detailsCol = UiColumn.of("Details");
         detailsCol.setCellValueFactory(c -> new javafx.beans.property.SimpleStringProperty(
                 c.getValue().details() != null ? c.getValue().details() : ""));
         detailsCol.setPrefWidth(200);
 
-        TableColumn<NetworkChangeEntry, Boolean> resultCol = new TableColumn<>("Result");
+        TableColumn<NetworkChangeEntry, Boolean> resultCol = UiColumn.of("Result");
         resultCol.setCellValueFactory(c -> new javafx.beans.property.SimpleBooleanProperty(c.getValue().success()));
         resultCol.setPrefWidth(80);
         resultCol.setCellFactory(col -> new TableCell<>() {

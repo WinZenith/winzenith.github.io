@@ -38,10 +38,10 @@ public class App extends Application {
     private final BooleanProperty busy = new com.sbtools.util.BusyProperty();
 
     private static final String[] TAB_NAMES = {
-            "Dashboard", "Drivers", "Backup/Rollback", "Software Update",
-            "System Information", "Uninstaller", "Startup items/services",
-            "System cleanup", "Disk Tools",
-            "Browser Extensions", "Network Optimizer"
+            "Dashboard", "Drivers", "Backup/rollback", "Software update",
+            "System information", "Uninstaller", "Startup items/services",
+            "System cleanup", "Disk tools",
+            "Browser extensions", "Network optimizer"
     };
 
     private BorderPane root;
@@ -169,8 +169,8 @@ public class App extends Application {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "A new version v" + result.latestVersion() + " is available.\nDo you want to download it?",
                 ButtonType.YES, ButtonType.NO);
-        confirm.setTitle("Update Available");
-        confirm.setHeaderText("Update Available");
+        confirm.setTitle("Update available");
+        confirm.setHeaderText("Update available");
         if (primaryStage != null) {
             confirm.initOwner(primaryStage);
         }

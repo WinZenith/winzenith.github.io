@@ -888,23 +888,23 @@ public class DashboardTabView extends BorderPane {
         TableView<IssueCategory> t = new TableView<>(issues);
         t.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<IssueCategory, String> categoryCol = new TableColumn<>("Category");
+        TableColumn<IssueCategory, String> categoryCol = UiColumn.of("Category");
         categoryCol.setCellValueFactory(c -> c.getValue().categoryProperty());
         categoryCol.setPrefWidth(220);
 
-        TableColumn<IssueCategory, String> countCol = new TableColumn<>("Issues Found");
+        TableColumn<IssueCategory, String> countCol = UiColumn.of("Issues Found");
         countCol.setCellValueFactory(c -> c.getValue().countTextProperty());
         countCol.setPrefWidth(160);
 
-        TableColumn<IssueCategory, String> sizeCol = new TableColumn<>("Size");
+        TableColumn<IssueCategory, String> sizeCol = UiColumn.of("Size");
         sizeCol.setCellValueFactory(c -> c.getValue().sizeTextProperty());
         sizeCol.setPrefWidth(110);
 
-        TableColumn<IssueCategory, String> sourceCol = new TableColumn<>("Source");
+        TableColumn<IssueCategory, String> sourceCol = UiColumn.of("Source");
         sourceCol.setCellValueFactory(c -> c.getValue().sourceProperty());
         sourceCol.setPrefWidth(90);
 
-        TableColumn<IssueCategory, String> statusCol = new TableColumn<>("Status");
+        TableColumn<IssueCategory, String> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().severity()));
         statusCol.setPrefWidth(130);
         statusCol.setCellFactory(col -> new TableCell<>() {

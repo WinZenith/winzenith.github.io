@@ -545,8 +545,8 @@ class DnsCachePanel extends VBox {
         if (!requireAdmin()) return;
         Alert warn = new Alert(Alert.AlertType.WARNING,
                 "Resetting the network stack requires a system reboot. Continue?");
-        warn.setTitle("Confirm Reset");
-        warn.setHeaderText("Reset Network Stack");
+        warn.setTitle(com.sbtools.util.UiText.label("Confirm reset"));
+        warn.setHeaderText(com.sbtools.util.UiText.label("Reset network stack"));
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             statusLabel.setText("Ready.");
             return;
@@ -587,7 +587,7 @@ class DnsCachePanel extends VBox {
         if (!requireAdmin()) return;
         Alert warn = new Alert(Alert.AlertType.WARNING,
                 "Resetting Winsock may require a reboot. Continue?");
-        warn.setTitle("Confirm Reset");
+        warn.setTitle(com.sbtools.util.UiText.label("Confirm reset"));
         warn.setHeaderText("Reset Winsock");
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             statusLabel.setText("Ready.");

@@ -236,10 +236,10 @@ public class DiskToolsTabView extends BorderPane {
         TabPane tabPane = new TabPane();
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
-        Tab defragTab = new Tab("Defrag", buildDefragContent());
-        Tab healthTab = new Tab("Disk Health", buildDiskHealthContent());
-        Tab benchmarkTab = new Tab("Benchmark", buildBenchmarkContent());
-        Tab secureEraseTab = new Tab("Secure Erase", buildSecureEraseContent());
+        Tab defragTab = UiTab.tab("Defrag", buildDefragContent());
+        Tab healthTab = UiTab.tab("Disk health", buildDiskHealthContent());
+        Tab benchmarkTab = UiTab.tab("Benchmark", buildBenchmarkContent());
+        Tab secureEraseTab = UiTab.tab("Secure erase", buildSecureEraseContent());
 
         tabPane.getTabs().addAll(defragTab, healthTab, benchmarkTab, secureEraseTab);
         setCenter(tabPane);
@@ -349,7 +349,7 @@ public class DiskToolsTabView extends BorderPane {
         driveTable.setItems(filteredDrives);
         driveTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<DriveInfo, DriveInfo> checkCol = new TableColumn<>(" ");
+        TableColumn<DriveInfo, DriveInfo> checkCol = UiColumn.of(" ");
         checkCol.setPrefWidth(40);
         checkCol.setMinWidth(40);
         checkCol.setMaxWidth(40);
@@ -378,34 +378,34 @@ public class DiskToolsTabView extends BorderPane {
             }
         });
 
-        TableColumn<DriveInfo, String> letterCol = new TableColumn<>("Drive");
+        TableColumn<DriveInfo, String> letterCol = UiColumn.of("Drive");
         letterCol.setCellValueFactory(c -> c.getValue().driveLetterProperty());
         letterCol.setPrefWidth(60);
 
-        TableColumn<DriveInfo, String> labelCol = new TableColumn<>("Label");
+        TableColumn<DriveInfo, String> labelCol = UiColumn.of("Label");
         labelCol.setCellValueFactory(c -> {
             String label = c.getValue().getVolumeLabel();
             return new SimpleObjectProperty<>(label.isBlank() ? "-" : label);
         });
         labelCol.setPrefWidth(120);
 
-        TableColumn<DriveInfo, String> typeCol = new TableColumn<>("Type");
+        TableColumn<DriveInfo, String> typeCol = UiColumn.of("Type");
         typeCol.setCellValueFactory(c -> c.getValue().mediaTypeProperty());
         typeCol.setPrefWidth(70);
 
-        TableColumn<DriveInfo, String> fsCol = new TableColumn<>("File System");
+        TableColumn<DriveInfo, String> fsCol = UiColumn.of("File System");
         fsCol.setCellValueFactory(c -> c.getValue().fileSystemProperty());
         fsCol.setPrefWidth(90);
 
-        TableColumn<DriveInfo, String> sizeCol = new TableColumn<>("Total Size");
+        TableColumn<DriveInfo, String> sizeCol = UiColumn.of("Total Size");
         sizeCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getSizeFormatted()));
         sizeCol.setPrefWidth(100);
 
-        TableColumn<DriveInfo, String> freeCol = new TableColumn<>("Free Space");
+        TableColumn<DriveInfo, String> freeCol = UiColumn.of("Free Space");
         freeCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getFreeFormatted()));
         freeCol.setPrefWidth(100);
 
-        TableColumn<DriveInfo, String> lastAnalyzedCol = new TableColumn<>("Last Analyzed");
+        TableColumn<DriveInfo, String> lastAnalyzedCol = UiColumn.of("Last Analyzed");
         lastAnalyzedCol.setCellValueFactory(c -> {
             Instant last = lastAnalyzed.get(c.getValue().getDriveLetter());
             if (last == null) return new SimpleObjectProperty<>("-");
@@ -417,7 +417,7 @@ public class DiskToolsTabView extends BorderPane {
         });
         lastAnalyzedCol.setPrefWidth(110);
 
-        TableColumn<DriveInfo, String> lastDefraggedCol = new TableColumn<>("Last Defragged");
+        TableColumn<DriveInfo, String> lastDefraggedCol = UiColumn.of("Last Defragged");
         lastDefraggedCol.setCellValueFactory(c -> {
             Instant last = lastDefragged.get(c.getValue().getDriveLetter());
             if (last == null) return new SimpleObjectProperty<>("-");
@@ -760,7 +760,7 @@ public class DiskToolsTabView extends BorderPane {
                         + "\nMode: " + modeDescription
                         + (preWarnings.isEmpty() ? "" : "\n\nWarnings:\n" + String.join("\n", preWarnings))
                         + "\n\nProceed?");
-        confirm.setHeaderText("Intelligent Defrag (" + mode + ")");
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Intelligent defrag (" + mode + ")"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         defragBusy.set(true);
@@ -1549,15 +1549,15 @@ public class DiskToolsTabView extends BorderPane {
         shredderTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         shredderTable.setPrefHeight(150);
 
-        TableColumn<ShredderFileEntry, String> pathCol = new TableColumn<>("File Path");
+        TableColumn<ShredderFileEntry, String> pathCol = UiColumn.of("File Path");
         pathCol.setCellValueFactory(c -> c.getValue().filePathProperty());
         pathCol.setPrefWidth(400);
 
-        TableColumn<ShredderFileEntry, String> sizeCol = new TableColumn<>("Size");
+        TableColumn<ShredderFileEntry, String> sizeCol = UiColumn.of("Size");
         sizeCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getSizeFormatted()));
         sizeCol.setPrefWidth(100);
 
-        TableColumn<ShredderFileEntry, String> statusCol = new TableColumn<>("Status");
+        TableColumn<ShredderFileEntry, String> statusCol = UiColumn.of("Status");
         statusCol.setCellValueFactory(c -> c.getValue().statusProperty());
         statusCol.setPrefWidth(160);
         statusCol.setCellFactory(col -> new TableCell<>() {
@@ -1665,19 +1665,19 @@ public class DiskToolsTabView extends BorderPane {
         recycleBinTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         recycleBinTable.setPrefHeight(150);
 
-        TableColumn<RecycleBinEntry, String> rbNameCol = new TableColumn<>("File Name");
+        TableColumn<RecycleBinEntry, String> rbNameCol = UiColumn.of("File Name");
         rbNameCol.setCellValueFactory(c -> c.getValue().nameProperty());
         rbNameCol.setPrefWidth(200);
 
-        TableColumn<RecycleBinEntry, String> rbOrigCol = new TableColumn<>("Original Location");
+        TableColumn<RecycleBinEntry, String> rbOrigCol = UiColumn.of("Original Location");
         rbOrigCol.setCellValueFactory(c -> c.getValue().originalPathProperty());
         rbOrigCol.setPrefWidth(300);
 
-        TableColumn<RecycleBinEntry, String> rbSizeCol = new TableColumn<>("Size");
+        TableColumn<RecycleBinEntry, String> rbSizeCol = UiColumn.of("Size");
         rbSizeCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getSizeFormatted()));
         rbSizeCol.setPrefWidth(90);
 
-        TableColumn<RecycleBinEntry, String> rbDateCol = new TableColumn<>("Deleted");
+        TableColumn<RecycleBinEntry, String> rbDateCol = UiColumn.of("Deleted");
         rbDateCol.setCellValueFactory(c -> {
             String date = c.getValue().getDeleteDate();
             return new SimpleObjectProperty<>(date != null && !date.isBlank() ? date : "-");
@@ -1748,7 +1748,7 @@ public class DiskToolsTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Are you sure you want to securely wipe all " + entries.size() + " item(s) from the Recycle Bin?\n\n"
                         + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
-        confirm.setHeaderText("Confirm Recycle Bin Wipe");
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm recycle bin wipe"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         recycleBinBusy.set(true);
@@ -1848,7 +1848,7 @@ public class DiskToolsTabView extends BorderPane {
                             + filePath + "\n\n"
                             + "Deleting this file may cause system instability or prevent Windows from starting.\n"
                             + "Are you absolutely sure you want to proceed?");
-            warning.setHeaderText("Critical System File Detected");
+            warning.setHeaderText(com.sbtools.util.UiText.label("Critical system file detected"));
             if (warning.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         }
 
@@ -1856,7 +1856,7 @@ public class DiskToolsTabView extends BorderPane {
                 "Are you sure you want to securely delete this file?\n\n"
                         + filePath + "\n\n"
                         + "This action is irreversible. The file will be overwritten multiple times and cannot be recovered.");
-        confirm.setHeaderText("Confirm Secure Delete");
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm secure delete"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         secureBusy.set(true);
@@ -1981,7 +1981,7 @@ public class DiskToolsTabView extends BorderPane {
                                     + "Contains approximately " + countedFiles + " file(s).\n"
                                     + "All files will be overwritten multiple times and cannot be recovered.\n"
                                     + "This action is irreversible.");
-                    confirm.setHeaderText("Confirm Secure Folder Delete");
+                    confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm secure folder delete"));
                     if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
                         filePathField.clear();
                         filePathField.setUserData(null);
@@ -2103,14 +2103,14 @@ public class DiskToolsTabView extends BorderPane {
                             + String.join("\n", criticalFiles) + "\n\n"
                             + "Deleting these files may cause system instability or prevent Windows from starting.\n"
                             + "Are you absolutely sure you want to proceed?");
-            warning.setHeaderText("Critical System Files Detected");
+            warning.setHeaderText(com.sbtools.util.UiText.label("Critical system files detected"));
             if (warning.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Are you sure you want to securely delete " + pendingEntries.size() + " file(s)?\n\n"
                         + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
-        confirm.setHeaderText("Confirm Batch Secure Delete");
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm batch secure delete"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         secureBusy.set(true);
@@ -2380,7 +2380,7 @@ public class DiskToolsTabView extends BorderPane {
         wipeDriveTable.setItems(wipeDrives);
         wipeDriveTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<DriveInfo, DriveInfo> checkCol = new TableColumn<>(" ");
+        TableColumn<DriveInfo, DriveInfo> checkCol = UiColumn.of(" ");
         checkCol.setPrefWidth(40);
         checkCol.setMinWidth(40);
         checkCol.setMaxWidth(40);
@@ -2409,22 +2409,22 @@ public class DiskToolsTabView extends BorderPane {
             }
         });
 
-        TableColumn<DriveInfo, String> dlCol = new TableColumn<>("Drive");
+        TableColumn<DriveInfo, String> dlCol = UiColumn.of("Drive");
         dlCol.setCellValueFactory(c -> c.getValue().driveLetterProperty());
         dlCol.setPrefWidth(60);
 
-        TableColumn<DriveInfo, String> vlCol = new TableColumn<>("Label");
+        TableColumn<DriveInfo, String> vlCol = UiColumn.of("Label");
         vlCol.setCellValueFactory(c -> {
             String label = c.getValue().getVolumeLabel();
             return new SimpleObjectProperty<>(label.isBlank() ? "-" : label);
         });
         vlCol.setPrefWidth(120);
 
-        TableColumn<DriveInfo, String> szCol = new TableColumn<>("Total Size");
+        TableColumn<DriveInfo, String> szCol = UiColumn.of("Total Size");
         szCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getSizeFormatted()));
         szCol.setPrefWidth(100);
 
-        TableColumn<DriveInfo, String> frCol = new TableColumn<>("Free Space");
+        TableColumn<DriveInfo, String> frCol = UiColumn.of("Free Space");
         frCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getFreeFormatted()));
         frCol.setPrefWidth(100);
 
@@ -2513,7 +2513,7 @@ public class DiskToolsTabView extends BorderPane {
                     + "break updates/pagefile, and cause app crashes. Proceed only with ample free space.");
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, confirmText.toString());
-        confirm.setHeaderText("Confirm Free Space Wipe");
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm free space wipe"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         // Strict: system-drive wipe needs a second explicit confirmation.

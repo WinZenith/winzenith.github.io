@@ -370,7 +370,7 @@ public class DriversTabView extends BorderPane {
         TableView<DriverRow> table = new TableView<>(items);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<DriverRow, Boolean> selectCol = new TableColumn<>("Select");
+        TableColumn<DriverRow, Boolean> selectCol = UiColumn.of("Select");
         selectCol.setCellValueFactory(c -> c.getValue().selectedProperty());
         selectCol.setCellFactory(col -> new TableCell<DriverRow, Boolean>() {
             private final CheckBox cb = new CheckBox();
@@ -409,19 +409,19 @@ public class DriversTabView extends BorderPane {
         selectCol.setEditable(false);
         selectCol.setSortable(false);
 
-        TableColumn<DriverRow, String> deviceCol = new TableColumn<>("Device");
+        TableColumn<DriverRow, String> deviceCol = UiColumn.of("Device");
         deviceCol.setCellValueFactory(c -> c.getValue().deviceNameProperty());
         deviceCol.setPrefWidth(220);
 
-        TableColumn<DriverRow, String> currentCol = new TableColumn<>("Current");
+        TableColumn<DriverRow, String> currentCol = UiColumn.of("Current");
         currentCol.setCellValueFactory(c -> c.getValue().currentVersionProperty());
         currentCol.setPrefWidth(100);
 
-        TableColumn<DriverRow, String> availableCol = new TableColumn<>("Available");
+        TableColumn<DriverRow, String> availableCol = UiColumn.of("Available");
         availableCol.setCellValueFactory(c -> c.getValue().availableVersionProperty());
         availableCol.setPrefWidth(100);
 
-        TableColumn<DriverRow, UpdateSeverity> severityCol = new TableColumn<>("Severity");
+        TableColumn<DriverRow, UpdateSeverity> severityCol = UiColumn.of("Severity");
         severityCol.setCellValueFactory(c -> c.getValue().severityProperty());
         severityCol.setPrefWidth(100);
         severityCol.setCellFactory(col -> new TableCell<>() {
@@ -461,11 +461,11 @@ public class DriversTabView extends BorderPane {
             }
         });
 
-        TableColumn<DriverRow, String> sourceCol = new TableColumn<>("Source");
+        TableColumn<DriverRow, String> sourceCol = UiColumn.of("Source");
         sourceCol.setCellValueFactory(c -> c.getValue().sourceProperty());
         sourceCol.setPrefWidth(90);
 
-        TableColumn<DriverRow, DriverHealthService.DriverHealthScore> healthCol = new TableColumn<>("Health");
+        TableColumn<DriverRow, DriverHealthService.DriverHealthScore> healthCol = UiColumn.of("Health");
         healthCol.setCellValueFactory(c -> c.getValue().healthScoreProperty());
         healthCol.setPrefWidth(80);
         healthCol.setCellFactory(col -> new TableCell<>() {
@@ -483,7 +483,7 @@ public class DriversTabView extends BorderPane {
             }
         });
 
-        TableColumn<DriverRow, Void> actionCol = new TableColumn<>("Action");
+        TableColumn<DriverRow, Void> actionCol = UiColumn.of("Action");
         actionCol.setPrefWidth(280);
         actionCol.setCellFactory(col -> new DriverActionCell());
 
@@ -666,15 +666,15 @@ public class DriversTabView extends BorderPane {
         TableView<DriverRow> table = new TableView<>(items);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<DriverRow, String> deviceCol = new TableColumn<>("Device");
+        TableColumn<DriverRow, String> deviceCol = UiColumn.of("Device");
         deviceCol.setCellValueFactory(c -> c.getValue().deviceNameProperty());
         deviceCol.setPrefWidth(220);
 
-        TableColumn<DriverRow, String> currentCol = new TableColumn<>("Current");
+        TableColumn<DriverRow, String> currentCol = UiColumn.of("Current");
         currentCol.setCellValueFactory(c -> c.getValue().currentVersionProperty());
         currentCol.setPrefWidth(100);
 
-        TableColumn<DriverRow, DriverHealthService.DriverHealthScore> healthCol = new TableColumn<>("Health");
+        TableColumn<DriverRow, DriverHealthService.DriverHealthScore> healthCol = UiColumn.of("Health");
         healthCol.setCellValueFactory(c -> c.getValue().healthScoreProperty());
         healthCol.setPrefWidth(80);
         healthCol.setCellFactory(col -> new TableCell<>() {
@@ -692,7 +692,7 @@ public class DriversTabView extends BorderPane {
             }
         });
 
-        TableColumn<DriverRow, Void> actionCol = new TableColumn<>("Action");
+        TableColumn<DriverRow, Void> actionCol = UiColumn.of("Action");
         actionCol.setPrefWidth(120);
         actionCol.setCellFactory(col -> new TableCell<>() {
             private final UIButton ignoreBtn = UIButton.small("Ignore");
@@ -1137,8 +1137,8 @@ public class DriversTabView extends BorderPane {
 
     private void showIgnoredListDialog() {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Ignored Drivers");
-        dialog.setHeaderText("Ignored Drivers");
+        dialog.setTitle(com.sbtools.util.UiText.label("Ignored drivers"));
+        dialog.setHeaderText(com.sbtools.util.UiText.label("Ignored drivers"));
 
         AppSettings current = settingsStore.load();
         ObservableList<String> excludedIds = FXCollections.observableArrayList(current.excludedDriverIds());
@@ -1342,7 +1342,7 @@ public class DriversTabView extends BorderPane {
                                 "Driver installed but a restart is required to complete the installation.\n\n"
                                 + "The driver will stay in Outdated Drivers with a REBOOT badge until you restart.\n"
                                 + "Dashboard will also show it as outdated until reboot.");
-                        rebootAlert.setTitle("Restart Required");
+                        rebootAlert.setTitle(com.sbtools.util.UiText.label("Restart required"));
                         rebootAlert.setHeaderText("Restart required");
                         rebootAlert.showAndWait();
                     });
@@ -1556,7 +1556,7 @@ public class DriversTabView extends BorderPane {
         if (vendorPageUrl != null && !vendorPageUrl.isBlank()) {
             Alert alert = new Alert(Alert.AlertType.ERROR, safe + "\n\nYou can try downloading manually from the vendor website.",
                     ButtonType.OK, ButtonType.CANCEL);
-            alert.setTitle("Driver Install Failed");
+            alert.setTitle(com.sbtools.util.UiText.label("Driver install failed"));
             alert.setHeaderText("Install failed — manual download available");
 
             Button openWebsiteBtn = (Button) alert.getDialogPane().lookupButton(ButtonType.CANCEL);
@@ -1591,7 +1591,7 @@ public class DriversTabView extends BorderPane {
                         + "Please use the button below to go to the " + source
                         + " website, download the driver, and install it manually.",
                 ButtonType.OK, ButtonType.CANCEL);
-        alert.setTitle("Manual Download Required");
+        alert.setTitle(com.sbtools.util.UiText.label("Manual download required"));
         alert.setHeaderText(source + " driver update");
 
         Button openWebsiteBtn = (Button) alert.getDialogPane().lookupButton(ButtonType.CANCEL);
@@ -1689,8 +1689,8 @@ public class DriversTabView extends BorderPane {
 
     private void showUpdateHistory() {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Update History");
-        dialog.setHeaderText("Driver Update History");
+        dialog.setTitle(com.sbtools.util.UiText.label("Update history"));
+        dialog.setHeaderText(com.sbtools.util.UiText.label("Driver update history"));
 
         ListView<UpdateHistoryStore.UpdateEntry> listView = new ListView<>();
         listView.setCellFactory(lv -> new ListCell<>() {
@@ -1736,7 +1736,7 @@ public class DriversTabView extends BorderPane {
 
     private void showDriverDetails(DriverRow row) {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Driver Details");
+        dialog.setTitle(com.sbtools.util.UiText.label("Driver details"));
         dialog.setHeaderText(row.installed().friendlyName());
 
         GridPane grid = new GridPane();
@@ -1887,7 +1887,7 @@ public class DriversTabView extends BorderPane {
         if (c == null) return;
 
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Driver Comparison");
+        dialog.setTitle(com.sbtools.util.UiText.label("Driver comparison"));
         dialog.setHeaderText(row.installed().friendlyName());
 
         GridPane grid = new GridPane();
@@ -2001,8 +2001,8 @@ public class DriversTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Update all " + count + " outdated driver(s)? This may take several minutes.",
                 ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle("Batch Update");
-        confirm.setHeaderText("Update All Drivers");
+        confirm.setTitle(com.sbtools.util.UiText.label("Batch update"));
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Update all drivers"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             return;
         }
@@ -2023,8 +2023,8 @@ public class DriversTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Update " + selected.size() + " selected driver(s)? This may take several minutes.",
                 ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle("Batch Update");
-        confirm.setHeaderText("Update Selected Drivers");
+        confirm.setTitle(com.sbtools.util.UiText.label("Batch update"));
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Update selected drivers"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             return;
         }
@@ -2401,7 +2401,7 @@ public class DriversTabView extends BorderPane {
                 try { catalog.clearWindowsUpdateCache(); } catch (Exception ex) { AppLogger.warning("Cache clear failed: " + ex.getMessage()); }
                 // Detailed dialog with per-driver failures
                 Dialog<ButtonType> dlg = new Dialog<>();
-                dlg.setTitle("Batch Update Result");
+                dlg.setTitle(com.sbtools.util.UiText.label("Batch update result"));
                 dlg.setHeaderText("Batch update complete");
                 VBox box = new VBox(8);
                 box.setPadding(new Insets(12));
@@ -2446,8 +2446,8 @@ public class DriversTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Back up all currently installed drivers? This may take a few minutes.",
                 ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle("Driver Backup");
-        confirm.setHeaderText("Backup All Drivers");
+        confirm.setTitle(com.sbtools.util.UiText.label("Driver backup"));
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Backup all drivers"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             return;
         }

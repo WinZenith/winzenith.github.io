@@ -126,11 +126,11 @@ class AdapterSettingsPanel extends VBox {
     private void buildTable() {
         propTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
-        TableColumn<Map.Entry<String, String>, String> nameCol = new TableColumn<>("Property");
+        TableColumn<Map.Entry<String, String>, String> nameCol = UiColumn.of("Property");
         nameCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getKey()));
         nameCol.setPrefWidth(280);
 
-        TableColumn<Map.Entry<String, String>, String> valueCol = new TableColumn<>("Value");
+        TableColumn<Map.Entry<String, String>, String> valueCol = UiColumn.of("Value");
         valueCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getValue()));
         valueCol.setPrefWidth(280);
 
