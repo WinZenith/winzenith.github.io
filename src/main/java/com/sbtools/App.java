@@ -64,7 +64,7 @@ public class App extends Application {
     private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
     private final AtomicBoolean cleanupDone = new AtomicBoolean(false);
     /** Watchdog delay before forcing the JVM out (ms). Bounds Task Manager linger. */
-    private static final long FORCE_EXIT_DELAY_MS = 4000;
+    private static final long FORCE_EXIT_DELAY_MS = 1500;
 
     @Override
     public void start(Stage stage) {
@@ -373,10 +373,11 @@ public class App extends Application {
     }
 
     /**
-     * Guarantees the JVM terminates even if a worker thread ignores interrupts
-     * or a child process hangs. Daemon by design: it only fires while the JVM
-     * is otherwise kept alive, and {@code System.exit} is a no-op if we already
-     * exited cleanly.
+     * Guarantees the JVM terminates even if a worker ignores interrupts, a
+     * child hangs, or {@code System.exit} is already running (in which case a
+     * second {@code System.exit} blocks forever). {@code halt} is the only API
+     * that still kills the process then. Daemon: it only needs to fire while
+     * the JVM is otherwise kept alive.
      */
     private static void armForceExitWatchdog() {
         Thread watchdog = new Thread(() -> {
@@ -389,7 +390,7 @@ public class App extends Application {
                 AppLogger.warning("Force-exit watchdog firing; forcing JVM termination.");
             } catch (Throwable ignored) {
             }
-            System.exit(0);
+            Runtime.getRuntime().halt(0);
         }, "force-exit-watchdog");
         watchdog.setDaemon(true);
         watchdog.start();
@@ -454,12 +455,12 @@ public class App extends Application {
         }
         if (role == com.sbtools.util.SingleInstance.Role.SECONDARY) {
             com.sbtools.util.SingleInstance.signalPrimary();
-            return;
+            System.exit(0);
         }
         try {
             if (com.sbtools.util.ElevationGate.handlePreLaunch(args)) {
                 com.sbtools.util.SingleInstance.release();
-                return;
+                System.exit(0);
             }
         } catch (Throwable t) {
             System.err.println("[App] Elevation gate failed, starting normally: " + t.getMessage());
