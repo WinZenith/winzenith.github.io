@@ -22,15 +22,21 @@ public class PrivacyTracesCleaner implements CleanerExtension {
         long totalSize = 0;
         int itemCount = 0;
 
+        // Registry access is Windows-only; JNA throws Error (not Exception)
+        // on other OSes — skip registry traces there.
+        boolean isWindows = com.sbtools.util.AppPaths.isWindows();
         Path recentDir = CleanerUtils.safeEnvPath("APPDATA", "Microsoft", "Windows", "Recent");
-        if (recentDir != null && Files.isDirectory(recentDir)) {
+        if (recentDir != null && Files.isDirectory(recentDir) && CleanerUtils.isSafeToCleanDirectory(recentDir)) {
             try (Stream<Path> files = Files.list(recentDir)) {
                 for (Path f : (Iterable<Path>) files::iterator) {
-                    if (Files.isRegularFile(f)) { totalSize += Files.size(f); itemCount++; }
+                    try {
+                        if (Files.isRegularFile(f)) { totalSize += Files.size(f); itemCount++; }
+                    } catch (Exception ignored) {}
                 }
             } catch (Exception ignored) {}
         }
 
+        if (isWindows) {
         try {
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER,
                     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU")) {
@@ -40,8 +46,10 @@ public class PrivacyTracesCleaner implements CleanerExtension {
                     if (!"MRUListEx".equals(key) && !"MRUList".equals(key)) itemCount++;
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
+        }
 
+        if (isWindows) {
         try {
             String recentDocsPath = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs";
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER, recentDocsPath)) {
@@ -56,7 +64,8 @@ public class PrivacyTracesCleaner implements CleanerExtension {
                     } catch (Exception ignored) { itemCount++; }
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
+        }
 
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
@@ -73,21 +82,24 @@ public class PrivacyTracesCleaner implements CleanerExtension {
         if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         Path recentDir = CleanerUtils.safeEnvPath("APPDATA", "Microsoft", "Windows", "Recent");
-        if (recentDir != null && Files.isDirectory(recentDir)) {
+        if (recentDir != null && Files.isDirectory(recentDir) && CleanerUtils.isSafeToCleanDirectory(recentDir)) {
             try (Stream<Path> files = Files.list(recentDir)) {
                 for (Path f : (Iterable<Path>) files::iterator) {
                     if (token != null && token.isCancelled()) break;
-                    if (Files.isRegularFile(f)) {
-                        long size = Files.size(f);
-                        CleanerUtils.deletePermanently(f, token);
-                        if (!Files.exists(f)) cleaned += size;
-                    }
+                    try {
+                        if (Files.isRegularFile(f)) {
+                            long size = Files.size(f);
+                            CleanerUtils.deletePermanently(f, token);
+                            if (!Files.exists(f)) cleaned += size;
+                        }
+                    } catch (Exception ignored) {}
                 }
             } catch (Exception ignored) {}
         }
 
         if (token != null && token.isCancelled()) return cleaned;
 
+        if (com.sbtools.util.AppPaths.isWindows()) {
         try {
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER,
                     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU")) {
@@ -97,14 +109,16 @@ public class PrivacyTracesCleaner implements CleanerExtension {
                     if (token != null && token.isCancelled()) break;
                     if (!"MRUListEx".equals(key) && !"MRUList".equals(key)) {
                         try { Advapi32Util.registryDeleteValue(WinReg.HKEY_CURRENT_USER,
-                                "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU", key); } catch (Exception ignored) {}
+                                "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU", key); } catch (Throwable ignored) {}
                     }
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
+        }
 
         if (token != null && token.isCancelled()) return cleaned;
 
+        if (com.sbtools.util.AppPaths.isWindows()) {
         try {
             String recentDocsPath = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs";
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER, recentDocsPath)) {
@@ -113,10 +127,11 @@ public class PrivacyTracesCleaner implements CleanerExtension {
                     if (token != null && token.isCancelled()) break;
                     try {
                         Advapi32Util.registryDeleteKey(WinReg.HKEY_CURRENT_USER, recentDocsPath + "\\" + subKey);
-                    } catch (Exception ignored) {}
+                    } catch (Throwable ignored) {}
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
+        }
 
         return cleaned;
     }

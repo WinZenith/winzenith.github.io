@@ -35,6 +35,14 @@ public class RegistryCleaner implements CleanerExtension {
     @Override
     public void scan(CleanupRow row) {
         int count = 0;
+        // Registry cleaners are Windows-only; JNA throws UnsatisfiedLinkError
+        // (an Error, not Exception) on other OSes — never attempt the scan.
+        if (!com.sbtools.util.AppPaths.isWindows()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Not supported on this OS");
+            return;
+        }
         for (String keyPath : SAFE_DELETE_HKCU_RUN_PATHS) {
             count += countInvalidRegistryValues(WinReg.HKEY_CURRENT_USER, keyPath);
         }
@@ -42,6 +50,7 @@ public class RegistryCleaner implements CleanerExtension {
             count += countInvalidRegistryValues(WinReg.HKEY_LOCAL_MACHINE, keyPath);
         }
         count += countOrphanedSharedDLLs();
+        row.setTotalBytes(0);
         row.setItemCount(count);
         row.setSizeOrCountText(count + " invalid entr" + (count == 1 ? "y" : "ies"));
     }
@@ -54,6 +63,7 @@ public class RegistryCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
+        if (!com.sbtools.util.AppPaths.isWindows()) return 0L;
         for (String keyPath : SAFE_DELETE_HKCU_RUN_PATHS) {
             if (token != null && token.isCancelled()) break;
             deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_CURRENT_USER, keyPath, token);
@@ -112,14 +122,16 @@ public class RegistryCleaner implements CleanerExtension {
             if (Advapi32Util.registryKeyExists(hive, keyPath)) {
                 Map<String, Object> values = Advapi32Util.registryGetValues(hive, keyPath);
                 for (Map.Entry<String, Object> entry : values.entrySet()) {
-                    String value = entry.getValue().toString();
-                    if (value.startsWith("\"") && value.endsWith("\""))
+                    Object raw = entry.getValue();
+                    if (raw == null) continue;
+                    String value = raw.toString();
+                    if (value.length() > 1 && value.startsWith("\"") && value.endsWith("\""))
                         value = value.substring(1, value.length() - 1);
                     String cleanPath = CleanerUtils.extractPathFromRegistryValue(value);
                     if (isConfidentlyMissing(cleanPath)) count++;
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
         return count;
     }
 
@@ -135,8 +147,10 @@ public class RegistryCleaner implements CleanerExtension {
                 List<String> toDelete = new ArrayList<>();
                 for (Map.Entry<String, Object> entry : values.entrySet()) {
                     if (token != null && token.isCancelled()) break;
-                    String value = entry.getValue().toString();
-                    if (value.startsWith("\"") && value.endsWith("\""))
+                    Object raw = entry.getValue();
+                    if (raw == null) continue;
+                    String value = raw.toString();
+                    if (value.length() > 1 && value.startsWith("\"") && value.endsWith("\""))
                         value = value.substring(1, value.length() - 1);
                     String cleanPath = CleanerUtils.extractPathFromRegistryValue(value);
                     if (isConfidentlyMissing(cleanPath)) toDelete.add(entry.getKey());
@@ -156,11 +170,11 @@ public class RegistryCleaner implements CleanerExtension {
                     }
                     for (String valName : toDelete) {
                         if (token != null && token.isCancelled()) break;
-                        try { Advapi32Util.registryDeleteValue(hive, keyPath, valName); count++; } catch (Exception ignored) {}
+                        try { Advapi32Util.registryDeleteValue(hive, keyPath, valName); count++; } catch (Throwable ignored) {}
                     }
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
         return count;
     }
 
@@ -194,7 +208,7 @@ public class RegistryCleaner implements CleanerExtension {
                         int refCount = 0;
                         if (valObj instanceof Integer) {
                             refCount = (Integer) valObj;
-                        } else {
+                        } else if (valObj != null) {
                             try { refCount = Integer.parseInt(valObj.toString()); } catch (Exception ignored) {}
                         }
                         String expanded = CleanerUtils.expandEnvironmentVariables(rawPath);
@@ -202,7 +216,7 @@ public class RegistryCleaner implements CleanerExtension {
                     } catch (Exception ignored) {}
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
         return count;
     }
 
@@ -225,7 +239,7 @@ public class RegistryCleaner implements CleanerExtension {
                         int refCount = 0;
                         if (valObj instanceof Integer) {
                             refCount = (Integer) valObj;
-                        } else {
+                        } else if (valObj != null) {
                             try { refCount = Integer.parseInt(valObj.toString()); } catch (Exception ignored) {}
                         }
                         String expanded = CleanerUtils.expandEnvironmentVariables(rawPath);
@@ -242,10 +256,10 @@ public class RegistryCleaner implements CleanerExtension {
                 }
                 for (String valName : toDelete) {
                     if (token != null && token.isCancelled()) break;
-                    try { Advapi32Util.registryDeleteValue(WinReg.HKEY_LOCAL_MACHINE, keyPath, valName); count++; } catch (Exception ignored) {}
+                    try { Advapi32Util.registryDeleteValue(WinReg.HKEY_LOCAL_MACHINE, keyPath, valName); count++; } catch (Throwable ignored) {}
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
         return count;
     }
 

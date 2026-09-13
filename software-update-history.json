@@ -1,0 +1,108 @@
+﻿[ {
+  "packageName" : "Outlook for Windows",
+  "packageId" : "Microsoft.Outlook",
+  "oldVersion" : "1.2024.111.100",
+  "newVersion" : "1.2026.812.100",
+  "source" : "winget",
+  "installedAt" : "2026-08-25T16:47:37.385780700Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "LibreOffice 26.2.3.2",
+  "packageId" : "TheDocumentFoundation.LibreOffice",
+  "oldVersion" : "26.2.3.2",
+  "newVersion" : "26.2.5.2",
+  "source" : "winget",
+  "installedAt" : "2026-08-25T16:54:14.506428200Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "Microsoft Edge",
+  "packageId" : "Microsoft.Edge",
+  "oldVersion" : "151.0.4129.101",
+  "newVersion" : "151.0.4129.107",
+  "source" : "winget",
+  "installedAt" : "2026-08-25T16:55:14.418108700Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "Miniforge3 26.3.2-3 (Python 3.13.13 64-bit)",
+  "packageId" : "CondaForge.Miniforge3",
+  "oldVersion" : "26.3.2-3",
+  "newVersion" : "26.5.3-0",
+  "source" : "winget",
+  "installedAt" : "2026-08-25T16:56:55.251932700Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "GitHub Copilot",
+  "packageId" : "GitHub.CopilotApp",
+  "oldVersion" : "1.1.12",
+  "newVersion" : "1.1.13",
+  "source" : "winget",
+  "installedAt" : "2026-08-26T16:18:36.852217300Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "Google Chrome",
+  "packageId" : "Google.Chrome",
+  "oldVersion" : "151.0.7922.175",
+  "newVersion" : "152.0.7977.65",
+  "source" : "winget",
+  "installedAt" : "2026-08-30T18:49:11.508175900Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "Smart Defrag 11",
+  "packageId" : "IObit.SmartDefrag",
+  "oldVersion" : "11.4.0.508",
+  "newVersion" : "12.0.0.536",
+  "source" : "winget",
+  "installedAt" : "2026-08-30T18:49:27.920218200Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "Google Chrome",
+  "packageId" : "Google.Chrome",
+  "oldVersion" : "151.0.7922.175",
+  "newVersion" : "152.0.7977.65",
+  "source" : "winget",
+  "installedAt" : "2026-08-30T19:09:51.462197500Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "Microsoft .NET Runtime - 8.0.29 (x64)",
+  "packageId" : "Microsoft.DotNet.Runtime.8",
+  "oldVersion" : "8.0.29",
+  "newVersion" : "8.0.30",
+  "source" : "winget",
+  "installedAt" : "2026-08-30T19:11:00.645984200Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "Microsoft ASP.NET Core 8.0.29 - Shared Framework (x64)",
+  "packageId" : "Microsoft.DotNet.AspNetCore.8",
+  "oldVersion" : "8.0.29",
+  "newVersion" : "8.0.30",
+  "source" : "winget",
+  "installedAt" : "2026-08-30T19:11:13.010450500Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "Zoom Workplace (64-bit)",
+  "packageId" : "Zoom.Zoom",
+  "oldVersion" : "7.1.41345",
+  "newVersion" : "7.1.43453",
+  "source" : "winget",
+  "installedAt" : "2026-08-30T19:12:23.401914800Z",
+  "success" : true,
+  "errorMessage" : null
+}, {
+  "packageName" : "LibreOffice 26.2.3.2",
+  "packageId" : "TheDocumentFoundation.LibreOffice",
+  "oldVersion" : "26.2.3.2",
+  "newVersion" : "26.8.0.3",
+  "source" : "winget",
+  "installedAt" : "2026-08-30T19:36:56.434636200Z",
+  "success" : true,
+  "errorMessage" : null} ]

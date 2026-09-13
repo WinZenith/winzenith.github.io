@@ -49,7 +49,7 @@ public class ItunesBackupsCleaner implements CleanerExtension {
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
         Path backupDir = CleanerUtils.safeEnvPath("APPDATA", "Apple Computer", "MobileSync", "Backup");
-        if (backupDir == null || !Files.isDirectory(backupDir)) return 0;
+        if (backupDir == null || !Files.isDirectory(backupDir) || !CleanerUtils.isSafeToCleanDirectory(backupDir)) return 0;
         long cleaned = 0;
         try (DirectoryStream<Path> ds = Files.newDirectoryStream(backupDir)) {
             for (Path backup : ds) {
@@ -66,13 +66,13 @@ public class ItunesBackupsCleaner implements CleanerExtension {
                                     CleanerUtils.deletePermanently(f, token);
                                     if (!Files.exists(f)) cleaned += size;
                                 } else if (Files.isDirectory(f)) {
-                                    Files.deleteIfExists(f);
+                                    CleanerUtils.deleteDirectoryIfEmptySafe(f, token);
                                 }
                             } catch (Exception ignored) {}
                         }
                     } catch (Exception ignored) {}
                     if (token != null && token.isCancelled()) break;
-                    try { Files.deleteIfExists(backup); } catch (Exception ignored) {}
+                    CleanerUtils.deleteDirectoryIfEmptySafe(backup, token);
                 }
             }
         } catch (Exception ignored) {}

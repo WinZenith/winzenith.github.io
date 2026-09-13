@@ -15,12 +15,12 @@ try {
             if (-not $cur.bssid) { $cur.bssid = $Matches[2].Trim() }
         } elseif ($line -match '^Signal\s*:\s*(\d+)\s*%?' -and $cur) {
             $cur.signalPercent = [int]$Matches[1]
-        } elseif ($line -match '^Authentication\s*:\s*(.*)$' -and $cur) {
-            if (-not $cur.auth) { $cur.auth = $Matches[1].Trim() }
-        } elseif ($line -match '^Channel\s*:\s*(.*)$' -and $cur) {
-            if (-not $cur.channel) { $cur.channel = $Matches[1].Trim() }
-        } elseif ($line -match '^Radio type\s*:\s*(.*)$' -and $cur) {
-            if (-not $cur.radio) { $cur.radio = $Matches[1].Trim() }
+        } elseif ($line -match '^(Authentication|Authentifizierung|Authentification|Autenticaci.n)\s*:\s*(.*)$' -and $cur) {
+            if (-not $cur.auth) { $cur.auth = $Matches[2].Trim() }
+        } elseif ($line -match '^(Channel|Kanal|Canal)\s*:\s*(.*)$' -and $cur) {
+            if (-not $cur.channel) { $cur.channel = $Matches[2].Trim() }
+        } elseif ($line -match '^(Radio type|Funktyp|Type de radio|Tipo de radio)\s*:\s*(.*)$' -and $cur) {
+            if (-not $cur.radio) { $cur.radio = $Matches[2].Trim() }
         }
     }
     if ($cur -and $cur.ssid) { $networks += $cur }

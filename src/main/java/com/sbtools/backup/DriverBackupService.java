@@ -76,6 +76,12 @@ public class DriverBackupService {
                     + driver.friendlyName() + " (" + driver.deviceId()
                     + "). Automatic backup is not supported for this device.");
         }
+        // Strict INF shape: the name flows into pnputil arguments and wildcard
+        // -Filter probes — path separators or glob chars must never reach them.
+        if (!inf.matches("(?i)[\\w\\-]+\\.inf")) {
+            throw new IOException("Cannot backup driver: unexpected INF name \"" + inf + "\" for "
+                    + driver.friendlyName() + ". Automatic backup is not supported for this device.");
+        }
         if (driver.deviceId() == null || driver.deviceId().isBlank()) {
             throw new IOException("Cannot backup driver: device ID not available.");
         }
@@ -86,6 +92,9 @@ public class DriverBackupService {
         Path folder = root
                 .resolve(safeId)
                 .resolve(now.toEpochMilli() + "_" + UUID.randomUUID().toString().substring(0, 8));
+        // Tracks the portable-fallback below so the index is written next to
+        // the actual files (never primary-index + fallback-files split).
+        boolean usedFallbackRoot = false;
         try {
             Files.createDirectories(folder);
         } catch (IOException dirEx) {
@@ -99,6 +108,7 @@ public class DriverBackupService {
                 Files.createDirectories(fallback);
                 AppLogger.warning("Backups root not writable (" + root + "), using fallback " + fallbackRoot);
                 folder = fallback;
+                usedFallbackRoot = true;
             } catch (IOException fallbackEx) {
                 throw new IOException("Driver backup directory not writable: " + root
                         + " (fallback " + fallbackRoot + " also failed: " + fallbackEx.getMessage() + ")", dirEx);
@@ -106,11 +116,20 @@ public class DriverBackupService {
         }
 
         Path script = PowerShellScripts.resolve("pnputil-backup.ps1");
-        ProcessResult result = cancelled == null
-                ? processRunner.run(ProcessRunner.powershellScript(
-                        script.toString(), inf, folder.toString()))
-                : processRunner.run(ProcessRunner.powershellScript(
-                        script.toString(), inf, folder.toString()), cancelled);
+        ProcessResult result;
+        try {
+            // Non-interactive: prompts hang to the 300s timeout.
+            result = cancelled == null
+                    ? processRunner.run(ProcessRunner.powershellScriptNonInteractive(
+                            script.toString(), inf, folder.toString()))
+                    : processRunner.run(ProcessRunner.powershellScriptNonInteractive(
+                            script.toString(), inf, folder.toString()), cancelled);
+        } catch (java.util.concurrent.CancellationException | InterruptedException cancelEx) {
+            // Stop during backup: remove the orphan folder, propagate cancel
+            // (callers map this to "cancelled", never "proceed without backup").
+            try { deleteDirectory(folder); } catch (Exception ignored) {}
+            throw cancelEx;
+        }
         if (!result.success()) {
             // clean up empty folder on failure
             try { deleteDirectory(folder); } catch (Exception ignored) {}
@@ -133,14 +152,30 @@ public class DriverBackupService {
                 inf
         );
 
-        // Use the same settings-aware index path as the backup folder to avoid split-brain
-        Path idx = indexPath(settings);
+        // Index next to the actual files: on fallback the primary index is
+        // unwritable by definition, so writing it there would throw and orphan
+        // the files (unrevertable). Load merges all locations on read.
+        final Path idx = usedFallbackRoot
+                ? AppPaths.legacyBackupsRoot().resolve("index.json")
+                : indexPath(settings);
         ReentrantReadWriteLock lock = lockFor(idx);
         lock.writeLock().lock();
+        final Path savedFolder = folder;
         try {
             BackupIndex index = loadIndex(settings);
             index.getEntries().add(entry);
-            saveIndex(index, settings);
+            try {
+                if (usedFallbackRoot) {
+                    saveIndexToPath(index, idx);
+                } else {
+                    saveIndex(index, settings);
+                }
+            } catch (IOException | RuntimeException saveEx) {
+                // No index, no rollback: remove the files rather than leak an
+                // orphan backup the UI can never revert.
+                try { deleteDirectory(savedFolder); } catch (Exception ignored) {}
+                throw saveEx;
+            }
         } finally {
             lock.writeLock().unlock();
         }
@@ -158,6 +193,15 @@ public class DriverBackupService {
         if (!isSafeToDelete(folder)) {
             throw new IOException("Refusing to revert from folder outside backups root: " + folder);
         }
+        // Strict roots for the destructive path: isSafeToDelete also trusts
+        // index-referenced folders outside the current roots (old custom dir),
+        // but an index entry authorizes itself — a planted entry + INF would
+        // get an elevated install. Revert requires a current location; point
+        // the backup directory back first to revert older entries.
+        if (!isUnderCurrentRoots(folder)) {
+            throw new IOException("Backup is outside the current backup locations: " + folder
+                    + ". Point the backup directory back to its original location and retry.");
+        }
         if (!Files.isDirectory(folder)) {
             throw new IOException("Backup folder missing: " + folder);
         }
@@ -174,8 +218,18 @@ public class DriverBackupService {
         // deviceId may be null on corrupt index entries — script arg is optional, never pass null
         // into ProcessBuilder (would NPE). Empty string means "stage only, skip device restart".
         String deviceArg = entry.deviceId() != null ? entry.deviceId() : "";
-        ProcessResult result = processRunner.run(ProcessRunner.powershellScript(
-                script.toString(), folder.toString(), deviceArg));
+        // Wildcards would let a planted index entry disable an arbitrary
+        // device (Get-PnpDevice -InstanceId globs). Stage-only fallback.
+        if (deviceArg.matches(".*[*?\\[\\]].*")) {
+            AppLogger.warning("Revert: deviceId contains wildcards, skipping device restart for entry " + entry.id());
+            deviceArg = "";
+        }
+        // Recorded INF scopes the restore: without it the script would install
+        // every INF in the folder (a planted extra INF would ride along).
+        String infArg = entry.infName() != null ? entry.infName() : "";
+        // Non-interactive: prompts hang to the timeout.
+        ProcessResult result = processRunner.run(ProcessRunner.powershellScriptNonInteractive(
+                script.toString(), folder.toString(), deviceArg, infArg));
         RevertDetail detail = parseRevertOutput(result.stdout());
         if (!result.success()) {
             String msg = "Driver revert failed for " + entry.friendlyName()
@@ -228,13 +282,23 @@ public class DriverBackupService {
 
     public void removeBackupEntry(DriverBackupEntry entry) throws IOException {
         if (entry == null || entry.id() == null) return;
+        // Authorize BEFORE purging: isSafeToDelete trusts index-referenced
+        // folders outside the current roots (old custom dir after a settings
+        // change), and purging first would destroy that authorization and leak
+        // the folder forever.
+        Path folder = null;
+        boolean safe = false;
+        try {
+            folder = Path.of(entry.backupFolder());
+            safe = isSafeToDelete(folder);
+        } catch (Exception ignored) {
+        }
         // Remove from all index files (primary + fallbacks) to prevent ghost reappearance
         java.util.Set<String> idsToRemove = java.util.Set.of(entry.id());
         purgeFromAllIndexes(idsToRemove);
 
         try {
-            Path folder = Path.of(entry.backupFolder());
-            if (isSafeToDelete(folder)) {
+            if (folder != null && safe) {
                 deleteDirectory(folder);
                 cleanupEmptyParent(folder.getParent());
             }
@@ -372,6 +436,39 @@ public class DriverBackupService {
     }
 
     /**
+     * Current-roots membership for destructive paths (revert): shape + depth +
+     * under a present-day allowed root. Unlike {@link #isSafeToDelete}, it never
+     * consults index references — an index entry must not authorize itself.
+     */
+    private boolean isUnderCurrentRoots(Path folder) {
+        if (folder == null) return false;
+        if (!BackupHealth.isPathShapeSafe(folder)) return false;
+        try {
+            Path normalized = folder.toAbsolutePath().normalize();
+            if (normalized.getNameCount() < 2) return false;
+            java.util.List<Path> allowedRoots = cachedAllowedRoots();
+            try {
+                Path primaryRoot = indexPath().getParent();
+                if (primaryRoot != null) {
+                    Path normPrimary = primaryRoot.toAbsolutePath().normalize();
+                    if (!allowedRoots.contains(normPrimary)) {
+                        allowedRoots = new java.util.ArrayList<>(allowedRoots);
+                        allowedRoots.add(normPrimary);
+                    }
+                }
+            } catch (Exception ignored) {}
+            for (Path root : allowedRoots) {
+                if (normalized.startsWith(root)) {
+                    Path rel = root.relativize(normalized);
+                    if (rel.getNameCount() >= 2) return true;
+                    return false;
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    /**
      * Fast read-only guard for size/health scans: shape + allowed-roots only,
      * no index scan. Keeps per-entry scans O(1) instead of O(indexes).
      */
@@ -403,6 +500,12 @@ public class DriverBackupService {
 
     private boolean isSafeToDelete(Path folder) {
         if (folder == null) return false;
+        // Shape guard first: never trust an indexed path pointing at a system
+        // location (tampered index.json must not enable arbitrary delete).
+        if (!BackupHealth.isPathShapeSafe(folder)) {
+            AppLogger.warning("Refusing to delete unsafe-shaped folder: " + folder);
+            return false;
+        }
         try {
             Path normalized = folder.toAbsolutePath().normalize();
             // Must be at least 2 levels deep ( <root>/<safeId>/<timestamp> ).
@@ -556,6 +659,11 @@ public class DriverBackupService {
             try (var stream = Files.walk(directory)) {
                 stream.sorted(Comparator.reverseOrder())
                         .forEach(path -> {
+                            // pnputil exports inherit the read-only flag from the
+                            // DriverStore; without clearing it every delete on
+                            // Windows throws AccessDeniedException and the UI
+                            // reports success while files remain on disk.
+                            try { Files.setAttribute(path, "dos:readonly", Boolean.FALSE); } catch (Exception ignored) {}
                             try { Files.deleteIfExists(path); } catch (IOException e) { AppLogger.warning("Could not delete: " + path, e); }
                         });
             }

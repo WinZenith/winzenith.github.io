@@ -25,7 +25,6 @@ public class CacheCleaner implements CleanerExtension {
             if (dir != null && Files.isDirectory(dir)) {
                 try (Stream<Path> walk = Files.walk(dir, 8)) {
                     var stats = walk.filter(Files::isRegularFile)
-                            .filter(p -> { try { return !Files.isHidden(p); } catch (Exception e) { return true; } })
                             .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
                     totalSize += stats.getSum();
                     itemCount += (int) stats.getCount();

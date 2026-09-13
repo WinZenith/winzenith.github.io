@@ -283,7 +283,7 @@ public class App extends Application {
                         root.setCenter(createTab(idx));
                     });
             case 1 -> new DriversTabView(busy, AdminCheck::isRunningAsAdmin);
-            case 2 -> new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdminFresh);
+            case 2 -> new BackupRestoreTabView(busy, AdminCheck::isRunningAsAdmin);
             case 3 -> new SoftwareUpdatesTabView(busy, AdminCheck::isRunningAsAdmin);
             case 4 -> new SystemInfoTabView(busy, AdminCheck::isRunningAsAdmin);
             case 5 -> new UninstallerTabView(busy, AdminCheck::isRunningAsAdmin);

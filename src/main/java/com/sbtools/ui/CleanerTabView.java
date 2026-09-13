@@ -37,13 +37,14 @@ import java.util.concurrent.atomic.AtomicInteger;
     private final BooleanProperty busy;
     private final java.util.function.BooleanSupplier adminCheck;
     private final SettingsStore settingsStore;
-    private CancelableCompletableFuture<java.util.List<CleanupRow>> activeScanFuture;
-    private CancelableCompletableFuture<CleanupService.CleanSummary> activeCleanFuture;
-    private CancellationToken activeScanToken;
-    private CancellationToken activeCleanToken;
+    private volatile CancelableCompletableFuture<java.util.List<CleanupRow>> activeScanFuture;
+    private volatile CancelableCompletableFuture<CleanupService.CleanSummary> activeCleanFuture;
+    private volatile CancellationToken activeScanToken;
+    private volatile CancellationToken activeCleanToken;
     private final ObservableList<CleanupRow> sessionRows = FXCollections.observableArrayList();
     private volatile boolean hasScanned = false;
     private final AtomicBoolean cancelling = new AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicLong summaryGen = new java.util.concurrent.atomic.AtomicLong();
 
     private TableView<CleanupRow> table;
     private Label statusLabel;
@@ -109,12 +110,18 @@ import java.util.concurrent.atomic.AtomicInteger;
         cleanButton.getStyleClass().add("danger");
         cancelButton.setDisable(true);
 
+        // Selection actions affect only VISIBLE rows: acting on hidden rows
+        // would silently select HIGH-risk categories (iTunes backups, Docker,
+        // Windows.old) the user cannot see. Deselect All clears everything
+        // (safe direction).
         scanButton.setOnAction(e -> startScan());
         selectAllButton.setOnAction(e -> {
-            for (CleanupRow row : sessionRows) row.setSelected(true);
+            if (busy.get()) return;
+            for (CleanupRow row : filteredRows) row.setSelected(true);
             updateCleanButtonState();
         });
         deselectAllButton.setOnAction(e -> {
+            if (busy.get()) return;
             for (CleanupRow row : sessionRows) row.setSelected(false);
             updateCleanButtonState();
         });
@@ -155,7 +162,9 @@ import java.util.concurrent.atomic.AtomicInteger;
             presetButton.setDisable(newVal);
             exportButton.setDisable(newVal || sessionRows.isEmpty());
             cleanButton.setDisable(newVal || getSelectedCount() == 0);
+            historyButton.setDisable(newVal);
             cancelButton.setDisable(!newVal);
+            table.setDisable(newVal);
         });
 
         sessionRows.addListener((javafx.collections.ListChangeListener<CleanupRow>) c -> {
@@ -219,10 +228,11 @@ import java.util.concurrent.atomic.AtomicInteger;
                         + csv(r.getScanStatus().getDisplayText()) + ","
                         + (r.isSelected() ? "yes" : "no"));
             }
+            if (out.checkError()) throw new java.io.IOException("Write failed (disk full?)");
             statusLabel.setText("Scan exported to " + file.getName());
         } catch (Exception e) {
             AppLogger.warning("Failed to export cleanup scan: " + e.getMessage());
-            new Alert(Alert.AlertType.ERROR, "Export failed:\n" + e.getMessage()).showAndWait();
+            new Alert(Alert.AlertType.ERROR, "Export failed:\n" + java.util.Objects.toString(e.getMessage(), e.toString())).showAndWait();
         }
     }
 
@@ -245,11 +255,12 @@ import java.util.concurrent.atomic.AtomicInteger;
             statusLabel.setText("Report saved to " + file.getName());
         } catch (Exception e) {
             AppLogger.warning("Failed to save cleanup report: " + e.getMessage());
-            new Alert(Alert.AlertType.ERROR, "Save failed:\n" + e.getMessage()).showAndWait();
+            new Alert(Alert.AlertType.ERROR, "Save failed:\n" + java.util.Objects.toString(e.getMessage(), e.toString())).showAndWait();
         }
     }
 
     private void ignoreCategory(CleanupRow row) {
+        if (busy.get()) return;
         try {
             settingsStore.update(current -> {
                 java.util.List<String> ignored = new java.util.ArrayList<>(
@@ -264,18 +275,20 @@ import java.util.concurrent.atomic.AtomicInteger;
             statusLabel.setText(row.getCategory().getDisplayName() + " will be ignored in future scans.");
         } catch (Exception e) {
             AppLogger.warning("Failed to ignore cleanup category: " + e.getMessage());
-            new Alert(Alert.AlertType.ERROR, "Could not ignore category:\n" + e.getMessage()).showAndWait();
+            new Alert(Alert.AlertType.ERROR, "Could not ignore category:\n" + java.util.Objects.toString(e.getMessage(), e.toString())).showAndWait();
         }
     }
 
     // Rescan state — wired to Cancel button (B5)
-    private CancelableCompletableFuture<java.util.List<CleanupRow>> activeRescanFuture;
-    private CancellationToken activeRescanToken;
+    private volatile CancelableCompletableFuture<java.util.List<CleanupRow>> activeRescanFuture;
+    private volatile CancellationToken activeRescanToken;
     private volatile java.util.concurrent.CompletableFuture<?> activeRestoreFuture;
+    private volatile java.util.concurrent.atomic.AtomicBoolean activeRestoreCancel;
 
     private void cancelActive() {
         cancelling.set(true);
         try {
+            if (activeRestoreCancel != null) activeRestoreCancel.set(true);
             if (activeScanToken != null) activeScanToken.cancel();
             if (activeCleanToken != null) activeCleanToken.cancel();
             if (activeRescanToken != null) activeRescanToken.cancel();
@@ -284,6 +297,14 @@ import java.util.concurrent.atomic.AtomicInteger;
             if (activeRescanFuture != null && !activeRescanFuture.isDone()) activeRescanFuture.cancel(true);
             if (activeRestoreFuture != null && !activeRestoreFuture.isDone()) activeRestoreFuture.cancel(true);
         } catch (Exception ignored) {}
+    }
+
+    private boolean isRestoreCancel(Throwable ex) {
+        while (ex != null) {
+            if (ex instanceof java.util.concurrent.CancellationException) return true;
+            ex = ex.getCause();
+        }
+        return ex == null && cancelling.get();
     }
 
     private void buildTable() {
@@ -461,10 +482,12 @@ import java.util.concurrent.atomic.AtomicInteger;
             MenuItem item = new MenuItem(preset.getDisplayName() + " — " + preset.getDescription());
             item.setStyle("-fx-font-size: 12px;");
             item.setOnAction(e -> {
+                if (busy.get()) return;
                 Set<CleanupCategory> cats = preset.getCategories();
-                for (CleanupRow row : sessionRows) {
+                for (CleanupRow row : filteredRows) {
                     row.setSelected(cats.contains(row.getCategory()));
                 }
+                updateCleanButtonState();
             });
             menu.getItems().add(item);
         }
@@ -473,9 +496,11 @@ import java.util.concurrent.atomic.AtomicInteger;
         MenuItem invertItem = new MenuItem("Invert selection");
         invertItem.setStyle("-fx-font-size: 12px;");
         invertItem.setOnAction(e -> {
-            for (CleanupRow row : sessionRows) {
+            if (busy.get()) return;
+            for (CleanupRow row : filteredRows) {
                 row.setSelected(!row.isSelected());
             }
+            updateCleanButtonState();
         });
         menu.getItems().add(invertItem);
         menu.show(presetButton, javafx.geometry.Side.BOTTOM, 0, 0);
@@ -498,9 +523,10 @@ import java.util.concurrent.atomic.AtomicInteger;
             summaryLabel.setText(sb.toString());
             summaryLabel.setVisible(hasScanned);
             String prefix = sb.toString();
+            long gen = summaryGen.incrementAndGet();
             java.util.concurrent.CompletableFuture.supplyAsync(historyStore::getTotalBytesFreedAllTime, com.sbtools.util.AppExecutors.ioPool())
                     .thenAccept(allTime -> Platform.runLater(() -> {
-                        if (allTime > 0 && hasScanned) {
+                        if (allTime > 0 && hasScanned && gen == summaryGen.get()) {
                             summaryLabel.setText(prefix + " | All-time freed: " + CleanupService.formatBytes(allTime));
                         }
                     }));
@@ -535,15 +561,23 @@ import java.util.concurrent.atomic.AtomicInteger;
         java.util.List<CleanupCategory> cats = selected.stream().map(CleanupRow::getCategory).toList();
         activeRescanToken = new CancellationToken();
         activeRescanFuture = service.scanCategoriesAsync(cats, () -> {}, activeRescanToken);
+        final var myRescan = activeRescanFuture;
         activeRescanFuture.whenComplete((results, ex) -> Platform.runLater(() -> {
+            if (myRescan != activeRescanFuture) return;
             if (ex != null) {
                 if (cancelling.get() || (activeRescanFuture != null && activeRescanFuture.isCancelled())) {
                     statusLabel.setText("Refresh canceled.");
                 } else {
                     statusLabel.setText("Refresh failed.");
-                    new Alert(Alert.AlertType.ERROR, "Refresh failed:\n" + ex.getMessage()).showAndWait();
+                    new Alert(Alert.AlertType.ERROR, "Refresh failed:\n"
+                            + java.util.Objects.toString(ex.getMessage(), ex.toString())).showAndWait();
                 }
             } else if (results != null) {
+                // Cooperative cancel returns normally with "Canceled" placeholder
+                // rows — never overwrite good data with those.
+                if (cancelling.get() || (activeRescanToken != null && activeRescanToken.isCancelled())) {
+                    statusLabel.setText("Refresh canceled.");
+                } else {
                 java.util.Map<CleanupCategory, CleanupRow> map = new java.util.HashMap<>();
                 for (CleanupRow rr : results) map.put(rr.getCategory(), rr);
                 for (CleanupRow existing : sessionRows) {
@@ -560,11 +594,13 @@ import java.util.concurrent.atomic.AtomicInteger;
                 long totalBytes = sessionRows.stream().mapToLong(CleanupRow::getTotalBytes).sum();
                 statusLabel.setText("Refresh complete - " + CleanupService.formatBytes(totalBytes) + " identified.");
                 updateSummary();
+                }
             }
             progressBar.setVisible(false);
             cancelButton.setDisable(true);
             cancelling.set(false);
             activeRescanToken = null;
+            activeRescanFuture = null;
             busy.set(false);
         }));
     }
@@ -572,6 +608,8 @@ import java.util.concurrent.atomic.AtomicInteger;
     private void startScan() {
         if (busy.get()) return;
         busy.set(true);
+        final java.util.List<CleanupRow> prevRows = java.util.List.copyOf(sessionRows);
+        final boolean prevScanned = hasScanned;
         hasScanned = false;
         cancelling.set(false);
         statusLabel.setText("Scanning system...");
@@ -584,7 +622,9 @@ import java.util.concurrent.atomic.AtomicInteger;
         AtomicInteger scanned = new AtomicInteger();
 
         activeScanToken = new CancellationToken();
+        final var scanTok = activeScanToken;
         activeScanFuture = service.scanAsync(() -> {
+            if (cancelling.get() || scanTok.isCancelled()) return;
             int done = scanned.incrementAndGet();
             Platform.runLater(() -> {
                 progressBar.setProgress((double) done / totalCategories);
@@ -593,18 +633,35 @@ import java.util.concurrent.atomic.AtomicInteger;
         }, activeScanToken);
         cancelButton.setDisable(false);
 
+        final var myScan = activeScanFuture;
         activeScanFuture.whenComplete((results, ex) -> {
             Platform.runLater(() -> {
+                if (myScan != activeScanFuture) return;
                 if (ex != null) {
                     if (cancelling.get() || activeScanFuture.isCancelled()) {
                         statusLabel.setText("Scan canceled.");
                     } else {
                         statusLabel.setText("Scan failed.");
-                        new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
+                        new Alert(Alert.AlertType.ERROR, "Scan failed:\n"
+                                + java.util.Objects.toString(ex.getMessage(), ex.toString())).showAndWait();
                     }
+                    // Keep the previous good results instead of an empty table.
+                    sessionRows.setAll(prevRows);
+                    hasScanned = prevScanned;
+                    cleanButton.setDisable(getSelectedCount() == 0);
+                    updateSummary();
                     progressBar.setVisible(false);
                     cancelButton.setDisable(true);
                 } else {
+                    if (cancelling.get() || (activeScanToken != null && activeScanToken.isCancelled())) {
+                        statusLabel.setText("Scan canceled.");
+                        sessionRows.setAll(prevRows);
+                        hasScanned = prevScanned;
+                        cleanButton.setDisable(getSelectedCount() == 0);
+                        updateSummary();
+                        progressBar.setVisible(false);
+                        cancelButton.setDisable(true);
+                    } else {
                     AppSettings settings = settingsStore.load();
                     List<String> ignored = settings.ignoredCleanupCategories();
                     List<CleanupRow> filtered = results.stream()
@@ -621,9 +678,11 @@ import java.util.concurrent.atomic.AtomicInteger;
                     progressBar.setVisible(false);
                     cancelButton.setDisable(true);
                     updateSummary();
+                    }
                 }
                 cancelling.set(false);
                 activeScanToken = null;
+                activeScanFuture = null;
                 busy.set(false);
             });
         });
@@ -635,7 +694,8 @@ import java.util.concurrent.atomic.AtomicInteger;
         java.util.List<CleanupRow> initialSelection = sessionRows.stream().filter(CleanupRow::isSelected).toList();
         if (initialSelection.isEmpty()) return;
 
-        busy.set(true);
+        // Confirmations run without holding global busy (shared BusyProperty):
+        // holding it across modal dialogs would block other tabs while idle.
         cancelling.set(false);
 
         java.util.Set<CleanupCategory> adminRequired = new java.util.HashSet<>();
@@ -668,7 +728,6 @@ import java.util.concurrent.atomic.AtomicInteger;
                 a.setHeaderText("Administrator Rights Required");
                 a.showAndWait();
             }
-            busy.set(false);
             return;
         }
 
@@ -729,7 +788,6 @@ import java.util.concurrent.atomic.AtomicInteger;
         confirmAlert.getDialogPane().setMaxHeight(Math.min(
                 javafx.stage.Screen.getPrimary().getVisualBounds().getHeight() * 0.75, 600));
         if (confirmAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
-            busy.set(false);
             return;
         }
 
@@ -752,7 +810,6 @@ import java.util.concurrent.atomic.AtomicInteger;
                     ButtonType.OK, ButtonType.CANCEL);
             destructiveAlert.setHeaderText("Irreversible Deletion — Confirm Again");
             if (destructiveAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
-                busy.set(false);
                 return;
             }
         }
@@ -771,7 +828,6 @@ import java.util.concurrent.atomic.AtomicInteger;
             backupPrompt.getButtonTypes().setAll(continueBtn, ButtonType.CANCEL);
             var result = backupPrompt.showAndWait().orElse(ButtonType.CANCEL);
             if (result != continueBtn) {
-                busy.set(false);
                 return;
             }
         }
@@ -779,6 +835,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 
         AppSettings settings = settingsStore.load();
         final boolean createRestorePoint = settings.autoCreateRestoreBeforeCleanup();
+        // Dialogs above ran without holding busy: another tab may have started
+        // since — never run two system-mutating operations concurrently.
+        if (busy.get()) {
+            statusLabel.setText("Another operation is running — try again when it finishes.");
+            return;
+        }
+        busy.set(true);
 
         Runnable doClean = () -> {
             statusLabel.setText("Cleaning...");
@@ -790,7 +853,9 @@ import java.util.concurrent.atomic.AtomicInteger;
             AtomicInteger cleaned = new AtomicInteger();
 
             activeCleanToken = new CancellationToken();
+            final var cleanTok = activeCleanToken;
             activeCleanFuture = service.cleanAsync(selected, registryBackup, () -> {
+                if (cancelling.get() || cleanTok.isCancelled()) return;
                 int done = cleaned.incrementAndGet();
                 Platform.runLater(() -> {
                     progressBar.setProgress((double) done / totalCategories);
@@ -806,10 +871,14 @@ import java.util.concurrent.atomic.AtomicInteger;
                             statusLabel.setText("Cleanup canceled.");
                         } else {
                             statusLabel.setText("Cleanup failed.");
-                            new Alert(Alert.AlertType.ERROR, "Cleanup failed:\n" + ex.getMessage()).showAndWait();
+                            new Alert(Alert.AlertType.ERROR, "Cleanup failed:\n"
+                                    + java.util.Objects.toString(ex.getMessage(), ex.toString())).showAndWait();
                         }
                         progressBar.setVisible(false);
                         cancelButton.setDisable(true);
+                        cancelling.set(false);
+                        activeCleanToken = null;
+                        activeCleanFuture = null;
                         busy.set(false);
                     });
                 } else {
@@ -825,6 +894,47 @@ import java.util.concurrent.atomic.AtomicInteger;
                         AppLogger.info("Skipping history append for failed/zero-byte clean");
                     }
 
+                    // Canceled: skip the rescan (fresh token would ignore the
+                    // cancel) and go straight to the canceled result dialog.
+                    if (wasCanceled || cancelling.get()) {
+                        Platform.runLater(() -> {
+                            StringBuilder sb = new StringBuilder();
+                            sb.append("Cleanup canceled.\n\n");
+                            sb.append("Total freed: ").append(CleanupService.formatBytes(summary.getTotalBytes()));
+                            sb.append(" (").append(summary.getTotalItems()).append(" items)\n");
+                            if (!summary.getPerCategory().isEmpty()) {
+                                sb.append("\nPer-category breakdown:\n");
+                                summary.getPerCategory().forEach((cat, bytes) ->
+                                        sb.append("  - ").append(cat.getDisplayName()).append(": ")
+                                                .append(CleanupService.formatBytes(bytes)).append("\n"));
+                            }
+                            if (summary.hasErrors()) {
+                                sb.append("\nErrors encountered:\n");
+                                summary.getErrors().forEach(err ->
+                                        sb.append("  - ").append(err).append("\n"));
+                            }
+                            statusLabel.setText("Cleanup canceled - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed before cancel.");
+                            progressBar.setVisible(false);
+                            cancelButton.setDisable(true);
+                            updateSummary();
+                            Alert resultAlert = new Alert(Alert.AlertType.WARNING, sb.toString());
+                            resultAlert.setHeaderText("Cleanup Canceled");
+                            ButtonType saveReportBtn = new ButtonType("Save report...");
+                            resultAlert.getButtonTypes().add(saveReportBtn);
+                            var chosen = resultAlert.showAndWait().orElse(ButtonType.OK);
+                            if (chosen == saveReportBtn) {
+                                saveCleanReport(sb.toString());
+                            }
+                            cancelling.set(false);
+                            activeCleanToken = null;
+                            activeCleanFuture = null;
+                            activeRescanToken = null;
+                            activeRescanFuture = null;
+                            busy.set(false);
+                        });
+                        return;
+                    }
+
                     Platform.runLater(() -> {
                         statusLabel.setText("Re-scanning cleaned categories...");
                         progressBar.setProgress(-1);
@@ -834,11 +944,15 @@ import java.util.concurrent.atomic.AtomicInteger;
                             .map(CleanupRow::getCategory).toList();
 
                     activeRescanToken = new CancellationToken();
+                    if (cancelling.get()) activeRescanToken.cancel();
                     activeRescanFuture = service.scanCategoriesAsync(cleanedCategories, () -> {}, activeRescanToken);
 
                     activeRescanFuture.whenComplete((rescanResults, rescanEx) -> {
                         Platform.runLater(() -> {
                             if (rescanEx == null && rescanResults != null) {
+                                // Cooperative cancel delivers "Canceled" placeholders
+                                // normally — keep pre-clean values in that case.
+                                if (!cancelling.get() && !(activeRescanToken != null && activeRescanToken.isCancelled())) {
                                 java.util.Map<CleanupCategory, CleanupRow> rescanMap = new java.util.HashMap<>();
                                 for (CleanupRow rr : rescanResults) {
                                     rescanMap.put(rr.getCategory(), rr);
@@ -855,13 +969,14 @@ import java.util.concurrent.atomic.AtomicInteger;
                                         existing.setScanDurationMs(refreshed.getScanDurationMs());
                                     }
                                 }
+                                }
                             } else if (rescanEx != null) {
                                 if (activeRescanFuture != null && activeRescanFuture.isCancelled() || (activeRescanToken != null && activeRescanToken.isCancelled())) {
                                     statusLabel.setText("Cleanup completed - rescan canceled");
-                                    AppLogger.info("Rescan canceled: " + rescanEx.getMessage());
+                                    AppLogger.info("Rescan canceled: " + java.util.Objects.toString(rescanEx.getMessage(), rescanEx.toString()));
                                 } else {
-                                    statusLabel.setText("Cleanup completed - rescan failed: " + rescanEx.getMessage());
-                                    AppLogger.warning("Rescan failed: " + rescanEx.getMessage());
+                                    statusLabel.setText("Cleanup completed - rescan failed: " + java.util.Objects.toString(rescanEx.getMessage(), rescanEx.toString()));
+                                    AppLogger.warning("Rescan failed: " + java.util.Objects.toString(rescanEx.getMessage(), rescanEx.toString()));
                                 }
                                 // Don't update rows on rescan failure — keep previous scanned values
                             }
@@ -883,7 +998,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                                         sb.append("  - ").append(err).append("\n"));
                             }
                             if (rescanEx != null && !(rescanEx instanceof java.util.concurrent.CancellationException)) {
-                                sb.append("\nNote: Post-clean rescan failed (").append(rescanEx.getMessage()).append(") — table may show stale sizes. Click Scan to refresh.\n");
+                                sb.append("\nNote: Post-clean rescan failed (").append(java.util.Objects.toString(rescanEx.getMessage(), rescanEx.toString())).append(") — table may show stale sizes. Click Scan to refresh.\n");
                             }
                             if (!wasCanceled) statusLabel.setText("Cleanup completed - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed.");
                             else statusLabel.setText("Cleanup canceled - " + CleanupService.formatBytes(summary.getTotalBytes()) + " freed before cancel.");
@@ -902,6 +1017,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
                             cancelling.set(false);
                             activeCleanToken = null;
+                            activeCleanFuture = null;
                             activeRescanToken = null;
                             activeRescanFuture = null;
                             busy.set(false);
@@ -917,59 +1033,26 @@ import java.util.concurrent.atomic.AtomicInteger;
             progressBar.setVisible(true);
             cancelButton.setDisable(false);
 
-            final java.util.concurrent.atomic.AtomicBoolean restoreTimedOut = new java.util.concurrent.atomic.AtomicBoolean(false);
-            activeRestoreFuture = CompletableFuture.runAsync(() -> {
-                try {
-                    ProcessBuilder pb = new ProcessBuilder("powershell", "-Command",
-                            "Checkpoint-Computer -Description 'WinZenith Cleanup Pre-Clean' -RestorePointType MODIFY_SETTINGS");
-                    pb.redirectErrorStream(true);
-                    Process p = pb.start();
-                    boolean finished = false;
-                    long deadline = System.currentTimeMillis() + 120_000L;
-                    while (System.currentTimeMillis() < deadline) {
-                        if (cancelling.get()) {
-                            p.destroyForcibly();
-                            throw new java.util.concurrent.CancellationException("Restore point canceled");
-                        }
-                        try {
-                            if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            p.destroyForcibly();
-                            throw new java.util.concurrent.CancellationException("Restore point canceled");
-                        }
-                    }
-                    if (cancelling.get()) {
-                        p.destroyForcibly();
-                        throw new java.util.concurrent.CancellationException("Restore point canceled");
-                    }
-                    if (!finished) {
-                        p.destroyForcibly();
-                        restoreTimedOut.set(true);
-                        AppLogger.warning("System Restore point creation timed out");
-                    } else if (p.exitValue() != 0) {
-                        String err = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                        AppLogger.warning("System Restore point creation failed: " + err.trim());
-                        Platform.runLater(() -> {
-                            Alert alert = new Alert(Alert.AlertType.INFORMATION,
-                                    "Could not create a System Restore point.\n\n"
-                                            + "System Protection may be disabled on this drive.\n"
-                                            + "Cleanup will continue without a restore point.\n\n"
-                                            + "You can enable System Protection in System Properties > System Protection.");
-                            alert.setHeaderText("Restore Point Unavailable");
-                            alert.showAndWait();
-                        });
-                    }
-                } catch (java.util.concurrent.CancellationException ce) {
-                    AppLogger.info("System Restore point creation canceled by user");
-                    throw ce;
-                } catch (Exception e) {
-                    AppLogger.warning("Failed to create System Restore point: " + e.getMessage());
+            // Reuse the shared service (checkpoint-restore.ps1 via ProcessRunner,
+            // 300s VSS-aware timeout, NonInteractive) instead of an inline
+            // powershell -Command. The decision dialog runs synchronously on the
+            // FX thread inside whenComplete, so declining can never race ahead
+            // of doClean and run a HIGH-risk clean without a restore point.
+            java.util.concurrent.atomic.AtomicBoolean restoreCancel = new java.util.concurrent.atomic.AtomicBoolean(cancelling.get());
+            activeRestoreCancel = restoreCancel;
+            java.util.concurrent.CompletableFuture<com.sbtools.backup.SystemRestoreService.RestorePointResult> restoreFuture =
+                    CompletableFuture.supplyAsync(() -> {
+                if (restoreCancel.get() || cancelling.get()) {
+                    throw new java.util.concurrent.CancellationException("Restore point canceled");
                 }
+                return new com.sbtools.backup.SystemRestoreService()
+                        .createRestorePoint("WinZenith Cleanup Pre-Clean", restoreCancel);
             });
-            activeRestoreFuture.whenComplete((v, ex) -> Platform.runLater(() -> {
+            activeRestoreFuture = restoreFuture;
+            restoreFuture.whenComplete((result, ex) -> Platform.runLater(() -> {
                 activeRestoreFuture = null;
-                if (ex != null || cancelling.get()) {
+                activeRestoreCancel = null;
+                if (isRestoreCancel(ex)) {
                     statusLabel.setText("Cleanup canceled before start.");
                     progressBar.setVisible(false);
                     cancelButton.setDisable(true);
@@ -977,22 +1060,43 @@ import java.util.concurrent.atomic.AtomicInteger;
                     busy.set(false);
                     return;
                 }
-                if (restoreTimedOut.get()) {
-                    Alert timeoutAlert = new Alert(Alert.AlertType.WARNING,
-                            "System Restore point creation timed out after 120 seconds.\n\n"
-                                    + "Cleanup will continue WITHOUT a restore point.\n"
-                                    + "Consider enabling System Protection or retrying later.\n\n"
-                                    + "Do you want to continue without a restore point?",
-                            ButtonType.OK, ButtonType.CANCEL);
-                    timeoutAlert.setHeaderText("Restore Point Timed Out");
-                    if (timeoutAlert.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
-                        statusLabel.setText("Cleanup canceled (no restore point).");
-                        progressBar.setVisible(false);
-                        cancelButton.setDisable(true);
-                        cancelling.set(false);
-                        busy.set(false);
-                        return;
-                    }
+                if (ex != null) {
+                    String msg = java.util.Objects.toString(ex.getCause() != null ? ex.getCause().getMessage() : ex.getMessage(), ex.toString());
+                    AppLogger.warning("Restore point failed: " + msg);
+                    statusLabel.setText("Restore point failed.");
+                    new Alert(Alert.AlertType.ERROR, "Restore point failed:\n" + msg).showAndWait();
+                    progressBar.setVisible(false);
+                    cancelButton.setDisable(true);
+                    cancelling.set(false);
+                    busy.set(false);
+                    return;
+                }
+                if (result != null && result.success()) {
+                    doClean.run();
+                    return;
+                }
+                String err = result != null && result.error() != null && !result.error().isBlank() ? result.error() : "unknown error";
+                // A restore point already exists within 24h (Windows frequency
+                // limit) — protection is present, proceed without prompting.
+                if (err.contains("FREQUENCY_LIMIT")) {
+                    AppLogger.info("Restore point frequency limit hit, proceeding (protection exists)");
+                    doClean.run();
+                    return;
+                }
+                Alert alert = new Alert(Alert.AlertType.WARNING,
+                        "Could not create a System Restore point.\n\n"
+                                + err.trim() + "\n\n"
+                                + "You can enable System Protection in System Properties > System Protection.\n\n"
+                                + "Do you want to continue WITHOUT a restore point?",
+                        ButtonType.OK, ButtonType.CANCEL);
+                alert.setHeaderText("Restore Point Unavailable");
+                if (alert.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                    statusLabel.setText("Cleanup canceled (no restore point).");
+                    progressBar.setVisible(false);
+                    cancelButton.setDisable(true);
+                    cancelling.set(false);
+                    busy.set(false);
+                    return;
                 }
                 doClean.run();
             }));

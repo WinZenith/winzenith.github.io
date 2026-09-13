@@ -9,6 +9,12 @@ try {
         $result | ConvertTo-Json -Depth 2 -Compress; exit 1; return
     }
     $file = Get-Item -LiteralPath $FilePath -Force
+    # Strict-safety: file flow must never accept directories (would fail-open to
+    # reboot-delete without overwrite). Folders go through secure-delete-folder.ps1.
+    if ($file.PSIsContainer) {
+        $result.message = "Refusing to shred a folder in file mode (use folder delete): $FilePath"
+        $result | ConvertTo-Json -Depth 2 -Compress; exit 1; return
+    }
     # Strict-safety helper: clear ReadOnly so shred works; symlinks/reparse points
     # are blocked Java-side (ShredderSafety) — double-guard here.
     try {

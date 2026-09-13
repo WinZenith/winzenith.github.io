@@ -11,13 +11,15 @@ public enum UpdateSeverity {
         if (s == null || s.isBlank()) {
             return UNKNOWN;
         }
+        String t = s.strip();
         try {
-            return UpdateSeverity.valueOf(s.toUpperCase());
+            return UpdateSeverity.valueOf(t.toUpperCase());
         } catch (IllegalArgumentException e) {
-            return switch (s.toLowerCase()) {
+            return switch (t.toLowerCase()) {
                 case "critical" -> CRITICAL;
-                case "important" -> IMPORTANT;
+                case "important", "security" -> IMPORTANT;
                 case "moderate", "recommended" -> RECOMMENDED;
+                case "optional", "low" -> OPTIONAL;
                 default -> UNKNOWN;
             };
         }

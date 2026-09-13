@@ -35,7 +35,7 @@ public class SoftwareUpdateHistoryStore {
             try {
                 if (entry == null || entry.installedAt() == null) {
                     AppLogger.warning("Skipping software update history entry with missing timestamp");
-                    if (entry == null) return;
+                    return;
                 }
                 List<SoftwareUpdateHistoryEntry> history = load();
                 history.add(entry);

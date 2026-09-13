@@ -27,6 +27,9 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
     public boolean requiresAdmin() { return true; }
 
     @Override
+    public long getCleanTimeoutSeconds() { return 600; }
+
+    @Override
     public void scan(CleanupRow row) {
         scan(row, com.sbtools.util.CancellationToken.NONE);
     }
@@ -230,7 +233,7 @@ public class OldWindowsInstallCleaner implements CleanerExtension {
                 AppLogger.warning("Windows.old became a link, aborting removal for safety");
                 return false;
             }
-            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "rd /s /q \"" + target + "\"");
+            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "rd", "/s", "/q", target.toString());
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
             boolean finished = waitCancellable(p, 120, token);

@@ -60,6 +60,12 @@ public class CleanerHistoryStore {
             return new ArrayList<>(MAPPER.readValue(data, new TypeReference<List<HistoryEntry>>() {}));
         } catch (Exception e) {
             AppLogger.warning("Failed to load cleanup history: " + e.getMessage());
+            // Preserve the corrupt file for diagnosis instead of letting the
+            // next append silently overwrite up to 50 entries.
+            try {
+                Path backup = file.resolveSibling("cleanup-history.corrupt-" + System.currentTimeMillis() + ".json");
+                Files.move(file, backup, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception ignored) {}
             return new ArrayList<>();
         }
     }
@@ -91,7 +97,18 @@ public class CleanerHistoryStore {
         try {
             Path file = getHistoryFile();
             Files.createDirectories(file.getParent());
-            MAPPER.writeValue(file.toFile(), history);
+            Path tmp = Files.createTempFile(file.getParent(), ".cleanup-history.", ".tmp");
+            try {
+                MAPPER.writeValue(tmp.toFile(), history);
+                try {
+                    Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
+            }
         } catch (IOException e) {
             AppLogger.warning("Failed to save cleanup history: " + e.getMessage());
         }
@@ -105,7 +122,18 @@ public class CleanerHistoryStore {
         try {
             Path file = getHistoryFile();
             Files.createDirectories(file.getParent());
-            MAPPER.writeValue(file.toFile(), new java.util.ArrayList<HistoryEntry>());
+            Path tmp = Files.createTempFile(file.getParent(), ".cleanup-history.", ".tmp");
+            try {
+                MAPPER.writeValue(tmp.toFile(), new java.util.ArrayList<HistoryEntry>());
+                try {
+                    Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
+            }
         } catch (IOException e) {
             AppLogger.warning("Failed to clear cleanup history: " + e.getMessage());
         }

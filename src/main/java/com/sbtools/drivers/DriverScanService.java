@@ -1,6 +1,7 @@
 package com.sbtools.drivers;
 
 import com.sbtools.drivers.model.InstalledDriver;
+import com.sbtools.util.AppLogger;
 import com.sbtools.util.JsonMapper;
 import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessResult;
@@ -29,9 +30,31 @@ public class DriverScanService {
         Path script = PowerShellScripts.resolve("enumerate-devices.ps1");
         ProcessResult result = processRunner.run(ProcessRunner.powershellScript(script.toString()));
         if (!result.success()) {
-            throw new IOException("Driver enumeration failed: " + result.combinedOutput());
+            // Truncate: full WMI/PS dumps can be multi-MB and would freeze the
+            // FX thread inside setStatus + Alert (other paths cap at 1500).
+            String out = result.combinedOutput();
+            if (out != null && out.length() > 1500) {
+                out = out.substring(0, 1500) + "… [truncated, see app.log]";
+            }
+            AppLogger.warning("Driver enumeration failed: " + result.combinedOutput());
+            throw new IOException("Driver enumeration failed: " + out);
         }
-        return parseDrivers(result.stdout());
+        List<InstalledDriver> parsed;
+        try {
+            parsed = parseDrivers(result.stdout());
+        } catch (Exception parseEx) {
+            AppLogger.warning("Driver enumeration output unparseable: " + parseEx.getMessage());
+            throw new IOException("Driver enumeration returned unparseable output. Retry the scan."
+                    + (parseEx.getMessage() == null ? "" : " (" + parseEx.getMessage() + ")"));
+        }
+        // Fail closed: a healthy machine always enumerates devices. An empty
+        // list means CIM filtering went wrong, and reporting "0 devices, all
+        // up to date" would hide the failure behind a healthy-looking scan.
+        if (parsed.isEmpty()) {
+            AppLogger.warning("Driver enumeration returned no devices.");
+            throw new IOException("Driver enumeration returned no devices. The device query may have failed — retry the scan.");
+        }
+        return parsed;
     }
 
     /**
@@ -40,8 +63,12 @@ public class DriverScanService {
      */
     public InstalledDriver scanSingleDriver(String deviceId) throws IOException, InterruptedException {
         List<InstalledDriver> all = scanInstalled();
+        // Case-insensitive: parseDrivers dedups case-insensitively, so a
+        // case-variant re-enumeration must still resolve (else false
+        // "device no longer found" and skipped verification).
+        String want = normalizeDeviceKey(deviceId);
         for (InstalledDriver d : all) {
-            if (d.deviceId().equals(deviceId)) {
+            if (normalizeDeviceKey(d.deviceId()).equals(want)) {
                 return d;
             }
         }
@@ -50,21 +77,29 @@ public class DriverScanService {
 
     public static List<InstalledDriver> parseDrivers(String json) throws com.fasterxml.jackson.core.JsonProcessingException {
         JsonNode root = JsonMapper.parseTree(json);
+        // First/rich wins, keyed case-insensitively: the PnP source comes first
+        // with provider/driverKey populated, and sparse Display/Video fallback
+        // rows (or case-variant duplicates the PS $seen missed) must not
+        // clobber it and destroy PACKAGE_ID/INF evidence.
         Map<String, InstalledDriver> byDeviceId = new LinkedHashMap<>();
         if (root.isArray()) {
             for (JsonNode n : root) {
                 InstalledDriver d = nodeToDriver(n);
                 if (d != null) {
-                    byDeviceId.put(d.deviceId(), d);
+                    byDeviceId.putIfAbsent(normalizeDeviceKey(d.deviceId()), d);
                 }
             }
         } else if (root.isObject()) {
             InstalledDriver d = nodeToDriver(root);
             if (d != null) {
-                byDeviceId.put(d.deviceId(), d);
+                byDeviceId.putIfAbsent(normalizeDeviceKey(d.deviceId()), d);
             }
         }
         return new ArrayList<>(byDeviceId.values());
+    }
+
+    static String normalizeDeviceKey(String deviceId) {
+        return deviceId == null ? "" : deviceId.trim().toUpperCase(java.util.Locale.ROOT);
     }
 
     private static InstalledDriver nodeToDriver(JsonNode n) {

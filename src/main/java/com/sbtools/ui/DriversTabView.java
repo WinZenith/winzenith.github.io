@@ -18,6 +18,7 @@ import com.sbtools.settings.SettingsStore;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 import com.sbtools.util.CancellationToken;
+import com.sbtools.util.VersionCompare;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
@@ -88,8 +89,10 @@ public class DriversTabView extends BorderPane {
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
 
-    private final ObservableList<DriverRow> outdatedRows = FXCollections.observableArrayList();
-    private final ObservableList<DriverRow> upToDateRows = FXCollections.observableArrayList();
+    private final ObservableList<DriverRow> outdatedRows = FXCollections.observableArrayList(
+            row -> new javafx.beans.Observable[]{row.selectedProperty()});
+    private final ObservableList<DriverRow> upToDateRows = FXCollections.observableArrayList(
+            row -> new javafx.beans.Observable[]{row.selectedProperty()});
     // Per-row install cell tracking — supports concurrent visual state per row
     // (current execution is still serialized by installExecutor, but the UI is decoupled).
     // Uses ConcurrentHashMap for thread-safe access from FX thread and installExecutor callbacks.
@@ -117,6 +120,62 @@ public class DriversTabView extends BorderPane {
     private volatile Future<?> installFuture;
     private volatile Future<?> backupFuture;
     private volatile CancellationToken backupToken;
+    // Post-install verifier daemons (see single-install success path): a set,
+    // because a second install may start while an earlier 90s rescan is still
+    // running — a single field would orphan the first thread past dispose().
+    private final java.util.Set<Thread> verifierThreads = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private volatile boolean disposed;
+    // Lazily-loaded catalog DB for the Details dialog (+ stamp): avoids a
+    // full disk+parse load() on the FX thread for every dialog open.
+    private volatile DriverCatalogDatabase detailsDb;
+    private volatile long detailsDbStamp = Long.MIN_VALUE;
+
+    /**
+     * Tab-level cached catalog database, reloaded only when a refreshed
+     * catalog file changed (mtime stamp). Bundled content is immutable.
+     */
+    private DriverCatalogDatabase detailsCatalogDatabase() {
+        long stamp = 0;
+        try {
+            for (java.nio.file.Path p : new java.nio.file.Path[]{
+                    detailsRefreshedPath(true), detailsRefreshedPath(false)}) {
+                if (p != null) {
+                    try {
+                        if (java.nio.file.Files.exists(p)) {
+                            stamp = Math.max(stamp, java.nio.file.Files.getLastModifiedTime(p).toMillis());
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        DriverCatalogDatabase cached = detailsDb;
+        if (cached == null || detailsDbStamp != stamp) {
+            cached = DriverCatalogDatabase.load();
+            detailsDb = cached;
+            detailsDbStamp = stamp;
+        }
+        return cached;
+    }
+
+    private static java.nio.file.Path detailsRefreshedPath(boolean portable) {
+        try {
+            if (portable) {
+                java.nio.file.Path base = com.sbtools.util.AppPaths.portableBaseDir();
+                if (base != null) return base.resolve("catalog").resolve("driver-catalog.json");
+            } else {
+                return com.sbtools.util.AppPaths.localAppData().resolve("catalog").resolve("driver-catalog.json");
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+    // Pre-scan snapshots for Stop-restore: rescan clears the tables up front,
+    // so Stop (before seed AND after seed) must bring back the previous
+    // results instead of leaving empty / half-seeded tables.
+    private volatile List<DriverRow> preScanOutdated = List.of();
+    private volatile List<DriverRow> preScanUpToDate = List.of();
 
     private boolean acquireBusy(BusyOwner owner) {
         synchronized (busyLock) {
@@ -459,6 +518,12 @@ public class DriversTabView extends BorderPane {
         }
 
         private DriverRow currentRow() {
+            // TableRow item, not items.get(index): getIndex() is a view index
+            // that diverges from backing-list order once the user sorts a
+            // column, so index lookup acted on the wrong driver.
+            if (getTableRow() != null && getTableRow().getItem() != null) {
+                return getTableRow().getItem();
+            }
             if (getTableView() == null) return null;
             int idx = getIndex();
             if (idx < 0 || idx >= getTableView().getItems().size()) {
@@ -471,17 +536,31 @@ public class DriversTabView extends BorderPane {
         protected void updateItem(Void item, boolean empty) {
             super.updateItem(item, empty);
             if (empty) {
+                // Cell recycled to empty: drop stale row->cell mapping so
+                // late progress callbacks don't paint a detached cell.
+                if (trackedRow != null) {
+                    installCells.remove(trackedRow, this);
+                    trackedRow = null;
+                }
                 setGraphic(null);
-                trackedRow = null;
                 return;
             }
             DriverRow row = currentRow();
             if (row == null) {
+                if (trackedRow != null) {
+                    installCells.remove(trackedRow, this);
+                    trackedRow = null;
+                }
                 setGraphic(null);
-                trackedRow = null;
                 return;
             }
             if (row != trackedRow) {
+                // Cell recycled for a different row: unhook the old mapping
+                // first, otherwise install progress for the old row would
+                // update this cell while it displays the new row.
+                if (trackedRow != null) {
+                    installCells.remove(trackedRow, this);
+                }
                 state = State.IDLE;
                 sizeLabel.setText("");
                 downloadProgress.setProgress(0);
@@ -586,13 +665,20 @@ public class DriversTabView extends BorderPane {
 
             {
                 ignoreBtn.setOnAction(e -> {
-                    int idx = getIndex();
-                    if (idx >= 0 && idx < getTableView().getItems().size()) {
-                        DriverRow row = getTableView().getItems().get(idx);
-                        if (row != null) {
-                            excludeDriver(row);
-                            upToDateRows.remove(row);
+                    if (busy.get()) return;
+                    // TableRow item, not items.get(index): view index diverges
+                    // from backing order under column sorting (same fix as
+                    // DriverActionCell.currentRow).
+                    DriverRow row = getTableRow() != null ? getTableRow().getItem() : null;
+                    if (row == null && getTableView() != null) {
+                        int idx = getIndex();
+                        if (idx >= 0 && idx < getTableView().getItems().size()) {
+                            row = getTableView().getItems().get(idx);
                         }
+                    }
+                    if (row != null) {
+                        excludeDriver(row);
+                        upToDateRows.remove(row);
                     }
                 });
             }
@@ -603,6 +689,10 @@ public class DriversTabView extends BorderPane {
                 if (empty) {
                     setGraphic(null);
                 } else {
+                    // Disabled while busy (like the Outdated table): ignoring
+                    // mid-scan is resurrected by the next provider callback
+                    // reconciling new rows. Busy listener refreshes tables.
+                    ignoreBtn.setDisable(busy.get());
                     setGraphic(ignoreBtn);
                 }
             }
@@ -631,6 +721,30 @@ public class DriversTabView extends BorderPane {
             progressLabel.setVisible(false);
             scanButton.setDisable(false);
             stopScanButton.setDisable(true);
+            // Restore pre-scan results: rescan clears the tables up front, so
+            // Stop after the seed would otherwise leave half-seeded tables
+            // (all Up-to-Date, Outdated lost). Seed-cancel-before-seed is
+            // handled in the seed block; this covers stop-after-seed.
+            // Provider callbacks check the token and stay quiet afterwards.
+            try {
+                List<DriverRow> restoreOut = preScanOutdated;
+                List<DriverRow> restoreUp = preScanUpToDate;
+                if (restoreOut != null && restoreUp != null && (!restoreOut.isEmpty() || !restoreUp.isEmpty())) {
+                    // Drop partial new-scan rows (different instances than the
+                    // snapshots), then bring back the pre-scan rows.
+                    outdatedRows.removeIf(r -> !restoreOut.contains(r));
+                    upToDateRows.removeIf(r -> !restoreUp.contains(r));
+                    for (DriverRow r : restoreOut) {
+                        if (!outdatedRows.contains(r)) outdatedRows.add(r);
+                    }
+                    for (DriverRow r : restoreUp) {
+                        if (!upToDateRows.contains(r)) upToDateRows.add(r);
+                    }
+                    filterTables();
+                }
+            } catch (Exception restoreEx) {
+                AppLogger.warning("Stop-scan restore failed: " + restoreEx.getMessage());
+            }
             updateButtonStates();
             setStatus("Scan stopped.");
         }
@@ -674,13 +788,27 @@ public class DriversTabView extends BorderPane {
                 previouslySelected.add(row.installed().deviceId());
             }
         }
+        // Snapshot pre-scan rows BEFORE clearing: Stop before the seed block
+        // must restore them instead of leaving freshly-cleared empty tables.
+        // Stored in fields too so stopScan() can restore after the seed.
+        final List<DriverRow> preScanOutdated = new ArrayList<>(outdatedRows);
+        final List<DriverRow> preScanUpToDate = new ArrayList<>(upToDateRows);
+        this.preScanOutdated = List.copyOf(preScanOutdated);
+        this.preScanUpToDate = List.copyOf(preScanUpToDate);
         outdatedRows.clear();
         upToDateRows.clear();
+        // Rows are recreated per scan, so stale row->cell entries would leak
+        // and route progress to detached cells. Scans never overlap installs
+        // (busy gate above), so clearing here is safe.
+        installCells.clear();
         progressBar.setProgress(0);
         progressLabel.setText("0%");
         progressBar.setVisible(true);
         progressLabel.setVisible(true);
-        scanFuture = scanExecutor.submit(() -> {
+        // Self-holder for the guarded finally-clear below: without it a
+        // stale scan task wipes a newer rescan's token/future references.
+        final Future<?>[] selfFuture = new Future<?>[1];
+        Future<?> submitted = scanExecutor.submit(() -> {
             try {
                 if (token.isCancelled()) return;
                 List<InstalledDriver> installed = scanService.scanInstalled();
@@ -709,15 +837,26 @@ public class DriversTabView extends BorderPane {
                         rowByDevice.put(d.deviceId(), new DriverRow(d));
                     }
                 }
-                Set<String> excludedIdSet = loadExcludedIdSet();
                 Platform.runLater(() -> {
-                    if (token.isCancelled()) return;
+                    if (token.isCancelled()) {
+                        // Stop before seed: restore pre-scan results instead of
+                        // leaving freshly-cleared empty tables.
+                        outdatedRows.addAll(preScanOutdated.stream()
+                                .filter(r -> !outdatedRows.contains(r)).toList());
+                        upToDateRows.addAll(preScanUpToDate.stream()
+                                .filter(r -> !upToDateRows.contains(r)).toList());
+                        return;
+                    }
                     progressBar.setProgress(0.2);
                     progressLabel.setText("20%");
                     setStatus("Listed " + installed.size() + " device(s). Checking update sources…");
+                    // Reload exclusions live: the set may have changed during
+                    // enumeration (Ignored dialog), and provider callbacks
+                    // already reload per callback (see below).
+                    Set<String> seedExcluded = loadExcludedIdSet();
                     // Seed the up-to-date list immediately so users get feedback before any provider replies.
                     for (DriverRow row : rowByDevice.values()) {
-                        if (!excludedIdSet.contains(row.installed().deviceId())) {
+                        if (!seedExcluded.contains(row.installed().deviceId())) {
                             if (previouslySelected.contains(row.installed().deviceId())) {
                                 row.setSelected(true);
                             }
@@ -728,7 +867,10 @@ public class DriversTabView extends BorderPane {
 
                 if (token.isCancelled()) return;
                 AtomicInteger providersDone = new AtomicInteger();
-                int providerCount = catalog.relevantProviderCount(installed);
+                // Single vendor-detection pass shared by the count and the run.
+                java.util.List<com.sbtools.drivers.catalog.DriverCatalogProvider> activeProviders =
+                        catalog.relevantProviders(installed);
+                int providerCount = activeProviders.size();
                 catalog.findUpdates(
                         installed,
                         token,
@@ -746,10 +888,17 @@ public class DriversTabView extends BorderPane {
                                 if (token.isCancelled()) return;
                                 applyCandidates(rowByDevice, candidates);
                                 int done = providersDone.incrementAndGet();
-                                double progress = 0.2 + (0.8 * done / Math.max(1, providerCount));
+                                // Clamp: a provider must never push progress past
+                                // 100% ("Checked 6/5 sources") even if a stray
+                                // duplicate callback slips through dedup upstream.
+                                int shown = Math.min(done, Math.max(1, providerCount));
+                                double progress = 0.2 + (0.8 * shown / Math.max(1, providerCount));
                                 progressBar.setProgress(progress);
                                 progressLabel.setText((int)(progress * 100) + "%");
-                                boolean rowsChanged = reconcileRows(rowByDevice, excludedIdSet);
+                                // Reload exclusions per callback: Ignore clicked
+                                // mid-scan must not be resurrected by the next
+                                // provider reconciling against a stale snapshot.
+                                boolean rowsChanged = reconcileRows(rowByDevice, loadExcludedIdSet());
                                 // B3: reconcile reboot-pending state so Dashboard/Drivers stay in sync
                                 boolean rebootChanged = false;
                                 try {
@@ -796,8 +945,8 @@ public class DriversTabView extends BorderPane {
                                 }
                                 int outdated = outdatedRows.size();
                                 long rebootPendingCount = outdatedRows.stream().filter(DriverRow::isRebootPending).count();
-                                if (done < providerCount) {
-                                    setStatus("Checked " + done + "/" + providerCount + " sources — "
+                                if (shown < providerCount) {
+                                    setStatus("Checked " + shown + "/" + providerCount + " sources — "
                                             + outdated + " update(s) found so far…"
                                             + (rebootPendingCount > 0 ? " (" + rebootPendingCount + " reboot pending)" : ""));
                                 } else {
@@ -806,18 +955,29 @@ public class DriversTabView extends BorderPane {
                                             + installed.size() + " device(s)." + suffix);
                                 }
                             });
-                        }
+                        },
+                        activeProviders
                 );
             } catch (Exception ex) {
                 if (!token.isCancelled()) {
                     Platform.runLater(() -> {
+                        // Failed rescan must not wipe prior good results: the
+                        // tables were cleared up front, so bring back the
+                        // pre-scan snapshots (same as the seed-cancel path).
+                        outdatedRows.addAll(preScanOutdated.stream()
+                                .filter(r -> !outdatedRows.contains(r)).toList());
+                        upToDateRows.addAll(preScanUpToDate.stream()
+                                .filter(r -> !upToDateRows.contains(r)).toList());
                         setStatus("Scan failed: " + ex.getMessage());
                         new Alert(Alert.AlertType.ERROR, "Scan failed:\n" + ex.getMessage()).showAndWait();
                     });
                 }
             } finally {
-                scanFuture = null;
-                scanToken = null;
+                // Guarded clears: a rescan started after Stop would otherwise
+                // have its token/future wiped by this stale task's finally,
+                // making the new scan unstoppable.
+                if (scanToken == token) scanToken = null;
+                if (scanFuture == selfFuture[0]) scanFuture = null;
                 Platform.runLater(() -> {
                     releaseBusy(BusyOwner.SCAN);
                     progressBar.setVisible(false);
@@ -828,6 +988,8 @@ public class DriversTabView extends BorderPane {
                 });
             }
         });
+        selfFuture[0] = submitted;
+        scanFuture = submitted;
     }
 
     private void setStatus(String text) {
@@ -872,7 +1034,11 @@ public class DriversTabView extends BorderPane {
             if (row == null) continue;
             DriverUpdateCandidate newCandidate = entry.getValue();
             DriverUpdateCandidate oldCandidate = row.candidate();
-            if (oldCandidate == null || !newCandidate.availableVersion().equals(oldCandidate.availableVersion())) {
+            // Record equality covers version + downloadUrl + source + packageId:
+            // the aggregator streams cumulative best-pick snapshots, so a later
+            // snapshot with the same version but a better download (e.g. manual
+            // OEM URL replaced by a direct URL / WU packageId) must still swap.
+            if (oldCandidate == null || !newCandidate.equals(oldCandidate)) {
                 row.setCandidate(newCandidate);
             }
         }
@@ -992,6 +1158,10 @@ public class DriversTabView extends BorderPane {
                         AppLogger.warning("Ignored entry still present after remove (legacy store); retrying purge");
                         settingsStore.update(cur2 -> cur2.withExcludedDriverIds(cur2.excludedDriverIds() == null ? new ArrayList<>() : cur2.excludedDriverIds().stream().filter(s -> !extractExcludedId(s).equals(selId)).toList()));
                     }
+                    // The tables hold per-scan row instances: an un-ignored
+                    // driver cannot reappear without re-enumeration, so tell
+                    // the user instead of looking broken.
+                    setStatus("Removed from ignored list. Run Scan to pick it up again.");
                 } catch (IOException ex) {
                     AppLogger.warning("Failed to update ignored list: " + ex.getMessage());
                 }
@@ -1047,6 +1217,15 @@ public class DriversTabView extends BorderPane {
             return;
         }
 
+        // Acquire FIRST: the callbacks + cancel flags below are shared with
+        // any running batch install. Touching them before owning the gate
+        // would overwrite the live install's callbacks and clear its cancel
+        // request, then fail to acquire and leave stale state behind.
+        if (!acquireBusy(BusyOwner.INSTALL)) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "Another operation is running. Please wait for it to finish.").showAndWait();
+            return;
+        }
         if (cell != null) installCells.put(row, cell);
         installCancelFlag.set(false);
         installService.resetCancellation();
@@ -1067,11 +1246,6 @@ public class DriversTabView extends BorderPane {
                 live.setInstalling();
             }
         }));
-        if (!acquireBusy(BusyOwner.INSTALL)) {
-            new Alert(Alert.AlertType.INFORMATION,
-                    "Another operation is running. Please wait for it to finish.").showAndWait();
-            return;
-        }
         scanButton.setDisable(true);
         updateAllButton.setDisable(true);
         updateSelectedButton.setDisable(true);
@@ -1150,7 +1324,29 @@ public class DriversTabView extends BorderPane {
                     updateButtonStates();
                 });
                 if (result.installed() && !result.rebootRequired()) {
-                    verifyInstalledVersion(row, c);
+                    // Verify off the install thread: scanSingleDriver can take
+                    // up to 90s (PowerShell enumeration) and must not hold the
+                    // INSTALL busy gate / installExecutor hostage, nor block
+                    // scanExecutor behind a post-install check. One-off daemon,
+                    // tracked so dispose() can interrupt it on tab close.
+                    // FX snapshot first: row properties are FX-confined and must
+                    // not be read from the verifier thread (torn verdicts).
+                    final boolean wasPending = row.isRebootPending();
+                    final String oldCurrent = row.currentVersionProperty().get();
+                    try {
+                        Thread verifier = new Thread(() -> {
+                            try {
+                                verifyInstalledVersion(row, c, wasPending, oldCurrent);
+                            } finally {
+                                verifierThreads.remove(Thread.currentThread());
+                            }
+                        }, "driver-verify");
+                        verifier.setDaemon(true);
+                        verifierThreads.add(verifier);
+                        verifier.start();
+                    } catch (Exception submitEx) {
+                        AppLogger.warning("Post-install verify submit failed: " + submitEx.getMessage());
+                    }
                 }
             } catch (Exception ex) {
                 Platform.runLater(() -> {
@@ -1210,7 +1406,13 @@ public class DriversTabView extends BorderPane {
     }
 
     private void showErrorWithFallback(String message, String vendorPageUrl) {
+        // Cap: raw installer/pnputil/WU output can be megabytes and would
+        // freeze the dialog (batch caps at the same 1500).
         String safe = message == null ? "Install failed." : message;
+        if (safe.length() > 1500) {
+            AppLogger.warning("Driver install failure detail (truncated in dialog): " + safe);
+            safe = safe.substring(0, 1500) + "… [truncated — see app.log]";
+        }
         if (vendorPageUrl != null && !vendorPageUrl.isBlank()) {
             Alert alert = new Alert(Alert.AlertType.ERROR, safe + "\n\nYou can try downloading manually from the vendor website.",
                     ButtonType.OK, ButtonType.CANCEL);
@@ -1301,12 +1503,26 @@ public class DriversTabView extends BorderPane {
     }
 
     /**
+     * Numeric plausibility for a freshly re-scanned version string (mirrors the
+     * catalog providers' bar). Guards the VERIFIED verdict against garbage reads.
+     */
+    private static boolean isPlausibleVersionNumber(String v) {
+        if (v == null || v.isBlank() || v.length() > 64) return false;
+        return v.matches("(?i).*\\d+\\.\\d+.*");
+    }
+
+    /**
      * Re-scans a single driver after update to verify the new version was actually installed.
      * Updates the row's current version and health score via FX thread, and records a
      * verification outcome (VERIFIED / VERSION_MISMATCH / NEEDS_REBOOT) in history detail
      * without altering the original install history entry.
+     *
+     * @param wasPending row reboot-pending flag snapshotted on the FX thread
+     *                   before the verifier started (row properties are FX-confined)
+     * @param oldCurrent row current-version snapshotted the same way
      */
-    private void verifyInstalledVersion(DriverRow row, DriverUpdateCandidate oldCandidate) {
+    private void verifyInstalledVersion(DriverRow row, DriverUpdateCandidate oldCandidate,
+                                        boolean wasPending, String oldCurrent) {
         try {
             InstalledDriver updated = scanService.scanSingleDriver(row.installed().deviceId());
             if (updated != null) {
@@ -1314,24 +1530,73 @@ public class DriversTabView extends BorderPane {
                 String expected = oldCandidate != null && oldCandidate.availableVersion() != null
                         ? oldCandidate.availableVersion() : "";
                 String outcome;
-                if (row.isRebootPending()) {
+                // A transient WMI hiccup can re-read a garbage version right
+                // after a good install: only plausible reads may accuse the
+                // install, otherwise the verdict is INCONCLUSIVE (no history,
+                // no row move) rather than a false failure + bounce.
+                boolean readable = isPlausibleVersionNumber(newVersion);
+                if (wasPending) {
                     outcome = "NEEDS_REBOOT (reports " + newVersion + ", pending restart)";
-                } else if (!expected.isBlank() && newVersion.equals(expected)) {
+                } else if (readable && !expected.isBlank()
+                        && VersionCompare.compare(expected, newVersion) == 0) {
+                    // Numeric equality (not string equality): NVIDIA DCH
+                    // "32.0.15.8157" == public "581.57", and "23.70.0" ==
+                    // "23.70.0.0". String equals false-positived MISMATCH.
+                    // Plausibility first: an abstain-compare (0) on a garbage
+                    // read must never report VERIFIED.
                     outcome = "VERIFIED (" + newVersion + ")";
-                } else if (!newVersion.equals(row.currentVersionProperty().get())) {
+                } else if (readable && VersionCompare.compare(newVersion, oldCurrent) != 0) {
                     outcome = "updated to " + newVersion + " (expected " + (expected.isBlank() ? "?" : expected) + ")";
-                } else {
+                } else if (readable) {
                     outcome = "VERSION_MISMATCH (still " + newVersion + ", expected " + (expected.isBlank() ? "?" : expected) + ")";
+                } else {
+                    outcome = "INCONCLUSIVE (could not re-read version; install result stands)";
                 }
                 AppLogger.info("Post-install verification for " + row.installed().friendlyName() + ": " + outcome);
+                // Persist silent mismatches: the install already recorded
+                // success, so a VERSION_MISMATCH would otherwise stay visible
+                // only in a transient status label. VERIFIED needs no extra
+                // entry. Follow-up entry never alters the original.
+                final String outcomeFinal = outcome;
+                final boolean mismatch = outcome.startsWith("VERSION_MISMATCH")
+                        || outcome.startsWith("updated to ");
+                if (mismatch) {
+                    try {
+                        historyStore.recordUpdate(
+                                row.installed().deviceId(),
+                                row.installed().friendlyName(),
+                                newVersion,
+                                expected.isBlank() ? newVersion : expected,
+                                oldCandidate != null && oldCandidate.source() != null ? oldCandidate.source() : "",
+                                false,
+                                "post-install verify: " + outcomeFinal);
+                    } catch (Exception histEx) {
+                        AppLogger.warning("Failed to record verification outcome: " + histEx.getMessage());
+                    }
+                }
                 javafx.application.Platform.runLater(() -> {
+                    if (disposed) return;
                     row.refreshFrom(updated);
                     setStatus("Verified " + row.installed().friendlyName() + ": " + outcome + ".");
+                    if (mismatch && oldCandidate != null) {
+                        // Silent no-op install (exit 0, version unchanged): the
+                        // single-install path already moved this row to
+                        // Up-to-Date with candidate=null. Put it back in
+                        // Outdated with its candidate so it is not lost as
+                        // falsely up-to-date. Skip when a newer scan already
+                        // replaced the row (detached instance): the history
+                        // entry above is the record in that case.
+                        if (outdatedRows.contains(row) || upToDateRows.contains(row)) {
+                            row.setCandidate(oldCandidate);
+                            upToDateRows.remove(row);
+                            if (!outdatedRows.contains(row)) outdatedRows.add(row);
+                        }
+                    }
                     // Never auto-clear reboot-pending on version match: Windows
                     // often reports the new version before the reboot that
                     // actually binds it. Pending clears only on reboot /
                     // explicit user action, never on a version string.
-                    if (row.isRebootPending()) {
+                    if (row.isRebootPending() || mismatch) {
                         if (outdatedTable != null) outdatedTable.refresh();
                         if (upToDateTable != null) upToDateTable.refresh();
                     }
@@ -1367,7 +1632,8 @@ public class DriversTabView extends BorderPane {
     private final FilteredList<DriverRow> filteredUpToDate = new FilteredList<>(upToDateRows);
 
     private void filterTables() {
-        String filter = searchField.getText().toLowerCase().trim();
+        // ROOT locale: tr-TR turns "Intel" into "ıntel" and breaks contains().
+        String filter = searchField.getText().toLowerCase(java.util.Locale.ROOT).trim();
         if (filter.isEmpty()) {
             filteredOutdated.setPredicate(null);
             filteredUpToDate.setPredicate(null);
@@ -1378,10 +1644,13 @@ public class DriversTabView extends BorderPane {
     }
 
     private static boolean matchesFilter(DriverRow row, String filter) {
-        String name = row.installed().friendlyName() == null ? "" : row.installed().friendlyName().toLowerCase();
-        String version = row.installed().driverVersion() == null ? "" : row.installed().driverVersion().toLowerCase();
-        String src = row.sourceProperty().get() == null ? "" : row.sourceProperty().get().toLowerCase();
-        return name.contains(filter) || version.contains(filter) || src.contains(filter);
+        String name = row.installed().friendlyName() == null ? "" : row.installed().friendlyName().toLowerCase(java.util.Locale.ROOT);
+        // Use live properties (not the immutable installed record) so the
+        // filter reflects post-install refreshFrom() version changes.
+        String current = row.currentVersionProperty().get() == null ? "" : row.currentVersionProperty().get().toLowerCase(java.util.Locale.ROOT);
+        String available = row.availableVersionProperty().get() == null ? "" : row.availableVersionProperty().get().toLowerCase(java.util.Locale.ROOT);
+        String src = row.sourceProperty().get() == null ? "" : row.sourceProperty().get().toLowerCase(java.util.Locale.ROOT);
+        return name.contains(filter) || current.contains(filter) || available.contains(filter) || src.contains(filter);
     }
 
     private void showUpdateHistory() {
@@ -1472,7 +1741,7 @@ public class DriversTabView extends BorderPane {
         if (row.installed().releaseDate() != null) {
             addDetailRow(grid, r++, "Release Date:", row.installed().releaseDate().format(DateTimeFormatter.ISO_LOCAL_DATE));
         }
-        addDetailRow(grid, r++, "Current Version:", row.installed().driverVersion());
+        addDetailRow(grid, r++, "Current Version:", row.currentVersionProperty().get());
 
         if (row.hasUpdate()) {
             DriverUpdateCandidate c = row.candidate();
@@ -1480,8 +1749,10 @@ public class DriversTabView extends BorderPane {
             addDetailRow(grid, r++, "Source:", c.source());
             addDetailRow(grid, r++, "Severity:", c.severity() != null ? c.severity().name() : "Unknown");
             // Match explanation: why this catalog entry was chosen (HWID specificity, confidence).
+            // Tab-level cached DB (mtime-checked): a full load() per dialog
+            // open froze the FX thread on disk+parse.
             try {
-                DriverCatalogDatabase db = DriverCatalogDatabase.load();
+                DriverCatalogDatabase db = detailsCatalogDatabase();
                 String why = db.describeMatch(row.installed());
                 if (why != null && !why.isBlank()) {
                     addDetailRow(grid, r++, "Why this match:", why + " · catalog: " + db.sourceLabel());
@@ -1597,12 +1868,14 @@ public class DriversTabView extends BorderPane {
         grid.add(currentHeader, 0, 0);
         grid.add(availableHeader, 1, 0);
 
-        addComparisonRow(grid, 1, "Version:", row.installed().driverVersion(), c.availableVersion());
+        // Live property, not the immutable installed record: post-install
+        // refreshFrom() updates Current without a full rescan.
+        addComparisonRow(grid, 1, "Version:", row.currentVersionProperty().get(), c.availableVersion());
         addComparisonRow(grid, 2, "Provider:", row.installed().provider(), c.source());
         addComparisonRow(grid, 3, "Release Date:",
                 row.installed().releaseDate() != null
                         ? row.installed().releaseDate().format(DateTimeFormatter.ISO_LOCAL_DATE) : "\u2014",
-                c.title() != null && !c.title().isBlank() ? c.title() : "\u2014");
+                "\u2014");
 
         int r = 4;
         if (c.severity() != null) {
@@ -1739,6 +2012,22 @@ public class DriversTabView extends BorderPane {
         stopInstallButton.setManaged(true);
         stopInstallButton.setDisable(false);
 
+        // Snapshot visible action cells NOW on the FX thread: the background
+        // loop registers cells via runLater *after* starting each install, so
+        // early download progress found an empty map and the row stayed IDLE.
+        // (The per-row runLater inside the loop stays for rows scrolled into
+        // view mid-batch.)
+        try {
+            for (DriverRow r : rows) {
+                DriverActionCell cell = lookupActionCell(r);
+                if (cell != null) {
+                    installCells.put(r, cell);
+                }
+            }
+        } catch (Exception lookupEx) {
+            AppLogger.warning("Batch cell snapshot failed: " + lookupEx.getMessage());
+        }
+
         installFuture = installExecutor.submit(() -> {
             int succeeded = 0;
             int failed = 0;
@@ -1806,7 +2095,9 @@ public class DriversTabView extends BorderPane {
                                         + ": " + row.installed().friendlyName() + " \u2014 " + sizeText);
                                 DriverActionCell cell = installCells.get(row);
                                 if (cell != null) {
-                                    cell.setDownloading(sizeText, fraction > 0 ? fraction : 0);
+                                    // Pass through untouched (single-install parity):
+                                    // -1 renders indeterminate instead of a frozen 0%.
+                                    cell.setDownloading(sizeText, fraction);
                                 }
                             });
                         });
@@ -1830,6 +2121,26 @@ public class DriversTabView extends BorderPane {
                             catalog.clearWindowsUpdateCache();
                             if (c.source() != null && !c.source().isBlank()) catalog.clearCacheForProvider(c.source());
                         } catch (Exception ex) { AppLogger.warning("Cache clear failed: " + ex.getMessage()); }
+                        // Stop Install during the 900s pnputil/installer phase:
+                        // a post-cancel success must not count as succeeded nor
+                        // move the row to Up-to-Date (single-install parity).
+                        boolean cancelledAfterInstall = installCancelFlag.get() || installService.isCancelled();
+                        if (cancelledAfterInstall) {
+                            skipped++;
+                            int remaining = total - idx - 1;
+                            if (remaining > 0) skipped += remaining;
+                            failureDetails.add(row.installed().friendlyName() + ": cancelled by user");
+                            recordHistory(row, c, false, "cancelled by user");
+                            AppLogger.warning("Batch install completed after cancel request for "
+                                    + row.installed().friendlyName() + " — treated as cancelled");
+                            Platform.runLater(() -> {
+                                DriverActionCell cell = installCells.remove(row);
+                                if (cell != null) {
+                                    cell.setIdle();
+                                }
+                            });
+                            break;
+                        }
                         if (result.installed()) {
                             succeeded++;
                             boolean needsReboot = result.rebootRequired();
@@ -1945,9 +2256,16 @@ public class DriversTabView extends BorderPane {
                     for (InstalledDriver d : freshScan) {
                         freshByDevice.put(d.deviceId(), d);
                     }
-                    // B5 fix: all JavaFX property mutations must run on FX thread
+                    // B5 fix: all JavaFX property mutations must run on FX thread.
+                    // Guarded: after tab close the tables are gone — skip rather
+                    // than touching dead nodes. (A concurrent new scan owns new
+                    // row instances, so refreshing these stragglers is harmless.)
+                    final List<DriverRow> batchRows = new ArrayList<>(rows);
                     Platform.runLater(() -> {
-                        for (DriverRow row : rows) {
+                        if (disposed) {
+                            return;
+                        }
+                        for (DriverRow row : batchRows) {
                             InstalledDriver fresh = freshByDevice.get(row.installed().deviceId());
                             if (fresh != null) {
                                 row.refreshFrom(fresh);
@@ -1969,14 +2287,16 @@ public class DriversTabView extends BorderPane {
             final int r = rebootNeeded;
             final List<String> failures = new ArrayList<>(failureDetails);
             Platform.runLater(() -> {
-                releaseBusy(BusyOwner.INSTALL);
+                // No releaseBusy here: the finally block above already queued
+                // the single INSTALL release. A second release could clear a
+                // *new* INSTALL owner's gate if the user starts another op
+                // while the post-batch re-scan above is still running.
                 installFuture = null;
                 scanButton.setDisable(false);
                 stopInstallButton.setVisible(false);
                 stopInstallButton.setManaged(false);
                 stopInstallButton.setDisable(true);
-                updateAllButton.setDisable(outdatedRows.isEmpty());
-                updateSelectedButton.setDisable(true);
+                updateButtonStates();
                 progressBar.setProgress(1.0);
                 progressLabel.setText("100%");
                 progressBar.setVisible(false);
@@ -2009,7 +2329,12 @@ public class DriversTabView extends BorderPane {
                     Label failHeader = new Label("Failures / skipped:");
                     failHeader.setStyle("-fx-font-weight: bold;");
                     box.getChildren().add(failHeader);
-                    ListView<String> lv = new ListView<>(FXCollections.observableArrayList(failures));
+                    // Cap per-row text: uncapped installer/pnputil/WU output can
+                    // put megabytes into ListView rows and freeze the dialog.
+                    java.util.List<String> shown = failures.stream()
+                            .map(msg -> msg != null && msg.length() > 1500 ? msg.substring(0, 1500) + "… [truncated]" : msg)
+                            .toList();
+                    ListView<String> lv = new ListView<>(FXCollections.observableArrayList(shown));
                     lv.setPrefHeight(Math.min(200, failures.size() * 24 + 10));
                     box.getChildren().add(lv);
                 }
@@ -2037,10 +2362,14 @@ public class DriversTabView extends BorderPane {
             return;
         }
 
+        if (busy.get()) {
+            setStatus("Busy: finish the running operation before backup.");
+            return;
+        }
+        if (!acquireBusy(BusyOwner.BACKUP)) return;
         final CancellationToken token = new CancellationToken();
         backupToken = token;
         backupCancelFlag.set(false);
-        if (!acquireBusy(BusyOwner.BACKUP)) return;
         scanButton.setDisable(true);
         backupButton.setDisable(true);
         stopBackupButton.setVisible(true);
@@ -2091,6 +2420,28 @@ public class DriversTabView extends BorderPane {
                         AppLogger.warning("Backup failed for " + driver.friendlyName() + ": " + ex.getMessage());
                     }
                 }
+            } catch (java.util.concurrent.CancellationException | InterruptedException cancelEx) {
+                // Stop Backup during the pre-loop enumeration (scanInstalled
+                // is a 90s PowerShell call): report cancelled, not failed.
+                if (cancelEx instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                final int cs = succeeded;
+                final int cf = failed;
+                Platform.runLater(() -> {
+                    releaseBusy(BusyOwner.BACKUP);
+                    backupFuture = null;
+                    scanButton.setDisable(false);
+                    backupButton.setDisable(false);
+                    stopBackupButton.setVisible(false);
+                    stopBackupButton.setManaged(false);
+                    progressBar.setVisible(false);
+                    progressLabel.setVisible(false);
+                    String summary = "Backup cancelled: " + cs + " backed up, " + cf + " failed";
+                    statusLabel.setText(summary + ".");
+                    new Alert(Alert.AlertType.INFORMATION, summary + ".").showAndWait();
+                });
+                return;
             } catch (Exception ex) {
                 Platform.runLater(() -> {
                     releaseBusy(BusyOwner.BACKUP);
@@ -2151,6 +2502,7 @@ public class DriversTabView extends BorderPane {
      * or the application is shutting down to avoid leaked threads.
      */
     public void dispose() {
+        disposed = true;
         CancellationToken scan = scanToken;
         if (scan != null) scan.cancel();
         CancellationToken backup = backupToken;
@@ -2161,6 +2513,14 @@ public class DriversTabView extends BorderPane {
         try { if (scanFuture != null) scanFuture.cancel(true); } catch (Exception ignored) {}
         try { if (installFuture != null) installFuture.cancel(true); } catch (Exception ignored) {}
         try { if (backupFuture != null) backupFuture.cancel(true); } catch (Exception ignored) {}
+        // A post-install verifier may hold a 90s enumeration: interrupt them so
+        // none can record history / touch tables after the tab is gone.
+        try {
+            for (Thread verifier : verifierThreads) {
+                try { verifier.interrupt(); } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        verifierThreads.clear();
         shutdownExecutor(scanExecutor);
         shutdownExecutor(installExecutor);
         shutdownExecutor(backupExecutor);

@@ -9,7 +9,6 @@ import com.sbtools.util.ProcessManager;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.stream.Stream;
 
 public class DockerCacheCleaner implements CleanerExtension {
 
@@ -25,29 +24,23 @@ public class DockerCacheCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        long totalSize = 0;
-        int itemCount = 0;
+        // Scan and clean measure different things by design: clean runs
+        // 'docker system prune -f' (dangling cache only), while the on-disk
+        // image store holds tagged images prune preserves. Reporting the
+        // store size as cleanable fabricated GBs that clean could never free
+        // (and the service then logged a bogus "nothing was cleaned" error),
+        // and post-clean rescans never cleared. Report presence only; the
+        // actual reclaimed bytes are parsed from prune output during clean.
         String progData = CleanerUtils.safeEnv("PROGRAMDATA");
+        boolean present = false;
         if (progData != null) {
-            Path dockerDir = Path.of(progData, "Docker");
-            if (Files.isDirectory(dockerDir)) {
-                Path images = dockerDir.resolve("images");
-                Path containers = dockerDir.resolve("containers");
-                for (Path dir : new Path[]{images, containers}) {
-                    if (Files.isDirectory(dir)) {
-                        try (Stream<Path> walk = Files.walk(dir, 4)) {
-                            var stats = walk.filter(Files::isRegularFile)
-                                    .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                            totalSize += stats.getSum();
-                            itemCount += (int) stats.getCount();
-                        } catch (Exception ignored) {}
-                    }
-                }
-            }
+            present = Files.isDirectory(Path.of(progData, "Docker"));
         }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : " (requires Docker)"));
+        row.setTotalBytes(0);
+        row.setItemCount(0);
+        row.setSizeOrCountText(present
+                ? "Docker detected - reclaimable shown after clean"
+                : CleanerUtils.formatBytes(0) + " (requires Docker)");
     }
 
     @Override

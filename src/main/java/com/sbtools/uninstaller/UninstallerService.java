@@ -239,6 +239,15 @@ public class UninstallerService {
 
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(false);
+            // Run from the app's install dir when known so relative-path uninstallers resolve resources.
+            try {
+                String loc = app.getInstallLocation();
+                if (loc != null && !loc.isBlank()) {
+                    File dir = new File(loc);
+                    File workDir = dir.isDirectory() ? dir : dir.getParentFile();
+                    if (workDir != null && workDir.isDirectory()) pb.directory(workDir);
+                }
+            } catch (Exception ignored) {}
             AppLogger.info("Running uninstaller: " + String.join(" ", command));
             Process process = pb.start();
             try {
@@ -301,7 +310,8 @@ public class UninstallerService {
                 long afterSnapshotRemaining = Math.max(5, TimeUnit.NANOSECONDS.toSeconds(deadlineNanos - System.nanoTime()));
                 waitForChildProcesses(app, (int) Math.min(60, afterSnapshotRemaining));
             }
-            // Wait for the install directory to be removed (use remaining budget, not capped to 30)
+            // Wait for the install directory to be removed (short cap: leftovers
+            // review handles remaining files, so never burn the full budget here).
             // BLOCKER FIX: skip when the uninstaller reported success + reboot required
             // (3010/1641). Files pending reboot never disappear until restart, so the
             // old code always burned the full 120s wait as a pure hang after success.
@@ -311,7 +321,7 @@ public class UninstallerService {
                 AppLogger.info("Skipping install-dir wait (reboot required, exit=" + exitCode + ")");
             } else {
                 long afterChildRemaining = Math.max(5, TimeUnit.NANOSECONDS.toSeconds(deadlineNanos - System.nanoTime()));
-                waitForInstallDirRemoval(app, (int) Math.min(120, afterChildRemaining));
+                waitForInstallDirRemoval(app, (int) Math.min(15, afterChildRemaining));
             }
 
             return new ProcessResult(exitCode, stdout, stderr);
@@ -418,7 +428,7 @@ public class UninstallerService {
                     boolean isMsiexec = execPath.contains("msiexec") || cmdLine.contains("msiexec");
                     boolean isSetupUnins = execPath.contains("setup") || execPath.contains("unins")
                             || execPath.contains("uninstall");
-                    boolean matchByPath = !lowerLoc.isEmpty()
+                    boolean matchByPath = !lowerLoc.isEmpty() && !isProtectedPath(lowerLoc)
                             && (containsWordBoundary(cmdLine, lowerLoc) || containsWordBoundary(execPath, lowerLoc)
                                 || execPath.startsWith(lowerLoc + "\\") || execPath.startsWith(lowerLoc + "/"));
                     boolean matchByName = lowerName.length() >= 3
@@ -433,8 +443,17 @@ public class UninstallerService {
                             found.set(true);
                         } else if (matchByPath || matchByName || matchByUninstallBase) {
                             found.set(true);
-                        } else if (isSetupUnins && !lowerLoc.isEmpty() && execPath.startsWith(new File(lowerLoc).getParent() != null ? new File(lowerLoc).getParent().toLowerCase() + "\\" : "")) {
-                            found.set(true);
+                        } else if (isSetupUnins && !lowerLoc.isEmpty() && !isProtectedPath(lowerLoc)) {
+                            // Parent-dir fallback for Inno/NSIS wrappers: require a real
+                            // parent dir, never empty-string prefix (matches everything).
+                            String parentDir = null;
+                            try {
+                                parentDir = new File(lowerLoc).getParent();
+                            } catch (Exception ignored) {}
+                            if (parentDir != null && !parentDir.isBlank() && !isProtectedPath(parentDir)
+                                    && execPath.startsWith(parentDir.toLowerCase() + "\\")) {
+                                found.set(true);
+                            }
                         }
                     }
                 });
@@ -485,7 +504,7 @@ public class UninstallerService {
                     String cmdLine = info.commandLine().orElse("").toLowerCase();
                     String execPath = info.command().map(String::toLowerCase).orElse("");
 
-                    boolean matchByPath = !lowerLoc.isEmpty()
+                    boolean matchByPath = !lowerLoc.isEmpty() && !isProtectedPath(lowerLoc)
                             && (containsWordBoundary(cmdLine, lowerLoc) || containsWordBoundary(execPath, lowerLoc));
                     boolean matchByName = lowerName.length() >= 5
                             && !isGenericName(lowerName)
@@ -906,85 +925,7 @@ public class UninstallerService {
      *        (WindowsApps, Windows, System32) are always excluded regardless.
      */
     public List<String> scanFilesystemLeftovers(InstalledApp app, boolean includePrimaryLocation) {
-        List<String> leftovers = new ArrayList<>();
-
-        // Add primary install location if it exists — unless excluded or OS-protected.
-        // Store (AppX) locations under WindowsApps are NEVER deletable directly;
-        // they must be removed via Remove-AppxPackage only.
-        if (includePrimaryLocation && app.getInstallLocation() != null && !app.getInstallLocation().isBlank()
-                && !isProtectedPath(app.getInstallLocation())) {
-            File installDir = new File(app.getInstallLocation());
-            if (installDir.exists()) {
-                leftovers.add(installDir.getAbsolutePath());
-            }
-        } else if (app.getInstallLocation() != null && !app.getInstallLocation().isBlank()
-                && isProtectedPath(app.getInstallLocation())) {
-            AppLogger.info("Skipping protected install location from deletable leftovers: " + app.getInstallLocation());
-        }
-
-        List<String> roots = new ArrayList<>();
-        addIfNotNull(roots, System.getenv("ProgramFiles"));
-        addIfNotNull(roots, System.getenv("ProgramFiles(x86)"));
-        addIfNotNull(roots, System.getenv("CommonProgramFiles"));
-        addIfNotNull(roots, System.getenv("CommonProgramFiles(x86)"));
-        addIfNotNull(roots, System.getenv("AppData"));
-        addIfNotNull(roots, System.getenv("LocalAppData"));
-        addIfNotNull(roots, System.getenv("ProgramData"));
-
-        // Additional scan locations
-        String localAppData = System.getenv("LocalAppData");
-        String appData = System.getenv("AppData");
-        String userProfile = System.getenv("USERPROFILE");
-        String publicDir = System.getenv("PUBLIC");
-        if (localAppData != null) addIfNotNull(roots, localAppData + "\\Programs");
-        if (appData != null) addIfNotNull(roots, appData + "\\LocalLow");
-        if (publicDir != null) addIfNotNull(roots, publicDir + "\\Documents");
-        if (userProfile != null) addIfNotNull(roots, userProfile + "\\Desktop");
-        if (appData != null) addIfNotNull(roots, appData + "\\Microsoft\\Internet Explorer\\Quick Launch");
-
-        // Deduplicate roots (e.g., AppData vs Roaming overlap)
-        roots = new ArrayList<>(new java.util.LinkedHashSet<>(roots));
-
-        // Scan depth: 1 for standard roots, 2 for vendor directories
-        for (String root : roots) {
-            File rootDir = new File(root);
-            if (!rootDir.exists() || !rootDir.isDirectory()) {
-                continue;
-            }
-
-            File[] children = rootDir.listFiles();
-            if (children == null) {
-                continue;
-            }
-
-            for (File child : children) {
-                if (child.isDirectory()) {
-                    if (isFolderMatch(child.getName(), app.getName(), app.getPublisher())) {
-                        String absPath = child.getAbsolutePath();
-                        if (!leftovers.contains(absPath) && !isProtectedPath(absPath)) {
-                            leftovers.add(absPath);
-                        }
-                    } else if (isPublisherMatch(child.getName(), app.getPublisher())) {
-                        // Deeper scan: if this is a vendor folder, scan inside it
-                        // B5 FIX: never descend into a link/junction target.
-                        if (isLinkOrReparse(child)) continue;
-                        File[] vendorChildren = child.listFiles(File::isDirectory);
-                        if (vendorChildren != null) {
-                            for (File vendorChild : vendorChildren) {
-                                if (isFolderMatch(vendorChild.getName(), app.getName(), null)) {
-                                    String absPath = vendorChild.getAbsolutePath();
-                                    if (!leftovers.contains(absPath) && !isProtectedPath(absPath)) {
-                                        leftovers.add(absPath);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        return leftovers;
+        return scanFilesystemLeftovers(app, includePrimaryLocation, null);
     }
 
     /**
@@ -1061,7 +1002,7 @@ public class UninstallerService {
 
         if (cancelled != null && cancelled.get()) return leftovers;
         // Scan HKCR for file association entries
-        scanHkcrForLeftovers(app.getName(), app.getPublisher(), leftovers);
+        scanHkcrForLeftovers(app.getName(), app.getPublisher(), leftovers, cancelled);
 
         return leftovers;
     }
@@ -1071,6 +1012,11 @@ public class UninstallerService {
      * Uses stricter thresholds (>=5 chars, word-boundary) and correctly filters top-level CLSID.
      */
     private void scanHkcrForLeftovers(String appName, String publisher, List<String> leftovers) {
+        scanHkcrForLeftovers(appName, publisher, leftovers, null);
+    }
+
+    private void scanHkcrForLeftovers(String appName, String publisher, List<String> leftovers,
+                                      java.util.concurrent.atomic.AtomicBoolean cancelled) {
         try {
             if (!Advapi32Util.registryKeyExists(WinReg.HKEY_CLASSES_ROOT, "")) {
                 return;
@@ -1083,6 +1029,7 @@ public class UninstallerService {
             if (lowerName.length() < 5 && lowerPub.length() < 5) return;
 
             for (String subkey : subkeys) {
+                if (cancelled != null && cancelled.get()) return;
                 // Skip very long keys (COM CLSIDs, etc.) — top-level keys are flat, e.g. "CLSID" not "CLSID\..."
                 if (subkey.length() > 80) continue;
                 String lowerSub = subkey.toLowerCase();
@@ -2032,7 +1979,7 @@ public class UninstallerService {
                 String escapedPath = normalizedPath.replace("'", "''");
                 // Count matches so the summary is accurate instead of claiming success unconditionally
                 psScript = "$target = '" + escapedPath + "'; " +
-                        "$cands = Get-Process | Where-Object { " +
+                        "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { " +
                         "  if (-not $_.Path) { return $false }; " +
                         "  $p = $_.Path.Replace('\\','/'); " +
                         "  $p -eq $target -or $p.StartsWith($target + '/', [System.StringComparison]::OrdinalIgnoreCase) " +
@@ -2049,7 +1996,7 @@ public class UninstallerService {
                 String escapedExact = raw.replace("'", "''");
                 if (!allowWildcard) {
                     AppLogger.info("Process kill restricted to exact match for short/generic name: " + raw);
-                    psScript = "$cands = Get-Process | Where-Object { $_.ProcessName -eq '" + escapedExact + "' }; " +
+                    psScript = "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq '" + escapedExact + "' }; " +
                             "$n = @($cands).Count; " +
                             "$cands | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                             "Write-Output (\"KILLED:\" + $n)";
@@ -2059,7 +2006,7 @@ public class UninstallerService {
                     String noSpace = raw.replaceAll("\\s+", "");
                     String likeNoSpace = noSpace.replace("`", "``").replace("[", "`[").replace("]", "`]").replace("*", "`*").replace("?", "`?").replace("$", "`$").replace("'", "''");
                     // Use wildcards around the name; PowerShell -like is case-insensitive
-                    psScript = "$cands = Get-Process | Where-Object { $_.ProcessName -like '*" + likeEscaped + "*' -or $_.ProcessName -like '*" + likeNoSpace + "*' -or $_.ProcessName -eq '" + escapedExact + "' }; " +
+                    psScript = "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like '*" + likeEscaped + "*' -or $_.ProcessName -like '*" + likeNoSpace + "*' -or $_.ProcessName -eq '" + escapedExact + "' }; " +
                             "$n = @($cands).Count; " +
                             "$cands | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                             "Write-Output (\"KILLED:\" + $n)";

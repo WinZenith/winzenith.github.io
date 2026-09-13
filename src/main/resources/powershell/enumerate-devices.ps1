@@ -1,22 +1,59 @@
 # Enumerate installed drivers as JSON array.
-# Uses three sources for maximum coverage:
-#   1. Win32_PnPSignedDriver (traditional PnP signed drivers)
+# Uses four sources for maximum coverage:
+#   1. Win32_PnPSignedDriver (traditional PnP signed drivers, incl. empty-version rows)
 #   2. Win32_VideoController (GPU adapters that may not appear in PnPSignedDriver)
 #   3. Get-PnpDevice -Class Display (direct PnP tree query, most reliable for DCH GPU drivers)
+#   4. Get-PnpDevice problem devices (non-OK status not seen above, e.g. Code 28)
 $ErrorActionPreference = 'Continue'
 $seen = @{}
 $drivers = @()
 
-# Collect present device IDs to filter ghost / disconnected devices that inflate driver count
+# Collect present device IDs to filter ghost / disconnected devices that inflate driver count.
+# Also records real device status (OK vs Error/Code) so problem devices surface as ISSUE
+# instead of the previous hardcoded 'OK' for every entry.
 $presentIds = @{}
+$statusMap = @{}
 try {
     Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.InstanceId) { $presentIds[$_.InstanceId] = $true }
+        if ($_.InstanceId) {
+            $presentIds[$_.InstanceId] = $true
+            $st = 'OK'
+            try {
+                if ($_.Status -and $_.Status -ne 'OK') { $st = [string]$_.Status }
+            } catch {}
+            try {
+                if ($st -eq 'OK' -and $_.ConfigManagerErrorCode -and $_.ConfigManagerErrorCode -ne 0) {
+                    $st = 'Error ' + $_.ConfigManagerErrorCode
+                }
+            } catch {}
+            $statusMap[$_.InstanceId] = $st
+        }
     }
+} catch {}
+
+function Get-DevStatus($instanceId){
+    if($statusMap.ContainsKey($instanceId)){ return $statusMap[$instanceId] }
+    return 'OK'
+}
+
+# Bulk hardware-ID fetch: one pipeline call for all present devices instead of
+# one Get-PnpDeviceProperty per device (N+1 CIM round-trips blew the 90s
+# timeout on 100+ device machines). Per-device lookup below stays as fallback.
+$hwMap = @{}
+try {
+    Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+        Get-PnpDeviceProperty -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            if ($_.InstanceId -and $_.Data) {
+                $d = $_.Data
+                if ($d -is [Array]) { $hwMap[$_.InstanceId] = ($d -join ';') } else { $hwMap[$_.InstanceId] = [string]$d }
+            }
+        }
 } catch {}
 
 # Helper to fetch HardwareIds for an instance
 function Get-HwIds($instanceId, $fallback){
+    if ($hwMap.ContainsKey($instanceId)) { return $hwMap[$instanceId] }
     try {
         $prop = Get-PnpDeviceProperty -InstanceId $instanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue
         if($prop -and $prop.Data){
@@ -29,7 +66,7 @@ function Get-HwIds($instanceId, $fallback){
 }
 
 Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
-    Where-Object { $_.DeviceID -and $_.DriverVersion -and $_.DeviceID -notlike "SWD\*" -and $_.DeviceID -notlike "ROOT\*" -and ($presentIds.Count -eq 0 -or $presentIds.ContainsKey($_.DeviceID)) } |
+    Where-Object { $_.DeviceID -and $_.DeviceID -notlike "SWD\*" -and $_.DeviceID -notlike "ROOT\*" -and ($presentIds.Count -eq 0 -or $presentIds.ContainsKey($_.DeviceID)) } |
     ForEach-Object {
         $hwIds = Get-HwIds $_.DeviceID $_.DeviceID
         $driverDate = ''
@@ -45,10 +82,10 @@ Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
             friendlyName   = if ($_.DeviceName) { $_.DeviceName } else { $_.DeviceID }
             hardwareIds    = $hwIds
             provider       = $_.DriverProviderName
-            driverVersion  = $_.DriverVersion
+            driverVersion  = if ($_.DriverVersion) { $_.DriverVersion } else { '' }
             infName        = $_.InfName
             driverKey      = if ($_.Driver) { $_.Driver } else { '' }
-            status         = 'OK'
+            status         = Get-DevStatus $_.DeviceID
             releaseDate    = $driverDate
         }
         $seen[$_.DeviceID] = $true
@@ -88,7 +125,7 @@ if ($videoControllers.Count -gt 0) {
             driverVersion  = $ver
             infName        = $infPath
             driverKey      = ''
-            status         = 'OK'
+            status         = Get-DevStatus $id
             releaseDate    = $driverDate
         }
         $seen[$id] = $true
@@ -145,12 +182,38 @@ if ($displayDevices) {
             driverVersion  = $ver
             infName        = $infPath
             driverKey      = ''
-            status         = 'OK'
+            status         = Get-DevStatus $id
             releaseDate    = $driverDate
         }
         $seen[$id] = $true
         $drivers += $entry
     }
 }
+
+# Problem devices without drivers (e.g. Code 28): Win32_PnPSignedDriver may
+# report them with an empty version, so surface any present non-OK device not
+# already seen with an empty version and its real status.
+try {
+    Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceId -and -not $seen.ContainsKey($_.InstanceId) -and $_.Status -and $_.Status -ne 'OK' } |
+        ForEach-Object {
+            $id = $_.InstanceId
+            if ($id -like "SWD\*" -or $id -like "ROOT\*") { return }
+            $hwIds = Get-HwIds $id $id
+            $entry = [ordered]@{
+                deviceId       = $id
+                friendlyName   = if ($_.FriendlyName) { $_.FriendlyName } else { $id }
+                hardwareIds    = $hwIds
+                provider       = ''
+                driverVersion  = ''
+                infName        = ''
+                driverKey      = ''
+                status         = Get-DevStatus $id
+                releaseDate    = ''
+            }
+            $seen[$id] = $true
+            $drivers += $entry
+        }
+} catch {}
 
 $drivers | ConvertTo-Json -Depth 4 -Compress

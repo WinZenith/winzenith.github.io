@@ -28,7 +28,7 @@ function Get-ChromiumExtState {
     foreach ($prefsFile in $filesToCheck) {
         if (-not (Test-Path $prefsFile)) { continue }
         try {
-            $prefs = Get-Content $prefsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $prefs = Get-Content -LiteralPath $prefsFile -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if ($prefs.extensions -and $prefs.extensions.settings) {
                 $extSettings = $prefs.extensions.settings.PSObject.Properties[$ExtensionId]
                 if ($extSettings -and $extSettings.Value) {
@@ -90,7 +90,7 @@ function Resolve-LocaleMessage {
         $msgPath = Join-Path (Join-Path $localesBase $loc) "messages.json"
         if (Test-Path $msgPath) {
             try {
-                $msgs = Get-Content $msgPath -Raw | ConvertFrom-Json
+                $msgs = Get-Content -LiteralPath $msgPath -Raw -Encoding UTF8 | ConvertFrom-Json
                 if ($msgs.$Key -and $msgs.$Key.message) { return $msgs.$Key.message }
             } catch { }
         }
@@ -100,7 +100,7 @@ function Resolve-LocaleMessage {
 
 function Get-ChromiumManifestPermissions {
     param([object]$Manifest)
-    $collected = @()
+    $collected = New-Object System.Collections.ArrayList
     $seen = @{}
     $addItems = {
         param([object]$Items)
@@ -115,7 +115,7 @@ function Get-ChromiumManifestPermissions {
             $s = $s.Trim()
             if ($s -eq "" -or $seen.ContainsKey($s)) { continue }
             $seen[$s] = $true
-            $collected += $s
+            [void]$collected.Add($s)
         }
     }
     try { &$addItems $Manifest.permissions } catch { }
@@ -179,7 +179,7 @@ function Get-ChromiumManagedInfo {
     foreach ($prefsFile in @((Join-Path $ProfileDir "Secure Preferences"), (Join-Path $ProfileDir "Preferences"))) {
         if (-not (Test-Path -LiteralPath $prefsFile)) { continue }
         try {
-            $prefs = Get-Content -LiteralPath $prefsFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $prefs = Get-Content -LiteralPath $prefsFile -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if ($prefs.extensions -and $prefs.extensions.settings) {
                 foreach ($pp in @($prefs.extensions.settings.PSObject.Properties)) {
                     try {
@@ -232,7 +232,7 @@ function Scan-ChromiumExtensions {
             $mp = Join-Path (Join-Path $_.FullName $vd.Name) "manifest.json"
             if (Test-Path $mp) {
                 try {
-                    $m = Get-Content $mp -Raw | ConvertFrom-Json
+                    $m = Get-Content -LiteralPath $mp -Raw -Encoding UTF8 | ConvertFrom-Json
                     $rawName = if ($m.name) { $m.name } else { "Unknown" }
                     $resolvedName = $rawName
                     $rawDesc = if ($m.description) { $m.description } else { "" }
@@ -393,7 +393,7 @@ function Toggle-ChromiumExtension {
         if ($isLocked) { continue }
 
         try {
-            $raw = Get-Content -LiteralPath $targetFile -Raw -ErrorAction Stop
+            $raw = Get-Content -LiteralPath $targetFile -Raw -Encoding UTF8 -ErrorAction Stop
             $prefs = $raw | ConvertFrom-Json -ErrorAction Stop
             if (-not ($prefs.extensions -and $prefs.extensions.settings)) {
                 # No settings in this file, skip but not fail
@@ -495,7 +495,7 @@ function Toggle-ChromiumExtension {
                 Move-Item -LiteralPath $tmpFile -Destination $targetFile -Force
                 # Integrity check: written file must still parse as JSON and retain our edit
                 try {
-                    $verifyRaw = Get-Content -LiteralPath $targetFile -Raw -ErrorAction Stop
+                    $verifyRaw = Get-Content -LiteralPath $targetFile -Raw -Encoding UTF8 -ErrorAction Stop
                     $verifyPrefs = $verifyRaw | ConvertFrom-Json -ErrorAction Stop
                     $verifyProp = $verifyPrefs.extensions.settings.PSObject.Properties[$ExtensionId]
                     if (-not $verifyProp -or -not $verifyProp.Value) { throw "extension entry missing after write" }
@@ -553,7 +553,7 @@ function Toggle-ChromiumExtension {
 
 function Get-FirefoxAddonPermissions {
     param([object]$Addon)
-    $collected = @()
+    $collected = New-Object System.Collections.ArrayList
     $seen = @{}
     $addItems = {
         param([object]$Items)
@@ -570,7 +570,7 @@ function Get-FirefoxAddonPermissions {
             $s = $s.Trim()
             if ($s -eq "" -or $seen.ContainsKey($s)) { continue }
             $seen[$s] = $true
-            $collected += $s
+            [void]$collected.Add($s)
         }
     }
     try { &$addItems $Addon.permissions } catch { }
@@ -595,7 +595,7 @@ function Scan-FirefoxExtensions {
     $extJson = Join-Path $ProfileDir "extensions.json"
     if (-not (Test-Path $extJson)) { return $entries }
     try {
-        $json = Get-Content $extJson -Raw | ConvertFrom-Json
+        $json = Get-Content -LiteralPath $extJson -Raw -Encoding UTF8 | ConvertFrom-Json
         $addons = $json.addons
         if ($null -eq $addons) {
             [Console]::Error.WriteLine("No addons array found in extensions.json for profile: $ProfileDir")
@@ -673,7 +673,7 @@ function Toggle-FirefoxExtension {
     # Refuse system/built-in add-ons: Firefox restores them, so writing would
     # only produce false success.
     try {
-        $preRaw = Get-Content $extJson -Raw -ErrorAction Stop
+        $preRaw = Get-Content -LiteralPath $extJson -Raw -Encoding UTF8 -ErrorAction Stop
         $preJson = $preRaw | ConvertFrom-Json -ErrorAction Stop
         foreach ($pa in @($preJson.addons)) {
             if ($pa.id -and ($pa.id -replace $illegalFilenameChars, '_') -eq $ExtensionId) {
@@ -706,7 +706,7 @@ function Toggle-FirefoxExtension {
         Start-Sleep -Milliseconds 400
     }
     try {
-        $raw = Get-Content $extJson -Raw
+        $raw = Get-Content -LiteralPath $extJson -Raw -Encoding UTF8
         $json = $raw | ConvertFrom-Json
         $addons = $json.addons
         if ($null -eq $addons) {
@@ -760,7 +760,7 @@ function Toggle-FirefoxExtension {
         # Without this, Firefox may silently overwrite extensions.json from its
         # startup cache on next launch and the UI would report false success.
         try {
-            $verifyJson = Get-Content -LiteralPath $extJson -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $verifyJson = Get-Content -LiteralPath $extJson -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             $verifyFound = $false
             foreach ($va in @($verifyJson.addons)) {
                 if ($va.id -and ($va.id -replace $illegalFilenameChars, '_') -eq $ExtensionId) {
@@ -895,7 +895,7 @@ function Get-FirefoxProfileDirs {
         try {
             $curPath = $null
             $curRelative = "1"
-            foreach ($line in (Get-Content -LiteralPath $ini -ErrorAction Stop)) {
+            foreach ($line in (Get-Content -LiteralPath $ini -Encoding UTF8 -ErrorAction Stop)) {
                 $t = $line.Trim()
                 if ($t.StartsWith("[") -and $t.EndsWith("]")) {
                     if ($null -ne $curPath) {

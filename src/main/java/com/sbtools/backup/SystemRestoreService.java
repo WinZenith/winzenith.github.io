@@ -19,9 +19,19 @@ public class SystemRestoreService {
     }
 
     public RestorePointResult createRestorePoint(String description) {
+        return createRestorePoint(description, null);
+    }
+
+    public RestorePointResult createRestorePoint(String description, java.util.concurrent.atomic.AtomicBoolean cancelled) {
         try {
             Path script = PowerShellScripts.resolve("checkpoint-restore.ps1");
-            ProcessResult r = runner.run(ProcessRunner.powershellScript(script.toString(), description));
+            String desc = description == null ? "" : description.trim();
+            if (desc.isBlank()) desc = "WinZenith backup";
+            // Checkpoint-Computer rejects overly long descriptions; keep UI usable.
+            if (desc.length() > 64) desc = desc.substring(0, 64);
+            // VSS snapshot routinely takes minutes: 60s always timed out a
+            // healthy create. NonInteractive so PS can never block on a prompt.
+            ProcessResult r = runner.run(ProcessRunner.powershellScriptNonInteractive(script.toString(), desc), 300, cancelled);
             int seq = -1;
             boolean scriptSuccess = r.success();
             String err = "";
@@ -37,15 +47,23 @@ public class SystemRestoreService {
             }
             if (err.isBlank() && !r.stderr().isBlank()) err = r.stderr().trim();
             if (err.isBlank() && !r.stdout().isBlank() && !scriptSuccess) err = r.combinedOutput();
+            if (!scriptSuccess && err.isBlank()) err = "unknown error";
             if (scriptSuccess) {
                 AppLogger.info("System restore point created: " + description);
             } else {
                 AppLogger.warning("System restore point creation failed: " + (err.isBlank() ? r.combinedOutput() : err));
             }
             return new RestorePointResult(scriptSuccess, seq, err);
+        } catch (java.util.concurrent.CancellationException ce) {
+            throw ce;
         } catch (Exception e) {
-            AppLogger.warning("Failed to create restore point: " + e.getMessage());
-            return new RestorePointResult(false, -1, e.getMessage());
+            String msg = e.getMessage() != null ? e.getMessage() : "Unknown error";
+            if (msg.toLowerCase().contains("timed out")) {
+                msg += " — creating a restore point uses VSS and can take several minutes on a busy disk. "
+                        + "Wait a few minutes, check that System Protection is enabled and free space exists, then retry.";
+            }
+            AppLogger.warning("Failed to create restore point: " + msg);
+            return new RestorePointResult(false, -1, msg);
         }
     }
 
@@ -53,7 +71,7 @@ public class SystemRestoreService {
         List<SystemRestoreRow> result = new ArrayList<>();
         try {
             Path script = PowerShellScripts.resolve("list-restore-points.ps1");
-            ProcessResult r = runner.run(ProcessRunner.powershellScript(script.toString()));
+            ProcessResult r = runner.run(ProcessRunner.powershellScriptNonInteractive(script.toString()));
             if (!r.success()) {
                 String out = r.combinedOutput();
                 AppLogger.warning("list-restore-points failed: " + out);
@@ -198,7 +216,7 @@ public class SystemRestoreService {
 
     static String normalizeCreationTime(String ct) {
         if (ct == null || ct.isBlank()) {
-            return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date());
+            return "—";
         }
         String trimmed = ct.trim();
         // Handle WMI DMTF datetime format: yyyymmddHHMMSS.mmmmmmsUUU e.g., 20260825120000.000000+120

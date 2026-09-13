@@ -7,7 +7,7 @@ public enum CleanupCategory {
     PRIVACY_TRACES("Privacy traces", "Recent documents, run history, and usage traces", RiskLevel.LOW),
     WEB_BROWSING_TRACES("Web browsing traces", "Browser cache, cookies, history, and saved passwords (WARNING: saves passwords, cookies, and history will be deleted)", RiskLevel.HIGH),
     CACHE("Cache", "System and application cache data (including INetCache; INetCookies not cleaned for safety)", RiskLevel.LOW),
-    INSTALLER_FILES("Installer Files", "Cached installer packages and downloaded setup files (TEMP only)", RiskLevel.MEDIUM),
+    INSTALLER_FILES("Installer Files", "Stale installer packages in TEMP (large .msi/.exe older than 1 day; recent downloads kept)", RiskLevel.MEDIUM),
     TEMPORARY_SYSTEM_FILES("Temporary System Files", "Prefetch cache only (system upgrade directories excluded for safety)", RiskLevel.LOW),
     MEMORY_DUMPS("Memory Dumps", "System crash dump files (.dmp)", RiskLevel.LOW),
     WINDOWS_ERROR_REPORTING("Windows Error Reporting", "Archived error reports from Windows Error Reporting", RiskLevel.LOW),

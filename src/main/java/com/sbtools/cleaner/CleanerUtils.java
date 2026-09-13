@@ -675,6 +675,19 @@ public final class CleanerUtils {
         return false;
     }
 
+    public static boolean isWindowsServiceRunning(String serviceName) {
+        if (serviceName == null || serviceName.isBlank()) return false;
+        try {
+            ProcessBuilder pb = new ProcessBuilder("sc", "query", serviceName);
+            pb.redirectErrorStream(true);
+            Process p = com.sbtools.util.ProcessManager.start(pb);
+            boolean finished = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) { p.destroyForcibly(); return false; }
+            String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            return output.contains("RUNNING");
+        } catch (Exception ignored) { return false; }
+    }
+
     public static String formatBytes(long bytes) {
         return FormatUtils.formatBytes(bytes);
     }

@@ -34,8 +34,15 @@ public class FontCacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
+        List<Path> probe = new ArrayList<>();
+        CleanerUtils.addEnvPath(probe, "WINDIR", "ServiceProfiles", "LocalService", "AppData", "Local", "FontCache");
+        if (probe.isEmpty()) return 0L;
+        // Only restart services that were running: starting a stopped/disabled
+        // service changes system state beyond the cleanup.
+        boolean fontWasRunning = CleanerUtils.isWindowsServiceRunning("FontCache");
+        boolean font3WasRunning = CleanerUtils.isWindowsServiceRunning("FontCache3.0.0.0");
         stopService("FontCache");
-        if (token != null && token.isCancelled()) { startService("FontCache"); startService("FontCache3.0.0.0"); return 0L; }
+        if (token != null && token.isCancelled()) { if (fontWasRunning) startService("FontCache"); if (font3WasRunning) startService("FontCache3.0.0.0"); return 0L; }
         stopService("FontCache3.0.0.0");
         try {
             if (token != null && token.isCancelled()) return 0L;
@@ -43,8 +50,8 @@ public class FontCacheCleaner implements CleanerExtension {
             CleanerUtils.addEnvPath(dirs, "WINDIR", "ServiceProfiles", "LocalService", "AppData", "Local", "FontCache");
             return CleanerUtils.cleanDirectoryPattern(dirs, token);
         } finally {
-            startService("FontCache");
-            startService("FontCache3.0.0.0");
+            if (fontWasRunning) startService("FontCache");
+            if (font3WasRunning) startService("FontCache3.0.0.0");
         }
     }
 

@@ -65,6 +65,15 @@ public final class DriverPreflightService {
             Path downloadsDir = (configuredDir != null && !configuredDir.isBlank())
                     ? Path.of(configuredDir)
                     : Paths.get(System.getProperty("user.home"), "Downloads");
+            // A read-only preflight must not create system directories as admin
+            // (typo'd/imported path like C:\Windows\System32\drivers-dl).
+            String protectedReason = protectedDownloadLocation(downloadsDir);
+            if (protectedReason != null) {
+                return new PreflightResult(false,
+                        "Download directory is not allowed (" + protectedReason + "): " + downloadsDir
+                                + ". Choose a regular folder such as Downloads. No changes were made.",
+                        warnings);
+            }
             try {
                 Files.createDirectories(downloadsDir);
             } catch (Exception ex) {
@@ -89,10 +98,14 @@ public final class DriverPreflightService {
             if (settings != null && settings.autoBackupDrivers()) {
                 try {
                     Path backupsRoot = AppPaths.backupsRoot(settings);
-                    // Don't create here; probe parent store when dir doesn't exist yet.
-                    Path probe = Files.exists(backupsRoot) ? backupsRoot
-                            : backupsRoot.toAbsolutePath().getParent() != null
-                            ? backupsRoot.toAbsolutePath().getParent() : Paths.get(System.getProperty("user.home"));
+                    // Don't create here; walk up to the nearest existing
+                    // ancestor (fresh portable roots don't exist yet, and the
+                    // single-level parent probe still throws on those).
+                    Path probe = backupsRoot;
+                    while (probe != null && !Files.exists(probe)) {
+                        probe = probe.getParent();
+                    }
+                    if (probe == null) probe = Paths.get(System.getProperty("user.home"));
                     long backupFree = Files.getFileStore(probe).getUsableSpace();
                     if (backupFree < MIN_BACKUP_FREE_BYTES) {
                         warnings.add("Low disk space on backup volume (" + formatBytes(backupFree)
@@ -132,9 +145,41 @@ public final class DriverPreflightService {
         }
     }
 
+    /**
+     * Rejects protected locations for the download directory. Returns a
+     * human-readable reason, or null when the location is acceptable.
+     * Never throws.
+     */
+    static String protectedDownloadLocation(Path dir) {
+        try {
+            if (dir == null) return "no directory configured";
+            Path norm = dir.toAbsolutePath().normalize();
+            String s = norm.toString().toLowerCase();
+            String winDir = System.getenv("SystemRoot");
+            if (winDir == null || winDir.isBlank()) winDir = "C:\\Windows";
+            String winLower = winDir.toLowerCase();
+            if (s.equals(winLower) || s.startsWith(winLower + java.io.File.separator)) {
+                return "inside the Windows directory";
+            }
+            for (String pf : new String[]{System.getenv("ProgramFiles"), System.getenv("ProgramFiles(x86)")}) {
+                if (pf != null && !pf.isBlank()) {
+                    String p = pf.toLowerCase();
+                    if (s.equals(p) || s.startsWith(p + java.io.File.separator)) {
+                        return "inside Program Files";
+                    }
+                }
+            }
+            Path root = norm.getRoot();
+            if (root != null && norm.equals(root)) {
+                return "a drive root";
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
     /** Shared helpers so single + batch paths classify candidates identically. */
-    public static boolean isWindowsUpdateInstall(DriverUpdateCandidate c) {
-        return c != null && "WindowsUpdate".equals(c.source())
+    public static boolean isWindowsUpdateInstall(DriverUpdateCandidate c) {        return c != null && "WindowsUpdate".equals(c.source())
                 && c.packageId() != null && !c.packageId().isBlank();
     }
 

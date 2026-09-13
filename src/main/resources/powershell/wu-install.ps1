@@ -17,10 +17,15 @@ try {
     $toInstall = New-Object -ComObject Microsoft.Update.UpdateColl
     Write-Output "Searching for matching Windows Update(s)..."
     foreach ($id in $UpdateIds) {
-        $criteria = "UpdateID='$id'"
+        # IsInstalled=0: without it a re-click before rescan re-finds the
+        # installed update and reports a no-op SUCCESS.
+        $criteria = "UpdateID='$id' AND IsInstalled=0"
         $result = $searcher.Search($criteria)
         if ($result.Updates.Count -gt 0) {
-            [void]$toInstall.Add($result.Updates.Item(0))
+            $u = $result.Updates.Item(0)
+            # First-time vendor drivers need EULA acceptance before download.
+            try { if (-not $u.EulaAccepted) { $u.AcceptEula() } } catch {}
+            [void]$toInstall.Add($u)
         }
     }
     if ($toInstall.Count -eq 0) {

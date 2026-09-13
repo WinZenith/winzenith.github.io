@@ -48,19 +48,22 @@ public class WindowsSearchCacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
+        List<Path> cacheDirs = getSafeSearchCacheDirs();
+        if (cacheDirs.isEmpty()) return 0L;
+        boolean searchWasRunning = CleanerUtils.isWindowsServiceRunning("WSearch");
         stopService("WSearch");
         try {
             if (token != null && token.isCancelled()) return 0L;
             long cleaned = 0;
-            for (Path dir : getSafeSearchCacheDirs()) {
+            for (Path dir : cacheDirs) {
                 if (token != null && token.isCancelled()) break;
-                if (dir != null && Files.isDirectory(dir)) {
+                if (dir != null && Files.isDirectory(dir) && CleanerUtils.isSafeToCleanDirectory(dir)) {
                     cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
                 }
             }
             return cleaned;
         } finally {
-            startService("WSearch");
+            if (searchWasRunning) startService("WSearch");
         }
     }
 

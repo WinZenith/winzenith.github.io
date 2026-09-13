@@ -14,13 +14,31 @@ function Find-OemInf {
         $escapedInf = [regex]::Escape($TargetInf)
         $entries = $enum -split '\r?\n\r?\n'
         foreach ($entry in $entries) {
-            # English pattern
-            if ($entry -match "Published Name\s*:\s*(oem\d+\.inf)" -and $entry -match "Original Name\s*:\s*$escapedInf") {
-                return $Matches[1]
+            # English pattern (capture OEM first: a second -match overwrites $Matches)
+            if ($entry -match "Published Name\s*:\s*(oem\d+\.inf)") {
+                $oemName = $Matches[1]
+                if ($entry -match "Original Name\s*:\s*$escapedInf") {
+                    return $oemName
+                }
             }
-            # Localized fallback: any oem*.inf line near the target inf (case-insensitive, no header language dependency)
-            if ($entry -match "(oem\d+\.inf)" -and $entry.ToLower().Contains($TargetInf.ToLower())) {
-                return $Matches[1]
+            # Localized fallback: any oem*.inf line near the target inf (case-insensitive, no header language dependency).
+            # Filename-boundary anchored: a bare Contains() lets hdaudio.inf match
+            # the intchdaudio.inf entry (wrong OEM exported). The char before the
+            # hit must not be [A-Za-z0-9].
+            if ($entry -match "(oem\d+\.inf)") {
+                $oemCandidate = $Matches[1]
+                $hit = $false
+                foreach ($line in ($entry -split '\r?\n')) {
+                    $t = $line.Trim()
+                    if ($t.Length -ge $TargetInf.Length -and $t.ToLower().EndsWith($TargetInf.ToLower())) {
+                        $prev = ' '
+                        if ($t.Length -gt $TargetInf.Length) { $prev = $t[$t.Length - $TargetInf.Length - 1] }
+                        # [_-] are glue too (my_hdaudio.inf): only a boundary
+                        # outside [A-Za-z0-9_-] counts as a filename hit.
+                        if ([string]$prev -notmatch '[A-Za-z0-9_-]') { $hit = $true; break }
+                    }
+                }
+                if ($hit) { return $oemCandidate }
             }
         }
     } catch {}
@@ -33,15 +51,21 @@ function Find-OemInf {
             if ($d.InfName -match '^oem\d+\.inf$') { return $d.InfName }
         }
     } catch {}
-    # 3) Search DriverStore directly
+    # 3) Search DriverStore directly (filter wildcards escaped: a scan-supplied
+    # INF name containing * ? [ ] must not glob unrelated entries; literal
+    # .Replace chain avoids regex-quoting traps)
     try {
-        $store = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository" -Filter $TargetInf -ErrorAction SilentlyContinue | Select-Object -First 1
+        $filterEscaped = $TargetInf.Replace('*', '`*').Replace('?', '`?').Replace('[', '`[').Replace(']', '`]')
+        $store = Get-ChildItem "$env:SystemRoot\System32\DriverStore\FileRepository" -Filter $filterEscaped -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($store) {
-            # Find corresponding oem via pnputil enum-drivers contains that path
+            # Find OEM within the same enum entry as the target INF (not the first OEM overall)
             $enum2 = & pnputil.exe /enum-drivers 2>&1 | Out-String
-            if ($enum2 -match "Original Name\s*:\s*$([regex]::Escape($TargetInf))") {
-                $m = [regex]::Match($enum2, "Published Name\s*:\s*(oem\d+\.inf)")
-                if ($m.Success) { return $m.Groups[1].Value }
+            $entries2 = $enum2 -split '\r?\n\r?\n'
+            foreach ($e2 in $entries2) {
+                if ($e2 -match "Original Name\s*:\s*$([regex]::Escape($TargetInf))") {
+                    $m = [regex]::Match($e2, "(oem\d+\.inf)")
+                    if ($m.Success) { return $m.Groups[1].Value }
+                }
             }
         }
     } catch {}

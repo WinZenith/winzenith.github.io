@@ -120,7 +120,7 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
             if (file == null) return;
             try (java.io.PrintWriter out = new java.io.PrintWriter(file, java.nio.charset.StandardCharsets.UTF_8)) {
                 out.println("Timestamp,BytesFreed,Items,Categories,Errors");
-                for (CleanerHistoryStore.HistoryEntry en : data) {
+                for (CleanerHistoryStore.HistoryEntry en : store.load()) {
                     StringBuilder cats = new StringBuilder();
                     if (en.perCategoryBytes() != null) {
                         en.perCategoryBytes().forEach((cat, bytes) -> {
@@ -132,8 +132,9 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
                     out.println(csv(en.timestamp()) + "," + en.totalBytesFreed() + ","
                             + en.totalItems() + "," + csv(cats.toString()) + "," + csv(errs));
                 }
+                if (out.checkError()) throw new java.io.IOException("Write failed (disk full?)");
             } catch (Exception ex) {
-                new Alert(Alert.AlertType.ERROR, "Export failed:\n" + ex.getMessage()).showAndWait();
+                new Alert(Alert.AlertType.ERROR, "Export failed:\n" + java.util.Objects.toString(ex.getMessage(), ex.toString())).showAndWait();
             }
         });
 

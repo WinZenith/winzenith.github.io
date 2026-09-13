@@ -467,16 +467,17 @@ public class DefragService {
             if (t.startsWith("{") && t.contains("\"success\"")) lastJson = t;
         }
         if (lastJson != null) {
+            final com.fasterxml.jackson.databind.JsonNode node;
             try {
-                var node = JsonMapper.mapper().readTree(lastJson);
-                if (node.has("success") && !node.get("success").asBoolean(true)) {
-                    String msg = node.has("message") ? node.get("message").asText("Operation failed") : "Operation failed";
-                    throw new IOException(msg);
-                }
-            } catch (IOException e) {
-                if (e.getMessage() != null && (e.getMessage().contains("Operation failed") || e.getMessage().contains("Access denied"))) throw e;
+                node = JsonMapper.mapper().readTree(lastJson);
+            } catch (Exception pe) {
                 // JSON parse error - fall back to exit code check
                 if (!result.success()) throw new IOException("Defrag operation failed: " + result.combinedOutput());
+                return;
+            }
+            if (node.has("success") && !node.get("success").asBoolean(true)) {
+                String msg = node.has("message") ? node.get("message").asText("Operation failed") : "Operation failed";
+                throw new IOException(msg);
             }
         } else if (!result.success()) {
             throw new IOException("Defrag operation failed: " + result.combinedOutput());

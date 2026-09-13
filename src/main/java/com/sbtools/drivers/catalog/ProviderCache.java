@@ -39,9 +39,13 @@ public final class ProviderCache {
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private static final long DEFAULT_TTL_SECONDS = 6 * 60 * 60L; // 6 hours
-    private static final long WINDOWS_UPDATE_TTL_SECONDS = 30 * 60L; // 30 minutes — WU state changes frequently
+    private static final long WINDOWS_UPDATE_TTL_SECONDS = 5 * 60L; // 5 minutes — WU offer sets flip outside the app (Settings/auto-install) while the fingerprint stays identical, which wedged rescans on stale offers until expiry
     private static final long EMPTY_RESULT_TTL_SECONDS = 15 * 60L; // 15 min negative cache for empty/transient results
     private static final ConcurrentHashMap<String, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
+    // Serializes clearAll against itself: per-provider locks are taken in map
+    // order, so two concurrent clearAlls could ABBA-deadlock. Writes take only
+    // their provider lock (never this one), so no lock-order cycle exists.
+    private static final ReentrantLock CLEAR_LOCK = new ReentrantLock();
 
     private final Path cacheDir;
     private final long ttlSeconds;
@@ -151,7 +155,9 @@ public final class ProviderCache {
             cached.candidates = toStore;
             String json = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(cached);
             Path target = pathFor(providerId);
-            Path tmp = target.resolveSibling("." + target.getFileName().toString() + ".tmp");
+            // Unique tmp: fixed sibling names let concurrent instances truncate
+            // each other's file (intra-process locks don't cross processes).
+            Path tmp = Files.createTempFile(target.getParent(), "." + target.getFileName().toString() + ".", ".tmp");
             Files.writeString(tmp, json, StandardCharsets.UTF_8);
             try {
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -169,6 +175,7 @@ public final class ProviderCache {
 
     public void clearAll() {
         // Acquire all provider locks to avoid racing with concurrent writes
+        CLEAR_LOCK.lock();
         var locks = LOCKS.values().stream().toList();
         locks.forEach(ReentrantLock::lock);
         try {
@@ -186,6 +193,7 @@ public final class ProviderCache {
             AppLogger.warning("ProviderCache: Failed to clear cache: " + e.getMessage());
         } finally {
             locks.forEach(ReentrantLock::unlock);
+            CLEAR_LOCK.unlock();
         }
     }
 
@@ -215,32 +223,77 @@ public final class ProviderCache {
             String catalogVersion = catalogFingerprint();
             md.update(("catalog:" + catalogVersion + ";").getBytes(StandardCharsets.UTF_8));
             installed.stream()
+                    // Stable identity only: friendlyName/provider/infName churn
+                    // on innocent renames (Windows re-enumeration, oemNNN.inf
+                    // rollover) and thrashed the cache into repaying full
+                    // WU/OEM cost every rescan. deviceId+version+HW+key fully
+                    // determine provider results.
                     .map(d -> (d == null ? "" : "")
                             + (d == null || d.deviceId() == null ? "" : d.deviceId())
                             + "@" + (d == null || d.driverVersion() == null ? "" : d.driverVersion())
                             + "#" + (d == null || d.hardwareIds() == null ? "" : d.hardwareIds())
-                            + "#" + (d == null || d.friendlyName() == null ? "" : d.friendlyName())
-                            + "#" + (d == null || d.provider() == null ? "" : d.provider())
-                            + "#" + (d == null || d.infName() == null ? "" : d.infName()))
+                            // driverKey selects PACKAGE_ID catalog matches: same
+                            // id/version with a different package must not reuse
+                            // cached candidates within the TTL.
+                            + "#" + (d == null || d.driverKey() == null ? "" : d.driverKey()))
                     .sorted()
                     .forEach(s -> md.update(s.getBytes(StandardCharsets.UTF_8)));
             return HexFormat.of().formatHex(md.digest());
         } catch (Exception e) {
-            return "";
+            // Never return a constant here: "" would collide with every other
+            // failed hash and serve stale cross-device results from cache.
+            return "err-" + System.nanoTime();
         }
     }
 
     private static String catalogFingerprint() {
-        try (var is = ProviderCache.class.getResourceAsStream("/catalog/driver-catalog.json")) {
-            if (is == null) return "no-catalog";
+        try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = is.read(buf)) != -1) md.update(buf, 0, n);
+            boolean any = false;
+            try (var is = ProviderCache.class.getResourceAsStream("/catalog/driver-catalog.json")) {
+                if (is != null) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = is.read(buf)) != -1) md.update(buf, 0, n);
+                    any = true;
+                }
+            } catch (Exception ignored) {
+            }
+            // Refreshed catalogs merge over bundled entries in load(): a changed
+            // refreshed file must bust the cache too, otherwise scans keep
+            // serving candidates computed from the previous catalog content.
+            for (Path p : refreshedCatalogPaths()) {
+                try {
+                    if (p != null && Files.exists(p) && Files.size(p) > 0) {
+                        byte[] buf = new byte[8192];
+                        try (var in = Files.newInputStream(p)) {
+                            int n;
+                            while ((n = in.read(buf)) != -1) md.update(buf, 0, n);
+                        }
+                        any = true;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (!any) return "no-catalog";
             return HexFormat.of().formatHex(md.digest());
         } catch (Exception e) {
             return "catalog-err";
         }
+    }
+
+    private static List<Path> refreshedCatalogPaths() {
+        List<Path> out = new java.util.ArrayList<>(2);
+        try {
+            Path portable = AppPaths.portableBaseDir();
+            if (portable != null) out.add(portable.resolve("catalog").resolve("driver-catalog.json"));
+        } catch (Exception ignored) {
+        }
+        try {
+            out.add(AppPaths.localAppData().resolve("catalog").resolve("driver-catalog.json"));
+        } catch (Exception ignored) {
+        }
+        return out;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

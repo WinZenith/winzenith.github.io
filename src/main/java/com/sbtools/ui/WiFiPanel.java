@@ -393,7 +393,7 @@ class WiFiPanel extends VBox {
                 List<NetworkAdapterRow> adapters = service.listAdapters();
                 String wifiAdapterName = null;
                 for (NetworkAdapterRow a : adapters) {
-                    if (a.getDescription() != null && a.getDescription().matches("(?i).*(Wireless|Wi-Fi|802\\.11).*")) {
+                    if (a.getDescription() != null && a.getDescription().matches("(?i).*(Wireless|Wi-?Fi|WLAN|802\\.11).*")) {
                         wifiAdapterName = a.getName();
                         break;
                     }

@@ -49,20 +49,43 @@ try {
 
     # Critical fix: pre-check free space so a nearly-full drive is never filled to 0
     # (which can freeze the OS / apps). Require test size + 100 MB headroom.
+    # Fail closed when free is unknown (both providers blind).
     $totalBytes = [long]$TestSizeMB * 1024 * 1024
     try {
         $vol = Get-PSDrive -Name $letter -ErrorAction SilentlyContinue
         $freeBytes = if ($vol -and $null -ne $vol.Free) { [long]$vol.Free } else { -1 }
-        if ($freeBytes -ge 0 -and $freeBytes -lt ($totalBytes + 100MB)) {
+        if ($freeBytes -lt 0) {
+            try {
+                $di = New-Object System.IO.DriveInfo("$($letter):\")
+                if ($di -and $di.IsReady) { $freeBytes = [long]$di.AvailableFreeSpace }
+            } catch {}
+        }
+        if ($freeBytes -lt 0) {
+            throw "Could not determine free space on $($letter): (needs ~$TestSizeMB MB + 100 MB headroom). Aborting to avoid filling the drive."
+        }
+        if ($freeBytes -lt ($totalBytes + 100MB)) {
             throw "Insufficient free space on $($letter): (needs ~$TestSizeMB MB + 100 MB headroom, free $([math]::Round($freeBytes/1MB,1)) MB)"
         }
     } catch {
-        if ($_.Exception.Message -match 'Insufficient free space') { throw }
-        # If free-space query itself failed, continue and let the write fail naturally.
+        if ($_.Exception.Message -match 'Insufficient free space|Could not determine free space') { throw }
+        throw
     }
 
+    # Drive-root temp dir needs admin on locked-down drives (default C:\ ACL).
+    # Fall back to a same-drive user-writable dir so standard users can benchmark.
     if (-not (Test-Path -LiteralPath $testDir)) {
-        New-Item -ItemType Directory -Path $testDir -Force | Out-Null
+        try {
+            New-Item -ItemType Directory -Path $testDir -Force -ErrorAction Stop | Out-Null
+        } catch {
+            $fallbackDir = "$($letter):\Users\Public\.winzenith-bench-$runId"
+            try {
+                New-Item -ItemType Directory -Path $fallbackDir -Force -ErrorAction Stop | Out-Null
+                $testDir = $fallbackDir
+                $testFile = Join-Path $testDir "bench_test.tmp"
+            } catch {
+                throw "Access denied creating benchmark temp dir on $($letter):. Run as administrator or choose a writable drive."
+            }
+        }
     }
 
     $buffer = New-Object byte[] $bufferSize

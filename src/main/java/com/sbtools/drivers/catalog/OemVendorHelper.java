@@ -30,6 +30,20 @@ public enum OemVendorHelper {
         return label;
     }
 
+    /**
+     * Label match with word-boundary guard for short labels: "HP" must not
+     * match "PHILIPS"/"PHP", "AMD" must not match longer-word substrings.
+     * Labels longer than 4 chars use plain contains (low collision risk).
+     */
+    static boolean matchesLabel(String haystackUpper, String label) {
+        if (haystackUpper == null || haystackUpper.isBlank() || label == null || label.isBlank()) return false;
+        String needle = label.toUpperCase();
+        // Vendor spelling variant: ASUSTeK has no ASUS word boundary.
+        if ("ASUS".equals(needle) && haystackUpper.contains("ASUSTEK")) return true;
+        if (needle.length() > 4) return haystackUpper.contains(needle);
+        return haystackUpper.matches("(?s).*\\b" + java.util.regex.Pattern.quote(needle) + "\\b.*");
+    }
+
     public static OemVendorHelper detect(InstalledDriver driver) {
         if (driver == null) {
             return null;
@@ -41,8 +55,12 @@ public enum OemVendorHelper {
         AppLogger.debug("VendorDetect: Driver='" + driver.friendlyName() + "', HW='" + hw + "', Provider='" + prov + "'");
 
         for (OemVendorHelper v : values()) {
-            // PCI pattern must be exact token "VEN_xxxx" – avoids false substring 1002 matching.
-            boolean hwMatch = v.pciPattern.startsWith("VEN_") && hw.contains(v.pciPattern);
+            // HW tag match: VEN_xxxx tokens are already exact (prefix
+            // included); ACPI tags (HPQ/LEN/DELL/ASUS) must also match here —
+            // requiring startsWith("VEN_") skipped those providers entirely,
+            // so HPQ/Lenovo/Dell/ASUS devices with generic names were never
+            // detected and their providers never ran (missed updates).
+            boolean hwMatch = v.pciPattern != null && !v.pciPattern.isBlank() && hw.contains(v.pciPattern);
             // venId (e.g. 1002) must appear as VEN_1002 or DEV_1002 or isolated, not arbitrary substring.
             boolean venIdMatch = false;
             if (v.venId != null && v.venId.length() == 4) {
@@ -56,8 +74,8 @@ public enum OemVendorHelper {
             } else if (v.venId != null) {
                 venIdMatch = hw.contains(v.venId) || name.contains(v.venId) || prov.contains(v.venId);
             }
-            boolean nameMatch = name.contains(v.label.toUpperCase());
-            boolean provMatch = prov.contains(v.label.toUpperCase());
+            boolean nameMatch = matchesLabel(name, v.label);
+            boolean provMatch = matchesLabel(prov, v.label.toUpperCase());
             if (hwMatch || venIdMatch || nameMatch || provMatch) {
                 AppLogger.debug("VendorDetect: Matched vendor " + v.label() + " for driver " + driver.friendlyName());
                 return v;

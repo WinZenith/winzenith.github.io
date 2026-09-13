@@ -1,5 +1,6 @@
 package com.sbtools.drivers.catalog;
 
+import com.fasterxml.jackson.annotation.JsonEnumDefaultValue;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
@@ -64,7 +65,11 @@ public final class CatalogEntry {
         NAME_REGEX,
         SIGNATURE,
         INF_METADATA,
-        PACKAGE_ID
+        PACKAGE_ID,
+        // Forward-compat: unknown future values from a refreshed catalog must
+        // not abort the whole file load (see mapper flag below); entries with
+        // this method simply match nothing.
+        @JsonEnumDefaultValue UNKNOWN
     }
 
     public String id() { return id; }

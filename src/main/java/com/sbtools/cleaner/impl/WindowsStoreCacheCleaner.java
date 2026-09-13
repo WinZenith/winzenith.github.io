@@ -66,7 +66,7 @@ public class WindowsStoreCacheCleaner implements CleanerExtension {
                         if (token != null && token.isCancelled()) break;
                         if (Files.isDirectory(pkg)) {
                             Path localCache = pkg.resolve("LocalCache");
-                            if (Files.isDirectory(localCache)) {
+                            if (Files.isDirectory(localCache) && CleanerUtils.isSafeToCleanDirectory(localCache)) {
                                 try (Stream<Path> walk = Files.walk(localCache, 1)) {
                                     long cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS;
                                     for (Path f : (Iterable<Path>) walk::iterator) {

@@ -1,8 +1,11 @@
 param([string]$DriveLetter, [string]$Mode)
+$ErrorActionPreference = 'Stop'
 $drive = $DriveLetter -replace ':', ''
 
 $currentPhase = 0
 $totalPhases = 0
+$hadError = $false
+$firstError = ''
 
 function EmitProgress {
     param([int]$pct)
@@ -34,13 +37,16 @@ try {
     if ($Mode.ToUpper() -eq 'DEEP') {
         EmitProgress 0
         & ([scriptblock]::Create("Optimize-Volume -DriveLetter $drive -Defrag -Verbose")) *>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $script:hadError = $true; if (-not $script:firstError) { $script:firstError = $_.Exception.Message } }
             $m2 = if ($_ -is [string]) { $_ } elseif ($_.Message) { $_.Message } else { "$_" }
             if ($m2 -match '(\d+)%\s*complete') { EmitProgress ([int]([int]$matches[1] * 0.7)) }
         }
         & ([scriptblock]::Create("Optimize-Volume -DriveLetter $drive -FreeSpace -Verbose")) *>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $script:hadError = $true; if (-not $script:firstError) { $script:firstError = $_.Exception.Message } }
             $m2 = if ($_ -is [string]) { $_ } elseif ($_.Message) { $_.Message } else { "$_" }
             if ($m2 -match '(\d+)%\s*complete') { EmitProgress ([int](70 + [int]$matches[1] * 0.3)) }
         }
+        if ($hadError) { EmitResult $false $(if ($firstError) { $firstError } else { 'Optimize-Volume reported errors.' }); return }
         EmitProgress 100
         EmitResult $true "Deep defrag (full + free space consolidation) completed successfully."
         return
@@ -53,6 +59,7 @@ try {
 
     $sb = [scriptblock]::Create($action.Cmd)
     & $sb *>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { $script:hadError = $true; if (-not $script:firstError) { $script:firstError = $_.Exception.Message } }
         $msg = ""
         if ($_ -is [string]) {
             $msg = $_
@@ -82,6 +89,7 @@ try {
         }
     }
 
+    if ($hadError) { EmitResult $false $(if ($firstError) { $firstError } else { 'Optimize-Volume reported errors.' }); return }
     EmitProgress 100
     EmitResult $true "Operation completed successfully."
 } catch {

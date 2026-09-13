@@ -376,7 +376,9 @@ public class BackupRestoreTabView extends BorderPane {
         if (row == null) {
             return;
         }
-        if (!com.sbtools.util.AdminCheck.isRunningAsAdminFresh()) {
+        // Cached check on FX thread (fast). Fresh elevation is re-verified
+        // in the background task before touching pnputil.
+        if (adminCheck != null && !adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING,
                     "Reverting drivers requires administrator rights. Please restart as administrator.").showAndWait();
             return;
@@ -408,6 +410,11 @@ public class BackupRestoreTabView extends BorderPane {
         busy.set(true);
         AppExecutors.ioPool().execute(() -> {
             try {
+                if (!com.sbtools.util.AdminCheck.isRunningAsAdminFresh()) {
+                    Platform.runLater(() -> new Alert(Alert.AlertType.WARNING,
+                            "Reverting drivers requires administrator rights. Please restart as administrator.").showAndWait());
+                    return;
+                }
                 rollbackBackupService.revert(row.entry());
                 // Verify the active driver actually matches the backup
                 // version: pnputil stages the old INF but Windows may keep
@@ -584,6 +591,11 @@ public class BackupRestoreTabView extends BorderPane {
         }
         try {
             Path p = Path.of(folder);
+            if (!com.sbtools.backup.BackupHealth.isPathShapeSafe(p)) {
+                new Alert(Alert.AlertType.WARNING,
+                        "Refusing to open unsafe backup path:\n" + folder).showAndWait();
+                return;
+            }
             if (!Files.isDirectory(p)) {
                 new Alert(Alert.AlertType.WARNING,
                         "Folder no longer exists:\n" + folder + "\n\nUse Repair to clean stale entries.").showAndWait();
@@ -611,23 +623,19 @@ public class BackupRestoreTabView extends BorderPane {
         AppExecutors.ioPool().execute(() -> {
             try {
                 var entries = rollbackBackupService.listAll();
-                List<RestoreRow> checked = new ArrayList<>();
-                int ok = 0;
+                ObservableList<RestoreRow> newRows = FXCollections.observableArrayList();
                 for (var e : entries) {
                     if (e == null || e.id() == null) {
                         continue;
                     }
-                    com.sbtools.backup.BackupHealth.Stats stats =
-                            com.sbtools.backup.BackupHealth.inspect(e.backupFolder());
-                    if (com.sbtools.backup.BackupHealth.isHealthy(stats.status())) {
-                        ok++;
-                    }
-                    checked.add(new RestoreRow(e));
+                    newRows.add(new RestoreRow(e));
                 }
-                ObservableList<RestoreRow> newRows = FXCollections.observableArrayList(checked);
-                RestoreRow.computeAllSizesAsync(newRows);
-                final int okFinal = ok;
-                final int totalFinal = checked.size();
+                // Single disk pass: count from the same inspection that feeds
+                // the display, so "x/y healthy" can never disagree with the
+                // Health column (join on worker thread only — never FX).
+                RestoreRow.computeAllSizesAsync(newRows).join();
+                final int okFinal = (int) newRows.stream().filter(RestoreRow::isHealthy).count();
+                final int totalFinal = newRows.size();
                 Platform.runLater(() -> {
                     rollbackRows.setAll(newRows);
                     updateRollbackSelectionButtons();
@@ -895,13 +903,15 @@ public class BackupRestoreTabView extends BorderPane {
         if (description == null || description.isBlank()) return;
 
         localBusy.set(true);
-        statusLabel.setText("Creating restore point...");
+        statusLabel.setText("Creating restore point (this can take several minutes)...");
         final String desc = description;
 
         AppExecutors.ioPool().execute(() -> {
+            boolean succeeded = false;
             try {
                 var result = service.createRestorePoint(desc);
                 boolean ok = result.success();
+                succeeded = ok;
                 String err = result.error();
                 Platform.runLater(() -> {
                     if (ok) {
@@ -932,9 +942,14 @@ public class BackupRestoreTabView extends BorderPane {
                     new Alert(Alert.AlertType.ERROR, "Failed to create restore point:\n" + e.getMessage()).showAndWait();
                 });
             } finally {
+                final boolean rescan = succeeded;
                 Platform.runLater(() -> {
                     localBusy.set(false);
-                    scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
+                    // Only rescan on success: on failure a second 60s scan would
+                    // hide the error status and double the wait after a timeout.
+                    if (rescan) {
+                        scanSystemRestore(service, localBusy, rows, statusLabel, spinner, scanButton, createButton, launchButton);
+                    }
                 });
             }
         });
@@ -1514,6 +1529,7 @@ public class BackupRestoreTabView extends BorderPane {
             try (var stream = Files.walk(directory)) {
                 stream.sorted(java.util.Comparator.reverseOrder())
                         .forEach(path -> {
+                            try { Files.setAttribute(path, "dos:readonly", Boolean.FALSE); } catch (Exception ignored) {}
                             try {
                                 Files.deleteIfExists(path);
                             } catch (IOException e) {
@@ -1530,7 +1546,11 @@ public class BackupRestoreTabView extends BorderPane {
         if (cleanName.contains("..") || cleanName.contains("/") || cleanName.contains("\\")) {
             throw new IOException("Invalid backup path: " + filename);
         }
-        for (Path base : registryBackupsRoots()) {
+        List<Path> roots = registryBackupsRoots();
+        if (roots.isEmpty()) {
+            throw new IOException("No backup locations available: " + filename);
+        }
+        for (Path base : roots) {
             Path filePath = base.resolve(cleanName).normalize();
             if (!filePath.startsWith(base)) {
                 continue;
@@ -1540,7 +1560,7 @@ public class BackupRestoreTabView extends BorderPane {
             }
         }
         // Fall back to primary for a clear missing-dir error downstream.
-        Path primary = registryBackupsRoots().get(0);
+        Path primary = roots.get(0);
         Path filePath = primary.resolve(cleanName).normalize();
         if (!filePath.startsWith(primary)) {
             throw new IOException("Invalid backup path: " + filename);

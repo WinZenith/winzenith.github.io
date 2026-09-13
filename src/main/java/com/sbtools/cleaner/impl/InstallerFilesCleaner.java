@@ -11,6 +11,19 @@ import java.util.stream.Stream;
 
 public class InstallerFilesCleaner implements CleanerExtension {
 
+    // Never delete just-downloaded setups: only installers older than a day
+    // are treated as leftover cache (pending installs stay untouched).
+    private static final long MAX_AGE_MS = 24L * 60 * 60 * 1000;
+
+    private static boolean isStaleInstaller(Path f) {
+        try {
+            long modified = Files.getLastModifiedTime(f).toMillis();
+            return modified > 0 && System.currentTimeMillis() - modified > MAX_AGE_MS;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     @Override
     public CleanupCategory getCategory() { return CleanupCategory.INSTALLER_FILES; }
 
@@ -20,14 +33,15 @@ public class InstallerFilesCleaner implements CleanerExtension {
         int itemCount = 0;
 
         Path tempDir = CleanerUtils.safeEnvPath("TEMP");
-        if (tempDir != null && Files.isDirectory(tempDir)) {
+        if (tempDir != null && Files.isDirectory(tempDir)
+                && CleanerUtils.isSafeToCleanDirectory(tempDir)) {
             try (Stream<Path> files = Files.list(tempDir)) {
                 for (Path f : (Iterable<Path>) files::iterator) {
                     if (Files.isRegularFile(f)) {
                         String name = f.getFileName().toString().toLowerCase();
                         if ((name.endsWith(".msi") || name.endsWith(".exe"))) {
                             long size = f.toFile().length();
-                            if (size > 10 * 1024 * 1024) {
+                            if (size > 10 * 1024 * 1024 && isStaleInstaller(f)) {
                                 totalSize += size;
                                 itemCount++;
                             }
@@ -52,7 +66,8 @@ public class InstallerFilesCleaner implements CleanerExtension {
         if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         Path tempDir = CleanerUtils.safeEnvPath("TEMP");
-        if (tempDir != null && Files.isDirectory(tempDir)) {
+        if (tempDir != null && Files.isDirectory(tempDir)
+                && CleanerUtils.isSafeToCleanDirectory(tempDir)) {
             try (Stream<Path> files = Files.list(tempDir)) {
                 for (Path f : (Iterable<Path>) files::iterator) {
                     if (token != null && token.isCancelled()) break;
@@ -60,7 +75,7 @@ public class InstallerFilesCleaner implements CleanerExtension {
                         String name = f.getFileName().toString().toLowerCase();
                         if ((name.endsWith(".msi") || name.endsWith(".exe"))) {
                             long size = f.toFile().length();
-                            if (size > 10 * 1024 * 1024) {
+                            if (size > 10 * 1024 * 1024 && isStaleInstaller(f)) {
                                 CleanerUtils.deletePermanently(f, token);
                                 if (!Files.exists(f)) cleaned += size;
                             }

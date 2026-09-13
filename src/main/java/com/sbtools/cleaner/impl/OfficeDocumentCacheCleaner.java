@@ -26,7 +26,7 @@ public class OfficeDocumentCacheCleaner implements CleanerExtension {
                         if (Files.isDirectory(versionDir)) {
                             Path fileCache = versionDir.resolve("OfficeFileCache");
                             if (Files.isDirectory(fileCache)) {
-                                try (Stream<Path> walk = Files.walk(fileCache)) {
+                                try (Stream<Path> walk = Files.walk(fileCache, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
                                     var stats = walk.filter(Files::isRegularFile)
                                             .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
                                     totalSize += stats.getSum();
@@ -61,7 +61,8 @@ public class OfficeDocumentCacheCleaner implements CleanerExtension {
                         if (token != null && token.isCancelled()) break;
                         if (Files.isDirectory(versionDir)) {
                             Path fileCache = versionDir.resolve("OfficeFileCache");
-                            if (Files.isDirectory(fileCache)) cleaned += CleanerUtils.deleteDirectoryContents(fileCache, token);
+                            if (Files.isDirectory(fileCache)
+                                    && CleanerUtils.isSafeToCleanDirectory(fileCache)) cleaned += CleanerUtils.deleteDirectoryContents(fileCache, token);
                         }
                     }
                 } catch (Exception ignored) {}

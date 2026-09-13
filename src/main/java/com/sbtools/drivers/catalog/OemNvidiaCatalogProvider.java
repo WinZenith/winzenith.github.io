@@ -20,11 +20,11 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
     private static final Pattern VERSION_PATTERN = Pattern.compile(
             "Version\\s*([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)", Pattern.CASE_INSENSITIVE);
     private static final Pattern DOWNLOAD_LINK_PATTERN = Pattern.compile(
-            "href\\s*=\\s*\"([^\"]*download\\.nvidia\\.com[^\"]*\\.(exe|zip))\"", Pattern.CASE_INSENSITIVE);
+            "href\\s*=\\s*[\"']([^\"']*download\\.nvidia\\.com[^\"']*\\.(exe|zip)(?:[?#][^\"']*)?)[\"']", Pattern.CASE_INSENSITIVE);
     private static final Pattern PRODUCT_PAGE_PATTERN = Pattern.compile(
-            "href\\s*=\\s*\"(https?://www\\.nvidia\\.com/Download/[^\"]+)\"", Pattern.CASE_INSENSITIVE);
+            "href\\s*=\\s*[\"'](https?://www\\.nvidia\\.com/Download/[^\"']+)[\"']", Pattern.CASE_INSENSITIVE);
     private static final Pattern LNK_DWNLD_PATTERN = Pattern.compile(
-            "id\\s*=\\s*\"lnkDwnldBtn\"[^>]*href\\s*=\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE);
+            "id\\s*=\\s*[\"']lnkDwnldBtn[\"'][^>]*href\\s*=\\s*[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE);
 
     private static final Map<String, int[]> GPU_PSID_PFID = new HashMap<>();
 

@@ -9,7 +9,6 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Shared logic for prompting the user to clean up installer files
@@ -67,87 +66,6 @@ public final class InstallerCleanupHelper {
                     com.sbtools.util.AppLogger.warning("promptAndCleanupAsync timeout: " + ex.getMessage());
                     return false;
                 });
-    }
-
-    /**
-     * Synchronously prompts the user to delete installer files detected in the Downloads folder.
-     * Blocks until the user responds. Safe to call only from background threads.
-     *
-     * @deprecated Prefer {@link #promptAndCleanupAsync} which never blocks a worker
-     * thread on a 60s latch. Kept for compatibility; bounded by a 60s latch.
-     *
-     * @param service   the update service (for finding/deleting files)
-     * @param entry     the update entry that was installed
-     * @param since     timestamp to search for candidate files (typically install start time)
-     * @return true if the user confirmed deletion and files were deleted
-     */
-    @Deprecated
-    public static boolean promptAndCleanup(SoftwareUpdateService service,
-                                           SoftwareUpdateEntry entry,
-                                           Instant since) {
-        List<Path> candidates = service.findCandidateInstallersForPackage(entry, since);
-        if (candidates == null || candidates.isEmpty()) return false;
-
-        // Guard: never block FX thread
-        if (Platform.isFxApplicationThread()) {
-            com.sbtools.util.AppLogger.warning("promptAndCleanup called on FX thread – showing async only");
-            // Show async and return false (don't block FX)
-            Platform.runLater(() -> {
-                StringBuilder sb = new StringBuilder();
-                for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
-                Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                        "The following installer files were detected in your Downloads folder:\n\n"
-                                + sb + "\nDelete these files?");
-                del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
-                if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
-                    service.deleteInstallerFiles(candidates);
-                }
-            });
-            return false;
-        }
-
-        AtomicBoolean userConfirmed = new AtomicBoolean(false);
-        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-
-        try {
-            Platform.runLater(() -> {
-                try {
-                    StringBuilder sb = new StringBuilder();
-                    for (Path p : candidates) sb.append(p.getFileName().toString()).append("\n");
-                    Alert del = new Alert(Alert.AlertType.CONFIRMATION,
-                            "The following installer files were detected in your Downloads folder:\n\n"
-                                    + sb + "\nDelete these files?");
-                    del.setHeaderText("Delete installer files for " + (entry.getName() != null ? entry.getName() : entry.id()));
-                    if (del.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
-                        userConfirmed.set(true);
-                    }
-                } catch (Exception ex) {
-                    com.sbtools.util.AppLogger.warning("promptAndCleanup dialog failed: " + ex.getMessage());
-                } finally {
-                    latch.countDown();
-                }
-            });
-        } catch (Exception ex) {
-            // Platform.runLater failed (toolkit shutting down) – don't block forever
-            com.sbtools.util.AppLogger.warning("promptAndCleanup Platform.runLater failed: " + ex.getMessage());
-            return false;
-        }
-
-        try {
-            boolean completed = latch.await(60, java.util.concurrent.TimeUnit.SECONDS);
-            if (!completed) {
-                com.sbtools.util.AppLogger.warning("promptAndCleanup timed out waiting for user response – skipping delete");
-                return false;
-            }
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
-
-        if (userConfirmed.get()) {
-            service.deleteInstallerFiles(candidates);
-        }
-        return userConfirmed.get();
     }
 
     /**

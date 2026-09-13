@@ -22,8 +22,8 @@ public class MavenCacheCleaner implements CleanerExtension {
         String userHome = CleanerUtils.safeEnv("USERPROFILE");
         if (userHome != null) {
             Path repo = Paths.get(userHome, ".m2", "repository");
-            if (Files.isDirectory(repo)) {
-                try (Stream<Path> walk = Files.walk(repo)) {
+            if (Files.isDirectory(repo) && CleanerUtils.isSafeToCleanDirectory(repo)) {
+                try (Stream<Path> walk = Files.walk(repo, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
                     var stats = walk.filter(Files::isRegularFile)
                             .filter(p -> {
                                 String n = p.getFileName().toString().toLowerCase();
@@ -56,8 +56,8 @@ public class MavenCacheCleaner implements CleanerExtension {
         String userHome = CleanerUtils.safeEnv("USERPROFILE");
         if (userHome == null) return 0;
         Path repo = Paths.get(userHome, ".m2", "repository");
-        if (!Files.isDirectory(repo)) return 0;
-        try (Stream<Path> walk = Files.walk(repo)) {
+        if (!Files.isDirectory(repo) || !CleanerUtils.isSafeToCleanDirectory(repo)) return 0;
+        try (Stream<Path> walk = Files.walk(repo, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
             var matched = walk.filter(Files::isRegularFile)
                     .filter(p -> {
                         String n = p.getFileName().toString().toLowerCase();

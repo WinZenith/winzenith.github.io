@@ -111,6 +111,11 @@ public class SystemInfoService {
         }
 
         // Fallback: legacy single invocation (supports old extracted scripts without -Sections).
+        // A cancelled parallel fan-out must never fall through to a new PowerShell run.
+        checkCancelled(cancelledToken);
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedException("System info cancelled by user");
+        }
         AppLogger.warning("SystemInfo: parallel section gather failed, falling back to legacy single-call");
         if (progressCallback != null) {
             progressCallback.accept("hardware", 0.2);
@@ -670,16 +675,10 @@ public class SystemInfoService {
                 return cachedData;
             }
         }
-        SystemInfoData disk = loadSnapshot();
-        if (disk != null) {
-            synchronized (cacheLock) {
-                // Populate memory cache from disk so the next Load() can report "cached"
-                // when the snapshot is still within TTL of its collection time.
-                cachedData = disk;
-                cacheTimestamp = System.currentTimeMillis();
-            }
-        }
-        return disk;
+        // Return the disk snapshot for instant display only. Do NOT prime the
+        // memory cache here, otherwise the next Load() would serve this stale
+        // snapshot as "cached" instead of querying fresh hardware state.
+        return loadSnapshot();
     }
 
     public void invalidateCache() {

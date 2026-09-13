@@ -58,7 +58,7 @@ public class BrowserTracesCleaner implements CleanerExtension {
             for (Path dir : profile.cacheDirs()) {
                 if (token != null && token.isCancelled()) break;
                 if (Files.isDirectory(dir)) {
-                    try (Stream<Path> walk = Files.walk(dir)) {
+                    try (Stream<Path> walk = Files.walk(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
                         var it = walk.filter(Files::isRegularFile).iterator();
                         while (it.hasNext()) {
                             if (token != null && token.isCancelled()) break;
@@ -113,7 +113,7 @@ public class BrowserTracesCleaner implements CleanerExtension {
             if (!browserRunning) {
                 for (Path dir : profile.cacheDirs()) {
                     if (token != null && token.isCancelled()) break;
-                    if (Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
+                    if (Files.isDirectory(dir) && CleanerUtils.isSafeToCleanDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
                 }
             }
 
@@ -307,8 +307,10 @@ public class BrowserTracesCleaner implements CleanerExtension {
 
     private Path dirForProfile(String localAppData, String... pathParts) {
         String profileLabel = pathParts[pathParts.length - 1];
-        String dirName = profileLabel.contains("(")
-                ? profileLabel.substring(profileLabel.indexOf('(') + 1, profileLabel.indexOf(')'))
+        int open = profileLabel.indexOf('(');
+        int close = profileLabel.indexOf(')');
+        String dirName = (open >= 0 && close > open + 1)
+                ? profileLabel.substring(open + 1, close)
                 : "Default";
         Path userData = Paths.get(localAppData, java.util.Arrays.copyOf(pathParts, pathParts.length - 1));
         Path profileDir = userData.resolve(dirName);

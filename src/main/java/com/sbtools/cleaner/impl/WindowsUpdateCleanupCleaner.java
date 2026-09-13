@@ -18,8 +18,6 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
     @Override
     public boolean requiresAdmin() { return true; }
 
-    private volatile long lastScannedBytes = 0;
-
     @Override
     public void scan(CleanupRow row) {
         scan(row, com.sbtools.util.CancellationToken.NONE);
@@ -114,7 +112,6 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 try { p.destroyForcibly(); } catch (Exception ignored2) {}
             }
         }
-        lastScannedBytes = totalSize;
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
         row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (superseded components)" : " (none found)"));
@@ -157,7 +154,13 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                     p.destroyForcibly();
                     throw new java.util.concurrent.CancellationException("DISM cleanup canceled");
                 }
-                if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+                try {
+                    if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    p.destroyForcibly();
+                    throw new java.util.concurrent.CancellationException("DISM cleanup canceled");
+                }
             }
             if (finished) {
                 if (token != null && token.isCancelled()) {
@@ -168,10 +171,10 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 AppLogger.info("DISM component cleanup completed with exit code " + exitCode);
                 if (exitCode == 0) {
                     String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                    // Report only parsed reclaimed bytes: falling back to the
+                    // scan estimate here fabricated "freed" totals (localized
+                    // DISM output, shared singleton across parallel scans).
                     cleaned = parseCleanedBytes(output);
-                    if (cleaned == 0 && lastScannedBytes > 0) {
-                        cleaned = lastScannedBytes;
-                    }
                 }
             } else {
                 AppLogger.warning("DISM cleanup timed out after ~15 minutes");

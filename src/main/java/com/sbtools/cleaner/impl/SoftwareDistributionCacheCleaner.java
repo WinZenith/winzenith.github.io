@@ -45,7 +45,7 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
             CleanerUtils.addPath(dirs, windir + "\\SoftwareDistribution\\Download");
             for (Path dir : dirs) {
                 if (dir != null && Files.isDirectory(dir)) {
-                    try (Stream<Path> walk = Files.walk(dir)) {
+                    try (Stream<Path> walk = Files.walk(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
                         var stats = walk.filter(Files::isRegularFile)
                                 .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
                         totalSize += stats.getSum();
@@ -84,7 +84,8 @@ public class SoftwareDistributionCacheCleaner implements CleanerExtension {
             CleanerUtils.addPath(dirs, windir + "\\SoftwareDistribution\\Download");
             for (Path dir : dirs) {
                 if (token != null && token.isCancelled()) break;
-                if (dir != null && Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
+                if (dir != null && Files.isDirectory(dir)
+                        && CleanerUtils.isSafeToCleanDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
             }
         }
         return cleaned;

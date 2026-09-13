@@ -7,27 +7,61 @@ try {
         $result.message = "Folder not found: $FolderPath"
         $result | ConvertTo-Json -Depth 3 -Compress; exit 1; return
     }
+    try {
+        $rootItem = Get-Item -LiteralPath $FolderPath -Force -ErrorAction Stop
+        if ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            $result.message = "Refusing to shred a junction / reparse point root: $FolderPath"
+            $result | ConvertTo-Json -Depth 3 -Compress; exit 1; return
+        }
+    } catch {
+        if ($_.Exception.Message -match 'Refusing to shred') { throw }
+    }
 
     $bufferSize = 65536
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 
     # Strict-safety: never follow directory junctions / symlinks (would escape target).
-    # Enumerate files without following reparse points; skip any reparse-point file.
-    $files = Get-ChildItem -LiteralPath $FolderPath -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) }
+    # Get-ChildItem -Recurse follows junctions during traversal, so enumerate
+    # manually: list each dir non-recursively, never descend into reparse dirs.
+    $files = @()
+    $allDirs = @()
     $skippedReparse = @()
-    try {
-        $allFiles = Get-ChildItem -LiteralPath $FolderPath -Recurse -File -Force -ErrorAction SilentlyContinue
-        foreach ($a in @($allFiles)) {
+    $dirsToVisit = @($FolderPath)
+    $visited = @{}
+    while ($dirsToVisit.Count -gt 0) {
+        $cur = $dirsToVisit[0]
+        if ($dirsToVisit.Count -gt 1) { $dirsToVisit = $dirsToVisit[1..($dirsToVisit.Count - 1)] } else { $dirsToVisit = @() }
+        if (-not $cur) { continue }
+        $curKey = $cur.ToLower()
+        if ($visited.ContainsKey($curKey)) { continue }
+        $visited[$curKey] = $true
+        try { $children = Get-ChildItem -LiteralPath $cur -Force -ErrorAction SilentlyContinue } catch { continue }
+        foreach ($c in @($children)) {
+            $isReparse = $false
+            try { $isReparse = [bool]($c.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } catch {}
+            if ($isReparse) { $skippedReparse += $c.FullName; continue }
             try {
-                if ($a.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $skippedReparse += $a.FullName }
+                if ($c.PSIsContainer) {
+                    $allDirs += $c.FullName
+                    $dirsToVisit += $c.FullName
+                } else {
+                    $files += $c
+                }
             } catch {}
         }
-    } catch {}
-    if (-not $files) {
-        Remove-Item -LiteralPath $FolderPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($files.Count -eq 0) {
+        foreach ($d in ($allDirs | Sort-Object -Descending)) {
+            try {
+                if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue }
+            } catch {}
+        }
+        try { Remove-Item -LiteralPath $FolderPath -Force -ErrorAction SilentlyContinue } catch {}
         $result.success = $true
         $result.message = "Empty folder removed."
+        if ($skippedReparse.Count -gt 0) {
+            $result.message += " Skipped $($skippedReparse.Count) symlink/junction(s) (not followed)."
+        }
         $result | ConvertTo-Json -Depth 3 -Compress; return
     }
 
@@ -82,14 +116,12 @@ try {
         }
     }
 
-    $remainingDirs = Get-ChildItem -LiteralPath $FolderPath -Recurse -Directory -Force -ErrorAction SilentlyContinue |
-        Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
-        Sort-Object -Property FullName -Descending
+    $remainingDirs = $allDirs | Sort-Object -Descending
     foreach ($dir in $remainingDirs) {
         try {
-            if (-not (Test-Path -LiteralPath $dir.FullName)) { continue }
-            Remove-Item -LiteralPath $dir.FullName -Force -ErrorAction SilentlyContinue
-            if (-not (Test-Path -LiteralPath $dir.FullName)) { $result.foldersDeleted++ }
+            if (-not (Test-Path -LiteralPath $dir)) { continue }
+            Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $dir)) { $result.foldersDeleted++ }
         } catch {}
     }
     try {

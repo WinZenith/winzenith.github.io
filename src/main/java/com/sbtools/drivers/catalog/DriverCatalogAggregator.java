@@ -100,8 +100,11 @@ public class DriverCatalogAggregator {
      * Filters providers to only those relevant to the installed drivers.
      * OEM providers are skipped if no installed driver matches their vendor.
      * Windows Update provider is always included.
+     * Public so callers can compute the list once and share it between the
+     * progress count and the streaming run (each call re-detects vendors per
+     * device with logging).
      */
-    private List<DriverCatalogProvider> relevantProviders(List<InstalledDriver> installed) {
+    public List<DriverCatalogProvider> relevantProviders(List<InstalledDriver> installed) {
         Set<OemVendorHelper> presentVendors = EnumSet.noneOf(OemVendorHelper.class);
         if (installed != null) {
             for (InstalledDriver d : installed) {
@@ -175,6 +178,20 @@ public class DriverCatalogAggregator {
             CancellationToken token,
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderFinished) {
+        findUpdates(installed, token, onProviderStarted, onProviderFinished, null);
+    }
+
+    /**
+     * Streaming variant with a precomputed provider list (see
+     * {@link #relevantProviders(List)}): avoids running vendor detection
+     * twice per scan. A null list computes it internally.
+     */
+    public void findUpdates(
+            List<InstalledDriver> installed,
+            CancellationToken token,
+            Consumer<String> onProviderStarted,
+            Consumer<List<DriverUpdateCandidate>> onProviderFinished,
+            List<DriverCatalogProvider> precomputedProviders) {
         final CancellationToken effectiveToken = token != null ? token : CancellationToken.NONE;
         if (installed == null) return;
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
@@ -190,7 +207,7 @@ public class DriverCatalogAggregator {
             if (onProviderFinished != null) {
                 onProviderFinished.accept(List.copyOf(byDevice.values()));
             }
-        });
+        }, precomputedProviders);
     }
 
     private void runProviders(
@@ -198,8 +215,18 @@ public class DriverCatalogAggregator {
             CancellationToken token,
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderResult) {
+        runProviders(installed, token, onProviderStarted, onProviderResult, null);
+    }
+
+    private void runProviders(
+            List<InstalledDriver> installed,
+            CancellationToken token,
+            Consumer<String> onProviderStarted,
+            Consumer<List<DriverUpdateCandidate>> onProviderResult,
+            List<DriverCatalogProvider> precomputedProviders) {
         if (installed == null) return;
-        List<DriverCatalogProvider> activeProviders = relevantProviders(installed);
+        List<DriverCatalogProvider> activeProviders = precomputedProviders != null
+                ? List.copyOf(precomputedProviders) : relevantProviders(installed);
         if (activeProviders.isEmpty()) {
             return;
         }
@@ -214,8 +241,23 @@ public class DriverCatalogAggregator {
                 })
                 : pool;
         try {
+            // Once-only result delivery per provider: a timed-out task that
+            // later finishes must not invoke the callback a second time
+            // (progress counters would overshoot past providerCount).
+            java.util.Set<String> delivered = java.util.concurrent.ConcurrentHashMap.newKeySet();
+            java.util.function.BiConsumer<String, List<DriverUpdateCandidate>> deliverOnce =
+                    (providerId, results) -> {
+                        if (onProviderResult == null || !delivered.add(providerId)) return;
+                        try {
+                            onProviderResult.accept(results);
+                        } catch (Exception ex) {
+                            AppLogger.warning("CatalogAggregator: Provider result handler failed for "
+                                    + providerId + ": " + ex.getMessage());
+                        }
+                    };
+            record ProviderTask(String id, java.util.concurrent.Future<?> future) {}
             var futures = activeProviders.stream()
-                    .map(provider -> effectivePool.submit(() -> {
+                    .map(provider -> new ProviderTask(provider.id(), effectivePool.submit(() -> {
                         if (token.isCancelled()) {
                             return null;
                         }
@@ -236,19 +278,15 @@ public class DriverCatalogAggregator {
                             if (token.isCancelled()) {
                                 return null;
                             }
-                            if (onProviderResult != null) {
-                                try { onProviderResult.accept(results); } catch (Exception ex) {
-                                    AppLogger.warning("CatalogAggregator: Provider result handler failed for "
-                                            + provider.id() + ": " + ex.getMessage());
-                                }
-                            }
+                            deliverOnce.accept(provider.id(), results);
                             return null;
                         } finally {
                             rateLimit.release();
                         }
-                    }))
+                    })))
                     .toList();
-            for (var future : futures) {
+            for (var task : futures) {
+                var future = task.future();
                 if (token.isCancelled() || Thread.currentThread().isInterrupted()) {
                     future.cancel(true);
                     continue;
@@ -258,23 +296,33 @@ public class DriverCatalogAggregator {
                 } catch (java.util.concurrent.TimeoutException e) {
                     future.cancel(true);
                     AppLogger.warning("CatalogAggregator: Provider timed out after " + PROVIDER_TIMEOUT_SECONDS + "s");
+                    // Advance streaming progress: without a callback the
+                    // Drivers-tab providersDone counter never reaches
+                    // providerCount and progress/status freeze mid-scan.
+                    // deliverOnce dedups against a late finish of the same
+                    // provider so progress never overshoots past 100%.
+                    if (!token.isCancelled() && !Thread.currentThread().isInterrupted()) {
+                        deliverOnce.accept(task.id(), List.of());
+                    }
                 } catch (InterruptedException e) {
                     // Caller (e.g. Dashboard per-task timeout) interrupted us:
                     // release every queued provider so ioPool threads are not
                     // held by orphans that would starve the next scan.
                     Thread.currentThread().interrupt();
-                    for (var f : futures) {
-                        if (f != null && !f.isDone()) {
-                            try { f.cancel(true); } catch (Exception ignored) {}
+                    for (var t : futures) {
+                        var q = t == null ? null : t.future();
+                        if (q != null && !q.isDone()) {
+                            try { q.cancel(true); } catch (Exception ignored) {}
                         }
                     }
                     break;
                 } catch (Exception e) {
                     if (e.getCause() instanceof InterruptedException) {
                         Thread.currentThread().interrupt();
-                        for (var f : futures) {
-                            if (f != null && !f.isDone()) {
-                                try { f.cancel(true); } catch (Exception ignored) {}
+                        for (var t : futures) {
+                            var q = t == null ? null : t.future();
+                            if (q != null && !q.isDone()) {
+                                try { q.cancel(true); } catch (Exception ignored) {}
                             }
                         }
                         break;
@@ -337,6 +385,16 @@ public class DriverCatalogAggregator {
     }
 
     private static boolean isBetter(DriverUpdateCandidate candidate, DriverUpdateCandidate existing) {
+        // Version first: hiding a known-newer manual candidate behind an
+        // older installable one shows a downgrade as "Available" and the user
+        // never learns the newer release exists. Download capability only
+        // breaks version ties (batch then reports manual-required with the
+        // true newest version instead of auto-installing stale bits).
+        int cmp = VersionCompare.compare(candidate.availableVersion(), existing.availableVersion());
+        if (cmp != 0) {
+            return cmp > 0;
+        }
+
         boolean candidateHasDownload = hasWorkingDownload(candidate);
         boolean existingHasDownload = hasWorkingDownload(existing);
 
@@ -345,11 +403,6 @@ public class DriverCatalogAggregator {
         }
         if (!candidateHasDownload && existingHasDownload) {
             return false;
-        }
-
-        int cmp = VersionCompare.compare(candidate.availableVersion(), existing.availableVersion());
-        if (cmp != 0) {
-            return cmp > 0;
         }
 
         if ("WindowsUpdate".equals(candidate.source()) && !"WindowsUpdate".equals(existing.source())) {

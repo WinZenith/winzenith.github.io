@@ -18,17 +18,32 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
         long totalSize = 0;
         int itemCount = 0;
         long[] sub = new long[2];
 
-        scanSubCache(sub, this::scanDiscord); totalSize += sub[0]; itemCount += (int) sub[1];
-        scanSubCache(sub, this::scanVscode); totalSize += sub[0]; itemCount += (int) sub[1];
-        scanSubCache(sub, this::scanAdobe); totalSize += sub[0]; itemCount += (int) sub[1];
-        scanSubCache(sub, this::scanSteam); totalSize += sub[0]; itemCount += (int) sub[1];
-        scanSubCache(sub, this::scanSlack); totalSize += sub[0]; itemCount += (int) sub[1];
-        scanSubCache(sub, this::scanZoom); totalSize += sub[0]; itemCount += (int) sub[1];
-        scanSubCache(sub, this::scanTeams); totalSize += sub[0]; itemCount += (int) sub[1];
+        java.util.List<java.util.function.Consumer<CleanupRow>> scanners = java.util.List.of(
+                this::scanDiscord, this::scanVscode, this::scanAdobe, this::scanSteam,
+                this::scanSlack, this::scanZoom, this::scanTeams);
+        for (var scanner : scanners) {
+            if (token != null && token.isCancelled()) break;
+            scanSubCache(sub, scanner);
+            totalSize += sub[0];
+            itemCount += (int) sub[1];
+        }
+        if (token != null && token.isCancelled()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Canceled");
+            row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+            row.setErrorMessage("Scan canceled by user");
+            return;
+        }
 
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
@@ -44,11 +59,13 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
-        cleaned += cleanDiscord(); if (token != null && token.isCancelled()) return cleaned;
-        cleaned += cleanVscode(); if (token != null && token.isCancelled()) return cleaned;
-        cleaned += cleanAdobe(); if (token != null && token.isCancelled()) return cleaned;
-        cleaned += cleanSteam(); if (token != null && token.isCancelled()) return cleaned;
-        cleaned += cleanSlack(); if (token != null && token.isCancelled()) return cleaned;
+        // Every branch receives the token: previously Discord/VSCode/Adobe/Steam/Slack
+        // deletions ran to completion even after the user pressed Cancel.
+        cleaned += cleanDiscord(token); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanVscode(token); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanAdobe(token); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanSteam(token); if (token != null && token.isCancelled()) return cleaned;
+        cleaned += cleanSlack(token); if (token != null && token.isCancelled()) return cleaned;
         cleaned += cleanZoom(token); if (token != null && token.isCancelled()) return cleaned;
         cleaned += cleanTeams(token);
         return cleaned;
@@ -66,7 +83,7 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
         int itemCount = 0;
         for (Path dir : dirs) {
             if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> walk = Files.walk(dir)) {
+                try (Stream<Path> walk = Files.walk(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
                     var stats = walk.filter(Files::isRegularFile)
                             .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
                     totalSize += stats.getSum();
@@ -78,15 +95,11 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
         row.setItemCount(row.getItemCount() + itemCount);
     }
 
-    private long cleanAppCacheDirs(List<Path> dirs) {
-        return cleanAppCacheDirs(dirs, com.sbtools.util.CancellationToken.NONE);
-    }
-
     private long cleanAppCacheDirs(List<Path> dirs, com.sbtools.util.CancellationToken token) {
         long cleaned = 0;
         for (Path dir : dirs) {
             if (token != null && token.isCancelled()) break;
-            if (Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
+            if (Files.isDirectory(dir) && CleanerUtils.isSafeToCleanDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
         }
         return cleaned;
     }
@@ -110,34 +123,36 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
                 discord.resolve("GPUCache").toString()));
     }
 
-    private long cleanDiscord() {
+    private long cleanDiscord(com.sbtools.util.CancellationToken token) {
         String appData = CleanerUtils.safeEnv("APPDATA");
         if (appData == null) return 0;
         Path discord = Path.of(appData, "discord");
         return cleanAppCacheDirs(collectDirs(
                 discord.resolve("Cache").toString(),
                 discord.resolve("Code Cache").toString(),
-                discord.resolve("GPUCache").toString()));
+                discord.resolve("GPUCache").toString()), token);
     }
 
     private void scanVscode(CleanupRow row) {
         String appData = CleanerUtils.safeEnv("APPDATA");
         if (appData == null) return;
         Path code = Path.of(appData, "Code");
+        // CachedExtensions holds installed extensions (not regenerable cache)
+        // so only true caches are counted.
         scanAppCache(row, collectDirs(
                 code.resolve("Cache").toString(),
-                code.resolve("CachedData").toString(),
-                code.resolve("CachedExtensions").toString()));
+                code.resolve("Code Cache").toString(),
+                code.resolve("GPUCache").toString()));
     }
 
-    private long cleanVscode() {
+    private long cleanVscode(com.sbtools.util.CancellationToken token) {
         String appData = CleanerUtils.safeEnv("APPDATA");
         if (appData == null) return 0;
         Path code = Path.of(appData, "Code");
         return cleanAppCacheDirs(collectDirs(
                 code.resolve("Cache").toString(),
-                code.resolve("CachedData").toString(),
-                code.resolve("CachedExtensions").toString()));
+                code.resolve("Code Cache").toString(),
+                code.resolve("GPUCache").toString()), token);
     }
 
     private void scanAdobe(CleanupRow row) {
@@ -152,16 +167,16 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
         if (localAppData != null) {
             Path adobeLocal = Path.of(localAppData, "Adobe");
             if (Files.isDirectory(adobeLocal)) {
+                // CameraRawDatabase holds user XMP edits, not cache — keep only Cache.
                 scanAppCache(row, collectDirs(
                         adobeLocal.resolve("CameraRaw").resolve("Cache").toString(),
-                        adobeLocal.resolve("CameraRaw").resolve("CameraRawDatabase").toString(),
                         adobeLocal.resolve("Flash Player").resolve("SharedAssets").toString(),
                         adobeLocal.resolve("Color").resolve("CachedProfiles").toString()));
             }
         }
     }
 
-    private long cleanAdobe() {
+    private long cleanAdobe(com.sbtools.util.CancellationToken token) {
         long cleaned = 0;
         String appData = CleanerUtils.safeEnv("APPDATA");
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
@@ -169,16 +184,15 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
             Path adobeCommon = Path.of(appData, "Adobe", "Common");
             cleaned += cleanAppCacheDirs(collectDirs(
                     adobeCommon.resolve("Media Cache").toString(),
-                    adobeCommon.resolve("Media Cache Files").toString()));
+                    adobeCommon.resolve("Media Cache Files").toString()), token);
         }
         if (localAppData != null) {
             Path adobeLocal = Path.of(localAppData, "Adobe");
             if (Files.isDirectory(adobeLocal)) {
                 cleaned += cleanAppCacheDirs(collectDirs(
                         adobeLocal.resolve("CameraRaw").resolve("Cache").toString(),
-                        adobeLocal.resolve("CameraRaw").resolve("CameraRawDatabase").toString(),
                         adobeLocal.resolve("Flash Player").resolve("SharedAssets").toString(),
-                        adobeLocal.resolve("Color").resolve("CachedProfiles").toString()));
+                        adobeLocal.resolve("Color").resolve("CachedProfiles").toString()), token);
             }
         }
         return cleaned;
@@ -187,19 +201,18 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
     private void scanSteam(CleanupRow row) {
         Path steamDir = findSteamDir();
         if (steamDir == null) return;
+        // steamapps/downloading holds in-progress downloads — never touch.
         scanAppCache(row, collectDirs(
                 steamDir.resolve("appcache").toString(),
-                steamDir.resolve("logs").toString(),
-                steamDir.resolve("steamapps").resolve("downloading").toString()));
+                steamDir.resolve("logs").toString()));
     }
 
-    private long cleanSteam() {
+    private long cleanSteam(com.sbtools.util.CancellationToken token) {
         Path steamDir = findSteamDir();
         if (steamDir == null) return 0;
         return cleanAppCacheDirs(collectDirs(
                 steamDir.resolve("appcache").toString(),
-                steamDir.resolve("logs").toString(),
-                steamDir.resolve("steamapps").resolve("downloading").toString()));
+                steamDir.resolve("logs").toString()), token);
     }
 
     private Path findSteamDir() {
@@ -226,31 +239,29 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
                 slack.resolve("GPUCache").toString()));
     }
 
-    private long cleanSlack() {
+    private long cleanSlack(com.sbtools.util.CancellationToken token) {
         String appData = CleanerUtils.safeEnv("APPDATA");
         if (appData == null) return 0;
         Path slack = Path.of(appData, "Slack");
         return cleanAppCacheDirs(collectDirs(
                 slack.resolve("Cache").toString(),
                 slack.resolve("Code Cache").toString(),
-                slack.resolve("GPUCache").toString()));
+                slack.resolve("GPUCache").toString()), token);
     }
 
     private void scanZoom(CleanupRow row) {
         String appData = CleanerUtils.safeEnv("APPDATA");
         if (appData == null) return;
         Path zoomData = Path.of(appData, "Zoom", "data");
-        if (!Files.isDirectory(zoomData)) return;
+        if (!Files.isDirectory(zoomData) || !CleanerUtils.isSafeToCleanDirectory(zoomData)) return;
+        // Logs only: Zoom/data also holds settings — never wipe wholesale.
         try (Stream<Path> walk = Files.walk(zoomData, 1)) {
             var stats = walk.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".log"))
                     .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
             row.setTotalBytes(row.getTotalBytes() + stats.getSum());
             row.setItemCount(row.getItemCount() + (int) stats.getCount());
         } catch (Exception ignored) {}
-    }
-
-    private long cleanZoom() {
-        return cleanZoom(com.sbtools.util.CancellationToken.NONE);
     }
 
     private long cleanZoom(com.sbtools.util.CancellationToken token) {
@@ -258,12 +269,15 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
         String appData = CleanerUtils.safeEnv("APPDATA");
         if (appData == null) return 0;
         Path zoomData = Path.of(appData, "Zoom", "data");
-        if (!Files.isDirectory(zoomData)) return 0;
+        if (!Files.isDirectory(zoomData) || !CleanerUtils.isSafeToCleanDirectory(zoomData)) return 0;
         long cleaned = 0;
         try (Stream<Path> files = Files.list(zoomData)) {
             for (Path f : (Iterable<Path>) files::iterator) {
                 if (token != null && token.isCancelled()) break;
-                if (Files.isRegularFile(f)) { long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size; }
+                try {
+                    if (Files.isRegularFile(f)
+                            && f.getFileName().toString().toLowerCase().endsWith(".log")) { long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size; }
+                } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
         return cleaned;
@@ -280,16 +294,12 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
                 try (DirectoryStream<Path> ds = Files.newDirectoryStream(teamsPackage)) {
                     for (Path pkg : ds) {
                         String pkgName = pkg.getFileName().toString();
-                        if (pkgName.contains("MicrosoftTeams") || pkgName.contains("MSTeams")) {
+                        if (pkgName.startsWith("MicrosoftTeams_") || pkgName.startsWith("MSTeams_")) {
                             Path ac = pkg.resolve("AC");
-                            if (Files.isDirectory(ac)) {
-                                try (Stream<Path> walk = Files.walk(ac)) {
-                                    var stats = walk.filter(Files::isRegularFile)
-                                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                                    row.setTotalBytes(row.getTotalBytes() + stats.getSum());
-                                    row.setItemCount(row.getItemCount() + (int) stats.getCount());
-                                } catch (Exception ignored) {}
-                            }
+                            if (Files.isDirectory(ac)) scanAppCache(row, collectDirs(
+                                    ac.resolve("INetCache").toString(),
+                                    ac.resolve("INetCookies").toString(),
+                                    ac.resolve("Cache").toString()));
                         }
                     }
                 } catch (Exception ignored) {}
@@ -305,17 +315,13 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
                 teamsBase.resolve("Application Cache").toString()));
     }
 
-    private long cleanTeams() {
-        return cleanTeams(com.sbtools.util.CancellationToken.NONE);
-    }
-
     private long cleanTeams(com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
         long cleaned = 0;
         String appData = CleanerUtils.safeEnv("APPDATA");
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
-        cleaned += cleanTeamsDirs(appData != null ? Path.of(appData, "Microsoft", "Teams") : null);
-        cleaned += cleanTeamsDirs(appData != null ? Path.of(appData, "Microsoft", "Teams classic") : null);
+        cleaned += cleanTeamsDirs(appData != null ? Path.of(appData, "Microsoft", "Teams") : null, token);
+        cleaned += cleanTeamsDirs(appData != null ? Path.of(appData, "Microsoft", "Teams classic") : null, token);
         if (localAppData != null) {
             Path teamsPackage = Path.of(localAppData, "Packages");
             if (Files.isDirectory(teamsPackage)) {
@@ -323,9 +329,13 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
                     for (Path pkg : ds) {
                         if (token != null && token.isCancelled()) break;
                         String pkgName = pkg.getFileName().toString();
-                        if (pkgName.contains("MicrosoftTeams") || pkgName.contains("MSTeams")) {
+                        if (pkgName.startsWith("MicrosoftTeams_") || pkgName.startsWith("MSTeams_")) {
                             Path ac = pkg.resolve("AC");
-                            if (Files.isDirectory(ac)) cleaned += CleanerUtils.deleteDirectoryContents(ac, token);
+                            // AC holds auth/settings — only cache subdirs are safe.
+                            if (Files.isDirectory(ac)) cleaned += cleanAppCacheDirs(collectDirs(
+                                    ac.resolve("INetCache").toString(),
+                                    ac.resolve("INetCookies").toString(),
+                                    ac.resolve("Cache").toString()), token);
                         }
                     }
                 } catch (Exception ignored) {}
@@ -334,11 +344,11 @@ public class OtherProgramsCacheCleaner implements CleanerExtension {
         return cleaned;
     }
 
-    private long cleanTeamsDirs(Path teamsBase) {
+    private long cleanTeamsDirs(Path teamsBase, com.sbtools.util.CancellationToken token) {
         if (teamsBase == null || !Files.isDirectory(teamsBase)) return 0;
         return cleanAppCacheDirs(collectDirs(
                 teamsBase.resolve("Cache").toString(),
                 teamsBase.resolve("Code Cache").toString(),
-                teamsBase.resolve("Application Cache").toString()));
+                teamsBase.resolve("Application Cache").toString()), token);
     }
 }

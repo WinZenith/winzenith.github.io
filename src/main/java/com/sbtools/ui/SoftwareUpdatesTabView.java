@@ -64,6 +64,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
     private FilteredList<SoftwareUpdateEntry> filteredRows;
     private SortedList<SoftwareUpdateEntry> sortedRows;
     private javafx.collections.ListChangeListener<SoftwareUpdateEntry> filterCountListener;
+    private javafx.collections.ListChangeListener<SoftwareUpdateEntry> filteredCountListener;
 
     public SoftwareUpdatesTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -114,12 +115,13 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
         filterCountListener = ch -> updateFilterCount();
         viewModel.getRows().addListener(filterCountListener);
-        filteredRows.addListener((ListChangeListener<SoftwareUpdateEntry>) ch -> updateFilterCount());
+        filteredCountListener = ch -> updateFilterCount();
+        filteredRows.addListener(filteredCountListener);
         updateFilterPredicate();
 
         // Track per-entry selected listeners so we can remove on dispose / removal (fix leak B7)
-        java.util.Map<SoftwareUpdateEntry, javafx.beans.value.ChangeListener<Boolean>> selectedListeners = new java.util.HashMap<>();
-        javafx.collections.ListChangeListener<SoftwareUpdateEntry> rowsListener = c -> {
+        selectedListeners = new java.util.HashMap<>();
+        rowsListener = c -> {
             while (c.next()) {
                 if (c.wasAdded()) {
                     for (SoftwareUpdateEntry entry : c.getAddedSubList()) {
@@ -144,9 +146,6 @@ public class SoftwareUpdatesTabView extends BorderPane {
             e.selectedProperty().addListener(l);
             selectedListeners.put(e, l);
         }
-        // Store for dispose cleanup
-        this.rowsListener = rowsListener;
-        this.selectedListeners = selectedListeners;
 
         // Refresh table when either global or local busy changes (progress/status bindings)
         javafx.beans.value.ChangeListener<Boolean> refreshListener = (obs, oldVal, newVal) -> table.refresh();
@@ -155,9 +154,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
         this.refreshListener = refreshListener;
         this.tableRef = table;
         // Single listener for row changes to refresh (merged to avoid duplicate)
-        javafx.collections.ListChangeListener<SoftwareUpdateEntry> refreshRowsListener = ch -> table.refresh();
+        refreshRowsListener = ch -> table.refresh();
         viewModel.getRows().addListener(refreshRowsListener);
-        this.refreshRowsListener = refreshRowsListener;
 
         if (!AppPaths.isWindows()) {
             scanButton.setDisable(true);
@@ -334,6 +332,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 spinner.setPrefSize(48, 48);
                 spinner.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
                 spinner.setVisible(false);
+                // Unused indicator: keep it out of layout too, otherwise every row
+                // carries a blank 48px gap inside the Action cell.
+                spinner.setManaged(false);
                 installingLabel.setVisible(false);
                 downloadProgress.setPrefWidth(80);
                 downloadProgress.setVisible(false);
@@ -390,13 +391,16 @@ public class SoftwareUpdatesTabView extends BorderPane {
                 } catch (Exception ignored) {}
                 installingLabel.textProperty().bind(entry.statusProperty());
                 statusListener = (obs, oldVal, newVal) -> Platform.runLater(() -> {
-                    boolean show = newVal != null && !newVal.isBlank();
+                    // Progress views belong to an active install only: a terminal
+                    // "Failed" status must not keep showing "Installing...".
+                    boolean show = newVal != null && !newVal.isBlank() && !"Failed".equals(newVal);
                     downloadProgress.setVisible(show);
                     installingLabel.setVisible(show);
                     sizeLabel.setVisible(show);
                 });
                 entry.statusProperty().addListener(statusListener);
-                boolean showNow = entry.getStatus() != null && !entry.getStatus().isBlank();
+                boolean showNow = entry.getStatus() != null && !entry.getStatus().isBlank()
+                        && !"Failed".equals(entry.getStatus());
                 downloadProgress.setVisible(showNow);
                 installingLabel.setVisible(showNow);
                 sizeLabel.setVisible(showNow);
@@ -425,6 +429,11 @@ public class SoftwareUpdatesTabView extends BorderPane {
         table.setRowFactory(tv -> {
             TableRow<SoftwareUpdateEntry> row = new TableRow<>();
             row.setOnMouseClicked(event -> {
+                // Row click toggles selection, but clicks on interactive controls must reach
+                // the control only: otherwise the Install checkbox double-toggles (appears
+                // dead) and Update/Ignore clicks flip selection as a side effect.
+                if (event.getButton() != javafx.scene.input.MouseButton.PRIMARY) return;
+                if (isFromInteractiveControl(event.getTarget(), row)) return;
                 if (event.getClickCount() == 2 && !row.isEmpty() && row.getItem() != null
                         && "Failed".equals(row.getItem().getStatus())) {
                     showErrorDetailsDialog(row.getItem());
@@ -459,6 +468,28 @@ public class SoftwareUpdatesTabView extends BorderPane {
         });
 
         return table;
+    }
+
+    /**
+     * True when a row click originated inside an interactive control (Install checkbox,
+     * Update/Ignore buttons, progress views). Those clicks belong to the control: letting
+     * them also toggle row selection double-flips the checkbox (looks dead) and makes
+     * button clicks corrupt the selection as a side effect.
+     */
+    private static boolean isFromInteractiveControl(Object target, javafx.scene.Node boundary) {
+        javafx.scene.Node n = target instanceof javafx.scene.Node node ? node : null;
+        while (n != null) {
+            if (n instanceof javafx.scene.control.CheckBox
+                    || n instanceof javafx.scene.control.ButtonBase
+                    || n instanceof javafx.scene.control.ComboBoxBase<?>
+                    || n instanceof javafx.scene.control.ProgressBar
+                    || n instanceof javafx.scene.control.ProgressIndicator) {
+                return true;
+            }
+            if (n == boundary) break;
+            n = n.getParent();
+        }
+        return false;
     }
 
     private void updateFilterPredicate() {
@@ -659,6 +690,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
         }
         if (filterCountListener != null) {
             try { viewModel.getRows().removeListener(filterCountListener); } catch (Exception ignored) {}
+        }
+        if (filteredCountListener != null && filteredRows != null) {
+            try { filteredRows.removeListener(filteredCountListener); } catch (Exception ignored) {}
         }
         if (sortedRows != null) {
             try { sortedRows.comparatorProperty().unbind(); } catch (Exception ignored) {}

@@ -33,16 +33,16 @@ public class SystemRestoreRow {
         return sequenceNumber;
     }
 
+    // WMI SystemRestore.EventType codes (BEGIN/END_SYSTEM_CHANGE family).
+    // NOTE: 0/1/10/12/13 are RestorePointType codes, a different property
+    // the list script does not select — mapping them here mislabeled rows
+    // (e.g. every manual point showed "Restore Operation").
     static String formatEventType(int code) {
         return switch (code) {
-            case 0 -> "Application Install";
-            case 1 -> "Application Uninstall";
-            case 10 -> "Driver Install";
-            case 12 -> "Modify Settings";
-            case 13 -> "Cancelled Operation";
-            case 100 -> "System Checkpoint";
-            case 101 -> "Manual";
-            case 102 -> "Restore Operation";
+            case 100 -> "Begin system change";
+            case 101 -> "End system change";
+            case 102 -> "Begin nested change";
+            case 103 -> "End nested change";
             default -> "Unknown (" + code + ")";
         };
     }

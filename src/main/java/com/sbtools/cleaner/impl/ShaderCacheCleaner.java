@@ -28,12 +28,7 @@ public class ShaderCacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
-        long cleaned = 0;
-        for (Path dir : getDirs()) {
-            if (token != null && token.isCancelled()) break;
-            if (dir != null && Files.isDirectory(dir)) cleaned += CleanerUtils.deleteDirectoryContents(dir, token);
-        }
-        return cleaned;
+        return CleanerUtils.cleanDirectoryPattern(getDirs(), token);
     }
 
     private List<Path> getDirs() {

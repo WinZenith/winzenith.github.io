@@ -56,11 +56,16 @@ public class SoftwareUpdateViewModel {
     private static final int MAX_RETRY_ATTEMPTS = 3;
 
     private final AtomicBoolean scanCancelled = new AtomicBoolean(false);
+    private final AtomicBoolean scanRunning = new AtomicBoolean(false);
     private volatile Future<?> scanFuture;
     private final AtomicBoolean installCancelled = new AtomicBoolean(false);
     private final AtomicBoolean installRunning = new AtomicBoolean(false);
     private final AtomicBoolean restorePointCreatedThisBatch = new AtomicBoolean(false);
     private final List<SoftwareUpdateEntry> failedEntries = new ArrayList<>();
+    // Ownership epoch for the failure/retry state: every full invalidation (fresh scan,
+    // new batch, new retry owner) bumps it. Delayed retry dispatches carry the epoch they
+    // captured and die silently when it no longer matches instead of resurrecting stale rows.
+    private final java.util.concurrent.atomic.AtomicLong failureEpoch = new java.util.concurrent.atomic.AtomicLong(0);
     private volatile boolean disposed = false;
 
     private Consumer<String> onWingetNotAvailable;
@@ -113,13 +118,16 @@ public class SoftwareUpdateViewModel {
         if (disposed) return;
         // Block concurrent scan/install: check both busy and installRunning synchronously on caller thread.
         // busy/installRunning are set synchronously below, so rapid double-clicks cannot start overlapping scans.
-        if (busy.get() || installRunning.get()) return;
+        // globalBusy covers other tabs' operations (their buttons are disabled the same way).
+        if (busy.get() || installRunning.get() || globalBusy.get()) return;
         scanCancelled.set(false);
+        scanRunning.set(true);
         restorePointCreatedThisBatch.set(false);
         // A fresh scan invalidates any previous failure state. Without this, Retry Failed
         // after a re-scan would reinstall orphaned entries from the old scan (wrong versions,
         // rows no longer displayed) and a maxed-out retryCount would block retries forever.
         synchronized (failedEntries) { failedEntries.clear(); }
+        failureEpoch.incrementAndGet();
         retryCount.set(0);
         // Set busy synchronously when already on FX thread to close the race where a second
         // Scan click arrives before the async runLater from the first click executes.
@@ -140,6 +148,7 @@ public class SoftwareUpdateViewModel {
             scanFuture = executor.submit(this::scanInternal, "SoftwareUpdate-Scan");
         } catch (Exception ex) {
             AppLogger.warning("Failed to submit scan (shutting down?): " + ex.getMessage());
+            scanRunning.set(false);
             Platform.runLater(() -> {
                 if (!disposed) busy.set(false);
             });
@@ -177,7 +186,7 @@ public class SoftwareUpdateViewModel {
                     .map(s -> {
                         int t = s.lastIndexOf('\t');
                         String id = t >= 0 ? s.substring(t + 1) : s;
-                        return id == null ? "" : id.trim().toLowerCase();
+                        return id == null ? "" : id.trim().toLowerCase(java.util.Locale.ROOT);
                     })
                     .filter(s -> !s.isEmpty())
                     .collect(Collectors.toSet());
@@ -190,14 +199,14 @@ public class SoftwareUpdateViewModel {
                         if ("WindowsUpdate".equals(e.source())) {
                             if (e.updateId() == null || e.updateId().isBlank()) return false;
                             if (e.id() == null || e.id().isBlank()) return false;
-                            return !skippedIdSet.contains(e.id().trim().toLowerCase());
+                            return !skippedIdSet.contains(e.id().trim().toLowerCase(java.util.Locale.ROOT));
                         }
                         // winget rows: entries with blank id were already filtered in
                         // SoftwareUpdateService, but guard here as defense-in-depth.
                         if (e.id() == null || e.id().isBlank()) {
                             return false;
                         }
-                        return !skippedIdSet.contains(e.id().trim().toLowerCase());
+                        return !skippedIdSet.contains(e.id().trim().toLowerCase(java.util.Locale.ROOT));
                     })
                     .collect(Collectors.toList());
             // Deduplicate by id (case-insensitive, keep-first = winget wins since winget
@@ -229,7 +238,7 @@ public class SoftwareUpdateViewModel {
                         List<SoftwareUpdateEntry> cachedFiltered = cachedOpt.get().entries().stream()
                                 .filter(e -> {
                                     if (e == null || e.id() == null || e.id().isBlank()) return false;
-                                    String key = e.id().trim().toLowerCase();
+                                    String key = e.id().trim().toLowerCase(java.util.Locale.ROOT);
                                     if ("WindowsUpdate".equals(e.source())) {
                                         return e.updateId() != null && !e.updateId().isBlank()
                                                 && !skippedIdSet.contains(key);
@@ -305,6 +314,7 @@ public class SoftwareUpdateViewModel {
             }
         } finally {
             scanFuture = null;
+            scanRunning.set(false);
             Platform.runLater(() -> {
                 if (!disposed) busy.set(false);
             });
@@ -313,6 +323,10 @@ public class SoftwareUpdateViewModel {
 
     public void stopScan() {
         scanCancelled.set(true);
+        // Press-time snapshot: a Stop landing after the scan worker finished (or while an
+        // install is finalizing) must not clear busy / overwrite the status text - that
+        // silently unblocked the UI while work (or its follow-up scan) was still landing.
+        boolean wasScanning = scanRunning.getAndSet(false);
         if (scanFuture != null) {
             try {
                 scanFuture.cancel(true);
@@ -320,6 +334,7 @@ public class SoftwareUpdateViewModel {
             }
             scanFuture = null;
         }
+        if (!wasScanning) return;
         Platform.runLater(() -> {
             if (!disposed && !installRunning.get()) {
                 busy.set(false);
@@ -352,10 +367,17 @@ public class SoftwareUpdateViewModel {
         // Synchronous mutual exclusion: block overlapping batch/single installs and scans.
         // Claim installRunning immediately (before the async restore-point dialog) so rapid
         // double-clicks or Update-Selected + per-row Update cannot start parallel winget/MSI runs.
-        if (installRunning.get() || busy.get()) {
+        // globalBusy covers other tabs' operations.
+        if (installRunning.get() || busy.get() || globalBusy.get()) {
             Platform.runLater(() -> {
                 if (!disposed) new Alert(Alert.AlertType.INFORMATION, "Another operation is already in progress. Please wait.").showAndWait();
             });
+            return;
+        }
+        // Validate selection first so an empty selection shows only the
+        // "select at least one" hint instead of stacking the admin notice + hint.
+        if (selected == null || selected.isEmpty()) {
+            Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Select at least one program to update.").showAndWait());
             return;
         }
         // Non-admin users can still update per-user winget packages. Do NOT hard-block:
@@ -376,10 +398,6 @@ public class SoftwareUpdateViewModel {
             }
         } catch (Exception ex) {
             AppLogger.warning("Admin check failed, proceeding as non-admin: " + ex.getMessage());
-        }
-        if (selected == null || selected.isEmpty()) {
-            Platform.runLater(() -> new Alert(Alert.AlertType.INFORMATION, "Select at least one program to update.").showAndWait());
-            return;
         }
         if (!installRunning.compareAndSet(false, true)) {
             Platform.runLater(() -> {
@@ -414,8 +432,14 @@ public class SoftwareUpdateViewModel {
                 return;
             }
             synchronized (failedEntries) { failedEntries.clear(); }
+            failureEpoch.incrementAndGet();
             if (!isRetry) retryCount.set(0);
             int total = snapshot.size();
+            // Reset synchronously on this worker thread BEFORE submitting the batch:
+            // the previous reset lived inside the runLater below, so a batch worker
+            // starting before the FX thread ran saw the stale true from an earlier
+            // cancel and aborted immediately ("0 of N completed" without user input).
+            installCancelled.set(false);
             Platform.runLater(() -> {
                 if (disposed) return;
                 busy.set(true);
@@ -514,6 +538,22 @@ public class SoftwareUpdateViewModel {
                     }
                     if (installCancelled.get()) {
                         statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
+                        // Items that failed BEFORE the cancel still deserve a retry path:
+                        // without this their rows show Failed but Retry Failed stays hidden.
+                        if (!finalFailed.isEmpty() || !finalTechMismatch.isEmpty()) {
+                            for (SoftwareUpdateEntry fe : finalFailed) {
+                                synchronized (failedEntries) { if (!failedEntries.contains(fe)) failedEntries.add(fe); }
+                                fe.setStatus("Failed");
+                                fe.setProgress(0.0);
+                                fe.setSelected(false);
+                                rows.remove(fe);
+                                rows.add(fe);
+                            }
+                            for (SoftwareUpdateEntry te : finalTechMismatch) {
+                                synchronized (failedEntries) { if (!failedEntries.contains(te)) failedEntries.add(te); }
+                            }
+                            showRetryFailed.set(true);
+                        }
                     } else if (rebootAbort) {
                         statusText.set("Reboot required – " + finalCompleted + " installed, " + skippedDueToReboot + " skipped. Please reboot and re-scan.");
                         if (!finalFailed.isEmpty()) {
@@ -554,7 +594,7 @@ public class SoftwareUpdateViewModel {
 
     public void updateSingle(SoftwareUpdateEntry entry) {
         if (disposed || entry == null) return;
-        if (installRunning.get() || busy.get()) {
+        if (installRunning.get() || busy.get() || globalBusy.get()) {
             Platform.runLater(() -> {
                 if (!disposed) new Alert(Alert.AlertType.INFORMATION, "Another operation is already in progress. Please wait.").showAndWait();
             });
@@ -606,6 +646,9 @@ public class SoftwareUpdateViewModel {
                 return;
             }
             synchronized (failedEntries) { failedEntries.clear(); }
+            // Same stale-flag race as the batch path: reset on this worker thread
+            // before submitting, not only inside the runLater below.
+            installCancelled.set(false);
             Platform.runLater(() -> {
                 if (disposed) return;
                 busy.set(true);
@@ -642,6 +685,7 @@ public class SoftwareUpdateViewModel {
                     new Alert(Alert.AlertType.ERROR, "Missing Windows Update identifier for " + entry.getName()).showAndWait();
                     entry.setStatus("Failed");
                     entry.setProgress(0.0);
+                    if (!disposed) statusText.set("Update failed for " + entry.getName() + ": missing identifier.");
                 });
                 installRunning.set(false);
                 Platform.runLater(() -> {
@@ -655,6 +699,7 @@ public class SoftwareUpdateViewModel {
                     new Alert(Alert.AlertType.ERROR, "Missing package identifier for " + entry.getName()).showAndWait();
                     entry.setStatus("Failed");
                     entry.setProgress(0.0);
+                    if (!disposed) statusText.set("Update failed for " + entry.getName() + ": missing identifier.");
                 });
                 installRunning.set(false);
                 Platform.runLater(() -> {
@@ -675,6 +720,9 @@ public class SoftwareUpdateViewModel {
                     res = service.installWindowsUpdate(entry.updateId(), INSTALL_TIMEOUT_WU_SECONDS, installCancelled, entry);
                 } catch (CancellationException cex) {
                     resetEntryUiState(entry);
+                    Platform.runLater(() -> {
+                        if (!disposed) statusText.set("Update cancelled for " + entry.getName() + ".");
+                    });
                     return;
                 }
             } else {
@@ -682,6 +730,9 @@ public class SoftwareUpdateViewModel {
                     res = service.updatePackageWithStreaming(entry.id(), true, INSTALL_TIMEOUT_WINGET_SECONDS, entry, installCancelled);
                 } catch (CancellationException cex) {
                     resetEntryUiState(entry);
+                    Platform.runLater(() -> {
+                        if (!disposed) statusText.set("Update cancelled for " + entry.getName() + ".");
+                    });
                     return;
                 }
             }
@@ -797,6 +848,7 @@ public class SoftwareUpdateViewModel {
 
     public void retryFailed() {
         List<SoftwareUpdateEntry> toRetry;
+        long capturedEpoch;
         synchronized (failedEntries) {
             if (failedEntries.isEmpty()) return;
             if (retryCount.get() >= MAX_RETRY_ATTEMPTS) {
@@ -807,25 +859,65 @@ public class SoftwareUpdateViewModel {
             retryCount.incrementAndGet();
             toRetry = new ArrayList<>(failedEntries);
             failedEntries.clear();
-            for (SoftwareUpdateEntry e : toRetry) {
-                e.setStatus("");
-                e.setProgress(0.0);
-                e.setSelected(true);
-            }
-            showRetryFailed.set(false);
+            capturedEpoch = failureEpoch.incrementAndGet();
             final int attempt = retryCount.get();
+            final List<SoftwareUpdateEntry> retrySnapshot = toRetry;
+            // JavaFX properties must change on the FX thread (this runs on a worker).
             Platform.runLater(() -> {
+                for (SoftwareUpdateEntry e : retrySnapshot) {
+                    e.setStatus("");
+                    e.setProgress(0.0);
+                    e.setSelected(true);
+                }
+                showRetryFailed.set(false);
                 if (!disposed) statusText.set(
-                        "Retrying " + toRetry.size() + " failed update(s) (attempt " + attempt + "/" + MAX_RETRY_ATTEMPTS + ")...");
+                        "Retrying " + retrySnapshot.size() + " failed update(s) (attempt " + attempt + "/" + MAX_RETRY_ATTEMPTS + ")...");
             });
         }
+        final List<SoftwareUpdateEntry> retryList = toRetry;
+        final long epoch = capturedEpoch;
         try {
             executor.submit(() -> {
                 try { Thread.sleep(2000); } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     return;
                 }
-                Platform.runLater(() -> updateSelected(toRetry, true));
+                Platform.runLater(() -> {
+                    // Superseded by a newer scan/batch: the state this retry captured
+                    // was intentionally invalidated - die silently, never resurrect it.
+                    if (epoch != failureEpoch.get()) return;
+                    // Drop entries the user ignored during the delay: retrying them
+                    // would reinstall explicitly ignored packages.
+                    List<SoftwareUpdateEntry> live = filterOutIgnored(retryList);
+                    if (live.isEmpty()) {
+                        showRetryFailed.set(false);
+                        if (!disposed) statusText.set("Nothing left to retry (remaining items were ignored).");
+                        return;
+                    }
+                    // The tab (or another tab via shared busy) may have become busy
+                    // during the delay: postpone instead of losing the retry. The
+                    // attempt is refunded so a postponement never burns a retry.
+                    if (disposed || installRunning.get() || busy.get() || globalBusy.get()) {
+                        retryCount.decrementAndGet();
+                        synchronized (failedEntries) {
+                            for (SoftwareUpdateEntry e : live) {
+                                if (!failedEntries.contains(e)) failedEntries.add(e);
+                            }
+                        }
+                        for (SoftwareUpdateEntry e : live) {
+                            e.setStatus("Failed");
+                            e.setProgress(0.0);
+                            e.setSelected(false);
+                            // List nudge so the table/filter refresh like the other failure paths.
+                            rows.remove(e);
+                            rows.add(e);
+                        }
+                        showRetryFailed.set(true);
+                        if (!disposed) statusText.set("Retry postponed \u2013 another operation is running. Press \"Retry Failed\" to try again.");
+                        return;
+                    }
+                    updateSelected(live, true);
+                });
             });
         } catch (Exception ex) {
             AppLogger.warning("Failed to schedule retry (shutting down?): " + ex.getMessage());
@@ -846,7 +938,7 @@ public class SoftwareUpdateViewModel {
             } else {
                 String safeName = entry.getName() == null ? id : entry.getName().replace("\t", " ").replace("\n", " ").replace("\r", " ");
                 String stored = safeName + "\t" + id;
-                String idLower = id.toLowerCase();
+                String idLower = id.toLowerCase(java.util.Locale.ROOT);
                 // Atomic RMW so concurrent saves from other tabs cannot lose updates.
                 settingsStore.update(curr -> {
                     List<String> cur = curr.skippedSoftwareIds();
@@ -886,6 +978,35 @@ public class SoftwareUpdateViewModel {
     }
 
     /**
+     * Drops entries the user moved to the ignore list (same id-key convention as the
+     * scan filter), so a delayed retry never reinstalls explicitly ignored packages.
+     */
+    private List<SoftwareUpdateEntry> filterOutIgnored(List<SoftwareUpdateEntry> entries) {
+        if (entries == null || entries.isEmpty()) return List.of();
+        try {
+            AppSettings settings = settingsStore.load();
+            List<String> skipped = settings == null ? null : settings.skippedSoftwareIds();
+            if (skipped == null || skipped.isEmpty()) return new ArrayList<>(entries);
+            Set<String> skippedSet = skipped.stream()
+                    .map(s -> {
+                        int t = s.lastIndexOf('\t');
+                        String id = t >= 0 ? s.substring(t + 1) : s;
+                        return id == null ? "" : id.trim().toLowerCase(java.util.Locale.ROOT);
+                    })
+                    .filter(s -> !s.isEmpty())
+                    .collect(Collectors.toSet());
+            if (skippedSet.isEmpty()) return new ArrayList<>(entries);
+            return entries.stream()
+                    .filter(e -> e != null && e.id() != null
+                            && !skippedSet.contains(e.id().trim().toLowerCase(java.util.Locale.ROOT)))
+                    .collect(Collectors.toList());
+        } catch (Exception ex) {
+            AppLogger.warning("Retry ignore-filter failed, keeping full list: " + ex.getMessage());
+            return new ArrayList<>(entries);
+        }
+    }
+
+    /**
      * Deduplicates entries by package id (case-insensitive), keeping the first occurrence.
      * Callers pass winget results before Windows Update results so winget wins ties.
      * Package-visible for unit tests.
@@ -908,6 +1029,7 @@ public class SoftwareUpdateViewModel {
     public void dispose() {
         disposed = true;
         scanCancelled.set(true);
+        scanRunning.set(false);
         installCancelled.set(true);
         installRunning.set(false);
         // Ensure UI busy flags are cleared immediately so globalBusy doesn't stick (B8/B9)
@@ -1043,6 +1165,9 @@ public class SoftwareUpdateViewModel {
                 });
             }
         } catch (CancellationException cex) {
+            // Mid-item cancel must clear the "Installing..." row state, otherwise the
+            // row claims to install forever (single-install path already does this).
+            resetEntryUiState(entry);
             return false;
         } catch (Exception ex) {
             String msg = ex.getMessage();
@@ -1114,12 +1239,37 @@ public class SoftwareUpdateViewModel {
             if (size > 1024 * 1024) size = 1024 * 1024;
             try (java.io.InputStream in = java.nio.file.Files.newInputStream(p)) {
                 byte[] buf = in.readNBytes((int) size);
-                String logContent = new String(buf, java.nio.charset.StandardCharsets.UTF_8).toLowerCase();
+                String logContent = decodeInstallerLog(buf).toLowerCase();
                 return logContent.contains("error 1714") || logContent.contains("cannot be removed");
             }
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * Decodes an installer log with BOM sniffing. MSI logs are usually UTF-16LE (with BOM);
+     * plain UTF-8 decoding leaves NULs between every char so markers like "error 1714"
+     * never match and the corruption guidance below never fires (Edge 1714 case).
+     */
+    private static String decodeInstallerLog(byte[] buf) {
+        if (buf == null || buf.length == 0) return "";
+        if (buf.length >= 2) {
+            int b0 = buf[0] & 0xFF, b1 = buf[1] & 0xFF;
+            if (b0 == 0xFF && b1 == 0xFE) return new String(buf, java.nio.charset.StandardCharsets.UTF_16);
+            if (b0 == 0xFE && b1 == 0xFF) return new String(buf, java.nio.charset.StandardCharsets.UTF_16BE);
+        }
+        if (buf.length >= 3 && (buf[0] & 0xFF) == 0xEF && (buf[1] & 0xFF) == 0xBB && (buf[2] & 0xFF) == 0xBF) {
+            return new String(buf, java.nio.charset.StandardCharsets.UTF_8);
+        }
+        // No BOM: NULs on odd positions dominate in UTF-16LE ASCII text.
+        int sample = Math.min(buf.length, 512);
+        int nulOdd = 0, checks = 0;
+        for (int i = 1; i < sample; i += 2) { checks++; if (buf[i] == 0) nulOdd++; }
+        if (checks > 0 && nulOdd * 2 > checks) {
+            return new String(buf, java.nio.charset.StandardCharsets.UTF_16LE);
+        }
+        return new String(buf, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private CompletableFuture<Void> maybeCreateRestorePointAsync() {
@@ -1231,7 +1381,10 @@ public class SoftwareUpdateViewModel {
         StringBuilder msg = new StringBuilder();
         if (!failedEntries.isEmpty()) {
             msg.append("The following updates failed:\n\n");
-            for (SoftwareUpdateEntry fe : failedEntries) {
+            // Cap the dialog list: mass failures would otherwise build a giant modal.
+            // Full per-item errors stay in Update History.
+            int shown = Math.min(failedEntries.size(), 10);
+            for (SoftwareUpdateEntry fe : failedEntries.subList(0, shown)) {
                 String displayName = fe.getName() != null ? fe.getName() : fe.id();
                 msg.append("  - ").append(displayName).append("\n");
                 String error = fe.getLastError();
@@ -1241,6 +1394,10 @@ public class SoftwareUpdateViewModel {
                     msg.append("    Error: ").append(shortError).append("\n");
                 }
                 msg.append("\n");
+            }
+            if (failedEntries.size() > shown) {
+                msg.append("  ...and ").append(failedEntries.size() - shown)
+                        .append(" more (see Update History for details).\n\n");
             }
         }
         if (!techMismatchEntries.isEmpty()) {
@@ -1275,10 +1432,20 @@ public class SoftwareUpdateViewModel {
         try {
             new SoftwareUpdateHistoryStore().add(new SoftwareUpdateHistoryEntry(
                     entry.getName(), entry.id(), oldVersion, newVersion,
-                    entry.source(), Instant.now(), success, errorMessage));
+                    entry.source(), Instant.now(), success, capHistoryError(errorMessage)));
         } catch (Exception ex) {
             AppLogger.warning("Failed to record update history: " + ex.getMessage());
         }
+    }
+
+    /**
+     * Failure payloads are full process outputs (unbounded for long winget/WU runs).
+     * Persisting them verbatim bloats the 500-entry history file and the History dialog.
+     */
+    private static String capHistoryError(String errorMessage) {
+        final int max = 8000;
+        if (errorMessage == null || errorMessage.length() <= max) return errorMessage;
+        return errorMessage.substring(0, max) + "\n...[truncated, full output in logs]";
     }
 
     private static void shutdownExecutor(ExecutorService executor) {

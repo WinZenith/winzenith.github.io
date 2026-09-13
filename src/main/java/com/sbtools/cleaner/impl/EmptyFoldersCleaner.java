@@ -21,6 +21,7 @@ public class EmptyFoldersCleaner implements CleanerExtension {
         int count = 0;
         for (Path root : getRoots()) {
             if (root != null && Files.isDirectory(root)) {
+                if (!CleanerUtils.isSafeToCleanDirectory(root)) continue;
                 try (Stream<Path> walk = Files.walk(root, 3)) {
                     count += (int) walk.filter(Files::isDirectory)
                             .filter(p -> !p.equals(root))
@@ -28,6 +29,7 @@ public class EmptyFoldersCleaner implements CleanerExtension {
                 } catch (Exception ignored) {}
             }
         }
+        row.setTotalBytes(0);
         row.setItemCount(count);
         row.setSizeOrCountText(count + " empty folder" + (count == 1 ? "" : "s"));
     }
@@ -43,6 +45,7 @@ public class EmptyFoldersCleaner implements CleanerExtension {
         for (Path root : getRoots()) {
             if (token != null && token.isCancelled()) break;
             if (root != null && Files.isDirectory(root)) {
+                if (!CleanerUtils.isSafeToCleanDirectory(root)) continue;
                 try (Stream<Path> walk = Files.walk(root, 3)) {
                     List<Path> emptyDirs = walk.filter(Files::isDirectory)
                             .filter(p -> !p.equals(root))

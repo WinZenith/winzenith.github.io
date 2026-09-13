@@ -256,9 +256,11 @@ public class SystemInfoTabView extends BorderPane {
                 }
             } finally {
                 // Ensure loading flag is cleared even if FX toolkit is shutting down and runLater never executes.
-                // Busy is released exactly once via busyHeld (ref-counted global flag).
+                // Busy is released exactly once via busyHeld, on the FX thread only:
+                // BusyProperty wraps a JavaFX property and must never be touched
+                // off-FX (previously 1 acquire / 2 releases corrupted the counter
+                // and could clear another tab's still-running busy state).
                 isLoading.set(false);
-                releaseBusyOnce();
                 Platform.runLater(() -> {
                     releaseBusyOnce();
                     isLoading.set(false);

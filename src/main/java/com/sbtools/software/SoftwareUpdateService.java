@@ -59,82 +59,36 @@ public class SoftwareUpdateService {
 
         if (cancelled != null && cancelled.get()) return results;
 
-        if (winget.supportsJsonOutput()) {
-            ProcessResult r;
-            try {
-                r = winget.runWithFallback(120, cancelled,
-                        "upgrade", "--source", "winget", "--accept-source-agreements",
-                        "--accept-package-agreements", "--output", "json");
-            } catch (RuntimeException re) {
-                if (re.getCause() instanceof java.util.concurrent.CancellationException || cancelled != null && cancelled.get()) {
-                    AppLogger.info("winget JSON scan cancelled");
-                    return results;
-                }
-                lastWingetError = re.getMessage();
-                throw re;
+        // List mode takes NO --output/--accept-* flags. `upgrade --output json` is rejected by
+        // current winget (it prints usage text, which the text parser then misread as phantom
+        // rows) and --accept-package-agreements flips list mode into a "Multiple installed
+        // packages found" Name/Id-only table on winget >= 1.29. List bare instead.
+        ProcessResult r;
+        try {
+            r = winget.runWithFallback(120, cancelled,
+                    "upgrade", "--source", "winget");
+        } catch (RuntimeException re) {
+            if (re.getCause() instanceof java.util.concurrent.CancellationException || cancelled != null && cancelled.get()) {
+                AppLogger.info("winget scan cancelled");
+                return results;
             }
-            if (r == null) {
-                lastWingetError = "winget returned no result";
-            } else if (!r.success() && (r.stdout() == null || r.stdout().isBlank()) && (r.stderr() == null || r.stderr().isBlank())) {
-                lastWingetError = "winget failed with exit " + r.exitCode();
-            }
-            if (r != null) {
-                String stdout = r.stdout();
-                if (stdout != null && !stdout.isBlank()) {
-                    List<SoftwareUpdateEntry> jsonResults = parseJsonOutput(stdout);
-                    if (!jsonResults.isEmpty()) {
-                        results.addAll(jsonResults);
-                    } else {
-                        String trimmed = stdout.trim();
-                        boolean looksJson = trimmed.startsWith("{") || trimmed.startsWith("[");
-                        if (!looksJson) {
-                            List<SoftwareUpdateEntry> fallback = parseTextOutput(stdout);
-                            if (!fallback.isEmpty()) {
-                                AppLogger.info("winget JSON parse yielded 0, text fallback yielded " + fallback.size());
-                                results.addAll(fallback);
-                            }
-                        } else {
-                            // JSON output but parser found 0 – may be schema change or "No applicable" message.
-                            // Don't silently return empty; try text parse as safety net before declaring no updates.
-                            if (trimmed.contains("No applicable") || trimmed.contains("No installed package")
-                                    || trimmed.contains("No package found")) {
-                                return results;
-                            }
-                            List<SoftwareUpdateEntry> fallback = parseTextOutput(stdout);
-                            if (!fallback.isEmpty()) {
-                                AppLogger.warning("winget JSON parse yielded 0 despite JSON-looking output; text fallback recovered " + fallback.size() + " entries");
-                                results.addAll(fallback);
-                            } else {
-                                AppLogger.warning("winget JSON parse yielded 0 and text fallback also empty; treating as no updates. Raw output head: " + trimmed.substring(0, Math.min(300, trimmed.length())));
-                            }
-                        }
-                    }
-                }
-            }
+            lastWingetError = re.getMessage();
+            throw re;
+        }
+        if (r == null) {
+            lastWingetError = "winget returned no result";
+        } else if (WingetRunner.isLauncherFailure(r)) {
+            // The launcher never started winget (missing binary, "not recognized", usage text):
+            // surface as an error instead of parsing help text into phantom rows.
+            String detail = r.combinedOutput();
+            if (detail != null && detail.length() > 300) detail = detail.substring(0, 300) + "...";
+            lastWingetError = "winget list failed (exit " + r.exitCode() + "): " + (detail == null ? "" : detail.strip());
         } else {
-            ProcessResult textResult;
-            try {
-                textResult = winget.runWithFallback(120, cancelled,
-                        "upgrade", "--source", "winget");
-            } catch (RuntimeException re) {
-                if (re.getCause() instanceof java.util.concurrent.CancellationException || cancelled != null && cancelled.get()) {
-                    AppLogger.info("winget text scan cancelled");
-                    return results;
-                }
-                lastWingetError = re.getMessage();
-                throw re;
-            }
-            if (textResult != null) {
-                String stdout = textResult.stdout();
-                if (stdout != null && !stdout.isBlank()) {
-                    results.addAll(parseTextOutput(stdout));
-                } else if (!textResult.success()) {
-                    lastWingetError = "winget text scan exit " + textResult.exitCode() + ": " + textResult.combinedOutput();
-                }
-            }
-            if (results.isEmpty() && textResult == null) {
-                lastWingetError = "winget text scan returned null";
-                AppLogger.warning("winget text scan failed");
+            String stdout = r.stdout();
+            if (stdout != null && !stdout.isBlank()) {
+                results.addAll(parseTextOutput(stdout));
+            } else if (!r.success()) {
+                lastWingetError = "winget text scan exit " + r.exitCode() + ": " + r.combinedOutput();
             }
         }
 
@@ -241,6 +195,22 @@ public class SoftwareUpdateService {
             }
         }
 
+        // Locale-robust fallback: winget localizes header TEXT (e.g. German "Verfuegbar"/
+        // "Quelle") but never reorders columns (Name, Id, Version, Available[, Source]), and
+        // titles stay single words — so a 4-word header maps to [N,I,V,A], 5 words to
+        // [N,I,V,A,S]. Only fills roles the keyword search missed; anything else keeps
+        // the old behavior instead of risking misalignment on multi-word titles.
+        if (headerLine != null && (idxAvailable < 0 || idxSource < 0 || idxVersion < 0 || idxId < 0 || idxName < 0)) {
+            int[] wordStarts = parseHeaderWordStarts(headerLine);
+            if (wordStarts.length == 4 || wordStarts.length == 5) {
+                if (idxName < 0) idxName = wordStarts[0];
+                if (idxId < 0 && wordStarts.length > 1) idxId = wordStarts[1];
+                if (idxVersion < 0 && wordStarts.length > 2) idxVersion = wordStarts[2];
+                if (idxAvailable < 0 && wordStarts.length > 3) idxAvailable = wordStarts[3];
+                if (idxSource < 0 && wordStarts.length > 4) idxSource = wordStarts[4];
+            }
+        }
+
         int[] colStarts = {idxName, idxId, idxVersion, idxAvailable, idxSource};
         int headerLen = headerLine != null ? headerLine.length() : 0;
         // If separator available, use its length as authoritative width
@@ -254,6 +224,16 @@ public class SoftwareUpdateService {
             if (trimmedLine.startsWith("---")) continue;
             // Skip summary/footer lines in any locale that contain dashes or upgrade summary
             String lower = trimmedLine.toLowerCase();
+            // winget appends an "explicit targeting" footer (second table, narrower columns)
+            // for packages that `upgrade --all` skips. Everything from here on is footer:
+            // parsing it with main-table column positions yields garbage ids (e.g. a sliced
+            // "hon 3.14.7 64-bit) CondaForge.Mini") whose install always fails, and duplicate
+            // installed copies behind those rows cannot be targeted by --id anyway.
+            if (lower.contains("explicit targeting")) break;
+            // Any-locale backstop: a second header-like line after data started means the
+            // footer table began (its preamble is localized, e.g. German, so the fast path
+            // above cannot match it). Headers carry no digits; data rows virtually always do.
+            if (!out.isEmpty() && looksLikeTableHeader(trimmedLine)) break;
             if (lower.contains("upgrades available") || lower.contains("package(s) have version")
                     || lower.startsWith("---") || lower.contains("winget upgrade")) continue;
             // Heuristic: skip lines that are clearly not data (e.g., "The upgrade ...")
@@ -262,11 +242,11 @@ public class SoftwareUpdateService {
             try {
                 String name = null, id = null, version = null, available = null, source = null;
                 if (headerLine != null && boundaryLen > 0) {
-                    if (idxName >= 0) name = extractColumnAt(l, idxName, colStarts, 0, boundaryLen).trim();
-                    if (idxId >= 0) id = extractColumnAt(l, idxId, colStarts, 1, boundaryLen).trim();
-                    if (idxVersion >= 0) version = extractColumnAt(l, idxVersion, colStarts, 2, boundaryLen).trim();
-                    if (idxAvailable >= 0) available = extractColumnAt(l, idxAvailable, colStarts, 3, boundaryLen).trim();
-                    if (idxSource >= 0) source = extractColumnAt(l, idxSource, colStarts, 4, boundaryLen).trim();
+                    if (idxName >= 0) name = extractColumnAt(l, idxName, colStarts, boundaryLen).trim();
+                    if (idxId >= 0) id = extractColumnAt(l, idxId, colStarts, boundaryLen).trim();
+                    if (idxVersion >= 0) version = extractColumnAt(l, idxVersion, colStarts, boundaryLen).trim();
+                    if (idxAvailable >= 0) available = extractColumnAt(l, idxAvailable, colStarts, boundaryLen).trim();
+                    if (idxSource >= 0) source = extractColumnAt(l, idxSource, colStarts, boundaryLen).trim();
                 }
                 // Fallback token split if column extraction failed to produce name
                 if (name == null || name.isBlank()) {
@@ -316,6 +296,13 @@ public class SoftwareUpdateService {
                     AppLogger.warning("Skipping winget entry with missing id: name=" + name + " available=" + available);
                     continue;
                 }
+                // winget ids never contain whitespace: one inside means the line was sliced
+                // with wrong column positions (localized header, wrapped prose) — skip it
+                // instead of queuing an uninstallable phantom row.
+                if (id.matches(".*\\s.*")) continue;
+                // Summary/note lines that survive to here (localized "N upgrades available"
+                // etc.) carry no version digits in either version field — real rows always do.
+                if (!version.matches(".*\\d.*") && !available.matches(".*\\d.*")) continue;
                 if (name == null || name.isBlank()) name = id;
                 if (!available.equals(version)) {
                     out.add(new SoftwareUpdateEntry(id, name, version, available));
@@ -329,8 +316,22 @@ public class SoftwareUpdateService {
         return out;
     }
 
-    private static int[] parseSeparatorColumns(String sep) {
+    // Start offset of every whitespace-separated word in a header line.
+    private static int[] parseHeaderWordStarts(String header) {
         java.util.List<Integer> starts = new java.util.ArrayList<>();
+        boolean inWord = false;
+        for (int i = 0; i < header.length(); i++) {
+            if (header.charAt(i) <= ' ') {
+                inWord = false;
+            } else if (!inWord) {
+                starts.add(i);
+                inWord = true;
+            }
+        }
+        return starts.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    private static int[] parseSeparatorColumns(String sep) {        java.util.List<Integer> starts = new java.util.ArrayList<>();
         boolean inDash = false;
         for (int i = 0; i < sep.length(); i++) {
             char c = sep.charAt(i);
@@ -369,18 +370,31 @@ public class SoftwareUpdateService {
         return -1;
     }
 
-    private static String extractColumnAt(String line, int startCol, int[] colStarts, int colIndex, int headerLen) {
-        if (startCol >= line.length()) return "";
-        int endCol = headerLen;
-        for (int j = colIndex + 1; j < colStarts.length; j++) {
-            if (colStarts[j] > startCol) {
-                endCol = colStarts[j];
-                break;
-            }
+    // Column end = nearest other column start to the right (order-proof: holds even when
+    // roles were mapped positionally for a localized header instead of by keyword order).
+    private static String extractColumnAt(String line, int startCol, int[] colStarts, int headerLen) {
+        if (startCol < 0 || startCol >= line.length()) return "";
+        // End = nearest other column start to the right, else end of line: values may
+        // overflow the header/separator width (e.g. long versions in the trailing column)
+        // and must not be truncated (was: capped at headerLen, last char(s) lost).
+        int endCol = line.length();
+        for (int s : colStarts) {
+            if (s > startCol && s < endCol) endCol = s;
         }
-        if (startCol >= line.length()) return "";
         int end = Math.min(endCol, line.length());
+        if (startCol >= end) return "";
         return line.substring(startCol, end).trim();
+    }
+
+    // True for a repeated table-header line (footer table in any locale): header keywords
+    // present but no digits. Data rows virtually always carry version digits.
+    private static boolean looksLikeTableHeader(String trimmedLine) {
+        if (trimmedLine == null || trimmedLine.isBlank() || trimmedLine.matches(".*\\d.*")) return false;
+        String lower = trimmedLine.toLowerCase();
+        boolean hasName = lower.contains("name");
+        boolean hasVersion = lower.contains("version") || lower.contains("installed");
+        boolean hasId = lower.contains("id") || lower.contains("identifier") || lower.contains("package");
+        return hasName && (hasVersion || hasId);
     }
 
     List<SoftwareUpdateEntry> parseJsonOutput(String stdout) {
@@ -1025,8 +1039,13 @@ public class SoftwareUpdateService {
     public List<SoftwareUpdateEntry> scanAllConcurrent(AtomicBoolean cancelled,
                                                         java.util.function.IntConsumer onWingetDone,
                                                         java.util.function.IntConsumer onWuDone,
-                                                        long overallTimeoutSeconds) {
+                                                         long overallTimeoutSeconds) {
         List<SoftwareUpdateEntry> allUpdates = new ArrayList<>();
+        // Fresh errors per scan: sub-scans reset these on entry, but early-return paths
+        // (winget missing, non-Windows, pre-cancelled) skip the reset and would otherwise
+        // leak the PREVIOUS scan's warning into this scan's status line.
+        lastWingetError = null;
+        lastWindowsUpdateError = null;
         // Internal flag: carries user cancel + timeout signal to ProcessRunner without polluting caller's flag (B1 fix)
         AtomicBoolean internalCancelled = new AtomicBoolean(cancelled != null && cancelled.get());
         Thread cancelMonitor = null;

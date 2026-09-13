@@ -179,46 +179,56 @@ class OptimizationPanel extends VBox {
                 AppLogger.warning("Pre-apply snapshot failed: " + e.getMessage());
             }
             if (wantRestorePoint) {
+                boolean restoreOk = true;
+                String restoreErr = null;
                 try {
                     Platform.runLater(() -> statusLabel.setText("Creating system restore point..."));
                     var rp = new SystemRestoreService().createRestorePoint("WinZenith network " + preset.name());
                     if (!rp.success()) {
-                        final String err = rp.error() != null ? rp.error() : "unknown error";
-                        AppLogger.warning("Restore point before optimization failed: " + err);
-                        // Blocking gate: ask on the FX thread and WAIT for the answer.
-                        // A fire-and-forget runLater alert would let the background thread
-                        // proceed with system-wide TCP/registry writes without protection.
-                        java.util.concurrent.FutureTask<ButtonType> gateTask = new java.util.concurrent.FutureTask<>(
-                                () -> new Alert(Alert.AlertType.CONFIRMATION,
-                                        "Restore point could not be created:\n" + err
-                                                + "\n\nThe safety net is missing. Continue with optimization anyway?",
-                                        ButtonType.YES, ButtonType.NO).showAndWait().orElse(ButtonType.NO));
-                        Platform.runLater(gateTask);
-                        ButtonType choice;
-                        try {
-                            choice = gateTask.get();
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            choice = ButtonType.NO;
-                        } catch (Exception ex) {
-                            choice = ButtonType.NO;
-                        }
-                        if (choice != ButtonType.YES) {
-                            final NetworkSnapshot finalSnap = preSnap;
-                            Platform.runLater(() -> {
-                                progressBar.setVisible(false);
-                                busy.set(false);
-                                statusLabel.setText("Optimization cancelled — no changes applied (restore point failed).");
-                                refreshSnapshotLabel();
-                            });
-                            AppLogger.info("Optimization of " + preset.name() + " aborted by user after restore-point failure."
-                                    + (finalSnap != null ? " Pre-change snapshot: " + finalSnap.id() : ""));
-                            return;
-                        }
-                        AppLogger.warning("User accepted optimization of " + preset.name() + " without restore point.");
+                        restoreOk = false;
+                        restoreErr = rp.error() != null ? rp.error() : "unknown error";
+                        AppLogger.warning("Restore point before optimization failed: " + restoreErr);
                     }
                 } catch (Exception e) {
-                    AppLogger.warning("Restore point before optimization failed: " + e.getMessage());
+                    // Same gate as a reported failure: never proceed silently with
+                    // system-wide TCP/registry writes when protection was requested.
+                    restoreOk = false;
+                    restoreErr = e.getMessage() != null ? e.getMessage() : e.toString();
+                    AppLogger.warning("Restore point before optimization failed: " + restoreErr);
+                }
+                if (!restoreOk) {
+                    final String err = restoreErr;
+                    // Blocking gate: ask on the FX thread and WAIT for the answer.
+                    // A fire-and-forget runLater alert would let the background thread
+                    // proceed with system-wide TCP/registry writes without protection.
+                    java.util.concurrent.FutureTask<ButtonType> gateTask = new java.util.concurrent.FutureTask<>(
+                            () -> new Alert(Alert.AlertType.CONFIRMATION,
+                                    "Restore point could not be created:\n" + err
+                                            + "\n\nThe safety net is missing. Continue with optimization anyway?",
+                                    ButtonType.YES, ButtonType.NO).showAndWait().orElse(ButtonType.NO));
+                    Platform.runLater(gateTask);
+                    ButtonType choice;
+                    try {
+                        choice = gateTask.get();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        choice = ButtonType.NO;
+                    } catch (Exception ex) {
+                        choice = ButtonType.NO;
+                    }
+                    if (choice != ButtonType.YES) {
+                        final NetworkSnapshot finalSnap = preSnap;
+                        Platform.runLater(() -> {
+                            progressBar.setVisible(false);
+                            busy.set(false);
+                            statusLabel.setText("Optimization cancelled — no changes applied (restore point failed).");
+                            refreshSnapshotLabel();
+                        });
+                        AppLogger.info("Optimization of " + preset.name() + " aborted by user after restore-point failure."
+                                + (finalSnap != null ? " Pre-change snapshot: " + finalSnap.id() : ""));
+                        return;
+                    }
+                    AppLogger.warning("User accepted optimization of " + preset.name() + " without restore point.");
                 }
             }
             Platform.runLater(() -> statusLabel.setText("Applying " + preset.getDisplayName() + "..."));

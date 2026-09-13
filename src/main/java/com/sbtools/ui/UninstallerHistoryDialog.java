@@ -179,6 +179,6 @@ public class UninstallerHistoryDialog {
     private static String csv(String v) {
         if (v == null) return "";
         String s = v.replace("\"", "\"\"");
-        return s.contains(",") || s.contains("\"") || s.contains("\n") ? "\"" + s + "\"" : s;
+        return s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r") ? "\"" + s + "\"" : s;
     }
 }

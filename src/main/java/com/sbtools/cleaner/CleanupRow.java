@@ -83,7 +83,11 @@ public class CleanupRow {
     }
 
     public void setStatusText(String text) {
-        this.statusText.set(text);
+        if (isFxThread()) {
+            this.statusText.set(text);
+        } else if (!runLaterSafe(() -> this.statusText.set(text))) {
+            this.statusText.set(text);
+        }
     }
 
     public LongProperty scanDurationMsProperty() {

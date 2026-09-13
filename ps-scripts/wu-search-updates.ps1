@@ -17,7 +17,6 @@ try {
 
     $updates = @()
     for ($i = 0; $i -lt $result.Updates.Count; $i++) {
-        try {
         $u = $result.Updates.Item($i)
         # One corrupt/deserialized entry must never kill the whole scan (see null date below).
         if ($null -eq $u) { continue }
@@ -40,12 +39,6 @@ try {
             severity    = [string]$u.MsrcSeverity
             kbArticle   = [string]$kb
             categories  = @($u.Categories | ForEach-Object { $_.Name })
-        }
-        } catch {
-            # A single unreadable update (corrupt metadata, revoked COM wrapper)
-            # is skipped so the remaining updates still surface (stderr keeps stdout JSON clean).
-            [Console]::Error.WriteLine("Skipping unreadable Windows Update at index ${i}: $_")
-            continue
         }
     }
     if ($updates.Count -eq 0) {

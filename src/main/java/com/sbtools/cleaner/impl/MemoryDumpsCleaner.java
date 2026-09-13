@@ -27,7 +27,7 @@ public class MemoryDumpsCleaner implements CleanerExtension {
         List<Path> dirs = new ArrayList<>();
         CleanerUtils.addEnvPath(dirs, "WINDIR", "Minidump");
         for (Path dir : dirs) {
-            if (dir != null && Files.isDirectory(dir)) {
+            if (dir != null && Files.isDirectory(dir) && CleanerUtils.isSafeToCleanDirectory(dir)) {
                 try (Stream<Path> files = Files.list(dir)) {
                     var matched = files.filter(Files::isRegularFile)
                             .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".dmp")).toList();
@@ -36,7 +36,7 @@ public class MemoryDumpsCleaner implements CleanerExtension {
             }
         }
         String sysdrive = CleanerUtils.safeEnv("SYSTEMDRIVE");
-        if (sysdrive != null) {
+        if (sysdrive != null && sysdrive.matches("(?i)^[a-z]:\\\\?$")) {
             String rootDrive = sysdrive.endsWith("\\") ? sysdrive : sysdrive + "\\";
             for (String name : new String[]{"memory.dmp", "SWA.DMP"}) {
                 Path dump = Paths.get(rootDrive, name);
@@ -60,7 +60,7 @@ public class MemoryDumpsCleaner implements CleanerExtension {
         List<Path> dirs = new ArrayList<>();
         CleanerUtils.addEnvPath(dirs, "WINDIR", "Minidump");
         String sysdrive = CleanerUtils.safeEnv("SYSTEMDRIVE");
-        if (sysdrive != null) {
+        if (sysdrive != null && sysdrive.matches("(?i)^[a-z]:\\\\?$")) {
             String rootDrive = sysdrive.endsWith("\\") ? sysdrive : sysdrive + "\\";
             for (String name : new String[]{"memory.dmp", "SWA.DMP"}) {
                 if (token != null && token.isCancelled()) break;
@@ -70,12 +70,14 @@ public class MemoryDumpsCleaner implements CleanerExtension {
         }
         for (Path dir : dirs) {
             if (token != null && token.isCancelled()) break;
-            if (dir != null && Files.isDirectory(dir)) {
+            if (dir != null && Files.isDirectory(dir) && CleanerUtils.isSafeToCleanDirectory(dir)) {
                 try (Stream<Path> files = Files.list(dir)) {
                     for (Path f : (Iterable<Path>) files::iterator) {
                         if (token != null && token.isCancelled()) break;
                         if (Files.isRegularFile(f) && f.getFileName().toString().toLowerCase().endsWith(".dmp")) {
-                            long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size;
+                            try {
+                                long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size;
+                            } catch (Exception ignored) {}
                         }
                     }
                 } catch (Exception ignored) {}

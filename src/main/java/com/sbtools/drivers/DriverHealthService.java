@@ -24,7 +24,8 @@ public class DriverHealthService {
         } else if (provider.contains("advanced micro devices") || provider.contains("nvidia")
                 || provider.contains("intel") || provider.contains("realtek")
                 || provider.contains("lenovo") || provider.contains("dell")
-                || provider.contains("hewlett-packard") || provider.contains("asus")
+                || provider.contains("hewlett") || provider.matches(".*\\bhp\\b.*")
+                || provider.contains("asus")
                 || provider.contains("synaptics") || provider.contains("broadcom")
                 || provider.contains("qualcomm")) {
             score -= 5;
@@ -40,7 +41,9 @@ public class DriverHealthService {
         }
 
         if (driver.hardwareIds() != null && !driver.hardwareIds().isEmpty()) {
-            if (driver.hardwareIds().contains("CC_") || driver.hardwareIds().contains("GENERIC")) {
+            // NOTE: CC_xxxx class codes ride along in every PCI HWID list, so
+            // they must not count — only a bare GENERIC marker means generic.
+            if (driver.hardwareIds().contains("GENERIC")) {
                 score -= 15;
                 details.append("Generic driver detected (-15 pts)\n");
             }

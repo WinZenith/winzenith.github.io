@@ -97,6 +97,9 @@ public class CleanupService {
                     row.setErrorMessage("Scan timed out");
                 } else {
                     AppLogger.warning("Scan task failed for " + row.getCategory().getDisplayName() + ": " + cause.getMessage());
+                    row.setSizeOrCountText("Error");
+                    row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+                    row.setErrorMessage(cause.getMessage() != null && !cause.getMessage().isBlank() ? cause.getMessage() : cause.toString());
                 }
                 return null;
             });
@@ -198,10 +201,11 @@ public class CleanupService {
                 row.setScanStatus(CleanupRow.ScanStatus.DONE);
             }
         } catch (Exception e) {
-            AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
+            String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
+            AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + msg);
             row.setSizeOrCountText("Error");
             row.setScanStatus(CleanupRow.ScanStatus.ERROR);
-            row.setErrorMessage(e.getMessage());
+            row.setErrorMessage(msg);
         }
     }
 
@@ -245,7 +249,8 @@ public class CleanupService {
                 perCategory.put(row.getCategory(), cleaned);
                 if (onProgress != null) onProgress.run();
             } catch (Exception e) {
-                String errorMsg = row.getCategory().getDisplayName() + ": " + e.getMessage();
+                String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
+                String errorMsg = row.getCategory().getDisplayName() + ": " + msg;
                 errors.add(errorMsg);
                 AppLogger.warning("Clean failed for " + errorMsg);
             }
@@ -283,10 +288,11 @@ public class CleanupService {
                     }
                     scanCategory(row, token);
                 } catch (Exception e) {
-                    AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
+                    String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
+                    AppLogger.warning("Scan failed for " + row.getCategory().getDisplayName() + ": " + msg);
                     row.setSizeOrCountText("Error");
                     row.setScanStatus(CleanupRow.ScanStatus.ERROR);
-                    row.setErrorMessage(e.getMessage());
+                    row.setErrorMessage(msg);
                 } finally {
                     // Per-row bookkeeping must never fail the whole scan: a
                     // single row's duration/status update or progress callback
@@ -373,10 +379,11 @@ public class CleanupService {
                     }
                     scanCategory(row, token);
                 } catch (Exception e) {
-                    AppLogger.warning("Rescan failed for " + row.getCategory().getDisplayName() + ": " + e.getMessage());
+                    String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
+                    AppLogger.warning("Rescan failed for " + row.getCategory().getDisplayName() + ": " + msg);
                     row.setSizeOrCountText("Error");
                     row.setScanStatus(CleanupRow.ScanStatus.ERROR);
-                    row.setErrorMessage(e.getMessage());
+                    row.setErrorMessage(msg);
                 } finally {
                     // Same fail-safe as scanAsync: bookkeeping/progress must
                     // never fail the whole rescan because of one row.
@@ -533,7 +540,7 @@ public class CleanupService {
                 Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
                 if (cause instanceof java.util.concurrent.TimeoutException || ex instanceof java.util.concurrent.TimeoutException) {
                     if (token != null) token.cancel();
-                    timedFuture.cancel(true);
+                    finalFuture.cancel(true);
                     try { executor.shutdownNow(); } catch (Exception ignored) {}
                     AppLogger.warning("Clean timed out after " + effectiveTimeout + "s for " + tasks.size() + " categories");
                 }
@@ -541,7 +548,7 @@ public class CleanupService {
         });
 
         CancelableCompletableFuture<CleanSummary> result = new CancelableCompletableFuture<>(
-                java.util.List.of(timedFuture), executor, true);
+                java.util.List.of(finalFuture, timedFuture), executor, true);
         result.completeFrom(timedFuture);
         result.whenComplete((r, ex) -> {
             try { executor.shutdown(); } catch (Exception ignored) {}

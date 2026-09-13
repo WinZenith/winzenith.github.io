@@ -36,7 +36,10 @@ public class DriverVerificationService {
             cmd.add("powershell");
             cmd.add("-NoProfile");
             cmd.add("-Command");
-            cmd.add("Get-AuthenticodeSignature -FilePath " + ProcessRunner.psQuote(file.toString()) + " | Select-Object -Property Status,SignerCertificate | ConvertTo-Json -Depth 4");
+            // Project Status as a string: Windows PowerShell 5.1 serializes the
+            // SignatureStatus enum as an integer (Valid -> 0), which callers
+            // reject as "invalid: 0" and block every signed installer.
+            cmd.add("Get-AuthenticodeSignature -FilePath " + ProcessRunner.psQuote(file.toString()) + " | Select-Object @{Name='Status';Expression={$_.Status.ToString()}},SignerCertificate | ConvertTo-Json -Depth 4");
             ProcessResult result = POWERSHELL_RUNNER.run(cmd);
             if (!result.success()) {
                 AppLogger.warning("Authenticode thumbprint check failed: " + result.combinedOutput());
@@ -50,8 +53,8 @@ public class DriverVerificationService {
                 JsonNode t = signer.get("Thumbprint");
                 if (t != null && !t.isNull()) actualThumb = t.asText("");
             }
-            String normActual = actualThumb.replaceAll("\\s+", "").toLowerCase();
-            String normExpected = expectedThumbprint.replaceAll("\\s+", "").toLowerCase();
+            String normActual = actualThumb.replaceAll("[^0-9a-fA-F]", "").toLowerCase();
+            String normExpected = expectedThumbprint.replaceAll("[^0-9a-fA-F]", "").toLowerCase();
             if (normExpected.isEmpty()) {
                 return new VerificationResult(true, "No expected thumbprint - skipped");
             }
@@ -99,14 +102,15 @@ public class DriverVerificationService {
             cmd.add("powershell");
             cmd.add("-NoProfile");
             cmd.add("-Command");
-            cmd.add("Get-AuthenticodeSignature -FilePath " + ProcessRunner.psQuote(file.toString()) + " | ConvertTo-Json -Depth 3");
+            // Same string-projection as above: PS 5.1 renders the enum as an integer.
+            cmd.add("Get-AuthenticodeSignature -FilePath " + ProcessRunner.psQuote(file.toString()) + " | Select-Object @{Name='Status';Expression={$_.Status.ToString()}},SignerCertificate | ConvertTo-Json -Depth 3");
             ProcessResult result = POWERSHELL_RUNNER.run(cmd);
             if (!result.success()) {
                 AppLogger.warning("Authenticode check failed: " + result.combinedOutput());
                 return new VerificationResult(false, "Could not verify signature: " + result.combinedOutput());
             }
 
-            String status = extractJsonString(result.stdout(), "Status");
+            String status = normalizeSignatureStatus(extractJsonString(result.stdout(), "Status"));
 
             if ("Valid".equals(status)) {
                 AppLogger.info("Authenticode signature valid for " + file.getFileName());
@@ -152,6 +156,24 @@ public class DriverVerificationService {
             }
         }
         return HexFormat.of().formatHex(digest.digest());
+    }
+
+    /**
+     * Maps numeric SignatureStatus codes to names. Windows PowerShell 5.1
+     * renders enums as integers in ConvertTo-Json (Valid=0, UnknownError=1,
+     * NotSigned=2, HashMismatch=3, NotTrusted=4), so integer output is still
+     * interpreted correctly even when the string projection is missing.
+     */
+    static String normalizeSignatureStatus(String status) {
+        if (status == null) return null;
+        return switch (status.trim()) {
+            case "0" -> "Valid";
+            case "1" -> "UnknownError";
+            case "2" -> "NotSigned";
+            case "3" -> "HashMismatch";
+            case "4" -> "NotTrusted";
+            default -> status;
+        };
     }
 
     private static String extractJsonString(String json, String key) {

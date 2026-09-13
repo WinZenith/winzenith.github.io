@@ -50,7 +50,14 @@ public final class VersionCompare {
             }
             return Integer.compare(prereleaseWeight(a), prereleaseWeight(b));
         }
-        return baseA.compareToIgnoreCase(baseB);
+        // Numeric parts and prerelease state tie: versions are equal even if
+        // spelled differently ("23.70.0" vs "23.70.0.0"). A raw lexicographic
+        // fallback here reported phantom Outdated and needless reinstalls.
+        // Trailing zero groups are stripped before comparing so exotic
+        // lettered revisions ("1.0a" vs "1.0b") still order correctly.
+        String normA = baseA.replaceAll("(\\.0+)+$", "");
+        String normB = baseB.replaceAll("(\\.0+)+$", "");
+        return normA.compareToIgnoreCase(normB);
     }
 
     private static String extractBaseVersion(String version) {
@@ -59,16 +66,29 @@ public final class VersionCompare {
         if (dashIdx > 0) {
             v = v.substring(0, dashIdx);
         }
-        String lower = v.toLowerCase();
+        // ROOT locale: tr-TR turns "PREVIEW" into "prevIew"(dotless), hiding tags.
+        String lower = v.toLowerCase(java.util.Locale.ROOT);
         for (String suffix : new String[]{"alpha", "beta", "rc", "preview", "test", "dev"}) {
             int idx = lower.indexOf(suffix);
             if (idx > 0) {
                 char before = lower.charAt(idx - 1);
-                int endIdx = idx + suffix.length();
-                boolean afterIsWord = endIdx < lower.length() && Character.isLetterOrDigit(lower.charAt(endIdx));
-                if (!Character.isLetterOrDigit(before) && !afterIsWord) {
-                    v = v.substring(0, idx);
-                    break;
+                // Attached forms ("1.0beta2", "2.0rc1") count too: only a
+                // preceding LETTER vetoes ("latest" is not a prerelease tag).
+                // A trailing digit run belongs to the tag ("beta2").
+                if (!Character.isLetter(before)) {
+                    int endIdx = idx + suffix.length();
+                    while (endIdx < lower.length() && Character.isDigit(lower.charAt(endIdx))) {
+                        endIdx++;
+                    }
+                    boolean afterIsWord = endIdx < lower.length() && Character.isLetter(lower.charAt(endIdx));
+                    if (!afterIsWord) {
+                        v = v.substring(0, idx);
+                        // Also drop a dangling separator left behind ("1.0-").
+                        while (v.endsWith("-") || v.endsWith(".") || v.endsWith("_")) {
+                            v = v.substring(0, v.length() - 1);
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -77,7 +97,7 @@ public final class VersionCompare {
 
     private static boolean hasPrereleaseSuffix(String version) {
         if (version == null) return false;
-        String v = version.replace(',', '.').toLowerCase();
+        String v = version.replace(',', '.').toLowerCase(java.util.Locale.ROOT);
         int dashIdx = v.indexOf('-');
         if (dashIdx > 0) {
             String suffix = v.substring(dashIdx + 1);
@@ -96,7 +116,7 @@ public final class VersionCompare {
 
     private static int prereleaseWeight(String version) {
         if (version == null) return 0;
-        String v = version.replace(',', '.').toLowerCase();
+        String v = version.replace(',', '.').toLowerCase(java.util.Locale.ROOT);
         if (v.contains("alpha") || v.contains("dev")) return 1;
         if (v.contains("beta")) return 2;
         if (v.contains("rc") || v.contains("preview")) return 3;
@@ -136,6 +156,10 @@ public final class VersionCompare {
             long dchEra = Long.parseLong(dchParts[0].replaceAll("[^0-9]", ""));
             long dchTail = Long.parseLong(dchParts[dchParts.length - 1].replaceAll("[^0-9]", ""));
             String pubDigits = pub.replaceAll("[^0-9]", "");
+            // Single-digit minors ("560.9") yield 4 digits; public minors are
+            // always 2 digits, so pad ("560.9" -> "56090") instead of
+            // abstaining (abstain hides real updates and reads as VERIFIED).
+            if (pubDigits.length() == 4) pubDigits = pubDigits + "0";
             if (pubDigits.length() < 5) return 0;
             long pubMajor = Long.parseLong(pubDigits.substring(0, pubDigits.length() - 2));
             long pubTail = Long.parseLong(pubDigits.substring(pubDigits.length() - 4));

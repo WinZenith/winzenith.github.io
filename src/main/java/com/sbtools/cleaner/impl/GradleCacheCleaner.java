@@ -24,7 +24,9 @@ public class GradleCacheCleaner implements CleanerExtension {
         if (userHome != null) {
             Path caches = Paths.get(userHome, ".gradle", "caches");
             if (Files.isDirectory(caches)) {
-                try (Stream<Path> walk = Files.walk(caches, 3)) {
+                // Real layout is caches/<ver>/modules-2/files-2.1/<group>/<artifact>/<ver>/<hash>/file
+                // (depth 6-8): depth 3 stopped at version dirs and reported ~0.
+                try (Stream<Path> walk = Files.walk(caches, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
                     var stats = walk.filter(Files::isRegularFile)
                             .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
                     totalSize = stats.getSum();
@@ -48,9 +50,9 @@ public class GradleCacheCleaner implements CleanerExtension {
         String userHome = CleanerUtils.safeEnv("USERPROFILE");
         if (userHome == null) return 0;
         Path caches = Paths.get(userHome, ".gradle", "caches");
-        if (!Files.isDirectory(caches)) return 0;
+        if (!Files.isDirectory(caches) || !CleanerUtils.isSafeToCleanDirectory(caches)) return 0;
         long cleaned = 0;
-        try (Stream<Path> walk = Files.walk(caches, 3)) {
+        try (Stream<Path> walk = Files.walk(caches, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
             List<Path> sorted = walk.sorted(java.util.Comparator.reverseOrder()).toList();
             for (Path f : sorted) {
                 if (token != null && token.isCancelled()) break;
@@ -61,7 +63,7 @@ public class GradleCacheCleaner implements CleanerExtension {
                         CleanerUtils.deletePermanently(f, token);
                         if (!Files.exists(f)) cleaned += size;
                     } else if (Files.isDirectory(f)) {
-                        Files.deleteIfExists(f);
+                        com.sbtools.cleaner.CleanerUtils.deleteDirectoryIfEmptySafe(f, token);
                     }
                 } catch (Exception ignored) {}
             }

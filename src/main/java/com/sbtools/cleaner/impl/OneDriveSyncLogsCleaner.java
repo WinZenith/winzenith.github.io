@@ -25,8 +25,9 @@ public class OneDriveSyncLogsCleaner implements CleanerExtension {
     @Override
     public java.util.List<String> describeTargets() {
         return java.util.List.of(
-                "%LOCALAPPDATA%\\Microsoft\\OneDrive\\logs (*.odl, *.log only)",
-                "%LOCALAPPDATA%\\Microsoft\\OneDrive\\setup\\logs (*.odl, *.log only)");
+                "%LOCALAPPDATA%\\Microsoft\\OneDrive\\logs (*.odl, *.odlsent, *.log, *.etl.log)",
+                "%LOCALAPPDATA%\\Microsoft\\OneDrive\\setup\\logs (*.odl, *.odlsent, *.log, *.etl.log)",
+                "%LOCALAPPDATA%\\Microsoft\\OneDrive\\Update\\logs (*.odl, *.odlsent, *.log, *.etl.log)");
     }
 
     @Override

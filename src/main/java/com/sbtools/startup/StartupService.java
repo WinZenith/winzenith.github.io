@@ -143,6 +143,8 @@ public class StartupService {
         loadOriginalStartTypes();
         long startNanos = System.nanoTime();
         ExecutorService ex = AppExecutors.scanPool();
+        // Visible to catch so a cancel during submit still reaps started phases.
+        List<Future<List<StartupItem>>> futures = new ArrayList<>();
         try {
             List<Callable<List<StartupItem>>> tasks = Arrays.asList(
                     this::listRegistryApps,
@@ -152,7 +154,6 @@ public class StartupService {
             );
 
             // Submit all and wait with timeout 60s total
-            List<Future<List<StartupItem>>> futures = new ArrayList<>();
             for (Callable<List<StartupItem>> t : tasks) {
                 if (Thread.currentThread().isInterrupted()) {
                     throw new InterruptedException("Startup scan cancelled before submit");
@@ -167,6 +168,7 @@ public class StartupService {
                 long remaining = deadline - System.nanoTime();
                 if (remaining <= 0) {
                     AppLogger.warning("Startup scan timed out: " + scanNames[i]);
+                    scanErrors.add(scanNames[i] + ": timed out after 60s (partial listing)");
                     futures.get(i).cancel(true);
                     continue;
                 }
@@ -179,13 +181,25 @@ public class StartupService {
                 } catch (TimeoutException e) {
                     f.cancel(true);
                     AppLogger.warning("Startup scan timed out: " + scanNames[i]);
+                    scanErrors.add(scanNames[i] + ": timed out (partial listing)");
                 } catch (CancellationException e) {
-                    AppLogger.warning("Startup scan timed out: " + scanNames[i]);
+                    AppLogger.warning("Startup scan cancelled: " + scanNames[i]);
+                    scanErrors.add(scanNames[i] + ": scan stopped by user (partial listing)");
+                    cancelAll(futures);
+                    Thread.currentThread().interrupt();
+                    return items;
                 } catch (ExecutionException e) {
                     AppLogger.error("Startup scan failed: " + scanNames[i], e);
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    scanErrors.add(scanNames[i] + ": " + cause.getMessage() + " (partial listing)");
                 } catch (InterruptedException e) {
+                    // Stop pressed: cancel still-running phases (incl. child PS
+                    // processes via thread interrupt) and return what we have.
+                    // Never fall back to sequential listAll() here — that would
+                    // restart a full scan on the interrupted thread and defeat Stop.
+                    cancelAll(futures);
                     Thread.currentThread().interrupt();
-                    return listAll();
+                    return items;
                 }
             }
 
@@ -196,11 +210,25 @@ public class StartupService {
             return items;
         } catch (Exception e) {
             if (e instanceof InterruptedException) {
+                // Cancelled before/during submit: reap started phases, never restart sequentially.
+                cancelAll(futures);
                 Thread.currentThread().interrupt();
-                return listAll();
+                return Collections.emptyList();
             }
             AppLogger.error("Parallel scan failed, falling back to sequential", e);
+            if (Thread.currentThread().isInterrupted()) {
+                return Collections.emptyList();
+            }
             return listAll();
+        }
+    }
+
+    private static void cancelAll(List<Future<List<StartupItem>>> futures) {
+        if (futures == null) return;
+        for (Future<List<StartupItem>> f : futures) {
+            try {
+                if (f != null && !f.isDone()) f.cancel(true);
+            } catch (Exception ignored) {}
         }
     }
 
@@ -313,11 +341,22 @@ public class StartupService {
         HKEY hive = isHkcu ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
         boolean is32bit = location.contains("32-bit");
         String valName = item.getRegistryValueName();
-        // Probe actual registry to avoid fragile location parsing (fixes legacy RunOnce moved to Run)
+        // Probe actual registry to avoid fragile location parsing (fixes legacy RunOnce moved to Run).
+        // Order is location-aware: the same value name can exist in both Run and
+        // RunOnce as two distinct entries — probing Run first for a RunOnce item
+        // would resolve (and later delete) the wrong sibling entry.
         if (valName != null && !valName.isBlank()) {
-            String[] candidates = is32bit
-                    ? new String[]{REG_WOW6432_RUN, REG_WOW6432_RUN_ONCE, REG_WOW6432_RUN_DISABLED}
-                    : new String[]{REG_RUN, REG_RUN_ONCE, REG_RUN_DISABLED};
+            String runKey = is32bit ? REG_WOW6432_RUN : REG_RUN;
+            String runOnceKey = is32bit ? REG_WOW6432_RUN_ONCE : REG_RUN_ONCE;
+            String disabledKey = is32bit ? REG_WOW6432_RUN_DISABLED : REG_RUN_DISABLED;
+            String[] candidates;
+            if (location.contains("RunOnce")) {
+                candidates = new String[]{runOnceKey, runKey, disabledKey};
+            } else if (location.contains("(Disabled)")) {
+                candidates = new String[]{disabledKey, runKey, runOnceKey};
+            } else {
+                candidates = new String[]{runKey, disabledKey, runOnceKey};
+            }
             for (String cand : candidates) {
                 try {
                     if (Advapi32Util.registryValueExists(hive, cand, valName)) {
@@ -488,7 +527,13 @@ public class StartupService {
                 items.add(new StartupItem(valName, publisher, cmd, enabled, locationLabel, valName, "", "", StartupItemType.REGISTRY, null));
             }
         } catch (Exception e) {
-            AppLogger.warning("Failed to scan registry for " + locationLabel + " " + keyPath + ": " + e.getMessage());
+            if (e instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            String msg = "Failed to scan registry for " + locationLabel + " " + keyPath + ": " + e.getMessage();
+            AppLogger.warning(msg);
+            scanErrors.add(locationLabel + ": " + e.getMessage() + " (partial listing)");
         }
     }
 
@@ -510,7 +555,12 @@ public class StartupService {
                 }
             }
         } catch (Exception e) {
+            if (e instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
+                Thread.currentThread().interrupt();
+                return;
+            }
             AppLogger.warning("Failed to scan orphaned " + approvedPath + " for " + locationLabel + ": " + e.getMessage());
+            scanErrors.add(locationLabel + " (orphaned): " + e.getMessage() + " (partial listing)");
         }
     }
 
@@ -563,7 +613,15 @@ public class StartupService {
                 AppLogger.warning(msg);
                 scanErrors.add("Scheduled Tasks: " + msg);
             }
+        } catch (InterruptedException e) {
+            // Stop pressed: preserve interrupt so parallel-scan cancellation works.
+            Thread.currentThread().interrupt();
+            return items;
         } catch (Exception e) {
+            if (e instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
+                Thread.currentThread().interrupt();
+                return items;
+            }
             AppLogger.error("Error running startup detail script", e);
             scanErrors.add("Scheduled Tasks: Failed to enumerate scheduled tasks: " + e.getMessage());
         }
@@ -657,7 +715,14 @@ public class StartupService {
                     saveOriginalStartTypes();
                 }
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return items;
         } catch (Exception e) {
+            if (e instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
+                Thread.currentThread().interrupt();
+                return items;
+            }
             AppLogger.warning("Failed to enumerate Windows services: " + e.getMessage());
             scanErrors.add("Windows Services: Failed to enumerate services: " + e.getMessage());
         }
@@ -888,12 +953,17 @@ public class StartupService {
                             Advapi32Util.registryDeleteValue(paths.hive(), paths.keyPath(), valName);
                         }
                     } catch (Exception ignored) {}
-                    String approved = StartupConstants.toApprovedPath(paths.keyPath());
-                    try {
-                        if (Advapi32Util.registryValueExists(paths.hive(), approved, valName)) {
-                            Advapi32Util.registryDeleteValue(paths.hive(), approved, valName);
-                        }
-                    } catch (Exception ignored) {}
+                    // RunOnce has no Approved overlay consulted by Windows. Never touch
+                    // Approved here: for 32-bit the RunOnce "approved" path IS the Run32
+                    // overlay, so deleting it would corrupt a same-named Run entry.
+                    if (!StartupConstants.isRunOnceKey(paths.keyPath())) {
+                        String approved = StartupConstants.toApprovedPath(paths.keyPath());
+                        try {
+                            if (Advapi32Util.registryValueExists(paths.hive(), approved, valName)) {
+                                Advapi32Util.registryDeleteValue(paths.hive(), approved, valName);
+                            }
+                        } catch (Exception ignored) {}
+                    }
                 }
             }
         }
@@ -1165,7 +1235,7 @@ public class StartupService {
                 entry.setBackupXmlName("task.xml");
 
                 Path xmlPath = backupFolder.resolve("task.xml");
-                ProcessResult result = processRunner.run(List.of("powershell.exe", "-Command",
+                ProcessResult result = processRunner.run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
                         "Export-ScheduledTask -TaskName " + ProcessRunner.psQuote(item.getName()) + " -TaskPath " + ProcessRunner.psQuote(tp) + " | Out-File -FilePath " + ProcessRunner.psQuote(xmlPath.toAbsolutePath().toString()) + " -Encoding utf8"));
                 if (!result.success()) {
                     throw new IOException("Failed to export Scheduled Task configuration: " + result.combinedOutput());
@@ -1270,6 +1340,9 @@ public class StartupService {
             if (entry.getCommand() == null) {
                 throw new IOException("Backup entry is corrupt (missing command). Backup kept.");
             }
+            if (!"HKCU".equals(entry.getHive()) && !"HKLM".equals(entry.getHive())) {
+                throw new IOException("Backup entry is corrupt (missing hive). Backup kept.");
+            }
             HKEY hive = "HKCU".equals(entry.getHive()) ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
             if (!Advapi32Util.registryKeyExists(hive, entry.getKeyPath())) {
                 Advapi32Util.registryCreateKey(hive, entry.getKeyPath());
@@ -1277,12 +1350,17 @@ public class StartupService {
             boolean expandSz = "REG_EXPAND_SZ".equalsIgnoreCase(entry.getRegistryValueType());
             setRegistryStringPreservingType(hive, entry.getKeyPath(), entry.getValueName(), entry.getCommand(), expandSz);
 
-            String approvedKeyPath = StartupConstants.toApprovedPath(entry.getKeyPath());
-            if (!approvedKeyPath.equals(entry.getKeyPath())) {
-                if (!Advapi32Util.registryKeyExists(hive, approvedKeyPath)) {
-                    Advapi32Util.registryCreateKey(hive, approvedKeyPath);
+            // RunOnce has no Approved overlay consulted by Windows; writing one only
+            // creates a legacy orphan — and for 32-bit the target IS the Run32
+            // overlay, corrupting a same-named Run entry. Skip for RunOnce.
+            if (!StartupConstants.isRunOnceKey(entry.getKeyPath())) {
+                String approvedKeyPath = StartupConstants.toApprovedPath(entry.getKeyPath());
+                if (!approvedKeyPath.equals(entry.getKeyPath())) {
+                    if (!Advapi32Util.registryKeyExists(hive, approvedKeyPath)) {
+                        Advapi32Util.registryCreateKey(hive, approvedKeyPath);
+                    }
+                    writeApprovedState(hive, approvedKeyPath, entry.getValueName(), entry.isEnabled());
                 }
-                writeApprovedState(hive, approvedKeyPath, entry.getValueName(), entry.isEnabled());
             }
         } else if ("Folder".equals(entry.getType())) {
             // Restore startup folder file
@@ -1562,6 +1640,10 @@ public class StartupService {
                     }
             }
         } catch (Exception e) {
+            if (e instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
+                Thread.currentThread().interrupt();
+                return;
+            }
             String msg = "Failed to scan startup folder " + folder + ": " + e.getMessage();
             AppLogger.warning(msg);
             scanErrors.add(locationLabel + ": " + msg);
@@ -1585,7 +1667,7 @@ public class StartupService {
             sb.append("); ");
             sb.append("foreach($p in $paths){ try{ $sc=$sh.CreateShortcut($p); $t=$sc.TargetPath; $a=$sc.Arguments; if($a){$t=\"$t $a\"} $res+=@{Path=$p; Target=$t} } catch{ $res+=@{Path=$p; Target=''} } } ");
             sb.append("$res | ConvertTo-Json -Depth 3");
-            ProcessResult r = new ProcessRunner(15).run(List.of("powershell.exe", "-NoProfile", "-Command", sb.toString()));
+            ProcessResult r = new ProcessRunner(15).run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", sb.toString()));
             if (r.success() && r.stdout() != null && !r.stdout().isBlank()) {
                 String out = r.stdout().trim();
                 try {
@@ -1612,8 +1694,14 @@ public class StartupService {
                     AppLogger.warning("Failed to parse batch lnk JSON: " + e.getMessage());
                 }
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
-            AppLogger.warning("Batch resolve lnk failed: " + e.getMessage());
+            if (Thread.currentThread().isInterrupted()) {
+                Thread.currentThread().interrupt();
+            } else {
+                AppLogger.warning("Batch resolve lnk failed: " + e.getMessage());
+            }
         }
         return result;
     }
@@ -1631,7 +1719,7 @@ public class StartupService {
             String ps = "$sh = New-Object -COM WScript.Shell; $sc = $sh.CreateShortcut('"
                     + lnk.toAbsolutePath().toString().replace("'", "''")
                     + "'); Write-Output $sc.TargetPath";
-            ProcessResult r = new ProcessRunner(10).run(List.of("powershell.exe", "-NoProfile", "-Command", ps));
+            ProcessResult r = new ProcessRunner(10).run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps));
             if (r.success() && r.stdout() != null && !r.stdout().isBlank()) {
                 String target = r.stdout().trim().split("\\R")[0].trim();
                 if (!target.isBlank()) {
@@ -1640,7 +1728,7 @@ public class StartupService {
                         String psArgs = "$sh = New-Object -COM WScript.Shell; $sc = $sh.CreateShortcut('"
                                 + lnk.toAbsolutePath().toString().replace("'", "''")
                                 + "'); Write-Output $sc.Arguments";
-                        ProcessResult ra = new ProcessRunner(10).run(List.of("powershell.exe", "-NoProfile", "-Command", psArgs));
+                        ProcessResult ra = new ProcessRunner(10).run(List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", psArgs));
                         if (ra.success() && ra.stdout() != null && !ra.stdout().isBlank()) {
                             args = ra.stdout().trim().split("\\R")[0].trim();
                         }

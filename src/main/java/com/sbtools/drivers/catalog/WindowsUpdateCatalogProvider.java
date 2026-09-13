@@ -44,7 +44,7 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                         ProcessRunner.powershellScript(script.toString(), String.valueOf(WU_SEARCH_TIMEOUT_SECONDS)));
                 if (!result.success()) {
                     AppLogger.debug("WindowsUpdate: PowerShell script failed (attempt " + attempt + "/2): " + result.combinedOutput());
-                    if (attempt == 1) {
+                    if (attempt == 1 && !Thread.currentThread().isInterrupted()) {
                         try {
                             Thread.sleep(2000);
                         } catch (InterruptedException ie) {
@@ -62,7 +62,8 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                     Thread.currentThread().interrupt();
                 }
                 AppLogger.debug("WindowsUpdate: Exception (attempt " + attempt + "/2): " + e.getMessage());
-                if (attempt == 1 && !(e instanceof InterruptedException)) {
+                if (attempt == 1 && !(e instanceof InterruptedException)
+                        && !Thread.currentThread().isInterrupted()) {
                     try {
                         Thread.sleep(2000);
                     } catch (InterruptedException ie) {
@@ -89,11 +90,11 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
         if (root.isArray()) {
             for (JsonNode n : root) {
                 WuDriverOffer o = parseOffer(n);
-                if (o != null && isPlausibleVersion(o.version())) offers.add(o);
+                if (isInstallableOffer(o)) offers.add(o);
             }
         } else if (root.isObject()) {
             WuDriverOffer o = parseOffer(root);
-            if (o != null && isPlausibleVersion(o.version())) offers.add(o);
+            if (isInstallableOffer(o)) offers.add(o);
         }
 
         List<DriverUpdateCandidate> candidates = new ArrayList<>();
@@ -101,11 +102,14 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
         for (InstalledDriver driver : installed) {
             if (driver == null) continue;
             WuDriverOffer best = null;
+            int bestStrength = 0;
             for (WuDriverOffer offer : offers) {
-                if (matchesDriver(driver, offer)) {
-                    if (best == null || VersionCompare.compare(offer.version, best.version) > 0) {
-                        best = offer;
-                    }
+                int strength = matchStrength(driver, offer);
+                if (strength == 0) continue;
+                if (best == null || strength > bestStrength
+                        || (strength == bestStrength && compareOffers(offer, best) > 0)) {
+                    best = offer;
+                    bestStrength = strength;
                 }
             }
             if (best != null && VersionCompare.isOlder(driver.driverVersion(), best.version)) {
@@ -125,29 +129,93 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
         return candidates;
     }
 
+    /**
+     * An offer is only usable when it carries a plausible version AND a
+     * non-blank updateId/title. A newer-but-identity-less offer must never
+     * displace an older installable one (empty packageId installs nothing).
+     */
+    private static boolean isInstallableOffer(WuDriverOffer o) {
+        if (o == null) return false;
+        if (!isPlausibleVersion(o.version())) return false;
+        if (o.updateId() == null || o.updateId().isBlank()) return false;
+        return o.title() != null && !o.title().isBlank();
+    }
+
+    /**
+     * Best-pick order: version first, then severity rank, then updateId for a
+     * deterministic winner (the old strict-greater comparison left ties to
+     * COM enumeration order, flipping severity run to run).
+     */
+    private static int compareOffers(WuDriverOffer a, WuDriverOffer b) {
+        int cmp = VersionCompare.compare(a.version(), b.version());
+        if (cmp != 0) return cmp;
+        cmp = Integer.compare(severityRank(a.severity()), severityRank(b.severity()));
+        if (cmp != 0) return cmp;
+        String idA = a.updateId() == null ? "" : a.updateId();
+        String idB = b.updateId() == null ? "" : b.updateId();
+        return idA.compareTo(idB);
+    }
+
+    private static int severityRank(UpdateSeverity s) {
+        if (s == null) return 0;
+        return switch (s) {
+            case CRITICAL -> 4;
+            case IMPORTANT -> 3;
+            case RECOMMENDED -> 2;
+            case OPTIONAL -> 1;
+            case UNKNOWN -> 0;
+        };
+    }
+
     private static final java.util.Set<String> GENERIC_WORDS = java.util.Set.of(
             "driver", "device", "controller", "adapter", "software", "component", "extension", "generic"
     );
 
+    /**
+     * Windows in-box class INFs: they identify a setup class, not a device.
+     * Matching offers on these alone cross-matches any same-class vendor
+     * driver (e.g. display.inf vs "NVIDIA - Display").
+     */
+    private static final java.util.Set<String> GENERIC_INFS = java.util.Set.of(
+            "display", "machine", "usb", "usbport", "volume", "wpdfs", "wpfsm",
+            "swenum", "ks", "kscaptur", "wdmaudio", "wdma_usb", "netav",
+            "basicdisplay", "basicrender", "monitor", "keyboard", "mouse",
+            "disk", "cdrom", "volsnap", "partmgr", "msports", "serenum"
+    );
+
     private static boolean matchesDriver(InstalledDriver driver, WuDriverOffer offer) {
-        if (driver == null || offer == null) return false;
-        if (offer.title == null || offer.title.isBlank()) return false;
+        return matchStrength(driver, offer) > 0;
+    }
+
+    /**
+     * Match evidence strength 0-4 (mirrors the numbered rules below). The
+     * best-pick ranks strength before version so a weak fallback match with a
+     * coincidental tag can never displace a strong exact match at the same
+     * version (previously severity-then-GUID decided, flipping run to run).
+     */
+    static int matchStrength(InstalledDriver driver, WuDriverOffer offer) {
+        if (driver == null || offer == null) return 0;
+        if (offer.title == null || offer.title.isBlank()) return 0;
         String title = offer.title.toLowerCase(Locale.ROOT);
         String nameRaw = driver.friendlyName() != null ? driver.friendlyName().toLowerCase(Locale.ROOT) : "";
         String name = nameRaw.trim();
 
         // 1) Exact friendlyName substring — strongest signal, require at least 5 chars to avoid generic matches
         if (name.length() >= 5 && title.contains(name)) {
-            return true;
+            return 4;
         }
 
-        // 2) INF base name match — must be meaningful (oem*.inf filtered out)
+        // 2) INF base name match — must be meaningful (oem*.inf filtered out).
+        // In-box generic INFs (display.inf, machine.inf, usb.inf, ...) name a
+        // device *class*, not a device: "display" matches every NVIDIA Display
+        // offer. Denylisted so they can never match on INF alone.
         String inf = driver.infName();
         if (inf != null && !inf.isBlank()) {
             String infBase = inf.replace(".inf", "").toLowerCase(Locale.ROOT).trim();
             boolean isGenericOem = infBase.matches("oem\\d+");
-            if (!isGenericOem && infBase.length() >= 5 && title.contains(infBase)) {
-                return true;
+            if (!isGenericOem && !GENERIC_INFS.contains(infBase)
+                    && infBase.length() >= 5 && title.contains(infBase)) {
+                return 3;
             }
         }
 
@@ -174,7 +242,7 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                     }
                 }
                 if (offerSignificantCount - validTokensCount <= 1) {
-                    return true;
+                    return 2;
                 }
             }
         }
@@ -194,21 +262,51 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                         if (title.contains(token)) providerMatched++;
                     }
                 }
-                if (validCount >= 2 && providerMatched >= 2 && providerMatched == validCount) return true;
+                if (validCount >= 2 && providerMatched >= 2 && providerMatched == validCount) return 1;
             }
         }
 
-        return false;
+        return 0;
     }
 
     private static WuDriverOffer parseOffer(JsonNode n) {
+        // Prefer the script-computed version (it sees both DriverModel and
+        // Title); fall back to the title-derived fullest version when the
+        // field is missing or implausible.
+        String scripted = text(n, "version");
+        String version = isPlausibleVersion(scripted)
+                ? scripted : bestVersionFrom("", text(n, "title"));
         return new WuDriverOffer(
                 text(n, "updateId"),
                 text(n, "title"),
                 text(n, "description"),
-                text(n, "version"),
+                version,
                 UpdateSeverity.fromString(text(n, "severity"))
         );
+    }
+
+    /**
+     * Picks the fullest version across DriverModel and Title (most dot-separated
+     * numeric parts wins): the old cascade preferred a short DriverModel
+     * ("6.0.9678") over the full Title ("6.0.9678.1"), understating the offer
+     * into missed updates and false VERIFIEDs.
+     */
+    static String bestVersionFrom(String driverModel, String title) {
+        String best = "";
+        int bestParts = 0;
+        for (String field : new String[]{driverModel, title}) {
+            if (field == null || field.isBlank()) continue;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\b\\d+(?:\\.\\d+)+\\b").matcher(field);
+            while (m.find()) {
+                String v = m.group(0);
+                int parts = v.split("\\.").length;
+                if (parts > bestParts || (parts == bestParts && v.length() > best.length())) {
+                    best = v;
+                    bestParts = parts;
+                }
+            }
+        }
+        return best;
     }
 
     private static String text(JsonNode n, String key) {

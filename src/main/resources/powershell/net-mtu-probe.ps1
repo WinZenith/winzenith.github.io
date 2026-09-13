@@ -12,7 +12,11 @@ foreach ($s in $sizes) {
         $out = ping -f -n 1 -l $s $TargetHost 2>&1 | Out-String
         $logLines += "--- ping -f -l $s $TargetHost ---"
         $logLines += $out.Trim()
-        if ($out -match "Reply from") {
+        # Locale-independent success check: every successful ping reply carries
+        # "TTL=" in all Windows locales (cf. net-ping.ps1). "Reply from" is
+        # English-only AND also matches error replies (e.g. Destination
+        # unreachable), so it must not be used here.
+        if ($out -match "TTL=") {
             $best = $s + 28
             break
         }

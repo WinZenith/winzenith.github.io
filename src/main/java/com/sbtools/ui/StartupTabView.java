@@ -587,25 +587,16 @@ public class StartupTabView extends BorderPane {
             try {
                 List<StartupItem> allItems = service.listAllParallel();
                 if (scanCancelled.get() || Thread.currentThread().isInterrupted()) {
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Scan stopped.");
-                        busy.set(false);
-                        progress.setVisible(false);
-                        scanButton.setDisable(false);
-                        stopButton.setDisable(true);
-                    });
+                    // Status only — finally owns busy/progress/buttons. Touching
+                    // busy here double-decrements the shared BusyProperty and can
+                    // clear another tab's still-running busy state.
+                    Platform.runLater(() -> statusLabel.setText("Scan stopped."));
                     return;
                 }
 
                 for (StartupItem item : allItems) {
                     if (scanCancelled.get() || Thread.currentThread().isInterrupted()) {
-                        Platform.runLater(() -> {
-                            statusLabel.setText("Scan stopped.");
-                            busy.set(false);
-                            progress.setVisible(false);
-                            scanButton.setDisable(false);
-                            stopButton.setDisable(true);
-                        });
+                        Platform.runLater(() -> statusLabel.setText("Scan stopped."));
                         return;
                     }
                     item.setEstimatedBootImpactMs(StartupImpactService.estimateBootImpactMs(item));
@@ -620,10 +611,6 @@ public class StartupTabView extends BorderPane {
                 Platform.runLater(() -> {
                     if (scanCancelled.get()) {
                         statusLabel.setText("Scan stopped.");
-                        busy.set(false);
-                        progress.setVisible(false);
-                        scanButton.setDisable(false);
-                        stopButton.setDisable(true);
                         return;
                     }
                     registryItems.setAll(regItems);

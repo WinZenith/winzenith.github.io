@@ -140,15 +140,22 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             Matcher m = jsonUrlPattern.matcher(body);
             if (m.find()) {
                 String url = m.group(1);
-                AppLogger.info("Intel: Found download URL in OEM JSON response: " + url);
-                return url;
+                // Gate: the first exe in an OEM search payload can be a BIOS
+                // or utility binary, not the Intel driver (wrong-file
+                // auto-install). Require an OEM/Intel host plus a
+                // wireless/graphics token.
+                if (isPlausibleOemDriverUrl(url, mfr)) {
+                    AppLogger.info("Intel: Found download URL in OEM JSON response: " + url);
+                    return url;
+                }
+                AppLogger.info("Intel: Ignoring implausible OEM JSON URL: " + url);
             }
 
             Pattern hrefPattern = Pattern.compile("href\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi))\"", Pattern.CASE_INSENSITIVE);
             m = hrefPattern.matcher(body);
             while (m.find()) {
                 String url = m.group(1);
-                if (url.contains("intel") || url.contains("gfx") || url.contains("driver") || url.contains(".exe")) {
+                if (isPlausibleOemDriverUrl(url, mfr)) {
                     AppLogger.info("Intel: Found download URL in OEM HTML response: " + url);
                     return url;
                 }
@@ -157,6 +164,40 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             AppLogger.warning("Intel: OEM search failed for " + mfr + ": " + e.getMessage());
         }
         return null;
+    }
+
+    /**
+     * Plausibility gate for OEM-fallback URLs: same-vendor-or-OEM host plus a
+     * wireless/graphics token (and no pre-release marker). The old check
+     * ({@code contains(".exe")}) matched every exe on the page, including
+     * BIOS and utility binaries.
+     */
+    private boolean isPlausibleOemDriverUrl(String url, SystemManufacturer.Manufacturer mfr) {
+        if (url == null || url.isBlank()) return false;
+        String lower = url.toLowerCase();
+        boolean hostOk;
+        try {
+            String host = new URI(url).getHost();
+            if (host == null) return false;
+            host = host.toLowerCase();
+            boolean intelHost = host.contains("intel.com");
+            boolean oemHost = switch (mfr) {
+                case LENOVO -> host.contains("lenovo.com") || host.contains("lenovo-images.com");
+                case DELL -> host.contains("dell.com") || host.contains("dellcdn.com") || host.contains("dell-cdn.com");
+                case HP -> host.contains("hp.com") || host.contains("hpe.com");
+                default -> false;
+            };
+            hostOk = intelHost || oemHost;
+        } catch (Exception e) {
+            return false;
+        }
+        if (!hostOk) return false;
+        boolean tokenOk = lower.contains("intel") || lower.contains("wifi") || lower.contains("wireless")
+                || lower.contains("bluetooth") || lower.contains("gfx") || lower.contains("graphics")
+                || lower.contains("arc") || lower.contains("iris") || lower.contains("killer")
+                || lower.contains("ax200") || lower.contains("ax201") || lower.contains("ax210")
+                || lower.contains("7265") || lower.contains("8265") || lower.contains("9260") || lower.contains("9560");
+        return tokenOk && isLikelyStable(url);
     }
 
     private String[] resolveDriverInfo(InstalledDriver driver) {
@@ -274,11 +315,10 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             String url = urlNode.asText("");
             if (url.isEmpty()) continue;
 
-            if (url.contains("downloadmirror.intel.com")) {
-                continue;
-            }
-
-            if (url.endsWith(".exe") || url.endsWith(".zip")) {
+            // Query- and case-tolerant: DSA feeds serve .../driver.exe?download=1
+            // or .EXE, which a bare endsWith missed (dropped to manual flow).
+            String bare = url.split("[?#]", 2)[0];
+            if (bare.toLowerCase().endsWith(".exe") || bare.toLowerCase().endsWith(".zip")) {
                 if (!url.startsWith("http")) {
                     url = "https://" + url;
                 }

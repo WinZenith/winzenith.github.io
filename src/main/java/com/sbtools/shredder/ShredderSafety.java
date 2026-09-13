@@ -79,6 +79,50 @@ public final class ShredderSafety {
             } catch (Exception ignored) {
                 // Attribute unavailable (e.g. missing file) — continue to protected checks.
             }
+            // 1b. Ancestor link guard: C:\Safe\link\System32\... where link -> C:\Windows
+            // passes leaf + string checks but resolves into the OS. Walk parents NOFOLLOW.
+            try {
+                Path cur = abs;
+                while (cur != null) {
+                    try {
+                        if (Files.isSymbolicLink(cur)) {
+                            return "Refusing to shred through a symbolic link in the path:\n" + path
+                                    + "\n\nLink component: " + cur;
+                        }
+                        Object rp = Files.getAttribute(cur, "dos:isReparsePoint",
+                                LinkOption.NOFOLLOW_LINKS);
+                        if (rp instanceof Boolean && (Boolean) rp) {
+                            // The leaf itself was cleared above; any ancestor reparse escapes.
+                            if (!cur.equals(abs)) {
+                                return "Refusing to shred through a junction / reparse point in the path:\n" + path
+                                        + "\n\nLink component: " + cur;
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    cur = cur.getParent();
+                }
+            } catch (Exception ignored) {
+            }
+            // 1c. Real-path re-check: resolve links and re-apply OS protection to the target.
+            try {
+                Path real = null;
+                try {
+                    real = abs.toRealPath();
+                } catch (Exception ignored) {
+                }
+                if (real != null && !real.equals(abs)) {
+                    try {
+                        if (isProtectedSystemPath(real) || CleanerUtils.isProtectedPath(real)) {
+                            return "Resolved target is a protected OS path — shredding is blocked:\n" + path
+                                    + "\n\nResolves to: " + real;
+                        }
+                    } catch (Exception e) {
+                        AppLogger.warning("ShredderSafety real-path check failed for " + path + ": " + e.getMessage());
+                    }
+                }
+            } catch (Exception ignored) {
+            }
             // 2. Protected OS locations (shared with Cleaner).
             try {
                 if (isProtectedSystemPath(path) || isProtectedSystemPath(abs)) {
@@ -90,6 +134,17 @@ public final class ShredderSafety {
                 }
             } catch (Exception e) {
                 AppLogger.warning("ShredderSafety protected check failed for " + path + ": " + e.getMessage());
+            }
+            // 2b. File-mode must never accept directories (drag-and-drop can mix
+            // folders into the batch file flow, bypassing folder count/admin gates).
+            if (!isFolderOp) {
+                try {
+                    if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+                            || Files.isDirectory(abs, LinkOption.NOFOLLOW_LINKS)) {
+                        return "Selected path is a folder. Use \"Secure Delete Folder\" (Browse Folder) for directories:\n" + path;
+                    }
+                } catch (Exception ignored) {
+                }
             }
             // 3. Drive roots, profile, WINDIR themselves.
             String s = abs.toString().toLowerCase(Locale.ROOT).replace('/', '\\');

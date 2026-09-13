@@ -28,18 +28,21 @@ public class BenchmarkService {
         if (testSizeMB < 1 || testSizeMB > 1024) {
             throw new IOException("Invalid benchmark size: " + testSizeMB + " MB (allowed 1-1024).");
         }
-        String letter = driveLetter.replace(":", "");
-        if (letter.isBlank()) {
+        if (driveLetter == null) {
             throw new IOException("No drive selected for benchmark.");
+        }
+        String letter = driveLetter.replace(":", "").trim();
+        if (!letter.matches("(?i)^[A-Z]$")) {
+            throw new IOException("Invalid drive for benchmark: " + driveLetter);
         }
         // Critical fix: never fill a nearly-full drive to 0 bytes (OS freeze risk).
         // Require test size + 100 MB headroom before launching the script (script
-        // double-checks via Get-PSDrive as well).
+        // double-checks via Get-PSDrive as well). Fail closed when free is unknown (0).
         try {
             java.io.File root = new java.io.File(letter + ":\\");
             long free = root.getFreeSpace();
             long required = (long) testSizeMB * 1024 * 1024 + 100L * 1024 * 1024;
-            if (free > 0 && free < required) {
+            if (free < required) {
                 throw new IOException("Insufficient free space on " + letter + ": needs ~"
                         + testSizeMB + " MB + 100 MB headroom.");
             }
@@ -146,7 +149,7 @@ public class BenchmarkService {
         if (pendingIo != null && result == null) throw pendingIo;
         if (result == null) throw new IOException("No PowerShell executable available for benchmark");
 
-        if (!result.success() && !cancelled.get()) {
+        if (!result.success() && (cancelled == null || !cancelled.get())) {
             throw new IOException("Benchmark failed: " + result.combinedOutput());
         }
 
@@ -206,8 +209,10 @@ public class BenchmarkService {
     private static void sweepBenchmarkLeftovers(String letter) {
         try {
             java.io.File root = new java.io.File(letter + ":\\");
+            // Only GUID-suffixed run dirs are safe to wipe recursively; the legacy
+            // fixed name is handled below (file-only + remove-if-empty, mirroring PS).
             java.io.File[] stale = root.listFiles((dir, name) ->
-                    name.startsWith(".winzenith-bench-") || name.equals("__winzenith_bench__"));
+                    name.startsWith(".winzenith-bench-"));
             if (stale != null) {
                 for (java.io.File f : stale) {
                     try {
@@ -215,6 +220,33 @@ public class BenchmarkService {
                     } catch (Exception ignored) {
                     }
                 }
+            }
+            // Legacy root-level dir from very old versions: never wipe recursively.
+            // Remove only the known temp file, then the dir if empty.
+            try {
+                java.io.File legacyRootFile = new java.io.File(root, "__winzenith_bench__\\bench_test.tmp");
+                java.nio.file.Files.deleteIfExists(legacyRootFile.toPath());
+                java.io.File legacyRootDir = new java.io.File(root, "__winzenith_bench__");
+                String[] left = legacyRootDir.list();
+                if (left != null && left.length == 0) {
+                    java.nio.file.Files.deleteIfExists(legacyRootDir.toPath());
+                }
+            } catch (Exception ignored) {
+            }
+            // Same-drive Public fallback dirs (standard-user benchmark path).
+            try {
+                java.io.File pub = new java.io.File(root, "Users\\Public");
+                java.io.File[] pubStale = pub.listFiles((dir, name) ->
+                        name.startsWith(".winzenith-bench-"));
+                if (pubStale != null) {
+                    for (java.io.File f : pubStale) {
+                        try {
+                            deleteRecursively(f.toPath());
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
             }
             java.io.File legacy = new java.io.File(root, "Users\\Public\\__winzenith_bench__\\bench_test.tmp");
             try {

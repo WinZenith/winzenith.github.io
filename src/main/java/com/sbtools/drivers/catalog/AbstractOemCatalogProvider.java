@@ -72,8 +72,11 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                             + ", confidence: " + String.format("%.0f", bestCatalogMatch.confidence() * 100) + "%)");
                     DriverUpdateCandidate candidate = DriverCatalogDatabase.toCandidate(bestCatalogMatch, driver);
 
-                    if (candidate.downloadUrl() == null || candidate.downloadUrl().isBlank()) {
-                        AppLogger.info(vendor.label() + ": Catalog entry has no sourceUrl, resolving via provider");
+                    // Landing-page catalog URLs (no installer file extension) must not
+                    // become downloadUrl: the installer would download an HTML page.
+                    // Resolve a direct file URL instead; fall back to manual flow.
+                    if (!hasDirectFile(candidate.downloadUrl())) {
+                        AppLogger.info(vendor.label() + ": Catalog entry has no direct file URL, resolving via provider");
                         String vendorPageUrl = candidate.vendorPageUrl();
                         if (vendorPageUrl == null || vendorPageUrl.isBlank()) {
                             vendorPageUrl = getVendorPageUrl(driver);
@@ -102,7 +105,16 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                             AppLogger.info(vendor.label() + ": No direct download for "
                                     + driver.friendlyName() + " — offering manual update to "
                                     + candidate.availableVersion());
-                            out.add(candidate);
+                            out.add(new DriverUpdateCandidate(
+                                    candidate.installed(),
+                                    candidate.availableVersion(),
+                                    candidate.source(),
+                                    candidate.packageId(),
+                                    candidate.title(),
+                                    candidate.description(),
+                                    candidate.severity(),
+                                    "",
+                                    candidate.vendorPageUrl()));
                             continue;
                         }
                     }
@@ -308,15 +320,50 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
         if (vendorPageUrl == null || vendorPageUrl.isBlank()) {
             return null;
         }
-        Pattern linkPattern = Pattern.compile("(?:href|data-href)\\s*=\\s*\"(https?://[^\"]+\\.(?:exe|zip|msi|inf|cab))\"",
+        // Quote- and query-tolerant: minified pages use single quotes and CDN
+        // links carry ?download=1 tails (which the old "...exe" pattern missed).
+        // The query stays INSIDE the capture: signed CDN links 403 without it.
+        Pattern linkPattern = Pattern.compile("(?:href|data-href)\\s*=\\s*[\"'](https?://[^\"']+\\.(?:exe|zip|msi|inf|cab)(?:[?#][^\"']*)?)[\"']",
                 Pattern.CASE_INSENSITIVE);
         String body = httpGet(vendorPageUrl);
         String found = findFirstMatchingLink(body, linkPattern);
-        if (found != null && isLikelyStable(found)) {
+        // Vendor-host gate: the first exe on a support page can be an ad or a
+        // third-party tool. Only same-vendor hosts are accepted (mirrors the
+        // install-time trusted-source list); anything else falls to manual flow.
+        if (found != null && isLikelyStable(found) && isVendorHost(found)) {
             AppLogger.debug(vendor.label() + ": Resolved direct download URL: " + found);
             return found;
         }
         return null;
+    }
+
+    /**
+     * True when the URL host belongs to this provider's vendor (CDNs included).
+     * Mirrors {@code DriverInstallService.isTrustedSource} for the vendor side;
+     * the install gate re-validates before any download.
+     */
+    protected boolean isVendorHost(String url) {
+        if (url == null || url.isBlank()) return false;
+        try {
+            String host = new URI(url).getHost();
+            if (host == null || host.isBlank()) return false;
+            host = host.toLowerCase();
+            return switch (vendor) {
+                case NVIDIA -> host.contains("nvidia.com") || host.contains("geforce.com") || host.contains("nvdlcdn.com");
+                case AMD -> host.contains("amd.com");
+                case INTEL -> host.contains("intel.com");
+                case REALTEK -> host.contains("realtek.com");
+                case BROADCOM -> host.contains("broadcom.com");
+                case QUALCOMM -> host.contains("qualcomm.com");
+                case SYNAPTICS -> host.contains("synaptics.com") || host.contains("hp.com") || host.contains("lenovo.com");
+                case LENOVO -> host.contains("lenovo.com") || host.contains("lenovo-images.com") || host.contains("lenovo.net");
+                case DELL -> host.contains("dell.com") || host.contains("dellcdn.com") || host.contains("dell-cdn.com");
+                case HP -> host.contains("hp.com") || host.contains("hpe.com");
+                case ASUS -> host.contains("asus.com") || host.contains("asusnet.net");
+            };
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     protected String findFirstMatchingLink(String html, Pattern pattern) {
@@ -330,8 +377,10 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
 
     protected boolean isLikelyStable(String url) {
         if (url == null) return false;
-        String lower = url.toLowerCase();
-        return !lower.matches(".*\\b(alpha|beta|rc|preview|test)\\b.*");
+        String lower = url.toLowerCase(java.util.Locale.ROOT);
+        // Digit-glued tags (rc1, beta2, preview3) have no word boundary
+        // before the digit and previously tested "stable".
+        return !lower.matches(".*\\b(alpha|beta|rc|preview|test)\\d*\\b.*");
     }
 
     private static String deviceKey(InstalledDriver d) {
@@ -351,5 +400,16 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
 
     private static String sanitize(String s) {
         return s.length() > 64 ? s.substring(0, 64) : s;
+    }
+
+    /**
+     * True when the URL points directly at an installer/archive file.
+     * Catalog landing pages (e.g. realtek.com/en/downloads) have no file
+     * extension and must go through provider resolution or manual flow.
+     */
+    static boolean hasDirectFile(String url) {
+        if (url == null || url.isBlank()) return false;
+        String path = url.split("[?#]", 2)[0];
+        return path.matches("(?i).*\\.(exe|zip|msi|inf|cab)$");
     }
 }

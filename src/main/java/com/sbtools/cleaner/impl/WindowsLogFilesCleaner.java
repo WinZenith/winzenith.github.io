@@ -26,7 +26,7 @@ public class WindowsLogFilesCleaner implements CleanerExtension {
         String windir = CleanerUtils.safeEnv("WINDIR");
         if (windir != null) {
             Path logsDir = Paths.get(windir, "Logs");
-            if (Files.isDirectory(logsDir)) {
+            if (Files.isDirectory(logsDir) && CleanerUtils.isSafeToCleanDirectory(logsDir)) {
                 try (Stream<Path> walk = Files.walk(logsDir, 2)) {
                     var stats = walk.filter(Files::isRegularFile)
                             .filter(p -> { String name = p.getFileName().toString().toLowerCase(); return name.endsWith(".log"); })
@@ -53,12 +53,19 @@ public class WindowsLogFilesCleaner implements CleanerExtension {
         String windir = CleanerUtils.safeEnv("WINDIR");
         if (windir != null) {
             Path logsDir = Paths.get(windir, "Logs");
-            if (Files.isDirectory(logsDir)) {
+            if (Files.isDirectory(logsDir) && CleanerUtils.isSafeToCleanDirectory(logsDir)) {
                 try (Stream<Path> walk = Files.walk(logsDir, 2)) {
                     List<Path> toDelete = walk.filter(Files::isRegularFile)
                             .filter(p -> { String name = p.getFileName().toString().toLowerCase(); return name.endsWith(".log"); })
                             .toList();
-                    for (Path f : toDelete) { if (token != null && token.isCancelled()) break; long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size; }
+                    for (Path f : toDelete) {
+                        if (token != null && token.isCancelled()) break;
+                        try {
+                            long size = Files.size(f);
+                            CleanerUtils.deletePermanently(f, token);
+                            if (!Files.exists(f)) cleaned += size;
+                        } catch (Exception ignored) {}
+                    }
                 } catch (Exception ignored) {}
             }
         }

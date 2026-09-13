@@ -40,7 +40,8 @@ public class RebootPendingStore {
         List<PendingEntry> entries = loadAll();
         Set<String> ids = new HashSet<>();
         for (PendingEntry e : entries) {
-            if (e.deviceId() != null) ids.add(e.deviceId());
+            // Corrupt [null] entries must not NPE the scan path.
+            if (e != null && e.deviceId() != null) ids.add(e.deviceId());
         }
         return ids;
     }
@@ -76,7 +77,7 @@ public class RebootPendingStore {
     public synchronized void addPending(String deviceId, String friendlyName) {
         if (deviceId == null || deviceId.isBlank()) return;
         List<PendingEntry> entries = loadAll();
-        boolean exists = entries.stream().anyMatch(e -> deviceId.equals(e.deviceId()));
+        boolean exists = entries.stream().anyMatch(e -> e != null && deviceId.equals(e.deviceId()));
         if (exists) return;
         entries.add(new PendingEntry(deviceId, friendlyName, Instant.now()));
         save(entries);
@@ -86,7 +87,10 @@ public class RebootPendingStore {
     public synchronized void clearPending(String deviceId) {
         if (deviceId == null) return;
         List<PendingEntry> entries = loadAll();
-        boolean removed = entries.removeIf(e -> deviceId.equals(e.deviceId()));
+        // Null-guard: a corrupt null entry must not NPE the clear and leave
+        // the REBOOT badge stuck forever. Nulls themselves are purged by
+        // purgeMissingDevices on the next scan.
+        boolean removed = entries.removeIf(e -> e != null && deviceId.equals(e.deviceId()));
         if (removed) {
             save(entries);
             AppLogger.info("Reboot pending cleared for " + deviceId);
@@ -117,7 +121,9 @@ public class RebootPendingStore {
             if (entries.isEmpty()) return 0;
             final java.time.Instant boot = bootTime;
             int before = entries.size();
-            entries.removeIf(e -> e == null || e.timestamp() == null || e.timestamp().isBefore(boot));
+            // Keep corrupt entries (null timestamp): purging them without a
+            // reboot drops the REBOOT badge and flip-flops Dashboard/Drivers.
+            entries.removeIf(e -> e != null && e.timestamp() != null && e.timestamp().isBefore(boot));
             int purged = before - entries.size();
             if (purged > 0) {
                 save(entries);
@@ -136,7 +142,10 @@ public class RebootPendingStore {
      */
     public synchronized int purgeMissingDevices(java.util.Set<String> installedIds) {
         try {
-            if (installedIds == null) return 0;
+            // Never purge on an empty/incomplete enumeration: one transient
+            // WMI omission would permanently drop valid REBOOT badges and
+            // reintroduce the Dashboard/Drivers flip-flop.
+            if (installedIds == null || installedIds.isEmpty()) return 0;
             List<PendingEntry> entries = loadAll();
             if (entries.isEmpty()) return 0;
             int before = entries.size();
@@ -170,12 +179,23 @@ public class RebootPendingStore {
             } finally {
                 try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
             }
-            // keep legacy in sync if portable
+            // keep legacy in sync if portable (atomic tmp+move like primary:
+            // a direct write torn by kill/power-loss truncates the legacy
+            // file, which then shadows everything on the next portable-missing
+            // load and loses all REBOOT badges)
             try {
                 Path legacy = legacyPath();
                 if (!legacy.equals(p)) {
                     if (legacy.getParent() != null) Files.createDirectories(legacy.getParent());
-                    MAPPER.writeValue(legacy.toFile(), entries);
+                    Path legacyTmp = legacy.resolveSibling("." + legacy.getFileName().toString() + ".tmp");
+                    MAPPER.writeValue(legacyTmp.toFile(), entries);
+                    try {
+                        Files.move(legacyTmp, legacy, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                    } catch (java.nio.file.AtomicMoveNotSupportedException ex) {
+                        Files.move(legacyTmp, legacy, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    } finally {
+                        try { Files.deleteIfExists(legacyTmp); } catch (Exception ignored) {}
+                    }
                 }
             } catch (Exception ignored) {}
         } catch (IOException e) {
@@ -201,6 +221,17 @@ public class RebootPendingStore {
                 } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
+        // No portable base (read-only media): OS app-data dir, not user.home.
+        return portableFallbackPath();
+    }
+
+    private Path portableFallbackPath() {
+        try {
+            Path p = com.sbtools.util.AppPaths.localAppData().resolve(FILE);
+            if (p.getParent() != null) Files.createDirectories(p.getParent());
+            return p;
+        } catch (Exception ignored) {
+        }
         return legacyPath();
     }
 

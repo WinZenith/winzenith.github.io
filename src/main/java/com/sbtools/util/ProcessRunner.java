@@ -169,6 +169,7 @@ public class ProcessRunner {
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
+            Thread.currentThread().interrupt();
             throw new CancellationException("Operation cancelled by user");
         }
 

@@ -160,6 +160,12 @@ public class VsCodeWorkspaceStorageCleaner implements CleanerExtension {
                 public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
                     if (attrs.isSymbolicLink() || attrs.isOther()) return FileVisitResult.SKIP_SUBTREE;
+                    try {
+                        if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
+                        Object reparse = Files.getAttribute(d, "dos:isReparsePoint",
+                                java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                        if (Boolean.TRUE.equals(reparse)) return FileVisitResult.SKIP_SUBTREE;
+                    } catch (Exception ignored) {}
                     long m = attrs.lastModifiedTime() != null ? attrs.lastModifiedTime().toMillis() : 0L;
                     newest.accumulateAndGet(m, Math::max);
                     return FileVisitResult.CONTINUE;

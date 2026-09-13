@@ -37,6 +37,11 @@ public class ShredderService {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Secure erase is only available on Windows.");
         }
+        // Defense-in-depth: UI validates, but direct service callers must not bypass it.
+        String blocked = ShredderSafety.validateFileForShred(filePath);
+        if (blocked != null) {
+            return new ShredderResult(filePath, false, false, false, "Blocked for safety: " + blocked);
+        }
         Path script = PowerShellScripts.resolve("secure-delete.ps1");
         ProcessResult result = runWithFallback(script.toString(), filePath, String.valueOf(passCount));
         return parseResult(result, filePath);
@@ -57,6 +62,11 @@ public class ShredderService {
                                                  AtomicBoolean cancelled) throws IOException, InterruptedException {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Secure erase is only available on Windows.");
+        }
+        // Defense-in-depth: UI validates, but direct service callers must not bypass it.
+        String blocked = ShredderSafety.validateFolderForShred(folderPath);
+        if (blocked != null) {
+            return new FolderDeleteResult(false, "Blocked for safety: " + blocked, 0, 0, List.of());
         }
         Path script = PowerShellScripts.resolve("secure-delete-folder.ps1");
         ProcessResult result = runStreamingWithFallback(script.toString(),
@@ -164,12 +174,60 @@ public class ShredderService {
     public record RecycleBinResult(List<RecycleBinEntry> entries, long totalSizeBytes, int fileCount) {}
 
     /**
+     * Trust boundary for Recycle Bin wipe: destructive input crosses COM -&gt; PS -&gt; JSON,
+     * so every path must prove containment under X:\$Recycle.Bin\ and must not be a link.
+     */
+    private static boolean isTrustedRecycleBinPath(String rawPath) {
+        if (rawPath == null || rawPath.isBlank()) return false;
+        try {
+            java.nio.file.Path p = java.nio.file.Paths.get(rawPath).toAbsolutePath().normalize();
+            String s = p.toString().toLowerCase(java.util.Locale.ROOT).replace('/', '\\');
+            if (s.startsWith("\\\\?\\unc\\")) s = "\\\\" + s.substring(8);
+            else if (s.startsWith("\\\\?\\")) s = s.substring(4);
+            if (!s.matches("^[a-z]:\\\\\\$recycle\\.bin\\\\.*")) return false;
+            try {
+                if (java.nio.file.Files.isSymbolicLink(p)) return false;
+                Object rp = java.nio.file.Files.getAttribute(p, "dos:isReparsePoint",
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                if (rp instanceof Boolean && (Boolean) rp) return false;
+                // Ancestor links (e.g. $Recycle.Bin\SID\plantedJunction\file) would
+                // otherwise pass the prefix check but resolve outside the bin.
+                java.nio.file.Path cur = p;
+                while (cur != null) {
+                    try {
+                        if (java.nio.file.Files.isSymbolicLink(cur)) return false;
+                        Object a = java.nio.file.Files.getAttribute(cur, "dos:isReparsePoint",
+                                java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                        if (a instanceof Boolean && (Boolean) a && !cur.equals(p)) return false;
+                    } catch (Exception ignored) {
+                    }
+                    cur = cur.getParent();
+                }
+                try {
+                    java.nio.file.Path real = p.toRealPath();
+                    String rs = real.toString().toLowerCase(java.util.Locale.ROOT).replace('/', '\\');
+                    if (rs.startsWith("\\\\?\\unc\\")) rs = "\\\\" + rs.substring(8);
+                    else if (rs.startsWith("\\\\?\\")) rs = rs.substring(4);
+                    if (!rs.matches("^[a-z]:\\\\\\$recycle\\.bin\\\\.*")) return false;
+                } catch (Exception ignored) {
+                    // Missing file: prefix + ancestor checks above already passed.
+                }
+            } catch (Exception ignored) {
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
      * Deletes the $I metadata sibling of a shredded $R recycle file.
-     * $Rxxx -> $Ixxx in the same $Recycle.Bin directory. Best-effort only.
+     * $Rxxx -&gt; $Ixxx in the same $Recycle.Bin directory. Best-effort only.
      */
     private static void deleteSiblingRecycleMetadata(String recyclePath) {
         try {
             if (recyclePath == null || recyclePath.isBlank()) return;
+            if (!isTrustedRecycleBinPath(recyclePath)) return;
             File r = new File(recyclePath);
             String name = r.getName();
             if (name.length() < 2) return;
@@ -183,6 +241,7 @@ public class ShredderService {
             File parent = r.getParentFile();
             if (parent == null) return;
             File sibling = new File(parent, siblingName);
+            if (!isTrustedRecycleBinPath(sibling.getAbsolutePath())) return;
             if (sibling.exists()) {
                 try {
                     java.nio.file.Files.deleteIfExists(sibling.toPath());
@@ -250,6 +309,11 @@ public class ShredderService {
                 progressCallback.accept("Securely deleting (" + current + "/" + total + "): " + new File(path).getName());
             }
 
+            if (!isTrustedRecycleBinPath(path)) {
+                AppLogger.warning("Skipping untrusted Recycle Bin path (outside $Recycle.Bin or link): " + path);
+                failed++;
+                continue;
+            }
             File file = new File(path);
             if (!file.exists()) {
                 skippedMissing++;

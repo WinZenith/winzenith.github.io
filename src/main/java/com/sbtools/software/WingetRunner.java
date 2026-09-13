@@ -417,10 +417,13 @@ public class WingetRunner {
         if (r.exitCode() == 9009) return true;
         String out = r.combinedOutput();
         if (out == null || out.isBlank()) {
-            // winget almost always prints something when it runs; blank with
-            // non-zero is treated as launcher failure to preserve fallback for
-            // truly missing binaries, at most trying the next shell once.
-            return true;
+            // Blank output with non-zero exit is an installer/scan failure, NOT a
+            // missing launcher: winget always prints something when it runs, and a
+            // truly missing binary surfaces as IOException / exit 9009 (handled
+            // above). Treating blank as launcher failure re-executed a failed
+            // install via every remaining shell (up to 3x, each up to the full
+            // 1200s timeout).
+            return false;
         }
         String lower = out.toLowerCase();
         if (lower.contains("not recognized")

@@ -620,9 +620,11 @@ public class UninstallerTabView extends BorderPane {
     }
 
     private void copyAppDetails(InstalledApp a) {
-        setClipboard(formatAppDetails(a)
-                + "\nUninstall: " + a.getUninstallString()
-                + "\nRegistry: " + a.getRegistryHive() + "\\" + a.getRegistryKeyPath());
+        String secondLine = a.isWin32()
+                ? ("\nUninstall: " + a.getUninstallString()
+                    + "\nRegistry: " + a.getRegistryHive() + "\\" + a.getRegistryKeyPath())
+                : ("\nPackage: " + a.getAppxPackageFullName());
+        setClipboard(formatAppDetails(a) + secondLine);
         statusLabel.setText("Copied details for " + a.getName());
     }
 
@@ -672,7 +674,7 @@ public class UninstallerTabView extends BorderPane {
     private static String csv(String v) {
         if (v == null) return "";
         String s = v.replace("\"", "\"\"");
-        return s.contains(",") || s.contains("\"") || s.contains("\n") ? "\"" + s + "\"" : s;
+        return s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r") ? "\"" + s + "\"" : s;
     }
 
     private void scan() {
@@ -712,7 +714,16 @@ public class UninstallerTabView extends BorderPane {
                 });
 
                 // Lazy AppX size enrichment (background, cancellable, non-blocking).
+                // Release busy right after the instant list so the tab stays usable
+                // while sizes resolve; enrichment is cancelled by a new scan/dispose.
                 if (!scanWin32 && !apps.isEmpty()) {
+                    Platform.runLater(() -> {
+                        if (scanCancellationToken == ct) {
+                            busy.set(false);
+                            progress.setVisible(false);
+                            cancelButton.setDisable(true);
+                        }
+                    });
                     for (int i = 0; i < apps.size(); i++) {
                         if (ct.isCancelled() || disposed) break;
                         InstalledApp a = apps.get(i);
@@ -1022,7 +1033,7 @@ public class UninstallerTabView extends BorderPane {
                 ProcessResult r = service.tryWingetUninstall(app, 600);
                 boolean ok = r != null && r.succeeded();
                 String out = r == null ? "(no result)" : r.combinedOutput();
-                recordHistory(app, ok ? "Winget" : "Winget",
+                recordHistory(app, "Winget",
                         ok, r == null ? -1 : r.exitCode(), 0,
                         ok ? "winget removal succeeded" : ("winget failed: " + truncate(out, 300)));
                 if (!ok) {
@@ -1039,7 +1050,7 @@ public class UninstallerTabView extends BorderPane {
                     });
                     return;
                 }
-                scanAndShowLeftovers(app, true);
+                scanAndShowLeftovers(app, true, null, -1, false, "Winget");
             } catch (Exception e) {
                 AppLogger.error("winget uninstall failed", e);
                 recordHistory(app, "Winget", false, -1, 0, "winget error: " + e.getMessage());
@@ -1065,7 +1076,10 @@ public class UninstallerTabView extends BorderPane {
     private void recordHistory(InstalledApp app, String mode, boolean success,
                                int exitCode, int leftoversDeleted, String detail) {
         try {
-            String type = app.isWin32() ? ("Desktop-" + app.getArchitecture()) : "Store";
+            String arch = app.getArchitecture();
+            String type = app.isWin32()
+                    ? ((arch == null || arch.isBlank()) ? "Desktop" : ("Desktop-" + arch.trim()))
+                    : "Store";
             historyStore.add(new UninstallHistoryEntry(
                     app.getName(), app.getVersion(), app.getPublisher(),
                     type, mode, success, exitCode, leftoversDeleted,
@@ -1210,7 +1224,8 @@ public class UninstallerTabView extends BorderPane {
                         });
                         // Uninstall FAILED: exclude the live install dir from deletable results.
                         // Deleting it now would bypass the vendor uninstaller and corrupt the install.
-                        scanAndShowLeftovers(app, false, result, result.exitCode(), rebootRequired);
+                        scanAndShowLeftovers(app, false, result, result.exitCode(), rebootRequired,
+                                preferQuiet ? "Silent" : "Standard");
                     } else {
                         recordHistory(app, preferQuiet ? "Silent" : "Standard",
                                 false, result.exitCode(), 0,
@@ -1230,7 +1245,8 @@ public class UninstallerTabView extends BorderPane {
                     AppLogger.info(rebootNote);
                     Platform.runLater(() -> statusLabel.setText(app.getName() + " uninstalled — reboot required."));
                 }
-                scanAndShowLeftovers(app, true, result, result.exitCode(), rebootRequired);
+                scanAndShowLeftovers(app, true, result, result.exitCode(), rebootRequired,
+                        preferQuiet ? "Silent" : "Standard");
 
             } catch (Exception e) {
                 AppLogger.error("Error during uninstallation workflow", e);
@@ -1251,11 +1267,17 @@ public class UninstallerTabView extends BorderPane {
     }
 
     private void scanAndShowLeftovers(InstalledApp app, boolean includePrimaryInstallDir) {
-        scanAndShowLeftovers(app, includePrimaryInstallDir, null, -1, false);
+        scanAndShowLeftovers(app, includePrimaryInstallDir, null, -1, false, "Standard");
     }
 
     private void scanAndShowLeftovers(InstalledApp app, boolean includePrimaryInstallDir,
                                       ProcessResult uninstallResult, int exitCode, boolean rebootRequired) {
+        scanAndShowLeftovers(app, includePrimaryInstallDir, uninstallResult, exitCode, rebootRequired, "Standard");
+    }
+
+    private void scanAndShowLeftovers(InstalledApp app, boolean includePrimaryInstallDir,
+                                      ProcessResult uninstallResult, int exitCode, boolean rebootRequired,
+                                      String mode) {
         leftoverCancel.set(false);
         Platform.runLater(() -> {
             statusLabel.setText("Scanning leftovers for " + app.getName() + "... (Cancel to skip)");
@@ -1271,7 +1293,7 @@ public class UninstallerTabView extends BorderPane {
                 statusLabel.setText("Leftover scan cancelled.");
                 busy.set(false);
                 cancelButton.setDisable(true);
-                recordHistory(app, "Standard", uninstallResult != null && uninstallResult.succeeded(),
+                recordHistory(app, mode, uninstallResult != null && uninstallResult.succeeded(),
                         exitCode, 0, cancelFlag.get() ? "leftover scan cancelled"
                                 : ("rebootRequired=" + rebootRequired));
                 scan();
@@ -1292,24 +1314,30 @@ public class UninstallerTabView extends BorderPane {
             }
             statusLabel.setText("Scanning completed.");
             showLeftoversReview(app, fileLeftovers, regLeftovers, pathWarnings,
-                    uninstallResult, exitCode, rebootRequired);
+                    uninstallResult, exitCode, rebootRequired, mode);
         });
     }
 
     private void showLeftoversReview(InstalledApp app, List<String> fileLeftovers, List<String> regLeftovers) {
-        showLeftoversReview(app, fileLeftovers, regLeftovers, List.of(), null, -1, false);
+        showLeftoversReview(app, fileLeftovers, regLeftovers, List.of(), null, -1, false, "Standard");
     }
 
     private void showLeftoversReview(InstalledApp app, List<String> fileLeftovers, List<String> regLeftovers, List<String> pathWarnings) {
-        showLeftoversReview(app, fileLeftovers, regLeftovers, pathWarnings, null, -1, false);
+        showLeftoversReview(app, fileLeftovers, regLeftovers, pathWarnings, null, -1, false, "Standard");
     }
 
     private void showLeftoversReview(InstalledApp app, List<String> fileLeftovers, List<String> regLeftovers,
                                      List<String> pathWarnings, ProcessResult uninstallResult,
                                      int exitCode, boolean rebootRequired) {
+        showLeftoversReview(app, fileLeftovers, regLeftovers, pathWarnings,
+                uninstallResult, exitCode, rebootRequired, "Standard");
+    }
+
+    private void showLeftoversReview(InstalledApp app, List<String> fileLeftovers, List<String> regLeftovers,
+                                     List<String> pathWarnings, ProcessResult uninstallResult,
+                                     int exitCode, boolean rebootRequired, String mode) {
         boolean hasDeletable = !fileLeftovers.isEmpty() || !regLeftovers.isEmpty();
         if (!hasDeletable) {
-            String mode = uninstallResult == null ? "Standard" : "Standard";
             recordHistory(app, mode, uninstallResult == null || uninstallResult.succeeded(),
                     exitCode, 0, rebootRequired ? "uninstalled; reboot required; no leftovers"
                             : "uninstalled; no leftovers");
@@ -1487,7 +1515,7 @@ public class UninstallerTabView extends BorderPane {
 
         java.util.Optional<ButtonType> dialogResult = dialog.showAndWait();
         if (dialogResult.isEmpty() || dialogResult.get() != ButtonType.OK) {
-            recordHistory(app, uninstallResult == null ? "Standard" : "Standard",
+            recordHistory(app, mode,
                     uninstallResult == null || uninstallResult.succeeded(),
                     exitCode, 0, "uninstalled; leftover deletion cancelled by user");
             busy.set(false);
@@ -1550,7 +1578,7 @@ public class UninstallerTabView extends BorderPane {
                             + (failedDeletions.isEmpty() ? "" : ("; " + failedDeletions.size() + " failed"))
                             + (backedUp > 0 ? ("; reg backup " + backedUp + " keys") : "")
                             + (rebootRequired ? "; reboot required" : "");
-                    recordHistory(app, uninstallResult == null ? "Standard" : "Standard",
+                    recordHistory(app, mode,
                             ok && failedDeletions.isEmpty(), exitCode, Math.max(0, deletedCount), detail);
 
                     final java.nio.file.Path backupDirFinal = backupDir;
@@ -1599,6 +1627,8 @@ public class UninstallerTabView extends BorderPane {
         if (s == null || s.isBlank()) return "app";
         String t = s.trim().replaceAll("[\\\\/:*?\"<>|]+", "_");
         if (t.length() > 60) t = t.substring(0, 60);
+        // Windows forbids trailing dots/spaces in file names.
+        t = t.replaceAll("[. ]+$", "");
         return t.isBlank() ? "app" : t;
     }
 

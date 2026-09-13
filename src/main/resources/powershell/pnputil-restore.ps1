@@ -1,14 +1,26 @@
 # Restore driver from backup folder. Safer order: install first, then remove old only if needed.
-# Args: BackupFolder DeviceId
+# Args: BackupFolder DeviceId RecordedInfName
 param(
     [Parameter(Mandatory = $true)][string]$BackupFolder,
-    [Parameter(Mandatory = $false)][string]$DeviceId
+    [Parameter(Mandatory = $false)][string]$DeviceId,
+    [Parameter(Mandatory = $false)][string]$RecordedInfName
 )
 $ErrorActionPreference = 'Stop'
 $infs = Get-ChildItem -Path $BackupFolder -Filter *.inf -Recurse -ErrorAction SilentlyContinue
 if (-not $infs) {
     Write-Error "No INF files in $BackupFolder"
     exit 1
+}
+# Scope to the recorded INF when the caller provides one: installing every INF
+# in the folder would also install a planted extra INF with admin rights.
+if ($RecordedInfName -and $RecordedInfName.Trim()) {
+    $want = $RecordedInfName.Trim()
+    $scoped = @($infs | Where-Object { $_.Name -eq $want })
+    if (-not $scoped -or $scoped.Count -eq 0) {
+        Write-Error "Recorded INF $want not found in $BackupFolder - refusing to install other INFs"
+        exit 1
+    }
+    $infs = $scoped
 }
 
 # Phase 1: Install backed-up drivers first (never delete current driver automatically - destructive)
@@ -47,27 +59,35 @@ try { & pnputil.exe /scan-devices 2>&1 | Out-Null } catch {}
 
 # Best-effort bind: staging via /add-driver does not always switch the active
 # driver on a downgrade path. Attempt a non-destructive device restart so the
-# staged (older) driver can bind without a reboot. Never fails the restore —
+# staged (older) driver can bind without a reboot. Never fails the restore -
 # if the restart is unavailable the caller falls back to reboot/manual steps.
 $restartAttempted = $false
 $restartOk = $false
 if ($DeviceId -and $DeviceId.Trim()) {
     $restartAttempted = $true
+    # Exact-instance guard: a wildcard DeviceId must never disable the first
+    # matching device (planted-index model). Compare case-sensitively.
+    $dev = $null
     try {
-        $r = & pnputil.exe /restart-device $DeviceId.Trim() 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0) { $restartOk = $true }
-        else { $installOutputs += "restart-device exit=$LASTEXITCODE $r" }
-    } catch {
-        $installOutputs += "restart-device unavailable: $($_.Exception.Message)"
-    }
-    if (-not $restartOk) {
+        $d = Get-PnpDevice -InstanceId $DeviceId.Trim() -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($d -and $d.InstanceId -ceq $DeviceId.Trim()) { $dev = $d }
+    } catch {}
+    if (-not $dev) {
+        $installOutputs += "restart-device skipped: no exact instance match for given DeviceId"
+    } else {
         try {
-            $dev = Get-PnpDevice -InstanceId $DeviceId.Trim() -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($dev) {
-                try { Disable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-                Start-Sleep -Milliseconds 1500
-                try { Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue; $restartOk = $true } catch {}
-            }
+            $r = & pnputil.exe /restart-device $DeviceId.Trim() 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0) { $restartOk = $true }
+            else { $installOutputs += "restart-device exit=$LASTEXITCODE $r" }
+        } catch {
+            $installOutputs += "restart-device unavailable: $($_.Exception.Message)"
+        }
+    }
+    if (-not $restartOk -and $dev) {
+        try {
+            try { Disable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+            Start-Sleep -Milliseconds 1500
+            try { Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue; $restartOk = $true } catch {}
         } catch {}
     }
 }

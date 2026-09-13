@@ -22,7 +22,7 @@ public class ThumbnailCacheCleaner implements CleanerExtension {
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
         if (localAppData != null) {
             Path explorerDir = Paths.get(localAppData, "Microsoft", "Windows", "Explorer");
-            if (Files.isDirectory(explorerDir)) {
+            if (Files.isDirectory(explorerDir) && CleanerUtils.isSafeToCleanDirectory(explorerDir)) {
                 try (Stream<Path> files = Files.list(explorerDir)) {
                     var matched = files.filter(Files::isRegularFile)
                             .filter(p -> { String name = p.getFileName().toString().toLowerCase(); return name.startsWith("thumbcache_"); })
@@ -48,14 +48,16 @@ public class ThumbnailCacheCleaner implements CleanerExtension {
         String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
         if (localAppData != null) {
             Path explorerDir = Paths.get(localAppData, "Microsoft", "Windows", "Explorer");
-            if (Files.isDirectory(explorerDir)) {
+            if (Files.isDirectory(explorerDir) && CleanerUtils.isSafeToCleanDirectory(explorerDir)) {
                 try (Stream<Path> files = Files.list(explorerDir)) {
                     for (Path f : (Iterable<Path>) files::iterator) {
                         if (token != null && token.isCancelled()) break;
                         if (Files.isRegularFile(f)) {
                             String name = f.getFileName().toString().toLowerCase();
                             if (name.startsWith("thumbcache_")) {
-                                long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size;
+                                try {
+                                    long size = Files.size(f); CleanerUtils.deletePermanently(f, token); if (!Files.exists(f)) cleaned += size;
+                                } catch (Exception ignored) {}
                             }
                         }
                     }

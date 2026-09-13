@@ -1295,15 +1295,25 @@ public class DiskToolsTabView extends BorderPane {
         final int testSizeMB = sizeMB;
 
         // Critical fix: fail fast when free space is insufficient instead of filling
-        // the drive to 0 bytes. Service + script double-check as well.
+        // the drive to 0 bytes. Service + script double-check as well. Fail closed:
+        // stale/unknown free (<=0) is re-queried live; still-unknown blocks the run.
         DriveInfo benchInfo = benchDriveMap.get(selected);
-        if (benchInfo != null && benchInfo.getFreeBytes() > 0) {
+        if (benchInfo != null) {
             long required = (long) testSizeMB * 1024 * 1024 + 100L * 1024 * 1024;
-            if (benchInfo.getFreeBytes() < required) {
+            long free = benchInfo.getFreeBytes();
+            if (free <= 0) {
+                try {
+                    free = new java.io.File(finalDriveLetter.replace(":", "") + ":\\").getFreeSpace();
+                } catch (Exception ignored) {
+                    free = 0;
+                }
+            }
+            if (free < required) {
+                String freeText = free > 0 ? DiskToolsTabView.formatWipeBytes(free) : benchInfo.getFreeFormatted();
                 new Alert(Alert.AlertType.WARNING,
                         "Insufficient free space on " + finalDriveLetter + " for a " + testSizeMB
                                 + " MB benchmark (needs ~" + testSizeMB + " MB + 100 MB headroom, free "
-                                + benchInfo.getFreeFormatted() + "). Free up space or choose a smaller size.")
+                                + freeText + "). Free up space or choose a smaller size.")
                         .showAndWait();
                 return;
             }

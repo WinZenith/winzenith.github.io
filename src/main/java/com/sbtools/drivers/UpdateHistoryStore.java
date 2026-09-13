@@ -62,7 +62,7 @@ public class UpdateHistoryStore {
         recordUpdate(deviceId, deviceName, oldVersion, newVersion, source, success, "");
     }
 
-    public void recordUpdate(String deviceId, String deviceName, String oldVersion,
+    public synchronized void recordUpdate(String deviceId, String deviceName, String oldVersion,
                              String newVersion, String source, boolean success, String detail) throws IOException {
         List<UpdateEntry> history = loadHistory();
         UpdateEntry entry = new UpdateEntry(
@@ -190,7 +190,12 @@ public class UpdateHistoryStore {
     }
 
     private void saveHistory(List<UpdateEntry> history) throws IOException {
-        Path p = path();
+        // Bound portable growth: weekly batch use would otherwise append
+        // thousands of entries (install + verify follow-ups), slowing the
+        // History dialog and filling USB sticks. Keep the newest 500.
+        if (history != null && history.size() > 500) {
+            history = new ArrayList<>(history.subList(history.size() - 500, history.size()));
+        }        Path p = path();
         Path dir = p.getParent();
         if (dir != null) {
             Files.createDirectories(dir);
@@ -204,6 +209,27 @@ public class UpdateHistoryStore {
             Files.move(tmp, p, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         } finally {
             try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
+        }
+        // Mirror to legacy location (like RebootPendingStore): loadHistory
+        // merges legacy when portable is missing, so without this mirror a
+        // portable-folder move hides all recently recorded history.
+        try {
+            Path legacy = legacyPath();
+            if (!legacy.equals(p)) {
+                Path legacyDir = legacy.getParent();
+                if (legacyDir != null) Files.createDirectories(legacyDir);
+                Path legacyTmp = legacy.resolveSibling("." + legacy.getFileName().toString() + ".tmp");
+                mapper.writeValue(legacyTmp.toFile(), history);
+                try {
+                    Files.move(legacyTmp, legacy, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException ex) {
+                    Files.move(legacyTmp, legacy, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } finally {
+                    try { Files.deleteIfExists(legacyTmp); } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception mirrorEx) {
+            AppLogger.warning("UpdateHistoryStore: legacy mirror write failed: " + mirrorEx.getMessage());
         }
     }
 
@@ -230,7 +256,19 @@ public class UpdateHistoryStore {
                 } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
-        return Path.of(System.getProperty("user.home"), DIR, FILE);
+        // No portable base (read-only media): prefer the OS app-data dir over
+        // dropping host traces into user.home (portability leak).
+        return portableFallbackPath();
+    }
+
+    private Path portableFallbackPath() {
+        try {
+            Path p = com.sbtools.util.AppPaths.localAppData().resolve(FILE);
+            if (p.getParent() != null) Files.createDirectories(p.getParent());
+            return p;
+        } catch (Exception ignored) {
+        }
+        return legacyPath();
     }
 
     private Path legacyPath() {

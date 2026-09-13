@@ -1,6 +1,7 @@
 package com.sbtools.drivers.catalog;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
@@ -41,7 +42,10 @@ import java.util.stream.Collectors;
 public final class DriverCatalogDatabase {
 
     private static final ObjectMapper MAPPER = JsonMapper.mapper()
-            .enable(SerializationFeature.INDENT_OUTPUT);
+            .enable(SerializationFeature.INDENT_OUTPUT)
+            // Unknown future MatchMethod values map to UNKNOWN instead of
+            // aborting the entire catalog load (forward-compat with feeds).
+            .enable(DeserializationFeature.READ_UNKNOWN_ENUM_VALUES_USING_DEFAULT_VALUE);
 
     private static final TypeReference<List<CatalogEntry>> LIST_TYPE = new TypeReference<>() {};
 
@@ -115,20 +119,37 @@ public final class DriverCatalogDatabase {
     }
 
     private static List<CatalogEntry> loadRefreshed() {
+        // Newest valid file wins: first-file-wins let a stale portable copy
+        // shadow a fresher localAppData one (USB-moved machines), and an
+        // mtime tie or 0-byte file confused refreshedCatalogTime() reporters.
+        List<CatalogEntry> best = List.of();
+        long bestMtime = Long.MIN_VALUE;
+        Path bestPath = null;
         for (Path p : refreshedCandidates()) {
             try {
                 if (p == null || !Files.exists(p) || Files.size(p) == 0) continue;
                 byte[] data = Files.readAllBytes(p);
                 List<CatalogEntry> list = MAPPER.readValue(data, LIST_TYPE);
-                if (list != null && !list.isEmpty()) {
-                    AppLogger.info("DriverCatalogDatabase: Found refreshed catalog at " + p + " (" + list.size() + " entries)");
-                    return list;
+                if (list == null || list.isEmpty()) continue;
+                long mtime;
+                try {
+                    mtime = Files.getLastModifiedTime(p).toMillis();
+                } catch (Exception ignored) {
+                    mtime = 0;
+                }
+                if (bestPath == null || mtime > bestMtime) {
+                    best = list;
+                    bestMtime = mtime;
+                    bestPath = p;
                 }
             } catch (Exception e) {
                 AppLogger.warning("DriverCatalogDatabase: Failed to load refreshed catalog at " + p + ": " + e.getMessage());
             }
         }
-        return List.of();
+        if (bestPath != null) {
+            AppLogger.info("DriverCatalogDatabase: Found refreshed catalog at " + bestPath + " (" + best.size() + " entries)");
+        }
+        return best;
     }
 
     private static List<Path> refreshedCandidates() {
@@ -150,7 +171,10 @@ public final class DriverCatalogDatabase {
         if (e.provider() == null || e.provider().isBlank()) return false;
         String ver = e.latestDriverVersion() != null && !e.latestDriverVersion().isBlank()
                 ? e.latestDriverVersion() : e.latestVersion();
+        // Numeric plausibility (same bar as scraped versions): a "9999" style
+        // version would otherwise become a phantom update for every match.
         if (ver == null || ver.isBlank() || ver.length() > 64) return false;
+        if (!AbstractOemCatalogProvider.isPlausibleVersion(ver)) return false;
         if (e.confidence() < 0 || e.confidence() > 1) return false;
         // URLs must stay https (sanitizeSourceUrl enforces; reject non-https here).
         for (String url : new String[]{e.sourceUrl(), e.vendorPageUrl()}) {
@@ -159,6 +183,24 @@ public final class DriverCatalogDatabase {
                 if (s.isBlank()) return false;
             }
         }
+        // Hashes/thumbprints buy gate trust: junk values ("x") must not pass.
+        if (e.hashSha256() != null && !e.hashSha256().isBlank()
+                && !e.hashSha256().trim().matches("(?i)[0-9a-f]{64}")) return false;
+        if (e.certThumbprint() != null && !e.certThumbprint().isBlank()) {
+            String norm = e.certThumbprint().replaceAll("[^0-9a-fA-F]", "");
+            if (!(norm.matches("(?i)[0-9a-f]{40}") || norm.matches("(?i)[0-9a-f]{64}"))) return false;
+        }
+        // NAME_REGEX must carry a specific pattern: ".*"/".+" would match
+        // every device, and >=0.95 confidence alone clears the gate.
+        if (e.matchMethod() == CatalogEntry.MatchMethod.NAME_REGEX) {
+            String mv = e.matchValue();
+            if (mv == null || mv.isBlank()) return false;
+            String literal = mv.replaceAll("[.*+?^$|(){}\\[\\]\\\\]", "");
+            if (literal.replaceAll("[^A-Za-z0-9]", "").length() < 3) return false;
+        }
+        // Top confidence without any hardware evidence is not refreshable:
+        // HW-strong entries still pass via the >=0.8 single-factor rule.
+        if (e.confidence() >= 0.95 && (e.hardwareIds() == null || e.hardwareIds().isEmpty())) return false;
         return true;
     }
 
@@ -196,6 +238,14 @@ public final class DriverCatalogDatabase {
         for (CatalogEntry e : combined) {
             // Skip test entries in normal matching
             if (e.testOnly()) continue;
+            // Blank installed version with a capped range: the true version is
+            // unknown, so a range cannot be honored — skip rather than risk a
+            // downgrade. Exception: problem devices (e.g. Code 28, no driver
+            // at all) cannot be downgraded, so they keep range-agnostic offers.
+            if ((driver.driverVersion() == null || driver.driverVersion().isBlank())
+                    && ((e.versionMin() != null && !e.versionMin().isBlank())
+                        || (e.versionMax() != null && !e.versionMax().isBlank()))
+                    && !isProblemDevice(driver)) continue;
             // Enforce version applicability range when the catalog specifies it
             if (!isWithinVersionRange(driver.driverVersion(), e.versionMin(), e.versionMax())) continue;
             // Enforce platform/arch when the catalog specifies them
@@ -349,25 +399,34 @@ public final class DriverCatalogDatabase {
         );
     }
 
+    /**
+     * Ranks tags through the shared {@link UpdateSeverity#fromString} parser so
+     * catalog severities agree with WU ones. Substring matching ("non-critical"
+     * contains "critical", "insecurity" contains "security") used to inflate
+     * badges. Untagged entries keep the historical RECOMMENDED default.
+     */
     static UpdateSeverity severityFromTags(java.util.List<String> tags) {
+        UpdateSeverity best = null;
         if (tags != null) {
             for (String t : tags) {
-                if (t == null) continue;
-                String l = t.toLowerCase();
-                if (l.contains("critical")) return UpdateSeverity.CRITICAL;
-            }
-            for (String t : tags) {
-                if (t == null) continue;
-                String l = t.toLowerCase();
-                if (l.contains("important") || l.contains("security")) return UpdateSeverity.IMPORTANT;
-            }
-            for (String t : tags) {
-                if (t == null) continue;
-                String l = t.toLowerCase();
-                if (l.contains("optional")) return UpdateSeverity.OPTIONAL;
+                UpdateSeverity s = UpdateSeverity.fromString(t);
+                if (s != null && rank(s) > rank(best)) {
+                    best = s;
+                }
             }
         }
-        return UpdateSeverity.RECOMMENDED;
+        return best == null || best == UpdateSeverity.UNKNOWN ? UpdateSeverity.RECOMMENDED : best;
+    }
+
+    private static int rank(UpdateSeverity s) {
+        if (s == null) return -1;
+        return switch (s) {
+            case CRITICAL -> 4;
+            case IMPORTANT -> 3;
+            case RECOMMENDED -> 2;
+            case OPTIONAL -> 1;
+            case UNKNOWN -> 0;
+        };
     }
 
     static String sanitizeSourceUrl(String url) {
@@ -388,8 +447,14 @@ public final class DriverCatalogDatabase {
         }
     }
 
-    static boolean isWithinVersionRange(String installed, String min, String max) {
-        try {
+    /** A device reporting a problem (or nothing at all) has no working driver to downgrade. */
+    static boolean isProblemDevice(InstalledDriver driver) {
+        if (driver == null) return false;
+        String status = driver.status();
+        return status != null && !status.isBlank() && !"OK".equalsIgnoreCase(status);
+    }
+
+    static boolean isWithinVersionRange(String installed, String min, String max) {        try {
             if (min != null && !min.isBlank()) {
                 if (installed == null || installed.isBlank()) return true;
                 if (VersionCompare.compare(installed, min) < 0) return false;
@@ -417,11 +482,17 @@ public final class DriverCatalogDatabase {
         if (arch == null || arch.isBlank()) return true;
         String a = arch.toLowerCase().replaceAll("[^a-z0-9]", "");
         String osArch = System.getProperty("os.arch", "").toLowerCase();
-        boolean is64 = osArch.contains("64") || osArch.contains("amd64") || osArch.contains("x86_64");
-        if (a.contains("64") || a.contains("amd64") || a.contains("x64")) return is64;
-        if (a.equals("x86") || a.equals("32") || a.contains("386")) return !is64;
-        if (a.contains("arm64") || a.contains("aarch64")) return osArch.contains("aarch64") || osArch.contains("arm64");
-        if (a.contains("arm")) return osArch.contains("arm");
+        // Split x64 vs ARM64 explicitly: osArch.contains("64") is true on
+        // aarch64 too, which previously let x64 kernel drivers through on ARM64.
+        boolean isArm64 = osArch.contains("aarch64") || osArch.contains("arm64");
+        boolean isX64 = !isArm64 && (osArch.contains("amd64") || osArch.contains("x86_64") || osArch.contains("64"));
+        // ARM64 first: "arm64" contains "64" and must not take the x64 branch.
+        if (a.contains("arm64") || a.contains("aarch64")) return isArm64;
+        if (a.contains("64") || a.contains("amd64") || a.contains("x64")) return isX64;
+        if (a.equals("x86") || a.equals("32") || a.contains("386")) return !isX64 && !isArm64;
+        // Generic "arm": "aarch64" has no contiguous "arm" substring, so test
+        // the flag explicitly or the entry is wrongly refused on ARM64.
+        if (a.contains("arm")) return isArm64 || osArch.contains("arm");
         return true;
     }
 
@@ -457,24 +528,45 @@ public final class DriverCatalogDatabase {
         return matches;
     }
 
+    // Compiled-pattern cache: findByNameRegex runs per driver per scan, and
+    // recompiling every time wastes CPU. Kept static (entries are immutable).
+    private static final java.util.concurrent.ConcurrentHashMap<String, Pattern> REGEX_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    // Cap match input: bounds catastrophic backtracking from hostile
+    // refreshed patterns (nested quantifiers pass the literal-length gate).
+    private static final int REGEX_INPUT_CAP = 256;
+
+    private static Pattern cachedRegex(String matchValue) {
+        Pattern cached = REGEX_CACHE.get(matchValue);
+        if (cached != null) return cached;
+        Pattern compiled = Pattern.compile(matchValue, Pattern.CASE_INSENSITIVE);
+        Pattern prev = REGEX_CACHE.putIfAbsent(matchValue, compiled);
+        return prev != null ? prev : compiled;
+    }
+
     private List<CatalogEntry> findByNameRegex(InstalledDriver driver) {
         String name = driver.friendlyName();
         if (name == null || name.isBlank()) {
             return List.of();
         }
-        String nameUpper = name.toUpperCase();
+        String query = name.length() > REGEX_INPUT_CAP ? name.substring(0, REGEX_INPUT_CAP) : name;
+        String nameUpper = query.toUpperCase();
         List<CatalogEntry> matches = new ArrayList<>();
         for (CatalogEntry entry : nameRegexEntries) {
             if (entry.matchValue() != null) {
                 try {
-                    Pattern p = Pattern.compile(entry.matchValue(), Pattern.CASE_INSENSITIVE);
-                    if (p.matcher(name).find()) {
+                    Pattern p = cachedRegex(entry.matchValue());
+                    if (p.matcher(query).find()) {
                         matches.add(entry);
                     }
                 } catch (PatternSyntaxException e) {
                     if (nameUpper.contains(entry.matchValue().toUpperCase())) {
                         matches.add(entry);
                     }
+                } catch (StackOverflowError | IllegalStateException e) {
+                    // Pathological backtracking on hostile patterns: skip the
+                    // entry rather than hanging the provider thread.
+                    AppLogger.warning("DriverCatalogDatabase: Skipping hostile regex for entry " + entry.id());
                 }
             }
         }
@@ -500,7 +592,9 @@ public final class DriverCatalogDatabase {
      * prefix of the other (e.g. PCI_VEN_8086&amp;DEV_2723 matches
      * PCI_VEN_8086&amp;DEV_2723&amp;SUBSYS_12345678) but rejecting
      * substring matches at non-segment boundaries (e.g. DEV_2723 must not
-     * match DEV_27231).
+     * match DEV_27231). Falls back to bus-agnostic VEN+DEV (or VID+PID)
+     * token comparison so HDAUDIO\FUNC_01&amp;VEN_10EC&amp;DEV_0888 matches
+     * catalog PCI\VEN_10EC&amp;DEV_0888 entries for the same codec.
      */
     private static boolean matchesHardwareId(String a, String b) {
         if (a.equals(b)) {
@@ -514,7 +608,56 @@ public final class DriverCatalogDatabase {
             return a.isEmpty() || a.charAt(a.length() - 1) == '&' || a.charAt(a.length() - 1) == '\\'
                     || b.charAt(a.length()) == '&' || b.charAt(a.length()) == '\\';
         }
-        return false;
+        return matchesDeviceTokens(a, b);
+    }
+
+    /**
+     * Bus-agnostic fallback: same physical device enumerated under a different
+     * bus prefix (HDAUDIO vs PCI, USB vs PCI). Requires both vendor and device
+     * tokens to match exactly; a vendor-only match is rejected (wrong-device risk).
+     * When either side carries a SUBSYS_ variant tag, the variants must be
+     * equal: a catalog entry for SUBSYS_AAA must never match a SUBSYS_BBB
+     * device (or a device with no SUBSYS evidence at all).
+     */
+    private static boolean matchesDeviceTokens(String a, String b) {
+        // SUBSYS variant rule: reject only when BOTH sides name a variant and
+        // they differ (OEM-specific entry vs different-OEM device). When only
+        // one side has SUBSYS_ (generic catalog entry vs specific device, or
+        // vice versa) there is no contradiction: fall through to VEN/DEV.
+        // (Requiring either-side presence broke bus-agnostic generic matches
+        // such as HDAUDIO VEN_10EC&DEV_0888&SUBSYS_X vs PCI VEN_10EC&DEV_0888.)
+        String subA = subsysToken(a);
+        String subB = subsysToken(b);
+        if (subA != null && subB != null && !subA.equals(subB)) {
+            return false;
+        }
+        String venA = token(a, "VEN_");
+        String devA = token(a, "DEV_");
+        String venB = token(b, "VEN_");
+        String devB = token(b, "DEV_");
+        if (venA != null && devA != null && venA.equals(venB) && devA.equals(devB)) {
+            return true;
+        }
+        String vidA = token(a, "VID_");
+        String pidA = token(a, "PID_");
+        String vidB = token(b, "VID_");
+        String pidB = token(b, "PID_");
+        return vidA != null && pidA != null && vidA.equals(vidB) && pidA.equals(pidB);
+    }
+
+    private static String token(String norm, String prefix) {
+        int i = norm.indexOf(prefix);
+        if (i < 0 || i + prefix.length() + 4 > norm.length()) return null;
+        String v = norm.substring(i, i + prefix.length() + 4);
+        return v.matches(prefix + "[0-9A-F]{4}") ? v : null;
+    }
+
+    /** Extracts SUBSYS_XXXXXXXX (8 hex) or null when absent/malformed. */
+    private static String subsysToken(String norm) {
+        int i = norm.indexOf("SUBSYS_");
+        if (i < 0 || i + 7 + 8 > norm.length()) return null;
+        String v = norm.substring(i, i + 7 + 8);
+        return v.matches("SUBSYS_[0-9A-F]{8}") ? v : null;
     }
 
     private static Map<String, List<CatalogEntry>> indexByProvider(List<CatalogEntry> entries) {

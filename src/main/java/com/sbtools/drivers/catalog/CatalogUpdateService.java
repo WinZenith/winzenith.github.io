@@ -44,6 +44,8 @@ public final class CatalogUpdateService {
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(30);
     /** Minimum sane catalog: refuse to replace a healthy catalog with a tiny file. */
     private static final int MIN_ENTRY_COUNT = 5;
+    /** Upper bound for a catalog payload: no truncation, fail closed instead of OOM. */
+    private static final long MAX_CATALOG_BYTES = 20L * 1024 * 1024;
 
     private CatalogUpdateService() {
     }
@@ -110,7 +112,17 @@ public final class CatalogUpdateService {
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
                 return new RefreshResult(false, "Catalog download failed: HTTP " + resp.statusCode(), 0, "");
             }
+            long declared = resp.headers().firstValueAsLong("Content-Length").orElse(-1);
+            if (declared > MAX_CATALOG_BYTES) {
+                return new RefreshResult(false, "Catalog download too large (" + declared + " bytes) — ignored.", 0, "");
+            }
             byte[] data = resp.body();
+            // Cap the actual body too: Content-Length may lie or be absent
+            // (chunked), and ofByteArray would otherwise heap-fill on junk.
+            if (data == null || data.length > MAX_CATALOG_BYTES) {
+                return new RefreshResult(false, "Catalog download too large ("
+                        + (data == null ? 0 : data.length) + " bytes) — ignored.", 0, "");
+            }
             if (data == null || data.length < 1024) {
                 return new RefreshResult(false, "Catalog download too small (" + (data == null ? 0 : data.length) + " bytes) — ignored.", 0, "");
             }
@@ -134,7 +146,12 @@ public final class CatalogUpdateService {
                 if (!root.isArray() || root.size() < MIN_ENTRY_COUNT) {
                     return new RefreshResult(false, "Downloaded catalog invalid (need JSON array with >= " + MIN_ENTRY_COUNT + " entries).", 0, "");
                 }
-                entries = JsonMapper.mapper().readValue(data,
+                entries = JsonMapper.mapper().copy()
+                        // Unknown future MatchMethod values map to UNKNOWN
+                        // instead of rejecting the whole refresh (see
+                        // DriverCatalogDatabase mapper config).
+                        .enable(com.fasterxml.jackson.databind.DeserializationFeature.READ_UNKNOWN_ENUM_VALUES_USING_DEFAULT_VALUE)
+                        .readValue(data,
                         JsonMapper.mapper().getTypeFactory().constructCollectionType(List.class, CatalogEntry.class));
             } catch (Exception ex) {
                 return new RefreshResult(false, "Downloaded catalog failed validation: " + ex.getMessage(), 0, "");
@@ -146,7 +163,9 @@ public final class CatalogUpdateService {
 
             Path target = refreshedCatalogPath();
             Files.createDirectories(target.getParent());
-            Path tmp = target.resolveSibling("." + target.getFileName().toString() + ".tmp");
+            // Unique tmp: a fixed sibling name lets two concurrent instances
+            // truncate each other's file mid-write (shared LOCALAPPDATA fallback).
+            Path tmp = Files.createTempFile(target.getParent(), ".driver-catalog-", ".tmp");
             Files.write(tmp, data);
             try {
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -185,9 +204,12 @@ public final class CatalogUpdateService {
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) return null;
             String body = resp.body();
             if (body == null || body.isBlank()) return null;
-            // Format is either "<hash>" or "<hash>  <filename>".
-            String first = body.trim().split("\\s+")[0];
-            if (first.matches("(?i)[0-9a-f]{64}")) return first.toLowerCase();
+            // Strip BOM (PowerShell Out-File sidecars) and scan only the first
+            // line's tokens: a bare contains() over an HTML error page could
+            // match an incidental hex string and "verify" garbage.
+            String firstLine = body.replace("\uFEFF", "").trim().split("\\R", 2)[0];
+            java.util.regex.Matcher hm = java.util.regex.Pattern.compile("(?i)\\b[0-9a-f]{64}\\b").matcher(firstLine);
+            if (hm.find()) return hm.group(0).toLowerCase();
             return null;
         } catch (Exception ignored) {
             return null;

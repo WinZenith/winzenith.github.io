@@ -1,0 +1,120 @@
+Sep 11, 2026 8:57:06 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 11, 2026 8:57:06 PM com.sbtools.util.AppLogger info
+INFO: Running: powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\durot\IdeaProjects\BasicSDriverUpdate\ps-scripts\wu-search-updates.ps1
+Sep 11, 2026 8:57:06 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=4880
+Sep 11, 2026 8:57:21 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=4880
+Sep 11, 2026 8:57:21 PM com.sbtools.util.AppLogger info
+INFO: Found 1 Windows Update(s)
+Sep 11, 2026 8:57:21 PM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 11, 2026 8:57:21 PM com.sbtools.util.AppLogger info
+INFO: Running: powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\durot\IdeaProjects\BasicSDriverUpdate\ps-scripts\wu-search-updates.ps1
+Sep 11, 2026 8:57:21 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=15304
+Sep 11, 2026 8:57:21 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=2088
+Sep 11, 2026 8:57:22 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=15304
+Sep 11, 2026 8:57:22 PM com.sbtools.util.AppLogger info
+INFO: Running: C:\Users\durot\AppData\Local\Microsoft\WindowsApps\winget.exe upgrade --source winget
+Sep 11, 2026 8:57:22 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=18100
+Sep 11, 2026 8:57:26 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=18100
+Sep 11, 2026 8:57:34 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=2088
+Sep 11, 2026 8:57:34 PM com.sbtools.util.AppLogger info
+INFO: Found 1 Windows Update(s)
+Sep 11, 2026 8:57:34 PM com.sbtools.util.AppLogger info
+INFO: JVM shutdown hook: terminating tracked processes
+Sep 12, 2026 10:10:25 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:10:25 AM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=google.chrome
+Sep 12, 2026 10:10:26 AM com.sbtools.util.AppLogger info
+INFO: SoftwareUpdateHistoryStore: Migrated history to portable location C:\Users\durot\IdeaProjects\BasicSDriverUpdate\software-update-history.json
+Sep 12, 2026 10:10:26 AM com.sbtools.util.AppLogger warning
+WARNING: Skipping software update history entry with missing timestamp
+Sep 12, 2026 10:10:26 AM com.sbtools.util.AppLogger info
+INFO: Software update history recorded: SwVerifyProbe 1 -> 2
+Sep 12, 2026 10:14:35 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:14:51 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:16:37 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:16:37 AM com.sbtools.util.AppLogger info
+INFO: Dropping duplicate software update entry for id=google.chrome
+Sep 12, 2026 10:16:37 AM com.sbtools.util.AppLogger warning
+WARNING: Skipping software update history entry with missing timestamp
+Sep 12, 2026 10:16:37 AM com.sbtools.util.AppLogger info
+INFO: Software update history recorded: SwVerifyProbe 1 -> 2
+Sep 12, 2026 10:31:56 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:31:56 AM com.sbtools.util.AppLogger info
+INFO: Parallel scan cancelled by user
+Sep 12, 2026 10:31:56 AM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 12, 2026 10:32:12 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:32:12 AM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 12, 2026 10:32:12 AM com.sbtools.util.AppLogger info
+INFO: Parallel scan cancelled by user
+Sep 12, 2026 10:41:40 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:45:45 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:45:45 AM com.sbtools.util.AppLogger info
+INFO: Skipped 4 non-winget (e.g. msstore) row(s): Store apps are not managed by this tab
+Sep 12, 2026 10:45:45 AM com.sbtools.util.AppLogger info
+INFO: Skipped 1 non-winget (e.g. msstore) row(s): Store apps are not managed by this tab
+Sep 12, 2026 10:45:45 AM com.sbtools.util.AppLogger info
+INFO: Skipped 3 non-winget (e.g. msstore) row(s): Store apps are not managed by this tab
+Sep 12, 2026 10:45:46 AM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 12, 2026 10:45:46 AM com.sbtools.util.AppLogger info
+INFO: Registered process key=5744
+Sep 12, 2026 10:45:46 AM com.sbtools.util.AppLogger info
+INFO: Process exited key=5744
+Sep 12, 2026 10:47:01 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:47:01 AM com.sbtools.util.AppLogger info
+INFO: Skipped 1 non-winget (e.g. msstore) row(s): Store apps are not managed by this tab
+Sep 12, 2026 10:47:01 AM com.sbtools.util.AppLogger warning
+WARNING: Skipping winget entry with missing id: name=NoId available=2.0
+Sep 12, 2026 10:47:02 AM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 12, 2026 10:47:02 AM com.sbtools.util.AppLogger info
+INFO: Registered process key=15164
+Sep 12, 2026 10:47:02 AM com.sbtools.util.AppLogger info
+INFO: Process exited key=15164
+Sep 12, 2026 10:47:32 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 12, 2026 10:47:32 AM com.sbtools.util.AppLogger info
+INFO: Skipped 1 non-winget (e.g. msstore) row(s): Store apps are not managed by this tab
+Sep 12, 2026 10:47:32 AM com.sbtools.util.AppLogger warning
+WARNING: Skipping winget entry with missing id: name=NoId available=2.0
+Sep 12, 2026 10:47:33 AM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 12, 2026 10:47:33 AM com.sbtools.util.AppLogger info
+INFO: Registered process key=17576
+Sep 12, 2026 10:47:33 AM com.sbtools.util.AppLogger info
+INFO: Process exited key=17576
+Sep 12, 2026 10:59:31 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 8:26:27 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 8:45:54 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 8:57:27 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 9:26:38 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 9:26:55 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 13, 2026 9:44:49 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
