@@ -5,23 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <!-- Standard SEO -->
-    <title>WinZenith - Free Windows System Optimizer &amp; Cleaner</title>
-    <meta name="description" content="WinZenith: free, portable, open-source Windows utility to clean junk, update drivers, uninstall apps, manage startup &amp; optimize your PC. No ads, no telemetry.">
-    <link rel="canonical" href="https://winzenith.github.io/">
+    <title>WinZenith — Free Portable PC Cleaner, Windows 11 Driver &amp; Software Updater</title>
+    <meta name="description" content="Free portable PC cleaner for Windows 10 and 11: junk cleanup, Windows 11 driver updater, Winget software updater, app uninstaller, and network optimizer. No ads, no telemetry, open source.">
+    <link rel="canonical" href="https://winzenith.github.io/" />
 
     <!-- Open Graph / Facebook -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://winzenith.github.io/">
-    <meta property="og:title" content="WinZenith - Free Open-Source Windows System Optimizer & Cleaner">
-    <meta property="og:description" content="Maintain software/driver updates, clean system junk, manage startup items, and optimize Windows 10 & 11. Free, portable, and ad-free.">
+    <meta property="og:locale" content="en_US">
+    <meta property="og:title" content="WinZenith — Free Portable PC Cleaner, Windows 11 Driver &amp; Software Updater">
+    <meta property="og:description" content="Free portable PC cleaner for Windows 10 and 11: junk cleanup, driver and Winget software updates, uninstaller, and network tools. No ads, no telemetry, open source.">
     <meta property="og:image" content="https://winzenith.github.io/images/logo.png">
     <meta property="og:site_name" content="WinZenith">
 
     <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:url" content="https://winzenith.github.io/">
-    <meta name="twitter:title" content="WinZenith - Free Open-Source Windows System Optimizer">
-    <meta name="twitter:description" content="Free, open-source, portable Windows utility for system cleanup, driver updates, and performance optimization.">
+    <meta name="twitter:title" content="WinZenith — Free Portable PC Cleaner &amp; Windows 11 Updater">
+    <meta name="twitter:description" content="Portable Windows optimizer: junk cleaner, driver updater, Winget software updates. Free, no ads, no telemetry, public GitHub source.">
     <meta name="twitter:image" content="https://winzenith.github.io/images/logo.png">
 
     <link rel="stylesheet" href="css/style.css">
@@ -39,26 +40,20 @@
         "price": "0",
         "priceCurrency": "USD"
       },
-      "aggregateRating": {
-        "@type": "AggregateRating",
-        "ratingValue": "3.5",
-        "bestRating": "5",
-        "worstRating": "1",
-        "ratingCount": "1",
-        "reviewCount": "1"
-      },
-      "description": "Free, open-source, and portable Windows system optimizer, driver updater, software updater, and system cleaner.",
+      "description": "Free, portable, open-source Windows 10 and 11 system optimizer: junk cleaner, driver updater, Winget software updater, app uninstaller, and network optimizer. No ads and no telemetry.",
       "url": "https://winzenith.github.io/",
-      "downloadUrl": "https://winzenith.github.io/",
+      "downloadUrl": "https://github.com/WinZenith/winzenith.github.io/releases/download/v1.3.2/WinZenith-1.3.2-portable.zip",
       "softwareVersion": "1.3.2",
       "featureList": [
-        "Driver & Software Updater",
-        "System Junk Cleaner",
-        "Windows App Uninstaller",
-        "Startup Manager & Services Configurator",
-        "Disk Defragmentation & Secure File Shredder",
-        "Browser Extensions Manager",
-        "Network Adapter Optimizer"
+        "Portable ZIP — no installation required",
+        "No background telemetry or tracking",
+        "Windows driver updater (multiple OEM providers)",
+        "Winget software updater with batch updates",
+        "System junk cleaner (21 categories)",
+        "Windows app uninstaller with leftover cleanup",
+        "Startup manager and Windows services tools",
+        "Network adapter optimizer",
+        "100% public source code on GitHub"
       ],
       "author": {
         "@type": "Organization",
@@ -95,6 +90,14 @@
             "@type": "Answer",
             "text": "WinZenith supports Windows 10 and Windows 11. It requires no additional dependencies or runtimes to be installed."
           }
+        },
+        {
+          "@type": "Question",
+          "name": "Does WinZenith use Winget for software updates?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. WinZenith integrates the Windows Package Manager (winget) to scan for outdated applications and install updates from your configured winget sources. Driver updates use WinZenith's built-in driver catalog and providers, separate from winget."
+          }
         }
       ]
     }
@@ -115,6 +118,7 @@
                 <a href="#screenshots" class="nav-link">Screenshots</a>
                 <a href="#changelog" class="nav-link">Changelog</a>
                 <a href="#guide" class="nav-link">Guide</a>
+                <a href="#comparison" class="nav-link">Compare</a>
                 <a href="#faq" class="nav-link">FAQ</a>
             </nav>
             <div class="nav-actions">
@@ -402,30 +406,94 @@
         </div>
     </section>
 
+    <!-- Comparison (GEO-friendly facts) -->
+    <section class="section comparison-section" id="comparison" aria-labelledby="comparison-heading">
+        <div class="container">
+            <p class="section-kicker reveal">How we compare</p>
+            <h2 class="section-title reveal" id="comparison-heading">WinZenith vs. <span>traditional PC cleaners</span></h2>
+            <p class="comparison-intro reveal">Factual differences that matter for privacy-focused Windows maintenance.</p>
+            <div class="comparison-table-wrap reveal">
+                <table class="comparison-table">
+                    <caption class="visually-hidden">Feature comparison between WinZenith and typical commercial PC cleaning software</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Criteria</th>
+                            <th scope="col">WinZenith</th>
+                            <th scope="col">Typical PC cleaners</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <th scope="row">Distribution</th>
+                            <td>Portable ZIP — extract and run <code>WinZenith.exe</code>; no installer</td>
+                            <td>Often requires installer and background services</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Telemetry / tracking</th>
+                            <td>None — no ads, no bundled software, no background tracking</td>
+                            <td>Often includes analytics, upsells, or bundled tools</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Software updates</th>
+                            <td>Integrated <strong>Winget</strong> (Windows Package Manager) batch updates</td>
+                            <td>Varies; rarely uses winget natively</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Driver updates</th>
+                            <td>Built-in driver scan and update with backup/rollback</td>
+                            <td>Sometimes offered as a separate paid module</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Source code</th>
+                            <td>100% public on <a href="https://github.com/WinZenith/winzenith.github.io">GitHub</a></td>
+                            <td>Proprietary; source not published</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Price</th>
+                            <td>Free (0 USD)</td>
+                            <td>Free tiers with paid upgrades common</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <ul class="comparison-facts reveal">
+                <li><strong>Portable:</strong> run from any folder or USB; delete the folder to remove the app.</li>
+                <li><strong>Private:</strong> zero telemetry; maintenance tools run locally on your PC.</li>
+                <li><strong>Transparent:</strong> full application source is public on GitHub for audit and contribution.</li>
+            </ul>
+        </div>
+    </section>
+
     <!-- FAQ Section -->
     <section class="section faq-section" id="faq">
         <div class="container">
             <p class="section-kicker reveal">Good to know</p>
             <h2 class="section-title reveal">Frequently <span>Asked Questions</span></h2>
             <div class="faq-list">
-                <details class="faq-item reveal">
-                    <summary class="faq-question">Is WinZenith completely free and safe?</summary>
+                <article class="faq-item reveal">
+                    <h3 class="faq-question">Is WinZenith completely free and safe?</h3>
                     <div class="faq-answer">
                         <p>Yes. WinZenith is 100% free and contains no ads, telemetry, or bundled software. The source code is publicly available on GitHub, and the executable is verified clean by VirusTotal and Softpedia's 100% Clean Award.</p>
                     </div>
-                </details>
-                <details class="faq-item reveal">
-                    <summary class="faq-question">Does WinZenith require installation?</summary>
+                </article>
+                <article class="faq-item reveal">
+                    <h3 class="faq-question">Does WinZenith require installation?</h3>
                     <div class="faq-answer">
                         <p>No. WinZenith is fully portable. Simply download the ZIP, extract it, and run the executable. No installation, no registry changes, and no leftover files when you delete it.</p>
                     </div>
-                </details>
-                <details class="faq-item reveal">
-                    <summary class="faq-question">Which Windows versions are supported?</summary>
+                </article>
+                <article class="faq-item reveal">
+                    <h3 class="faq-question">Which Windows versions are supported?</h3>
                     <div class="faq-answer">
                         <p>WinZenith supports Windows 10 and Windows 11. It requires no additional dependencies or runtimes to be installed.</p>
                     </div>
-                </details>
+                </article>
+                <article class="faq-item reveal">
+                    <h3 class="faq-question">Does WinZenith use Winget for software updates?</h3>
+                    <div class="faq-answer">
+                        <p>Yes. WinZenith integrates the Windows Package Manager (winget) to scan for outdated applications and install updates from your configured winget sources. Driver updates use WinZenith's built-in driver catalog and providers, separate from winget.</p>
+                    </div>
+                </article>
             </div>
         </div>
     </section>

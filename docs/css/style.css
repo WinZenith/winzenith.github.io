@@ -807,6 +807,89 @@ code {
     color: var(--warning);
 }
 
+/* --- Comparison Section --- */
+.comparison-section {
+    background-color: var(--bg-alt);
+    border-top: 1px solid var(--border-soft);
+}
+
+.comparison-intro {
+    text-align: center;
+    color: var(--text-muted);
+    max-width: 640px;
+    margin: 0 auto 28px;
+    font-size: 15px;
+    line-height: 1.65;
+}
+
+.comparison-table-wrap {
+    overflow-x: auto;
+    margin-bottom: 24px;
+}
+
+.comparison-table {
+    width: 100%;
+    max-width: 920px;
+    margin: 0 auto;
+    border-collapse: collapse;
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+.comparison-table caption.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.comparison-table th,
+.comparison-table td {
+    border: 1px solid var(--border-soft);
+    padding: 14px 16px;
+    text-align: left;
+    vertical-align: top;
+}
+
+.comparison-table thead th {
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
+    font-weight: 700;
+}
+
+.comparison-table tbody th[scope="row"] {
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
+    font-weight: 600;
+    width: 22%;
+}
+
+.comparison-table tbody td:nth-child(2) {
+    background-color: rgba(80, 250, 123, 0.06);
+}
+
+.comparison-table a {
+    color: var(--accent);
+}
+
+.comparison-facts {
+    max-width: 720px;
+    margin: 0 auto;
+    padding-left: 1.25rem;
+    color: var(--text-muted);
+    font-size: 14.5px;
+    line-height: 1.75;
+}
+
+.comparison-facts li {
+    margin-bottom: 8px;
+}
+
 /* --- FAQ Section --- */
 .faq-section {
     background-color: var(--bg-alt);
@@ -824,58 +907,23 @@ code {
     border-radius: var(--radius-small);
     margin-bottom: 12px;
     background-color: var(--bg-surface);
-    overflow: hidden;
+    padding: 18px 22px;
     transition: border-color 0.2s ease;
 }
 
-.faq-item[open] {
-    border-color: rgba(80, 250, 123, 0.55);
+.faq-item:hover {
+    border-color: rgba(80, 250, 123, 0.35);
 }
 
 .faq-question {
-    padding: 18px 22px;
+    margin: 0 0 10px;
     font-size: 15.5px;
     font-weight: 700;
     color: var(--text-primary);
-    cursor: pointer;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    transition: color 0.2s ease;
-}
-
-.faq-question::-webkit-details-marker {
-    display: none;
-}
-
-.faq-question::after {
-    content: "+";
-    flex-shrink: 0;
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    font-weight: bold;
-    color: var(--accent);
-    background-color: var(--accent-dim);
-    border-radius: 50%;
-    transition: transform 0.2s ease;
-}
-
-.faq-item[open] .faq-question::after {
-    content: "\2212";
-}
-
-.faq-question:hover {
-    color: var(--accent);
+    line-height: 1.4;
 }
 
 .faq-answer {
-    padding: 0 22px 18px;
     font-size: 14.5px;
     color: var(--text-muted);
     line-height: 1.75;
