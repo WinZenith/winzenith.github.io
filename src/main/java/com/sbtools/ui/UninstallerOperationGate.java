@@ -70,11 +70,11 @@ final class UninstallerOperationGate {
         return cancelFlag.get();
     }
 
-    /** Cancel stops in-flight cooperative work (scan, restore, leftover scan, sizing). */
+    /** Cancel stops in-flight cooperative work (scan, restore, leftover scan, sizing, cleanup). */
     boolean cancelStopsWorkImmediately() {
         return switch (phase) {
-            case LIST_SCAN, SIZE_ENRICHMENT, RESTORE_POINT, LEFTOVER_SCAN -> true;
-            case VENDOR_UNINSTALL, CLEANUP, FORCE_UNINSTALL, IDLE -> false;
+            case LIST_SCAN, SIZE_ENRICHMENT, RESTORE_POINT, LEFTOVER_SCAN, CLEANUP, FORCE_UNINSTALL -> true;
+            case VENDOR_UNINSTALL, IDLE -> false;
         };
     }
 

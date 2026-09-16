@@ -11,7 +11,7 @@ import java.util.List;
 
 /**
  * Delivery Optimization download cache. Conservative: skipped while servicing
- * is pending (active updates / pending reboot), admin required (WINDIR).
+ * is pending or Windows Update / DoSvc is active, admin required (WINDIR).
  */
 public class DeliveryOptimizationCleaner implements CleanerExtension {
 
@@ -38,6 +38,12 @@ public class DeliveryOptimizationCleaner implements CleanerExtension {
             row.setSizeOrCountText("Skipped (pending system restart: " + reasons + ")");
             return;
         }
+        if (CleanerUtils.isDeliveryOptimizationBusy()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Skipped (Windows Update / Delivery Optimization active)");
+            return;
+        }
         CleanerUtils.scanDirectorySizes(row, getDirs(), CleanerUtils.DEFAULT_SCAN_MAX_DEPTH);
     }
 
@@ -51,6 +57,10 @@ public class DeliveryOptimizationCleaner implements CleanerExtension {
         if (token != null && token.isCancelled()) return 0L;
         if (com.sbtools.util.WindowsServicingSafety.isServicingPending()) {
             com.sbtools.util.AppLogger.info("Skipping Delivery Optimization cleanup: pending system restart");
+            return 0;
+        }
+        if (CleanerUtils.isDeliveryOptimizationBusy()) {
+            com.sbtools.util.AppLogger.info("Skipping Delivery Optimization cleanup: Windows Update active");
             return 0;
         }
         return CleanerUtils.cleanDirectoryPattern(getDirs(), token);

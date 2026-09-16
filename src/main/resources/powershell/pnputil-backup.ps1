@@ -83,8 +83,30 @@ if ($InfName -match '^oem\d+\.inf$') {
     & pnputil.exe /export-driver $oem $BackupFolder
 }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-# Verify at least one file was exported
-$exported = Get-ChildItem -Path $BackupFolder -Recurse -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count
+# Verify at least one regular file was exported. Do not use Get-ChildItem
+# -Recurse: it descends Windows junctions into the target tree.
+try {
+    $rootItem = Get-Item -LiteralPath $BackupFolder -ErrorAction Stop
+} catch {
+    Write-Error "Backup folder not found after export: $BackupFolder"
+    exit 1
+}
+if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    Write-Error "Refusing to treat a junction/symlink as backup folder: $BackupFolder"
+    exit 1
+}
+$exported = 0
+$stack = New-Object System.Collections.Stack
+$stack.Push($rootItem)
+while ($stack.Count -gt 0) {
+    $dir = $stack.Pop()
+    Get-ChildItem -LiteralPath $dir.FullName -File -ErrorAction SilentlyContinue |
+        Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+        ForEach-Object { $exported++ }
+    Get-ChildItem -LiteralPath $dir.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        if (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($_) }
+    }
+}
 if (-not $exported -or $exported -eq 0) {
     Write-Error "Export succeeded but no files in $BackupFolder"
     exit 1

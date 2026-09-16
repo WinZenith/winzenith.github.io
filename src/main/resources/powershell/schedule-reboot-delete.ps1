@@ -2,14 +2,21 @@ param([string]$FilePath)
 $ErrorActionPreference = 'Stop'
 $result = [ordered]@{ success = $false; message = '' }
 try {
+    if (-not $FilePath) { throw "Path is empty." }
+    # LiteralPath only: Resolve-Path follows junctions and would schedule the TARGET.
+    $item = $null
+    try { $item = Get-Item -LiteralPath $FilePath -Force -ErrorAction Stop } catch {}
+    if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        $result.message = "Refusing to schedule a reparse point / symlink for reboot delete: $FilePath"
+        $result | ConvertTo-Json -Depth 2 -Compress; exit 1; return
+    }
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($FilePath)
+    } catch {
+        $fullPath = $FilePath
+    }
     $path = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
     $name = "PendingFileRenameOperations"
-    try {
-        $fullPath = (Resolve-Path -LiteralPath $FilePath -ErrorAction Stop).Path
-    } catch {
-        # Fallback for paths that are already partially deleted or use extended syntax
-        try { $fullPath = [System.IO.Path]::GetFullPath($FilePath) } catch { $fullPath = $FilePath }
-    }
     $existing = @()
     try {
         $prop = Get-ItemProperty -Path $path -Name $name -ErrorAction Stop

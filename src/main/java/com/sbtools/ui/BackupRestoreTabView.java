@@ -282,6 +282,7 @@ public class BackupRestoreTabView extends BorderPane {
 
     private void refreshRollback() {
         final int generation = rollbackRefreshGen.incrementAndGet();
+        busy.set(true);
         Platform.runLater(() -> {
             rollbackRefreshBusy.set(true);
             if (rollbackSpinner != null) rollbackSpinner.setVisible(true);
@@ -368,26 +369,33 @@ public class BackupRestoreTabView extends BorderPane {
                     }
                 });
                 RestoreRow.computeAllSizesAsync(newRows).whenComplete((v, ex) -> Platform.runLater(() -> {
-                    if (generation != rollbackRefreshGen.get()) {
-                        return;
+                    try {
+                        if (generation != rollbackRefreshGen.get()) {
+                            return;
+                        }
+                        if (rollbackTable != null) {
+                            rollbackTable.refresh();
+                        }
+                        if (rollbackSpinner != null) {
+                            rollbackSpinner.setVisible(false);
+                        }
+                        rollbackRefreshBusy.set(false);
+                    } finally {
+                        busy.set(false);
                     }
-                    if (rollbackTable != null) {
-                        rollbackTable.refresh();
-                    }
-                    if (rollbackSpinner != null) {
-                        rollbackSpinner.setVisible(false);
-                    }
-                    rollbackRefreshBusy.set(false);
                 }));
             } catch (Exception ex) {
                 AppLogger.error("Failed to load backups", ex);
                 Platform.runLater(() -> {
-                    if (generation != rollbackRefreshGen.get()) {
-                        return;
+                    try {
+                        if (generation == rollbackRefreshGen.get()) {
+                            rollbackStatusLabel.setText("Failed to load backups: " + ex.getMessage());
+                            if (rollbackSpinner != null) rollbackSpinner.setVisible(false);
+                            rollbackRefreshBusy.set(false);
+                        }
+                    } finally {
+                        busy.set(false);
                     }
-                    rollbackStatusLabel.setText("Failed to load backups: " + ex.getMessage());
-                    if (rollbackSpinner != null) rollbackSpinner.setVisible(false);
-                    rollbackRefreshBusy.set(false);
                 });
             }
         });
@@ -870,6 +878,7 @@ public class BackupRestoreTabView extends BorderPane {
                                     Button launchButton, boolean silent) {
         if (localBusy.get()) return;
         localBusy.set(true);
+        busy.set(true);
         statusLabel.setText("Scanning restore points...");
         // Keep snapshot to restore on failure so UI doesn't lose previous data
         List<SystemRestoreRow> snapshot = new ArrayList<>(rows);
@@ -905,7 +914,10 @@ public class BackupRestoreTabView extends BorderPane {
                     }
                 });
             } finally {
-                Platform.runLater(() -> localBusy.set(false));
+                Platform.runLater(() -> {
+                    localBusy.set(false);
+                    busy.set(false);
+                });
             }
         });
     }
@@ -929,12 +941,19 @@ public class BackupRestoreTabView extends BorderPane {
         if (description == null || description.isBlank()) return;
 
         localBusy.set(true);
+        busy.set(true);
         statusLabel.setText("Creating restore point (this can take several minutes)...");
         final String desc = description;
 
         AppExecutors.ioPool().execute(() -> {
             boolean succeeded = false;
             try {
+                if (!com.sbtools.util.AdminCheck.isRunningAsAdminFresh()) {
+                    Platform.runLater(() -> new Alert(Alert.AlertType.WARNING,
+                            "Creating system restore points requires administrator rights. Please restart as administrator.")
+                            .showAndWait());
+                    return;
+                }
                 var result = service.createRestorePoint(desc);
                 boolean ok = result.success();
                 succeeded = ok;
@@ -971,6 +990,7 @@ public class BackupRestoreTabView extends BorderPane {
                 final boolean rescan = succeeded;
                 Platform.runLater(() -> {
                     localBusy.set(false);
+                    busy.set(false);
                     // Only rescan on success: on failure a second 60s scan would
                     // hide the error status and double the wait after a timeout.
                     if (rescan) {
@@ -1425,7 +1445,16 @@ public class BackupRestoreTabView extends BorderPane {
                 // Validate the selected session BEFORE creating the safety net:
                 // a missing/.hiv-only session must not leave an orphan pre-restore dir.
                 Path dirPath = resolveRegistryBackupPath(selected.getFilename());
-                if (!Files.isDirectory(dirPath)) {
+                if (com.sbtools.backup.BackupHealth.isReparseOrSymlink(dirPath)) {
+                    Platform.runLater(() -> {
+                        statusLabel.setText("Backup session is a junction/symlink.");
+                        new Alert(Alert.AlertType.WARNING,
+                                "Refusing to restore a registry session that is a junction or symlink:\n"
+                                        + dirPath).showAndWait();
+                    });
+                    return;
+                }
+                if (!Files.isDirectory(dirPath, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                     Platform.runLater(() -> {
                         statusLabel.setText("Backup session not found.");
                         new Alert(Alert.AlertType.WARNING,
@@ -1439,6 +1468,7 @@ public class BackupRestoreTabView extends BorderPane {
                     List<Path> all = stream.sorted().toList();
                     regFiles = all.stream()
                             .filter(p -> p.toString().toLowerCase().endsWith(".reg"))
+                            .filter(p -> !com.sbtools.backup.BackupHealth.isReparseOrSymlink(p))
                             .toList();
                     hivCount = all.stream()
                             .filter(p -> p.toString().toLowerCase().endsWith(".hiv"))
@@ -1536,9 +1566,9 @@ public class BackupRestoreTabView extends BorderPane {
         AppExecutors.ioPool().execute(() -> {
             try {
                 Path dirPath = resolveRegistryBackupPath(selected.getFilename());
-                if (Files.isDirectory(dirPath)) {
+                if (Files.exists(dirPath, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                     deleteDirectoryRecursive(dirPath);
-                    if (Files.exists(dirPath)) {
+                    if (Files.exists(dirPath, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                         throw new IOException("Backup session folder still exists: " + dirPath);
                     }
                 }
@@ -1618,25 +1648,7 @@ public class BackupRestoreTabView extends BorderPane {
     }
 
     private static void deleteDirectoryRecursive(Path directory) throws IOException {
-        if (!Files.exists(directory)) {
-            return;
-        }
-        java.util.List<Path> failed = new java.util.ArrayList<>();
-        try (var stream = Files.walk(directory)) {
-            stream.sorted(java.util.Comparator.reverseOrder())
-                    .forEach(path -> {
-                        try { Files.setAttribute(path, "dos:readonly", Boolean.FALSE); } catch (Exception ignored) {}
-                        try {
-                            Files.deleteIfExists(path);
-                        } catch (IOException e) {
-                            failed.add(path);
-                            AppLogger.warning("Could not delete: " + path, e);
-                        }
-                    });
-        }
-        if (!failed.isEmpty() || Files.exists(directory)) {
-            throw new IOException("Could not delete folder completely: " + directory);
-        }
+        com.sbtools.backup.BackupHealth.deleteTree(directory);
     }
 
     private static Path resolveRegistryBackupPath(String filename) throws IOException {

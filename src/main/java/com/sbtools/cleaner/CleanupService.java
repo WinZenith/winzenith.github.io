@@ -17,7 +17,7 @@ import java.util.concurrent.ExecutorService;
 
 public class CleanupService {
 
-    private static final long SCAN_OVERALL_TIMEOUT_SECONDS = 300;
+    public static final long SCAN_OVERALL_TIMEOUT_SECONDS = 300;
     private static final long CLEAN_OVERALL_TIMEOUT_SECONDS = 960;
 
     public static final class CleanSummary {
@@ -233,6 +233,7 @@ public class CleanupService {
             backupRoot = newUniqueBackupRoot();
         }
 
+        if (token == null) token = CancellationToken.NONE;
         for (CleanupRow row : selectedRows) {
             if (!row.isSelected()) continue;
             if (token.isCancelled()) {
@@ -243,23 +244,21 @@ public class CleanupService {
                 long scannedBytes = row.getTotalBytes();
                 int scannedItems = row.getItemCount();
                 long cleaned = cleanCategory(row.getCategory(), registryBackup ? backupRoot : null, token);
-                totalBytes += cleaned;
+                boolean itemOnly = scannedBytes == 0;
+                if (!itemOnly) totalBytes += cleaned;
                 if (cleaned == 0) {
-                    if (scannedBytes == 0 && scannedItems > 0) {
-                        totalItems += scannedItems;
-                    } else {
-                        totalItems += 0;
+                    if (scannedItems > 0 && !token.isCancelled()) {
+                        errors.add(row.getCategory().getDisplayName()
+                                + ": nothing was cleaned (files may be locked or in use)");
                     }
-                } else if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
+                } else if (itemOnly) {
+                    totalItems += (int) Math.min(cleaned, Integer.MAX_VALUE);
+                } else if (scannedItems > 0 && cleaned < scannedBytes) {
                     totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
                 } else {
                     totalItems += scannedItems;
                 }
-                perCategory.put(row.getCategory(), cleaned);
-                if (cleaned == 0 && scannedBytes > 0 && !token.isCancelled()) {
-                    errors.add(row.getCategory().getDisplayName()
-                            + ": nothing was cleaned (files may be locked or in use)");
-                }
+                perCategory.put(row.getCategory(), itemOnly ? 0L : cleaned);
                 if (onProgress != null) onProgress.run();
             } catch (Exception e) {
                 String msg = e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : e.toString();
@@ -527,25 +526,26 @@ public class CleanupService {
             long cleaned = cleanedByIndex.getOrDefault(i, 0L);
             CleanupRow r = tasks.get(i);
             String taskErr = taskErrorMap.get(i);
+            int scannedItems = r.getItemCount();
+            long scannedBytes = r.getTotalBytes();
             if (taskErr != null) {
                 errors.add(taskErr);
-            } else if (cleaned == 0 && r.getTotalBytes() > 0 && !canceled) {
+            } else if (cleaned == 0 && scannedItems > 0 && !canceled) {
                 errors.add(r.getCategory().getDisplayName()
                         + ": nothing was cleaned (files may be locked or in use)");
             }
-            totalBytes += cleaned;
-            int scannedItems = r.getItemCount();
-            long scannedBytes = r.getTotalBytes();
+            boolean itemOnly = scannedBytes == 0;
+            if (!itemOnly) totalBytes += cleaned;
             if (cleaned == 0) {
-                if (taskErr == null && !canceled && scannedBytes == 0 && scannedItems > 0) {
-                    totalItems += scannedItems;
-                }
-            } else if (scannedBytes > 0 && scannedItems > 0 && cleaned < scannedBytes) {
+                // Do not credit scanned items when nothing was actually deleted.
+            } else if (itemOnly) {
+                totalItems += (int) Math.min(cleaned, Integer.MAX_VALUE);
+            } else if (scannedItems > 0 && cleaned < scannedBytes) {
                 totalItems += (int) Math.round(scannedItems * ((double) cleaned / scannedBytes));
             } else {
                 totalItems += scannedItems;
             }
-            perCategory.put(r.getCategory(), cleaned);
+            perCategory.put(r.getCategory(), itemOnly ? 0L : cleaned);
         }
         return new CleanSummary(totalBytes, totalItems, perCategory, errors);
     }

@@ -5,11 +5,9 @@ import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
 
 /**
  * OneDrive sync/setup logs only (*.odl, *.odlsent, *.log under OneDrive logs dirs).
@@ -32,24 +30,13 @@ public class OneDriveSyncLogsCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        long totalSize = 0;
-        int itemCount = 0;
-        for (Path dir : getDirs()) {
-            if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> walk = Files.walk(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .filter(OneDriveSyncLogsCleaner::isLogFile)
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> {
-                                try { return Files.size(p); } catch (Exception e) { return p.toFile().length(); }
-                            }));
-                    totalSize += stats.getSum();
-                    itemCount += (int) stats.getCount();
-                } catch (Exception ignored) {}
-            }
-        }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        CleanerUtils.scanFilesMatching(row, getDirs(), CleanerUtils.DEFAULT_SCAN_MAX_DEPTH,
+                OneDriveSyncLogsCleaner::isLogFile, token);
     }
 
     @Override
@@ -63,27 +50,14 @@ public class OneDriveSyncLogsCleaner implements CleanerExtension {
         long cleaned = 0;
         for (Path dir : getDirs()) {
             if (token != null && token.isCancelled()) break;
-            if (dir == null || !Files.isDirectory(dir) || !CleanerUtils.isSafeToCleanDirectory(dir)) continue;
-            try (Stream<Path> walk = Files.walk(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
-                List<Path> sorted = walk.filter(Files::isRegularFile)
-                        .filter(OneDriveSyncLogsCleaner::isLogFile)
-                        .sorted(java.util.Comparator.comparingInt(Path::getNameCount).reversed())
-                        .toList();
-                for (Path f : sorted) {
-                    if (token != null && token.isCancelled()) break;
-                    if (CleanerUtils.isProtectedPath(f)) continue;
-                    try {
-                        long size = Files.size(f);
-                        CleanerUtils.deletePermanently(f, token);
-                        if (!Files.exists(f)) cleaned += size;
-                    } catch (Exception ignored) {}
-                }
-            } catch (Exception ignored) {}
+            cleaned += CleanerUtils.deleteFilesMatching(dir, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH, token,
+                    OneDriveSyncLogsCleaner::isLogFile);
         }
         return cleaned;
     }
 
     private static boolean isLogFile(Path p) {
+        if (p == null || p.getFileName() == null) return false;
         String name = p.getFileName().toString().toLowerCase();
         for (String ext : LOG_EXTENSIONS) {
             if (name.endsWith(ext)) return true;

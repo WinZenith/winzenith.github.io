@@ -67,29 +67,19 @@ public class UninstallerService {
      * of being swallowed + retried as a full scan.
      */
     public List<InstalledApp> listAppxAppsFast(java.util.concurrent.atomic.AtomicBoolean cancelled) {
-        List<InstalledApp> fast;
         try {
-            fast = listAppxApps("appx-list-fast.ps1", cancelled);
+            return listAppxApps("appx-list-fast.ps1", cancelled);
         } catch (java.util.concurrent.CancellationException ce) {
             throw ce;
-        } catch (AppDiscoveryException e) {
-            throw e;
         } catch (Exception e) {
+            if (cancelled != null && cancelled.get()) {
+                throw new java.util.concurrent.CancellationException("AppX scan cancelled");
+            }
+            // Script missing / parse failure only — a successful empty inventory
+            // (typical after filtering Microsoft packages) must not run the slow scan.
             AppLogger.debug("Fast AppX list unavailable, falling back: " + e.getMessage());
-            fast = new ArrayList<>();
+            return listAppxApps("appx-list.ps1", cancelled);
         }
-        if (cancelled != null && cancelled.get()) {
-            throw new java.util.concurrent.CancellationException("AppX scan cancelled");
-        }
-        if (fast.isEmpty()) {
-            // Script missing (older install) or no results — fall back to full scan
-            // only when fast produced nothing to avoid an empty table.
-            // Never run the slow full scan when the user already cancelled.
-            if (cancelled != null && cancelled.get()) return fast;
-            List<InstalledApp> full = listAppxApps("appx-list.ps1", cancelled);
-            if (!full.isEmpty()) return full;
-        }
-        return fast;
     }
 
     private List<InstalledApp> listAppxApps(String scriptName) {
@@ -159,28 +149,9 @@ public class UninstallerService {
         try {
             File dir = new File(app.getInstallLocation());
             if (!dir.exists() || !dir.isDirectory()) return 0;
-            final long[] total = {0};
-            final int[] files = {0};
-            // B5 FIX: try-with-resources — the previous Files.walk stream was never
-            // closed, leaking dir handles on Windows (locking dirs, blocking delete).
-            try (java.util.stream.Stream<java.nio.file.Path> stream =
-                         java.nio.file.Files.walk(dir.toPath())) {
-                java.util.Iterator<java.nio.file.Path> it = stream.limit(20000).iterator();
-                while (it.hasNext()) {
-                    if (cancelled != null && cancelled.get()) return 0;
-                    if (files[0] > 20000) break;
-                    java.nio.file.Path p = it.next();
-                    try {
-                        // Never follow links when sizing — count the link itself, not target.
-                        if (java.nio.file.Files.isRegularFile(p, java.nio.file.LinkOption.NOFOLLOW_LINKS)
-                                && !java.nio.file.Files.isSymbolicLink(p)) {
-                            total[0] += java.nio.file.Files.size(p);
-                            files[0]++;
-                        }
-                    } catch (Exception ignored) {}
-                }
-            }
-            long kb = total[0] / 1024;
+            long bytes = sizeTreeNoFollow(dir.toPath(), cancelled, 20000);
+            if (bytes < 0) return 0;
+            long kb = bytes / 1024;
             return kb > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) kb;
         } catch (Exception e) {
             return 0;
@@ -247,12 +218,17 @@ public class UninstallerService {
     }
 
     public ProcessResult runUninstallerAndWait(InstalledApp app, long timeoutSeconds, boolean preferQuiet) throws IOException, InterruptedException {
+        return runUninstallerAndWait(app, timeoutSeconds, preferQuiet, null);
+    }
+
+    public ProcessResult runUninstallerAndWait(InstalledApp app, long timeoutSeconds, boolean preferQuiet,
+                                               AtomicBoolean cancelled) throws IOException, InterruptedException {
         if (!app.isWin32()) {
             if (app.getAppxPackageFullName() == null || app.getAppxPackageFullName().isBlank()) {
                 throw new IOException("No package identity available for " + app.getName());
             }
             Path script = PowerShellScripts.resolve("appx-uninstall.ps1");
-            return processRunner.run(ProcessRunner.powershellScript(script.toString(), "-PackageFullName", app.getAppxPackageFullName()), timeoutSeconds);
+            return processRunner.run(ProcessRunner.powershellScript(script.toString(), "-PackageFullName", app.getAppxPackageFullName()), timeoutSeconds, cancelled);
         } else {
             String uninstallCmd = app.getEffectiveUninstallString(preferQuiet);
             if (uninstallCmd == null || uninstallCmd.isBlank()) {
@@ -269,12 +245,17 @@ public class UninstallerService {
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(false);
             // Run from the app's install dir when known so relative-path uninstallers resolve resources.
+            // Never use a protected OS path or a junction (cwd would be the TARGET).
             try {
                 String loc = app.getInstallLocation();
-                if (loc != null && !loc.isBlank()) {
+                if (loc != null && !loc.isBlank() && !isProtectedPath(loc)) {
                     File dir = new File(loc);
                     File workDir = dir.isDirectory() ? dir : dir.getParentFile();
-                    if (workDir != null && workDir.isDirectory()) pb.directory(workDir);
+                    if (workDir != null && workDir.isDirectory()
+                            && !isProtectedPath(workDir.getAbsolutePath())
+                            && !isLinkOrReparse(workDir)) {
+                        pb.directory(workDir);
+                    }
                 }
             } catch (Exception ignored) {}
             AppLogger.info("Running uninstaller: " + String.join(" ", command));
@@ -455,6 +436,8 @@ public class UninstallerService {
                     if (prePids.contains(pid)) return;
 
                     boolean isMsiexec = execPath.contains("msiexec") || cmdLine.contains("msiexec");
+                    boolean msiexecUninstall = isMsiexec
+                            && (cmdLine.contains("/x") || cmdLine.contains("/uninstall") || cmdLine.contains("uninstall"));
                     boolean isSetupUnins = execPath.contains("setup") || execPath.contains("unins")
                             || execPath.contains("uninstall");
                     boolean matchByPath = !lowerLoc.isEmpty() && !isProtectedPath(lowerLoc)
@@ -467,8 +450,8 @@ public class UninstallerService {
                     boolean matchByUninstallBase = !uninstallBase.isEmpty()
                             && (execPath.contains(uninstallBase) || cmdLine.contains(uninstallBase));
 
-                    if (isMsiexec || matchByPath || matchByName || matchByUninstallBase || isSetupUnins) {
-                        if (isMsiexec) {
+                    if (msiexecUninstall || matchByPath || matchByName || matchByUninstallBase || isSetupUnins) {
+                        if (msiexecUninstall) {
                             found.set(true);
                         } else if (matchByPath || matchByName || matchByUninstallBase) {
                             found.set(true);
@@ -877,12 +860,33 @@ public class UninstallerService {
     public List<String> scanFilesystemLeftovers(InstalledApp app, boolean includePrimaryLocation,
                                                 java.util.concurrent.atomic.AtomicBoolean cancelled) {
         List<String> leftovers = new ArrayList<>();
+        // When uninstall failed, never re-offer the live install dir via the heuristic
+        // root walk (name/publisher match under Program Files / AppData).
+        java.util.Set<String> excludedPrimaries = includePrimaryLocation
+                ? java.util.Set.of()
+                : excludedPrimaryLeftoverPaths(app);
 
         if (includePrimaryLocation && app.getInstallLocation() != null && !app.getInstallLocation().isBlank()
                 && !isProtectedPath(app.getInstallLocation())) {
-            File installDir = new File(app.getInstallLocation());
+            String canon = canonicalizeForSafety(app.getInstallLocation());
+            File installDir = new File(canon != null ? canon : app.getInstallLocation());
             if (installDir.exists()) {
-                leftovers.add(installDir.getAbsolutePath());
+                String locForVendor = canon != null ? canon : app.getInstallLocation();
+                if (isSharedVendorInstallLocation(locForVendor, app.getName(), app.getPublisher())) {
+                    AppLogger.info("Skipping shared vendor install location from deletable leftovers: "
+                            + locForVendor);
+                    if (!isLinkOrReparse(installDir)) {
+                        String lowerApp = app.getName() != null ? app.getName().toLowerCase() : "";
+                        for (File inner : matchingInnerAppDirs(installDir, lowerApp)) {
+                            String absPath = inner.getAbsolutePath();
+                            if (offerFilesystemLeftover(absPath, leftovers, excludedPrimaries)) {
+                                leftovers.add(absPath);
+                            }
+                        }
+                    }
+                } else {
+                    leftovers.add(installDir.getAbsolutePath());
+                }
             }
         } else if (app.getInstallLocation() != null && !app.getInstallLocation().isBlank()
                 && isProtectedPath(app.getInstallLocation())) {
@@ -920,9 +924,21 @@ public class UninstallerService {
                 if (cancelled != null && cancelled.get()) break;
                 if (child.isDirectory()) {
                     if (isFolderMatch(child.getName(), app.getName(), app.getPublisher())) {
-                        String absPath = child.getAbsolutePath();
-                        if (!leftovers.contains(absPath) && !isProtectedPath(absPath)) {
-                            leftovers.add(absPath);
+                        if (looksLikeSharedVendorDir(child.getAbsolutePath(), app.getName())) {
+                            if (!isLinkOrReparse(child)) {
+                                String lowerApp = app.getName() != null ? app.getName().toLowerCase() : "";
+                                for (File inner : matchingInnerAppDirs(child, lowerApp)) {
+                                    String absPath = inner.getAbsolutePath();
+                                    if (offerFilesystemLeftover(absPath, leftovers, excludedPrimaries)) {
+                                        leftovers.add(absPath);
+                                    }
+                                }
+                            }
+                        } else {
+                            String absPath = child.getAbsolutePath();
+                            if (offerFilesystemLeftover(absPath, leftovers, excludedPrimaries)) {
+                                leftovers.add(absPath);
+                            }
                         }
                     } else if (isPublisherMatch(child.getName(), app.getPublisher())) {
                         // B5 FIX: never descend into a link/junction target.
@@ -933,7 +949,7 @@ public class UninstallerService {
                                 if (cancelled != null && cancelled.get()) break;
                                 if (isFolderMatch(vendorChild.getName(), app.getName(), null)) {
                                     String absPath = vendorChild.getAbsolutePath();
-                                    if (!leftovers.contains(absPath) && !isProtectedPath(absPath)) {
+                                    if (offerFilesystemLeftover(absPath, leftovers, excludedPrimaries)) {
                                         leftovers.add(absPath);
                                     }
                                 }
@@ -944,6 +960,61 @@ public class UninstallerService {
             }
         }
         return leftovers;
+    }
+
+    /**
+     * InstallLocation (and shared-vendor app inners) that must stay off the leftover
+     * list when {@code includePrimaryLocation} is false (failed vendor uninstall).
+     */
+    static java.util.Set<String> excludedPrimaryLeftoverPaths(InstalledApp app) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        if (app == null) return out;
+        String loc = app.getInstallLocation();
+        if (loc == null || loc.isBlank()) return out;
+        addNormalizedLeftoverPath(out, loc);
+        String canon = canonicalizeForSafety(loc);
+        String base = canon != null ? canon : loc.trim();
+        if (isSharedVendorInstallLocation(base, app.getName(), app.getPublisher())) {
+            File installDir = new File(base);
+            if (installDir.isDirectory() && !isLinkOrReparse(installDir)) {
+                String lowerApp = app.getName() != null ? app.getName().toLowerCase() : "";
+                for (File inner : matchingInnerAppDirs(installDir, lowerApp)) {
+                    addNormalizedLeftoverPath(out, inner.getAbsolutePath());
+                }
+            }
+        }
+        return out;
+    }
+
+    static boolean isExcludedPrimaryLeftover(String absPath, java.util.Set<String> excludedPrimaries) {
+        if (absPath == null || absPath.isBlank() || excludedPrimaries == null || excludedPrimaries.isEmpty()) {
+            return false;
+        }
+        String key = normalizeLeftoverPathKey(absPath);
+        return key != null && excludedPrimaries.contains(key);
+    }
+
+    private static boolean offerFilesystemLeftover(String absPath, List<String> leftovers,
+                                                   java.util.Set<String> excludedPrimaries) {
+        if (absPath == null || absPath.isBlank()) return false;
+        if (leftovers.contains(absPath)) return false;
+        if (isProtectedPath(absPath)) return false;
+        return !isExcludedPrimaryLeftover(absPath, excludedPrimaries);
+    }
+
+    private static void addNormalizedLeftoverPath(java.util.Set<String> out, String path) {
+        String key = normalizeLeftoverPathKey(path);
+        if (key != null) out.add(key);
+    }
+
+    static String normalizeLeftoverPathKey(String path) {
+        if (path == null || path.isBlank()) return null;
+        String c = canonicalizeForSafety(path);
+        if (c == null) {
+            c = path.trim().replace('/', '\\');
+            while (c.endsWith("\\") && c.length() > 3) c = c.substring(0, c.length() - 1);
+        }
+        return c.isBlank() ? null : c.toLowerCase();
     }
 
     /**
@@ -1015,7 +1086,9 @@ public class UninstallerService {
             HKEY hive = "HKLM".equalsIgnoreCase(app.getRegistryHive()) ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
             try {
                 if (Advapi32Util.registryKeyExists(hive, app.getRegistryKeyPath())) {
-                    leftovers.add(app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
+                    if (!isProtectedRegistryPath(app.getRegistryHive(), app.getRegistryKeyPath())) {
+                        leftovers.add(app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
+                    }
                 }
             } catch (Exception ignored) {}
         }
@@ -1054,8 +1127,7 @@ public class UninstallerService {
             if (subkeys == null) return;
 
             String lowerName = appName != null ? appName.toLowerCase().trim() : "";
-            String lowerPub = publisher != null ? publisher.toLowerCase().trim() : "";
-            if (lowerName.length() < 5 && lowerPub.length() < 5) return;
+            if (lowerName.length() < 5) return;
 
             for (String subkey : subkeys) {
                 if (cancelled != null && cancelled.get()) return;
@@ -1068,11 +1140,10 @@ public class UninstallerService {
                 // Skip generic HKCR entries like file extensions and type libs
                 if (isGenericName(lowerSub)) continue;
                 String lowerKey = lowerSub;
-                boolean nameMatch = lowerName.length() >= 5 && (lowerKey.equals(lowerName) || containsWordBoundary(lowerKey, lowerName));
-                boolean pubMatch = lowerPub.length() >= 5 && (lowerKey.equals(lowerPub) || containsWordBoundary(lowerKey, lowerPub));
-                if (nameMatch || pubMatch) {
+                boolean nameMatch = lowerName.length() >= 5 && isAppSpecificInnerName(lowerKey, lowerName);
+                if (nameMatch) {
                     String path = "HKCR\\" + subkey;
-                    if (!leftovers.contains(path)) {
+                    if (!leftovers.contains(path) && !isProtectedRegistryPath("HKCR", subkey)) {
                         leftovers.add(path);
                     }
                 }
@@ -1105,7 +1176,8 @@ public class UninstallerService {
                 // Check if the subkey matches publisher name or app name
                 if (isRegistryKeyMatch(subkey, appName, publisher)) {
                     String formattedPath = hiveLabel + "\\" + fullPath;
-                    if (!leftovers.contains(formattedPath)) {
+                    if (!leftovers.contains(formattedPath)
+                            && !isProtectedRegistryPath(hiveLabel, fullPath)) {
                         leftovers.add(formattedPath);
                     }
                 } else {
@@ -1118,7 +1190,8 @@ public class UninstallerService {
                                     if (cancelled != null && cancelled.get()) return;
                                     if (isRegistryKeyMatch(innerKey, appName, null)) {
                                         String formattedPath = hiveLabel + "\\" + fullPath + "\\" + innerKey;
-                                        if (!leftovers.contains(formattedPath)) {
+                                        if (!leftovers.contains(formattedPath)
+                                                && !isProtectedRegistryPath(hiveLabel, fullPath + "\\" + innerKey)) {
                                             leftovers.add(formattedPath);
                                         }
                                     }
@@ -1140,6 +1213,130 @@ public class UninstallerService {
     }
 
     /**
+     * Resolves {@code ..}, strips {@code \\?\} / {@code \\.\} prefixes, and returns
+     * an absolute normalized path. Null/blank/unresolvable → null (callers must refuse).
+     */
+    public static String canonicalizeForSafety(String path) {
+        if (path == null || path.isBlank()) return null;
+        String p = path.trim().replace('/', '\\');
+        if (p.length() > 1 && ((p.startsWith("\"") && p.endsWith("\""))
+                || (p.startsWith("'") && p.endsWith("'")))) {
+            p = p.substring(1, p.length() - 1).trim();
+        }
+        if (p.regionMatches(true, 0, "\\\\?\\UNC\\", 0, 8)) {
+            p = "\\\\" + p.substring(8);
+        } else if (p.startsWith("\\\\?\\") || p.startsWith("\\\\.\\")) {
+            p = p.substring(4);
+        }
+        // Admin shares (\\localhost\C$\Windows) resolve to the real drive. Map
+        // them before normalize so isProtectedPath sees C:\Windows, not a UNC
+        // string that skips the SystemRoot prefix check.
+        if (p.startsWith("\\\\")) {
+            java.util.regex.Matcher share = java.util.regex.Pattern
+                    .compile("(?i)^\\\\\\\\[^\\\\]+\\\\([a-z])\\$(?:\\\\(.*))?$")
+                    .matcher(p);
+            if (share.matches()) {
+                String rest = share.group(2);
+                p = share.group(1) + ":\\" + (rest == null ? "" : rest);
+            }
+        }
+        if (p.isBlank()) return null;
+        try {
+            java.nio.file.Path nio = java.nio.file.Path.of(p).normalize();
+            java.nio.file.Path abs = nio.isAbsolute() ? nio : nio.toAbsolutePath().normalize();
+            try {
+                if (java.nio.file.Files.exists(abs, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                    // toRealPath follows Windows junctions (MOUNT_POINT), which are
+                    // not Java symbolic links. Resolving a Program Files junction
+                    // into a user profile would offer the TARGET for deletion.
+                    Boolean link = NativeFileHelper.isLinkOrReparse(abs);
+                    if (Boolean.FALSE.equals(link)) {
+                        abs = abs.toRealPath(java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                    }
+                }
+            } catch (Exception ignored) {
+                // keep normalized absolute
+            }
+            String out = abs.toString().replace('/', '\\');
+            while (out.endsWith("\\") && out.length() > 3) out = out.substring(0, out.length() - 1);
+            return out;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Last path segment after canonicalization (empty if the path is unusable). */
+    public static String pathLeaf(String path) {
+        String p = canonicalizeForSafety(path);
+        if (p == null || p.isBlank()) {
+            if (path == null) return "";
+            p = path.trim().replace('/', '\\');
+            while (p.endsWith("\\") && p.length() > 3) p = p.substring(0, p.length() - 1);
+        }
+        int slash = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+        return slash >= 0 && slash + 1 < p.length() ? p.substring(slash + 1) : p;
+    }
+
+    /**
+     * True when {@code InstallLocation} is a shared vendor root (e.g. {@code ...\Adobe}
+     * for "Adobe Acrobat") rather than an app-specific folder. Force-uninstall must
+     * not recursively delete these.
+     */
+    public static boolean isSharedVendorInstallLocation(String path, String appName, String publisher) {
+        if (path == null || path.isBlank()) return false;
+        String leaf = pathLeaf(path);
+        if (leaf.isBlank()) return false;
+        if (isExactAppNameMatch(leaf, appName)) {
+            // "Opera" at ...\Opera can still host Opera GX as a sibling subfolder.
+            return looksLikeSharedVendorDir(path, appName);
+        }
+        String a = appName == null ? "" : appName.trim();
+        String p = publisher == null ? "" : publisher.trim();
+        String ll = leaf.toLowerCase();
+        String al = a.toLowerCase();
+        String pl = p.toLowerCase();
+        if (!al.isEmpty() && (al.startsWith(ll + " ") || al.startsWith(ll + "-"))) return true;
+        if (pl.isEmpty()) return false;
+        return ll.equals(pl)
+                || (pl.length() >= 4 && containsWordBoundary(pl, ll))
+                || (ll.length() >= 4 && containsWordBoundary(ll, pl));
+    }
+
+    /**
+     * True when a directory hosts at least one non-generic subfolder that does not
+     * belong to this app (sibling product). Force-uninstall / leftover-delete must
+     * not wipe the whole tree in that case.
+     */
+    public static boolean looksLikeSharedVendorDir(String path, String appName) {
+        if (path == null || path.isBlank()) return false;
+        try {
+            File dir = new File(path);
+            if (!Boolean.FALSE.equals(NativeFileHelper.isLinkOrReparse(dir.toPath()))) return true;
+            if (!dir.isDirectory()) return false;
+            File[] innerDirs = dir.listFiles(File::isDirectory);
+            if (innerDirs == null) return true;
+            String lowerApp = appName == null ? "" : appName.toLowerCase().trim();
+            int nonGeneric = 0;
+            int matching = 0;
+            for (File inner : innerDirs) {
+                if (isLinkOrReparse(inner)) {
+                    nonGeneric++;
+                    continue;
+                }
+                String n = inner.getName().toLowerCase().trim();
+                if (isGenericName(n)) continue;
+                nonGeneric++;
+                if (!lowerApp.isEmpty() && (n.equals(lowerApp) || isAppSpecificInnerName(n, lowerApp))) {
+                    matching++;
+                }
+            }
+            return nonGeneric >= 1 && matching < nonGeneric;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    /**
      * True for OS-protected locations that must never be deleted directly:
      * WindowsApps (Store packages — remove via Remove-AppxPackage only),
      * Windows / System32 / SysWOW64, and bare drive roots. Also guards
@@ -1148,16 +1345,14 @@ public class UninstallerService {
      * Desktop, ...) and any C:\Users profile root are protected too — a sloppy
      * InstallLocation pointing at them must never be offered, because
      * "Select All" in the leftover review would otherwise wipe user data.
+     * Paths are canonicalized first so {@code ..} / {@code \\?\} cannot skip the
+     * Windows/System32 prefix checks.
      */
     public static boolean isProtectedPath(String path) {
         if (path == null || path.isBlank()) return true;
-        String p = path.trim().replace('/', '\\');
-        // Strip surrounding quotes
-        if (p.length() > 1 && ((p.startsWith("\"") && p.endsWith("\"")) || (p.startsWith("'") && p.endsWith("'")))) {
-            p = p.substring(1, p.length() - 1).trim();
-        }
-        // Strip trailing separators for comparison
-        while (p.endsWith("\\") && p.length() > 3) p = p.substring(0, p.length() - 1);
+        String canon = canonicalizeForSafety(path);
+        if (canon == null || canon.isBlank()) return true;
+        String p = canon;
         String lower = p.toLowerCase();
         // Bare drive root (C:\, C:) — never deletable
         if (lower.matches("^[a-z]:\\\\?$")) return true;
@@ -1170,7 +1365,8 @@ public class UninstallerService {
         String windir = System.getenv("SystemRoot");
         if (windir == null) windir = System.getenv("WINDIR");
         if (windir == null) windir = "C:\\Windows";
-        String lowerWin = windir.toLowerCase().replace('/', '\\');
+        String canonWin = canonicalizeForSafety(windir);
+        String lowerWin = (canonWin != null ? canonWin : windir).toLowerCase().replace('/', '\\');
         while (lowerWin.endsWith("\\")) lowerWin = lowerWin.substring(0, lowerWin.length() - 1);
         if (lower.equals(lowerWin) || lower.startsWith(lowerWin + "\\")) return true;
         // Never offer a known scan root itself (exact match). Covers all roots
@@ -1234,6 +1430,38 @@ public class UninstallerService {
         return false;
     }
 
+    /**
+     * Refuse leftover-delete of hive roots and first-level vendor keys
+     * ({@code HKLM\SOFTWARE}, {@code HKLM\SOFTWARE\Adobe}). App-specific
+     * inner keys remain eligible. HKCR ProgIds are single-segment and allowed
+     * unless the name is a well-known COM/OS bucket.
+     */
+    public static boolean isProtectedRegistryPath(String hiveStr, String keyPath) {
+        if (keyPath == null || keyPath.isBlank()) return true;
+        String k = keyPath.replace('/', '\\').trim();
+        while (k.endsWith("\\") && k.length() > 1) k = k.substring(0, k.length() - 1);
+        if (k.isEmpty()) return true;
+        String lower = k.toLowerCase();
+        if (lower.equals("clsid") || lower.equals("wow6432node") || lower.equals("typelib")
+                || lower.equals("interface") || lower.equals("appid")
+                || lower.equals("software") || lower.equals("software\\wow6432node")) {
+            return true;
+        }
+        String hive = hiveStr == null ? "" : hiveStr.trim().toUpperCase();
+        if ("HKCR".equals(hive)) {
+            return isGenericName(lower);
+        }
+        // HKLM/HKCU: SOFTWARE\<vendor> is a shared tree — require a deeper app key.
+        if (lower.matches("software\\\\wow6432node\\\\[^\\\\]+")
+                || lower.matches("software\\\\[^\\\\]+")) {
+            return true;
+        }
+        String leaf = lower;
+        int slash = leaf.lastIndexOf('\\');
+        if (slash >= 0 && slash + 1 < leaf.length()) leaf = leaf.substring(slash + 1);
+        return isGenericName(leaf);
+    }
+
     private boolean isFolderMatch(String folderName, String appName, String publisher) {
         if (folderName == null || folderName.isBlank()) return false;
         String fName = folderName.toLowerCase().trim();
@@ -1241,23 +1469,7 @@ public class UninstallerService {
 
         if (aName.isEmpty()) return false;
         if (isGenericName(fName)) return false;
-
-        // BLOCKER FIX (B1): match ONLY on app name — never on publisher alone.
-        // Flagging folder == publisher wiped shared vendor roots (e.g. deleting
-        // "C:\Program Files\VideoLAN" when removing one VideoLAN app, killing
-        // sibling apps). Vendor roots are handled via isPublisherMatch() which
-        // only scans INSIDE for app-specific subfolders, never the vendor dir.
-        // Exact app-name match
-        if (fName.equals(aName)) {
-            return true;
-        }
-
-        // Substring match for App Name — require folder contains app (not reverse) to avoid vendor wipe (e.g., "Adobe" vs "Adobe Acrobat")
-        if (aName.length() >= 5 && containsWordBoundary(fName, aName)) {
-            return true;
-        }
-
-        return false;
+        return isAppSpecificInnerName(fName, aName);
     }
 
     private boolean isRegistryKeyMatch(String keyName, String appName, String publisher) {
@@ -1267,20 +1479,7 @@ public class UninstallerService {
 
         if (aName.isEmpty()) return false;
         if (isGenericName(kName)) return false;
-
-        // BLOCKER FIX (B1): match ONLY on app name — never on publisher alone.
-        // Flagging key == publisher wiped shared vendor keys (e.g. HKLM\SOFTWARE\Adobe
-        // when removing one Adobe app). Vendor handling stays in isPublisherMatch().
-        if (kName.equals(aName)) {
-            return true;
-        }
-
-        // Substring match — only key contains app (not reverse) to prevent vendor root false positives
-        if (aName.length() >= 5 && containsWordBoundary(kName, aName)) {
-            return true;
-        }
-
-        return false;
+        return isAppSpecificInnerName(kName, aName);
     }
 
     private boolean isPublisherMatch(String keyName, String publisher) {
@@ -1323,21 +1522,42 @@ public class UninstallerService {
     }
 
     /**
+     * Names that must never be used for name-based Stop-Process. Path-based
+     * kills still target only processes whose executable lives under the
+     * app's install dir (and skip our own PID).
+     */
+    static boolean isProtectedProcessName(String name) {
+        if (name == null || name.isBlank()) return true;
+        String n = name.toLowerCase().trim();
+        if (n.endsWith(".exe")) n = n.substring(0, n.length() - 4);
+        return switch (n) {
+            case "explorer", "svchost", "csrss", "lsass", "winlogon", "wininit",
+                 "services", "smss", "dwm", "system", "registry", "taskmgr",
+                 "conhost", "dllhost", "rundll32", "msiexec", "java", "javaw",
+                 "javaws", "winzenith", "runtimebroker", "searchhost",
+                 "shellexperiencehost", "sihost", "taskhostw", "spoolsv",
+                 "fontdrvhost", "applicationframehost", "startmenuexperiencehost",
+                 "textinputhost", "ctfmon", "securityhealthservice", "msmpeng",
+                 "smartscreen", "lsaiso", "userinit", "logonui", "searchapp",
+                 "systemsettings", "winstore.app" -> true;
+            default -> false;
+        };
+    }
+
+    /**
      * Rescan FIX (B5): true for symlinks/junctions without following them.
      * Used to avoid descending into link targets during scans and recursion —
      * a matching link itself may be offered (deleted as a link by
      * NativeFileHelper), but we never enumerate a link's target.
      */
     private static boolean isLinkOrReparse(java.io.File f) {
-        if (f == null) return false;
+        if (f == null) return true;
         try {
-            java.nio.file.Path p = f.toPath();
-            if (java.nio.file.Files.isSymbolicLink(p)) return true;
-            Object v = java.nio.file.Files.getAttribute(p, "dos:reparsePoint",
-                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
-            return Boolean.TRUE.equals(v);
-        } catch (Exception ignored) {
-            return false;
+            Boolean v = NativeFileHelper.isLinkOrReparse(f.toPath());
+            // Unknown (null) must not be descended — same as a link.
+            return !Boolean.FALSE.equals(v);
+        } catch (Exception e) {
+            return true;
         }
     }
 
@@ -1368,6 +1588,45 @@ public class UninstallerService {
     }
 
     /**
+     * True when a folder/key/shortcut leaf belongs to this app rather than a
+     * sibling product. Exact match, reverse word match (folder "Acrobat" for
+     * "Adobe Acrobat"), or app-name prefix plus a version/channel suffix
+     * ("IntelliJ IDEA 2024.1"). Forward substring is refused so "Opera GX"
+     * is never treated as "Opera".
+     */
+    public static boolean isAppSpecificInnerName(String innerName, String appName) {
+        if (innerName == null || appName == null) return false;
+        String inner = innerName.toLowerCase().trim();
+        String app = appName.toLowerCase().trim();
+        if (inner.isEmpty() || app.isEmpty() || isGenericName(inner)) return false;
+        if (inner.equals(app)) return true;
+        // Reverse match only the trailing product token ("Acrobat" for "Adobe Acrobat",
+        // "Chrome" for "Google Chrome"). A middle word ("Studio" in "Visual Studio Code")
+        // would offer unrelated folders as leftovers / force-delete targets.
+        if (inner.length() >= 5
+                && (app.endsWith(" " + inner) || app.endsWith("-" + inner))) {
+            return true;
+        }
+        if (inner.startsWith(app + " ")) return isVersionOrChannelSuffix(inner.substring(app.length() + 1));
+        if (inner.startsWith(app + "-")) return isVersionOrChannelSuffix(inner.substring(app.length() + 1));
+        return false;
+    }
+
+    /**
+     * Same product with a version/arch suffix ("IntelliJ IDEA 2024.1", "App x64").
+     * Channel/SKU names (Beta, Nightly, Pro, …) are separate installs and must not match.
+     * {@code DC} is Acrobat's in-product edition, not a sibling brand.
+     */
+    static boolean isVersionOrChannelSuffix(String remainder) {
+        if (remainder == null) return false;
+        String r = remainder.trim().toLowerCase();
+        if (r.isEmpty()) return true;
+        return r.matches("^(v|ver|version)?[\\d._].*")
+                || r.matches("^(x64|x86|win32|win64|64.?bit|32.?bit)\\b.*")
+                || r.matches("^dc\\b.*");
+    }
+
+    /**
      * Deletes a list of files or folders and logs failures (which are scheduled for reboot deletion).
      *
      * @param paths List of absolute folder or file paths.
@@ -1384,27 +1643,39 @@ public class UninstallerService {
      */
     public FilesystemCleanupResult deleteFilesystemLeftovers(List<String> paths, List<String> failedDeletions,
                                           List<String> recycled, boolean preferRecycle) {
+        return deleteFilesystemLeftovers(paths, failedDeletions, recycled, preferRecycle, null);
+    }
+
+    public FilesystemCleanupResult deleteFilesystemLeftovers(List<String> paths, List<String> failedDeletions,
+                                          List<String> recycled, boolean preferRecycle,
+                                          AtomicBoolean cancelled) {
         int deleted = 0, recycledCount = 0, absent = 0, queued = 0, failed = 0;
         if (paths == null) {
             return new FilesystemCleanupResult(0, 0, 0, 0, 0, List.of());
         }
         for (String pathStr : paths) {
             if (pathStr == null || pathStr.isBlank()) continue;
-            File file = new File(pathStr);
-            if (!file.exists()) {
-                absent++;
+            if (cancelled(cancelled)) {
+                if (failedDeletions != null) failedDeletions.add(pathStr + " (cancelled — not deleted)");
+                failed++;
                 continue;
             }
-            if (isProtectedPath(pathStr)) {
+            String canon = canonicalizeForSafety(pathStr);
+            if (canon == null || isProtectedPath(pathStr)) {
                 AppLogger.warning("Refused to delete protected path: " + pathStr);
                 String msg = pathStr + " (protected — skipped)";
                 if (failedDeletions != null) failedDeletions.add(msg);
                 failed++;
                 continue;
             }
+            File file = new File(canon);
+            if (!file.exists()) {
+                absent++;
+                continue;
+            }
             if (preferRecycle) {
                 NativeFileHelper.DeleteOutcome outcome =
-                        NativeFileHelper.deleteWithOutcome(file, true);
+                        NativeFileHelper.deleteWithOutcome(file, true, cancelled);
                 if (outcome == NativeFileHelper.DeleteOutcome.RECYCLED) {
                     recycledCount++;
                     if (recycled != null) recycled.add(pathStr);
@@ -1418,7 +1689,7 @@ public class UninstallerService {
                     if (failedDeletions != null) failedDeletions.add(pathStr);
                 }
             } else {
-                NativeFileHelper.DeleteOutcome outcome = NativeFileHelper.deleteOrQueueWithOutcome(file);
+                NativeFileHelper.DeleteOutcome outcome = NativeFileHelper.deleteOrQueueWithOutcome(file, cancelled);
                 if (outcome == NativeFileHelper.DeleteOutcome.DELETED) {
                     deleted++;
                 } else if (outcome == NativeFileHelper.DeleteOutcome.QUEUED_FOR_REBOOT) {
@@ -1460,6 +1731,12 @@ public class UninstallerService {
                 continue;
             }
             try {
+                int sep = fullPath.indexOf('\\');
+                if (sep > 0 && isProtectedRegistryPath(fullPath.substring(0, sep), fullPath.substring(sep + 1))) {
+                    AppLogger.warning("Refused to export protected registry key: " + fullPath);
+                    failedKeys.add(fullPath);
+                    continue;
+                }
                 String safe = fullPath.replace('\\', '_').replace('/', '_')
                         .replace(':', '_').replaceAll("[^A-Za-z0-9_\\-\\.]+", "_");
                 if (safe.length() > 80) safe = safe.substring(0, 80);
@@ -1500,29 +1777,68 @@ public class UninstallerService {
             File f = new File(absPath);
             if (!f.exists()) return -1;
             if (f.isFile()) return f.length();
-            final long[] total = {0};
-            final int[] count = {0};
-            // B5 FIX: close walk stream (handle leak locked dirs on Windows).
-            // NOFOLLOW_LINKS: never descend into / count link targets.
-            try (java.util.stream.Stream<java.nio.file.Path> stream =
-                         java.nio.file.Files.walk(f.toPath())) {
-                java.util.Iterator<java.nio.file.Path> it = stream.limit(20000).iterator();
-                while (it.hasNext()) {
-                    if (count[0] > 20000) break;
-                    java.nio.file.Path p = it.next();
-                    try {
-                        if (java.nio.file.Files.isRegularFile(p, java.nio.file.LinkOption.NOFOLLOW_LINKS)
-                                && !java.nio.file.Files.isSymbolicLink(p)) {
-                            total[0] += java.nio.file.Files.size(p);
-                            count[0]++;
-                        }
-                    } catch (Exception ignored) {}
-                }
-            }
-            return total[0];
+            return sizeTreeNoFollow(f.toPath(), null, 20000);
         } catch (Exception e) {
             return -1;
         }
+    }
+
+    /**
+     * Directory size that never descends into junctions/symlinks. {@code Files.walk}
+     * follows Windows mount points, so leftover sizing of a folder with an AppData
+     * junction would otherwise traverse the user profile (and hold those handles).
+     */
+    private static long sizeTreeNoFollow(java.nio.file.Path start, AtomicBoolean cancelled, int maxFiles) {
+        if (start == null) return -1;
+        if (!Boolean.FALSE.equals(NativeFileHelper.isLinkOrReparse(start))) return 0;
+        final long[] total = {0};
+        final int[] count = {0};
+        try {
+            java.nio.file.Files.walkFileTree(start,
+                    java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), 32,
+                    new java.nio.file.SimpleFileVisitor<>() {
+                        @Override
+                        public java.nio.file.FileVisitResult preVisitDirectory(java.nio.file.Path dir,
+                                java.nio.file.attribute.BasicFileAttributes attrs) {
+                            if (cancelled != null && cancelled.get()) {
+                                return java.nio.file.FileVisitResult.TERMINATE;
+                            }
+                            if (!dir.equals(start)
+                                    && !Boolean.FALSE.equals(NativeFileHelper.isLinkOrReparse(dir))) {
+                                return java.nio.file.FileVisitResult.SKIP_SUBTREE;
+                            }
+                            return java.nio.file.FileVisitResult.CONTINUE;
+                        }
+
+                        @Override
+                        public java.nio.file.FileVisitResult visitFile(java.nio.file.Path file,
+                                java.nio.file.attribute.BasicFileAttributes attrs) {
+                            if (cancelled != null && cancelled.get()) {
+                                return java.nio.file.FileVisitResult.TERMINATE;
+                            }
+                            if (count[0] >= maxFiles) return java.nio.file.FileVisitResult.TERMINATE;
+                            try {
+                                if (!Boolean.FALSE.equals(NativeFileHelper.isLinkOrReparse(file))) {
+                                    return java.nio.file.FileVisitResult.CONTINUE;
+                                }
+                                if (attrs.isRegularFile()) {
+                                    total[0] += attrs.size();
+                                    count[0]++;
+                                }
+                            } catch (Exception ignored) {}
+                            return java.nio.file.FileVisitResult.CONTINUE;
+                        }
+
+                        @Override
+                        public java.nio.file.FileVisitResult visitFileFailed(java.nio.file.Path file,
+                                java.io.IOException exc) {
+                            return java.nio.file.FileVisitResult.CONTINUE;
+                        }
+                    });
+        } catch (Exception e) {
+            return total[0] > 0 ? total[0] : -1;
+        }
+        return total[0];
     }
 
     /**
@@ -1530,6 +1846,22 @@ public class UninstallerService {
      * Never auto-runs: caller must have explicit user consent.
      */
     public ProcessResult tryWingetUninstall(InstalledApp app, long timeoutSeconds)
+            throws IOException, InterruptedException {
+        return tryWingetUninstall(app, timeoutSeconds, false);
+    }
+
+    /**
+     * Winget fallback for Win32 entries without an uninstall command.
+     * Never auto-runs: caller must have explicit user consent.
+     * {@code preferQuiet} is the only path that adds {@code --silent}.
+     */
+    public ProcessResult tryWingetUninstall(InstalledApp app, long timeoutSeconds, boolean preferQuiet)
+            throws IOException, InterruptedException {
+        return tryWingetUninstall(app, timeoutSeconds, preferQuiet, null);
+    }
+
+    public ProcessResult tryWingetUninstall(InstalledApp app, long timeoutSeconds, boolean preferQuiet,
+                                            AtomicBoolean cancelled)
             throws IOException, InterruptedException {
         com.sbtools.software.WingetRunner winget = new com.sbtools.software.WingetRunner();
         if (!winget.isAvailable()) {
@@ -1544,12 +1876,21 @@ public class UninstallerService {
         if (query.length() > 128 || query.matches(".*[\\r\\n&|><\\^;`$\"].*")) {
             throw new IOException("Unsafe app name for winget fallback (shell metacharacters rejected).");
         }
-        // --exact + --silent keeps the fallback predictable; caller already confirmed.
-        ProcessResult r = winget.runWithFallback(timeoutSeconds,
-                "uninstall", "--exact", "--silent", "--accept-source-agreements",
-                "--accept-package-agreements", "--name", query);
+        java.util.List<String> args = new ArrayList<>();
+        args.add("uninstall");
+        args.add("--exact");
+        if (preferQuiet) args.add("--silent");
+        args.add("--accept-source-agreements");
+        args.add("--accept-package-agreements");
+        args.add("--name");
+        args.add(query);
+        ProcessResult r = winget.runWithFallback(timeoutSeconds, cancelled, args.toArray(String[]::new));
         if (r == null) throw new IOException("winget uninstall produced no result.");
         return r;
+    }
+
+    private static boolean cancelled(AtomicBoolean cancelled) {
+        return cancelled != null && cancelled.get();
     }
 
     /**
@@ -1580,11 +1921,20 @@ public class UninstallerService {
      * @param failedDeletions Output list to append paths that could not be deleted.
      */
     public void deleteRegistryLeftovers(List<String> registryPaths, List<String> failedDeletions) {
+        deleteRegistryLeftovers(registryPaths, failedDeletions, null);
+    }
+
+    public void deleteRegistryLeftovers(List<String> registryPaths, List<String> failedDeletions,
+                                        AtomicBoolean cancelled) {
         if (registryPaths == null) return;
         for (String fullPath : registryPaths) {
             // Rescan FIX: null/blank entries must not NPE the cleanup thread
             // (which would leave busy=true and hang the tab until restart).
             if (fullPath == null || fullPath.isBlank()) continue;
+            if (cancelled(cancelled)) {
+                if (failedDeletions != null) failedDeletions.add(fullPath + " (cancelled — not deleted)");
+                continue;
+            }
             int separatorIdx = fullPath.indexOf('\\');
             if (separatorIdx == -1) continue;
 
@@ -1598,11 +1948,14 @@ public class UninstallerService {
                 hive = WinReg.HKEY_CURRENT_USER;
             } else if ("HKCR".equalsIgnoreCase(hiveStr)) {
                 hive = WinReg.HKEY_CLASSES_ROOT;
-            } else if ("HKU".equalsIgnoreCase(hiveStr)) {
-                hive = WinReg.HKEY_USERS;
             } else {
-                // Unknown hive — still record failure for visibility
+                // HKU / unknown — never delete user-hive roots or unexpected hives.
                 if (failedDeletions != null) failedDeletions.add(fullPath + " (unknown hive: " + hiveStr + ")");
+                continue;
+            }
+            if (isProtectedRegistryPath(hiveStr, subKeyPath)) {
+                AppLogger.warning("Refused to delete protected registry key: " + fullPath);
+                if (failedDeletions != null) failedDeletions.add(fullPath + " (protected — skipped)");
                 continue;
             }
             if (!deleteRegistryKeyRecursively(hive, subKeyPath)) {
@@ -1638,6 +1991,14 @@ public class UninstallerService {
      * removing registry entries, and cleaning Start Menu shortcuts — without running the standard uninstaller.
      */
     public ForceUninstallResult forceUninstall(InstalledApp app) {
+        return forceUninstall(app, null);
+    }
+
+    /**
+     * Forcefully removes an application by killing its processes, deleting install directories,
+     * removing registry entries, and cleaning Start Menu shortcuts — without running the standard uninstaller.
+     */
+    public ForceUninstallResult forceUninstall(InstalledApp app, AtomicBoolean cancelled) {
         List<String> summary = new ArrayList<>();
         List<String> errors = new ArrayList<>();
         String appName = app.getName();
@@ -1646,7 +2007,11 @@ public class UninstallerService {
         // Store (AppX) apps must be removed via Remove-AppxPackage — never by
         // deleting the protected WindowsApps folder directly.
         if (!app.isWin32()) {
-            return forceUninstallAppx(app, summary, errors);
+            return forceUninstallAppx(app, summary, errors, cancelled);
+        }
+        if (cancelled(cancelled)) {
+            errors.add("Force uninstall cancelled.");
+            return new ForceUninstallResult(summary, errors);
         }
 
         String installLoc = app.getInstallLocation();
@@ -1660,25 +2025,40 @@ public class UninstallerService {
         if (installLocProtected) {
             errors.add("Skipped protected system directory (use standard uninstall): " + installLoc);
             AppLogger.warning("Force uninstall refused protected path (kill + delete skipped): " + installLoc);
+        } else if (installLoc == null || installLoc.isBlank()) {
+            killProcessesByPath(null, appName, summary, errors);
         } else {
-            // Kill processes whose executable path matches the install location
-            killProcessesByPath(installLoc, appName, summary, errors);
-        }
-
-        // Delete the install directory — never touch OS-protected paths
-        if (installLoc != null && !installLoc.isBlank()) {
-            if (installLocProtected) {
-                // Already reported above; do not delete.
-            } else {
-                File dir = new File(installLoc);
-                if (dir.exists()) {
-                    if (NativeFileHelper.deleteOrQueue(dir)) {
-                        summary.add("Deleted directory: " + installLoc);
+            String resolved = canonicalizeForSafety(installLoc);
+            String targetLoc = resolved != null ? resolved : installLoc;
+            if (isSharedVendorInstallLocation(targetLoc, appName, app.getPublisher())) {
+                File vendorDir = new File(targetLoc);
+                if (vendorDir.exists() && vendorDir.isDirectory() && !isLinkOrReparse(vendorDir)) {
+                    List<File> matchingInner = matchingInnerAppDirs(vendorDir, lowerAppName);
+                    if (matchingInner.isEmpty()) {
+                        errors.add("Skipped shared vendor directory (not app-specific): " + targetLoc);
+                        AppLogger.warning("Force uninstall refused shared vendor root: " + targetLoc);
                     } else {
-                        errors.add("Scheduled for reboot deletion: " + installLoc);
+                        for (File inner : matchingInner) {
+                            if (cancelled(cancelled)) break;
+                            killProcessesByPath(inner.getAbsolutePath(), appName, summary, errors);
+                            deleteForceDir(inner, summary, errors, cancelled);
+                        }
                     }
+                } else {
+                    errors.add("Skipped shared vendor directory (not app-specific): " + targetLoc);
+                }
+            } else {
+                killProcessesByPath(targetLoc, appName, summary, errors);
+                File dir = new File(targetLoc);
+                if (dir.exists()) {
+                    deleteForceDir(dir, summary, errors, cancelled);
                 }
             }
+        }
+
+        if (cancelled(cancelled)) {
+            errors.add("Force uninstall cancelled.");
+            return new ForceUninstallResult(summary, errors);
         }
 
         // If installLocation is empty, search common directories
@@ -1696,31 +2076,34 @@ public class UninstallerService {
             addIfNotNull(roots, System.getenv("ProgramData"));
 
             for (String root : roots) {
+                if (cancelled(cancelled)) break;
                 File rootDir = new File(root);
                 if (!rootDir.exists() || !rootDir.isDirectory()) continue;
                 File[] children = rootDir.listFiles(File::isDirectory);
                 if (children == null) continue;
                 for (File child : children) {
+                    if (cancelled(cancelled)) break;
                     String childName = child.getName().toLowerCase().trim();
                     if (isGenericName(childName)) continue;
                     String publisherLower = app.getPublisher() != null ? app.getPublisher().toLowerCase().trim() : "";
-                    boolean nameMatch;
-                    if (isGenericName(lowerAppName)) {
-                        nameMatch = childName.equals(lowerAppName);
-                    } else {
-                        // Only folder contains app (not reverse) to avoid deleting vendor root like "Adobe" for "Adobe Acrobat"
-                        nameMatch = childName.equals(lowerAppName)
-                                || (lowerAppName.length() >= 5 && containsWordBoundary(childName, lowerAppName));
-                    }
+                    // Top-level: exact leaf only — substring would delete Opera GX when removing Opera.
+                    boolean nameMatch = childName.equals(lowerAppName);
                     if (nameMatch) {
-                        if (isProtectedPath(child.getAbsolutePath())) {
-                            AppLogger.warning("Force uninstall refused protected path: " + child.getAbsolutePath());
-                            continue;
-                        }
-                        if (NativeFileHelper.deleteOrQueue(child)) {
-                            summary.add("Deleted directory: " + child.getAbsolutePath());
+                        if (looksLikeSharedVendorDir(child.getAbsolutePath(), appName)) {
+                            if (!isLinkOrReparse(child)) {
+                                List<File> matchingInner = matchingInnerAppDirs(child, lowerAppName);
+                                if (matchingInner.isEmpty()) {
+                                    errors.add("Skipped shared vendor directory (not app-specific): "
+                                            + child.getAbsolutePath());
+                                } else {
+                                    for (File t : matchingInner) {
+                                        if (cancelled(cancelled)) break;
+                                        deleteForceDir(t, summary, errors, cancelled);
+                                    }
+                                }
+                            }
                         } else {
-                            errors.add("Scheduled for reboot deletion: " + child.getAbsolutePath());
+                            deleteForceDir(child, summary, errors, cancelled);
                         }
                     } else {
                         // Publisher folder: only touch if publisher name is >=5, not generic,
@@ -1734,52 +2117,22 @@ public class UninstallerService {
                             File[] allEntries = child.listFiles();
                             File[] innerDirs = child.listFiles(File::isDirectory);
                             if (allEntries == null || innerDirs == null) continue;
-                            List<File> matchingInner = new ArrayList<>();
-                            for (File innerDir : innerDirs) {
-                                String innerName = innerDir.getName().toLowerCase().trim();
-                                // Prevent generic app names from matching broadly; inner match only requires folder contains app
-                                if (isGenericName(lowerAppName)) {
-                                    if (innerName.equals(lowerAppName)) matchingInner.add(innerDir);
-                                } else {
-                                    boolean innerMatch = innerName.equals(lowerAppName)
-                                            || (lowerAppName.length() >= 5 && containsWordBoundary(innerName, lowerAppName));
-                                    if (innerMatch) matchingInner.add(innerDir);
-                                }
-                            }
+                            List<File> matchingInner = matchingInnerAppDirs(child, lowerAppName);
                             if (matchingInner.size() == 1) {
                                 File target = matchingInner.get(0);
                                 // Only delete whole vendor if it contains exactly one entry total (the app) — avoids wiping vendor that has extra files like uninstall.log
                                 if (allEntries.length == 1 && innerDirs.length == 1) {
                                     // Vendor folder has only this app — safe to delete the whole vendor folder
                                     // B2 FIX: still refuse protected/shared roots even in single-app case.
-                                    if (isProtectedPath(child.getAbsolutePath())) {
-                                        AppLogger.warning("Force uninstall refused protected vendor path: " + child.getAbsolutePath());
-                                    } else if (NativeFileHelper.deleteOrQueue(child)) {
-                                        summary.add("Deleted vendor directory (single-app): " + child.getAbsolutePath());
-                                    } else {
-                                        errors.add("Scheduled for reboot deletion: " + child.getAbsolutePath());
-                                    }
+                                    deleteForceDir(child, summary, errors, cancelled);
                                 } else {
                                     // Vendor folder hosts multiple entries — delete only the matching subfolder
-                                    if (isProtectedPath(target.getAbsolutePath())) {
-                                        AppLogger.warning("Force uninstall refused protected path: " + target.getAbsolutePath());
-                                    } else if (NativeFileHelper.deleteOrQueue(target)) {
-                                        summary.add("Deleted directory: " + target.getAbsolutePath());
-                                    } else {
-                                        errors.add("Scheduled for reboot deletion: " + target.getAbsolutePath());
-                                    }
+                                    deleteForceDir(target, summary, errors, cancelled);
                                 }
                             } else if (matchingInner.size() > 1) {
                                 for (File t : matchingInner) {
-                                    if (isProtectedPath(t.getAbsolutePath())) {
-                                        AppLogger.warning("Force uninstall refused protected path: " + t.getAbsolutePath());
-                                        continue;
-                                    }
-                                    if (NativeFileHelper.deleteOrQueue(t)) {
-                                        summary.add("Deleted directory: " + t.getAbsolutePath());
-                                    } else {
-                                        errors.add("Scheduled for reboot deletion: " + t.getAbsolutePath());
-                                    }
+                                    if (cancelled(cancelled)) break;
+                                    deleteForceDir(t, summary, errors, cancelled);
                                 }
                             }
                         }
@@ -1788,28 +2141,40 @@ public class UninstallerService {
             }
         }
 
+        if (cancelled(cancelled)) {
+            errors.add("Force uninstall cancelled.");
+            return new ForceUninstallResult(summary, errors);
+        }
+
         // Delete the registry key at the app's registryKeyPath
         if (app.isWin32() && !app.getRegistryKeyPath().isEmpty()) {
-            HKEY hive = "HKLM".equalsIgnoreCase(app.getRegistryHive())
-                    ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
-            try {
-                if (Advapi32Util.registryKeyExists(hive, app.getRegistryKeyPath())) {
-                    boolean deleted = false;
-                    try {
-                        Advapi32Util.registryDeleteKey(hive, app.getRegistryKeyPath());
-                        deleted = true;
-                    } catch (Exception ex) {
-                        deleted = deleteRegistryKeyRecursively(hive, app.getRegistryKeyPath());
-                        if (!deleted) {
-                            errors.add("Failed to delete registry key for " + appName + ": " + app.getRegistryKeyPath());
+            if (isProtectedRegistryPath(app.getRegistryHive(), app.getRegistryKeyPath())) {
+                errors.add("Skipped protected registry key: "
+                        + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
+                AppLogger.warning("Force uninstall refused protected registry key: "
+                        + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
+            } else {
+                HKEY hive = "HKLM".equalsIgnoreCase(app.getRegistryHive())
+                        ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
+                try {
+                    if (Advapi32Util.registryKeyExists(hive, app.getRegistryKeyPath())) {
+                        boolean deleted = false;
+                        try {
+                            Advapi32Util.registryDeleteKey(hive, app.getRegistryKeyPath());
+                            deleted = true;
+                        } catch (Exception ex) {
+                            deleted = deleteRegistryKeyRecursively(hive, app.getRegistryKeyPath());
+                            if (!deleted) {
+                                errors.add("Failed to delete registry key for " + appName + ": " + app.getRegistryKeyPath());
+                            }
+                        }
+                        if (deleted) {
+                            summary.add("Deleted registry key: " + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
                         }
                     }
-                    if (deleted) {
-                        summary.add("Deleted registry key: " + app.getRegistryHive() + "\\" + app.getRegistryKeyPath());
-                    }
+                } catch (Exception e) {
+                    errors.add("Failed to delete registry key for " + appName + ": " + e.getMessage());
                 }
-            } catch (Exception e) {
-                errors.add("Failed to delete registry key for " + appName + ": " + e.getMessage());
             }
         }
 
@@ -1821,6 +2186,7 @@ public class UninstallerService {
         };
 
         for (String[] pathInfo : uninstallPaths) {
+            if (cancelled(cancelled)) break;
             String hiveLabel = pathInfo[0];
             String keyPath = pathInfo[1];
             HKEY hive = "HKLM".equals(hiveLabel) ? WinReg.HKEY_LOCAL_MACHINE : WinReg.HKEY_CURRENT_USER;
@@ -1870,44 +2236,117 @@ public class UninstallerService {
             }
         }
 
+        if (cancelled(cancelled)) {
+            errors.add("Force uninstall cancelled.");
+            return new ForceUninstallResult(summary, errors);
+        }
+
         // Delete Start Menu shortcuts
         cleanStartMenuShortcuts(lowerAppName, summary, errors);
 
         return new ForceUninstallResult(summary, errors);
     }
 
+    private static List<File> matchingInnerAppDirs(File vendorDir, String lowerAppName) {
+        List<File> matchingInner = new ArrayList<>();
+        File[] innerDirs = vendorDir.listFiles(File::isDirectory);
+        if (innerDirs == null) return matchingInner;
+        for (File innerDir : innerDirs) {
+            String innerName = innerDir.getName().toLowerCase().trim();
+            if (isGenericName(innerName)) continue;
+            if (isGenericName(lowerAppName)) {
+                if (innerName.equals(lowerAppName)) matchingInner.add(innerDir);
+            } else if (isAppSpecificInnerName(innerName, lowerAppName)) {
+                matchingInner.add(innerDir);
+            }
+        }
+        return matchingInner;
+    }
+
+    private static void recordDeleteOutcome(File file, NativeFileHelper.DeleteOutcome outcome,
+                                            List<String> summary, List<String> errors, String deletedPrefix) {
+        if (file == null || outcome == null) {
+            if (errors != null && file != null) errors.add("Failed to delete: " + file.getAbsolutePath());
+            return;
+        }
+        String path = file.getAbsolutePath();
+        switch (outcome) {
+            case DELETED, RECYCLED -> summary.add(deletedPrefix + path);
+            case QUEUED_FOR_REBOOT -> summary.add("Scheduled for reboot deletion: " + path);
+            default -> errors.add("Failed to delete: " + path);
+        }
+    }
+
+    private void deleteForceDir(File target, List<String> summary, List<String> errors, AtomicBoolean cancelled) {
+        if (target == null) return;
+        if (cancelled(cancelled)) {
+            errors.add("Force uninstall cancelled.");
+            return;
+        }
+        if (isProtectedPath(target.getAbsolutePath())) {
+            AppLogger.warning("Force uninstall refused protected path: " + target.getAbsolutePath());
+            errors.add("Skipped protected system directory: " + target.getAbsolutePath());
+            return;
+        }
+        NativeFileHelper.DeleteOutcome outcome = NativeFileHelper.deleteOrQueueWithOutcome(target, cancelled);
+        if (cancelled(cancelled) && outcome != NativeFileHelper.DeleteOutcome.DELETED
+                && outcome != NativeFileHelper.DeleteOutcome.QUEUED_FOR_REBOOT) {
+            errors.add("Force uninstall cancelled.");
+            return;
+        }
+        recordDeleteOutcome(target, outcome, summary, errors, "Deleted directory: ");
+    }
+
     /**
      * Force-removes a Store (AppX) package via Remove-AppxPackage. Never deletes
      * the WindowsApps folder directly — it is OS-protected and shared.
      */
-    private ForceUninstallResult forceUninstallAppx(InstalledApp app, List<String> summary, List<String> errors) {
+    private ForceUninstallResult forceUninstallAppx(InstalledApp app, List<String> summary, List<String> errors,
+                                                    AtomicBoolean cancelled) {
         String appName = app.getName();
         String pkg = app.getAppxPackageFullName();
         if (pkg == null || pkg.isBlank()) {
             errors.add("Cannot force-remove " + appName + ": missing package identity.");
             return new ForceUninstallResult(summary, errors);
         }
+        if (cancelled(cancelled)) {
+            errors.add("Force uninstall cancelled.");
+            return new ForceUninstallResult(summary, errors);
+        }
         // Stop related processes first (name-based, with safety guards)
         killProcessesByPath(null, appName, summary, errors);
+        if (cancelled(cancelled)) {
+            errors.add("Force uninstall cancelled.");
+            return new ForceUninstallResult(summary, errors);
+        }
         try {
             Path script = PowerShellScripts.resolve("appx-uninstall.ps1");
             ProcessResult r = processRunner.run(
-                    ProcessRunner.powershellScript(script.toString(), "-PackageFullName", pkg), 180);
+                    ProcessRunner.powershellScript(script.toString(), "-PackageFullName", pkg), 180, cancelled);
             if (r.succeeded()) {
                 summary.add("Removed Store package: " + pkg
                         + (r.isRebootRequired() ? " (reboot required)" : ""));
             } else {
                 errors.add("Failed to remove Store package " + pkg + ": " + truncate(r.combinedOutput(), 400));
             }
+        } catch (java.util.concurrent.CancellationException e) {
+            errors.add("Force uninstall cancelled.");
+            return new ForceUninstallResult(summary, errors);
         } catch (Exception e) {
             errors.add("Failed to remove Store package " + pkg + ": " + e.getMessage());
+        }
+        if (cancelled(cancelled)) {
+            errors.add("Force uninstall cancelled.");
+            return new ForceUninstallResult(summary, errors);
         }
         // Clean Start Menu shortcuts. Store shortcuts use the friendly display name
         // (e.g. "Spotify.lnk") while the package name is dotted ("SpotifyAB.SpotifyMusic"),
         // so match on significant tokens from both — confined to Start Menu shortcuts only.
-        java.util.Set<String> tokens = significantNameTokens(appName);
-        tokens.addAll(significantNameTokens(app.getAppxPackageName()));
-        cleanStartMenuShortcutsByTokens(tokens, summary, errors);
+        // Keep display-name tokens separate from package tokens so a 2-word
+        // display name ("Notion Calendar") cannot match a sibling via one token
+        // unioned with a dotted package identity.
+        cleanStartMenuShortcutsByTokens(significantNameTokens(appName), summary, errors);
+        cleanStartMenuShortcutsByTokens(significantNameTokens(app.getAppxPackageName()), summary, errors);
         return new ForceUninstallResult(summary, errors);
     }
 
@@ -1953,6 +2392,24 @@ public class UninstallerService {
         return tokens;
     }
 
+    /**
+     * Single-token names match that token (Spotify.lnk). Multi-token names
+     * require every token in the leaf so "Notion Calendar" cannot delete Notion.lnk.
+     */
+    static boolean startMenuTokensMatchLeaf(String leafNoExt, java.util.Set<String> tokens) {
+        if (leafNoExt == null || tokens == null || tokens.isEmpty()) return false;
+        if (isGenericName(leafNoExt)) return false;
+        if (tokens.size() == 1) {
+            String tok = tokens.iterator().next();
+            return leafNoExt.equals(tok)
+                    || (tok.length() >= 6 && isAppSpecificInnerName(leafNoExt, tok));
+        }
+        for (String tok : tokens) {
+            if (!leafNoExt.equals(tok) && !containsWordBoundary(leafNoExt, tok)) return false;
+        }
+        return true;
+    }
+
     private void cleanStartMenuShortcutsByTokens(java.util.Set<String> tokens, List<String> summary, List<String> errors) {
         if (tokens == null || tokens.isEmpty()) return;
         List<String> startMenuRoots = new ArrayList<>();
@@ -1983,6 +2440,14 @@ public class UninstallerService {
         if (files == null) return;
         for (File file : files) {
             String lowerFile = file.getName().toLowerCase().trim();
+            // Generic containers (Start Menu\Programs) are protected-as-leaves.
+            // Recurse into them; never delete the container itself.
+            if (isProtectedPath(file.getAbsolutePath())) {
+                if (isGenericName(lowerFile) && file.isDirectory() && !isLinkOrReparse(file)) {
+                    deleteMatchingFilesByTokens(file, tokens, summary, errors);
+                }
+                continue;
+            }
             if (isGenericName(lowerFile)) {
                 // B5 FIX: never descend into link targets.
                 if (file.isDirectory() && !isLinkOrReparse(file)) deleteMatchingFilesByTokens(file, tokens, summary, errors);
@@ -1991,20 +2456,10 @@ public class UninstallerService {
             String leafNoExt = lowerFile;
             int dot = leafNoExt.lastIndexOf('.');
             if (dot > 0) leafNoExt = leafNoExt.substring(0, dot);
-            boolean matches = false;
-            for (String tok : tokens) {
-                if (leafNoExt.equals(tok)
-                        || (tok.length() >= 6 && containsWordBoundary(lowerFile, tok))) {
-                    matches = true;
-                    break;
-                }
-            }
+            boolean matches = startMenuTokensMatchLeaf(leafNoExt, tokens);
             if (matches) {
-                if (NativeFileHelper.deleteOrQueue(file)) {
-                    summary.add("Deleted: " + file.getAbsolutePath());
-                } else {
-                    errors.add("Scheduled for reboot deletion: " + file.getAbsolutePath());
-                }
+                recordDeleteOutcome(file, NativeFileHelper.deleteOrQueueWithOutcome(file),
+                        summary, errors, "Deleted: ");
             } else if (file.isDirectory()) {
                 // B5 FIX: matching links are deleted as links by deleteOrQueue;
                 // non-matching links are skipped, never traversed.
@@ -2019,11 +2474,15 @@ public class UninstallerService {
             // OS locations even if a future caller forgets the pre-check in
             // forceUninstall(). Killing by "C:\Windows" would match every system
             // process via prefix comparison.
-            if (installLoc != null && !installLoc.isBlank() && isProtectedPath(installLoc)) {
-                AppLogger.warning("Refused process kill by protected path: " + installLoc);
-                if (errors != null) errors.add("Skipped process kill for protected path: " + installLoc);
-                if (summary != null) summary.add("No running processes stopped (protected path).");
-                return;
+            if (installLoc != null && !installLoc.isBlank()) {
+                String canon = canonicalizeForSafety(installLoc);
+                if (canon == null || isProtectedPath(canon)) {
+                    AppLogger.warning("Refused process kill by protected path: " + installLoc);
+                    if (errors != null) errors.add("Skipped process kill for protected path: " + installLoc);
+                    if (summary != null) summary.add("No running processes stopped (protected path).");
+                    return;
+                }
+                installLoc = canon;
             }
             String psScript;
             // B3 FIX: registry values are untrusted — strip CR/LF + cap length
@@ -2031,6 +2490,7 @@ public class UninstallerService {
             // quote-breakout; this kills line-injection + oversized command lines).
             String safeLoc = sanitizePsInput(installLoc, 512);
             String safeApp = sanitizePsInput(appName, 128);
+            long selfPid = ProcessHandle.current().pid();
             boolean byPath = safeLoc != null && !safeLoc.isBlank();
             if (byPath) {
                 // Use exact directory boundary comparison to avoid killing processes
@@ -2039,8 +2499,9 @@ public class UninstallerService {
                 String normalizedPath = safeLoc.replace('\\', '/').replaceAll("/+$", "");
                 String escapedPath = normalizedPath.replace("'", "''");
                 // Count matches so the summary is accurate instead of claiming success unconditionally
-                psScript = "$target = '" + escapedPath + "'; " +
+                psScript = "$skip = " + selfPid + "; $target = '" + escapedPath + "'; " +
                         "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { " +
+                        "  if ($_.Id -eq $skip) { return $false }; " +
                         "  if (-not $_.Path) { return $false }; " +
                         "  $p = $_.Path.Replace('\\','/'); " +
                         "  $p -eq $target -or $p.StartsWith($target + '/', [System.StringComparison]::OrdinalIgnoreCase) " +
@@ -2056,17 +2517,24 @@ public class UninstallerService {
                     }
                     return;
                 }
+                String noSpace = raw.replaceAll("\\s+", "");
+                if (isGenericName(raw) || isGenericName(noSpace)
+                        || isProtectedProcessName(raw) || isProtectedProcessName(noSpace)) {
+                    if (summary != null) {
+                        summary.add("No running processes stopped (name not safe for process kill).");
+                    }
+                    return;
+                }
                 // CRITICAL FIX: exact ProcessName only — -like '*name*' killed unrelated processes.
                 String escapedExact = raw.replace("'", "''");
-                String noSpace = raw.replaceAll("\\s+", "");
                 String escapedNoSpace = noSpace.replace("'", "''");
                 if (noSpace.equalsIgnoreCase(raw)) {
-                    psScript = "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq '" + escapedExact + "' }; " +
+                    psScript = "$skip = " + selfPid + "; $cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $skip -and $_.ProcessName -eq '" + escapedExact + "' }; " +
                             "$n = @($cands).Count; " +
                             "$cands | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                             "Write-Output (\"KILLED:\" + $n)";
                 } else {
-                    psScript = "$cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq '" + escapedExact + "' -or $_.ProcessName -eq '" + escapedNoSpace + "' }; " +
+                    psScript = "$skip = " + selfPid + "; $cands = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $skip -and ($_.ProcessName -eq '" + escapedExact + "' -or $_.ProcessName -eq '" + escapedNoSpace + "') }; " +
                             "$n = @(@($cands) | Select-Object -Unique Id).Count; " +
                             "$cands | Select-Object -Unique Id | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; " +
                             "Write-Output (\"KILLED:\" + $n)";
@@ -2114,19 +2582,27 @@ public class UninstallerService {
         if (files == null) return;
         for (File file : files) {
             String lowerFile = file.getName().toLowerCase().trim();
+            // Generic containers (Start Menu\Programs) are protected-as-leaves.
+            // Recurse into them; never delete the container itself.
+            if (isProtectedPath(file.getAbsolutePath())) {
+                if (isGenericName(lowerFile) && file.isDirectory() && !isLinkOrReparse(file)) {
+                    deleteMatchingFiles(file, lowerName, summary, errors);
+                }
+                continue;
+            }
             if (isGenericName(lowerFile)) {
                 // B5 FIX: never descend into link targets.
                 if (file.isDirectory() && !isLinkOrReparse(file)) deleteMatchingFiles(file, lowerName, summary, errors);
                 continue;
             }
-            boolean matches = lowerFile.equals(lowerName)
-                    || (lowerName.length() >= 5 && containsWordBoundary(lowerFile, lowerName));
+            String leafNoExt = lowerFile;
+            int dot = lowerFile.lastIndexOf('.');
+            if (dot > 0) leafNoExt = lowerFile.substring(0, dot);
+            boolean matches = isAppSpecificInnerName(leafNoExt, lowerName)
+                    || isAppSpecificInnerName(lowerFile, lowerName);
             if (matches) {
-                if (NativeFileHelper.deleteOrQueue(file)) {
-                    summary.add("Deleted: " + file.getAbsolutePath());
-                } else {
-                    errors.add("Scheduled for reboot deletion: " + file.getAbsolutePath());
-                }
+                recordDeleteOutcome(file, NativeFileHelper.deleteOrQueueWithOutcome(file),
+                        summary, errors, "Deleted: ");
             } else if (file.isDirectory()) {
                 if (!isLinkOrReparse(file)) deleteMatchingFiles(file, lowerName, summary, errors);
             }

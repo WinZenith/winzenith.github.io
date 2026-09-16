@@ -43,17 +43,21 @@ public class OemBroadcomCatalogProvider extends AbstractOemCatalogProvider {
         java.util.regex.Pattern linkPattern = java.util.regex.Pattern.compile(
                 "href\\s*=\\s*\"([^\"]+\\.(?:exe|zip|msi))\"", java.util.regex.Pattern.CASE_INSENSITIVE);
         java.util.regex.Matcher m = linkPattern.matcher(body);
+        java.util.List<String> found = new java.util.ArrayList<>();
         while (m.find()) {
             String url = m.group(1);
             if (url.startsWith("//")) url = "https:" + url;
             else if (url.startsWith("/")) url = "https://www.broadcom.com" + url;
             if (url.toLowerCase().contains("broadcom.com") && isLikelyStable(url)) {
-                AppLogger.info("Broadcom: Found download URL: " + url);
-                return decodeHtmlEntities(url);
+                found.add(decodeHtmlEntities(url));
             }
         }
-        // Fallback to generic scrape (AbstractOemCatalogProvider)
-        AppLogger.info("Broadcom: No direct download found, user will be directed to vendor website");
+        String picked = com.sbtools.drivers.DriverInstallTrust.pickBestDownloadUrl(found, driver);
+        if (picked != null) {
+            AppLogger.info("Broadcom: Found download URL: " + picked);
+            return picked;
+        }
+        AppLogger.info("Broadcom: No device-matching download found, user will be directed to vendor website");
         return null;
     }
 }

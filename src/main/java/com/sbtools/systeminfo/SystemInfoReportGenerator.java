@@ -140,7 +140,7 @@ public final class SystemInfoReportGenerator {
                     if (data.storage().partitions() != null) {
                         final int diskIdx = i;
                         data.storage().partitions().stream()
-                                .filter(p -> p.diskIndex() == diskIdx)
+                                .filter(p -> p != null && p.diskIndex() == diskIdx)
                                 .forEach(part -> sb.append("  ").append(nvl(part.deviceID())).append(": ").append(nvl(part.volumeName()))
                                         .append(" ").append(nvl(part.fsType()))
                                         .append(" ").append(part.formatSize())
@@ -476,7 +476,7 @@ public final class SystemInfoReportGenerator {
                 if (data.storage().partitions() != null) {
                     final int diskIdx = i;
                     List<StorageInfo.Partition> diskParts = data.storage().partitions().stream()
-                            .filter(p -> p.diskIndex() == diskIdx)
+                            .filter(p -> p != null && p.diskIndex() == diskIdx)
                             .toList();
                     if (!diskParts.isEmpty()) {
                         html.append("<h4>Partitions on Disk ").append(i + 1).append("</h4><table>");
@@ -494,7 +494,7 @@ public final class SystemInfoReportGenerator {
             }
 
             List<StorageInfo.Partition> unassigned = data.storage().partitions() != null
-                    ? data.storage().partitions().stream().filter(p -> p.diskIndex() < 0).toList()
+                    ? data.storage().partitions().stream().filter(p -> p != null && p.diskIndex() < 0).toList()
                     : List.of();
             if (!unassigned.isEmpty()) {
                 html.append("<h3>Other Partitions</h3><table>");

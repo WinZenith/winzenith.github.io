@@ -2,6 +2,7 @@ package com.sbtools.startup;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.type.CollectionType;
+import com.sbtools.backup.BackupHealth;
 import com.sbtools.util.*;
 import com.sun.jna.Memory;
 import com.sun.jna.Pointer;
@@ -18,6 +19,7 @@ import com.sun.jna.ptr.PointerByReference;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.*;
@@ -337,9 +339,12 @@ public class StartupService {
         }
         synchronized (ORIGINAL_FILE_LOCK) {
             try {
-                Files.createDirectories(getBackupsDir());
+                Path backupsDir = StartupBackupValidation.requireRealBackupRoot(getBackupsDir());
+                Files.createDirectories(backupsDir);
                 Path file = getOriginalStartTypesFile();
+                StartupBackupValidation.refuseReparseFile(file, "Original start-types file");
                 Path tmp = file.resolveSibling("." + file.getFileName() + ".tmp");
+                StartupBackupValidation.refuseReparseFile(tmp, "Original start-types temp file");
                 JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), snapshot);
                 try {
                     Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
@@ -775,7 +780,7 @@ public class StartupService {
             String action = item.isEnabled() ? "Disable" : "Enable";
             Path script = PowerShellScripts.resolve("set-startup-task-state.ps1");
             ProcessResult result = processRunner.run(ProcessRunner.powershellScriptNonInteractive(
-                    script.toString(), "-TaskName", taskName, "-TaskPath", taskPath, "-Action", action));
+                    script.toString(), taskStateArgs(taskName, taskPath, action)));
             if (!result.success()) {
                 String err = result.combinedOutput();
                 String lower = err.toLowerCase(java.util.Locale.ROOT);
@@ -822,7 +827,7 @@ public class StartupService {
             }
         } else if (item.getType() == StartupItemType.SERVICE) {
             String serviceName = item.getName();
-            String scConfigArg;
+            String scStartValue;
             String newStartType;
             if (item.isEnabled()) {
                 // Save original before disabling if not yet saved (and not Disabled)
@@ -830,25 +835,31 @@ public class StartupService {
                         && !"Disabled".equalsIgnoreCase(item.getServiceStartType())) {
                     recordServiceStartType(serviceName, item.getServiceStartType());
                 }
-                scConfigArg = "start= disabled";
+                scStartValue = "disabled";
                 newStartType = "Disabled";
             } else {
                 String original = item.getOriginalServiceStartType();
                 if (original == null || original.isBlank() || "Disabled".equalsIgnoreCase(original)) {
                     original = "Manual";
                 }
-                scConfigArg = "start= " + startTypeToScArg(original);
+                scStartValue = startTypeToScArg(original);
                 newStartType = original;
             }
 
-            ProcessResult result = processRunner.run(List.of("sc.exe", "config", serviceName, scConfigArg));
+            ProcessResult result = processRunner.run(scConfigCommand(serviceName, scStartValue));
+            String errMsg = result.combinedOutput();
             if (!result.success()) {
-                String errMsg = result.combinedOutput();
                 String lower = errMsg.toLowerCase(java.util.Locale.ROOT);
                 if (lower.contains("577") || lower.contains("access") || lower.contains("denied") || lower.contains("privileg") || lower.contains("740")) {
                     throw new IOException("Access denied. Please run as administrator to modify service start types. Details: " + errMsg);
                 }
                 throw new IOException("Failed to toggle service start type: " + errMsg);
+            }
+            Integer applied = queryServiceStartCode(serviceName);
+            if (applied == null || !startCodeMatchesScArg(applied, scStartValue)) {
+                throw new IOException("Service start type was not applied (SCM reports "
+                        + (applied == null ? "unknown" : applied) + ", expected " + scStartValue
+                        + "). " + errMsg);
             }
 
             item.setServiceStartType(newStartType);
@@ -900,21 +911,20 @@ public class StartupService {
     }
 
     private void deleteStartupFolderItemRequired(StartupItem item) throws IOException {
-        String filePath = item.getFilePath();
-        if (filePath == null || filePath.isBlank()) {
-            filePath = item.getPath();
-        }
-        if (filePath == null || filePath.isBlank()) {
-            throw new IOException("Failed to delete startup folder item: path is missing.");
-        }
-        Path p = Path.of(filePath);
+        Path p = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
         Path disabled = p.resolveSibling(p.getFileName() + ".disabled");
         boolean deleted = false;
         try {
-            if (Files.exists(p)) {
+            if (Files.exists(p, LinkOption.NOFOLLOW_LINKS)) {
+                if (BackupHealth.isReparseOrSymlink(p) || Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("Failed to delete startup folder item: path is not a regular file.");
+                }
                 Files.delete(p);
                 deleted = true;
-            } else if (Files.exists(disabled)) {
+            } else if (Files.exists(disabled, LinkOption.NOFOLLOW_LINKS)) {
+                if (BackupHealth.isReparseOrSymlink(disabled) || Files.isDirectory(disabled, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("Failed to delete startup folder item: path is not a regular file.");
+                }
                 Files.delete(disabled);
                 deleted = true;
             }
@@ -924,7 +934,7 @@ public class StartupService {
         if (!deleted) {
             throw new IOException("Failed to delete startup folder item: file '" + item.getName() + "' was not found.");
         }
-        if (Files.exists(p) || Files.exists(disabled)) {
+        if (Files.exists(p, LinkOption.NOFOLLOW_LINKS) || Files.exists(disabled, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Startup folder item '" + item.getName() + "' still exists after deletion.");
         }
     }
@@ -1008,7 +1018,7 @@ public class StartupService {
         try {
             Path script = PowerShellScripts.resolve("set-startup-task-state.ps1");
             ProcessResult result = processRunner.run(ProcessRunner.powershellScriptNonInteractive(
-                    script.toString(), "-TaskName", taskName, "-TaskPath", taskPath, "-Action", "TestExists"));
+                    script.toString(), taskStateArgs(taskName, taskPath, "TestExists")));
             if (!result.success() || result.stdout() == null || result.stdout().isBlank()) {
                 throw new IOException("Failed to query scheduled task existence: " + result.combinedOutput());
             }
@@ -1114,30 +1124,22 @@ public class StartupService {
     }
 
     private boolean toggleStartupFolderItem(StartupItem item) throws Exception {
-        String filePath = item.getFilePath();
-        if (filePath == null || filePath.isBlank()) {
-            // Fallback use path
-            filePath = item.getPath();
-            if (filePath == null || filePath.isBlank()) return false;
-        }
-        Path p = Path.of(filePath);
+        Path p = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
         Path disabled = p.resolveSibling(p.getFileName() + ".disabled");
         if (item.isEnabled()) {
-            if (!Files.exists(p)) return false;
-            Files.move(p, disabled, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            if (!Files.exists(p, LinkOption.NOFOLLOW_LINKS) || BackupHealth.isReparseOrSymlink(p)
+                    || Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
+                return false;
+            }
+            Files.move(p, disabled);
             return true;
-        } else {
-            // Enable: look for .disabled file
-            if (Files.exists(disabled)) {
-                Files.move(disabled, p, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                return true;
-            }
-            if (Files.exists(p)) {
-                // Already enabled but location said disabled
-                return true;
-            }
-            return false;
         }
+        if (Files.exists(disabled, LinkOption.NOFOLLOW_LINKS) && !BackupHealth.isReparseOrSymlink(disabled)
+                && !Files.isDirectory(disabled, LinkOption.NOFOLLOW_LINKS)) {
+            Files.move(disabled, p);
+            return true;
+        }
+        return Files.exists(p, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS);
     }
 
     private static String getRegistryString(HKEY hive, String keyPath, String valueName) {
@@ -1211,18 +1213,18 @@ public class StartupService {
     // ── Backup / Restore Mechanism ────────────────────────────────────────────
 
     public Path getBackupsDir() {
-        // Portable-aware: prefer portable dir if available and writable
         Path portable = AppPaths.portableBaseDir();
         if (portable != null) {
-            try {
-                Path portableBackups = portable.resolve("startup-backups");
-                Files.createDirectories(portableBackups);
-                if (Files.isWritable(portableBackups)) {
-                    return portableBackups;
-                }
-            } catch (Exception ignored) {}
+            Path portableBackups = portable.resolve("startup-backups");
+            if (StartupBackupValidation.isUsableBackupRoot(portableBackups)) {
+                return portableBackups;
+            }
         }
-        return AppPaths.localAppData().resolve("startup-backups");
+        Path local = AppPaths.localAppData().resolve("startup-backups");
+        if (StartupBackupValidation.isUsableBackupRoot(local)) {
+            return local;
+        }
+        return local;
     }
 
     private Path getBackupsIndexFile() {
@@ -1246,9 +1248,12 @@ public class StartupService {
 
     private void saveBackupsIndex(List<StartupBackupEntry> list) throws IOException {
         // Caller must hold backupIndexLock
-        Files.createDirectories(getBackupsDir());
+        Path backupsDir = StartupBackupValidation.requireRealBackupRoot(getBackupsDir());
+        Files.createDirectories(backupsDir);
         Path indexFile = getBackupsIndexFile();
+        StartupBackupValidation.refuseReparseFile(indexFile, "Backup index");
         Path tmp = indexFile.resolveSibling("." + indexFile.getFileName() + ".tmp");
+        StartupBackupValidation.refuseReparseFile(tmp, "Backup index temp file");
         JsonMapper.mapper().writerWithDefaultPrettyPrinter()
                 .writeValue(tmp.toFile(), list);
         try {
@@ -1260,7 +1265,7 @@ public class StartupService {
 
     private void createBackup(StartupItem item) throws Exception {
         String backupId = UUID.randomUUID().toString();
-        Path backupFolder = getBackupsDir().resolve(backupId);
+        Path backupFolder = StartupBackupValidation.resolveConfinedBackupFolder(getBackupsDir(), backupId);
         Files.createDirectories(backupFolder);
         boolean backupSucceeded = false;
         try {
@@ -1303,22 +1308,21 @@ public class StartupService {
             if (location != null && location.startsWith("Startup Folder")) {
                 entry.setType("Folder");
                 entry.setHive(location.contains("(Common)") ? "COMMON" : "USER");
-                entry.setKeyPath(item.getFilePath() != null ? item.getFilePath() : item.getPath());
+                Path live = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
+                entry.setKeyPath(live.toString());
                 entry.setValueName(item.getRegistryValueName());
-                // Copy file to backup
-                String fp = item.getFilePath();
                 Path src = null;
-                if (fp != null && !fp.isBlank()) {
-                    Path p = Path.of(fp);
-                    Path disabled = p.resolveSibling(p.getFileName() + ".disabled");
-                    if (Files.exists(p)) src = p;
-                    else if (Files.exists(disabled)) src = disabled;
+                Path disabled = live.resolveSibling(live.getFileName() + ".disabled");
+                if (StartupBackupValidation.isSafeBackupPayloadFile(live)) {
+                    src = live;
+                } else if (StartupBackupValidation.isSafeBackupPayloadFile(disabled)) {
+                    src = disabled;
                 }
-                if (src == null || !Files.exists(src)) {
+                if (src == null) {
                     throw new IOException("Cannot create backup: startup folder file is missing.");
                 }
                 Path dest = backupFolder.resolve(src.getFileName().toString());
-                Files.copy(src, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.copy(src, dest, LinkOption.NOFOLLOW_LINKS);
                 entry.setBackupXmlName(src.getFileName().toString());
                 entry.setCommand(src.toAbsolutePath().toString());
             } else {
@@ -1384,23 +1388,27 @@ public class StartupService {
         Path backupFolder = StartupBackupValidation.resolveConfinedBackupFolder(getBackupsDir(), entry.getId());
 
         if ("Registry".equals(entry.getType())) {
+            String keyPath = StartupConstants.canonicalizeRestoreRunKey(entry.getKeyPath());
+            if (keyPath == null) {
+                throw new IOException("Backup entry is corrupt (registry key is not a Run/RunOnce key). Backup kept.");
+            }
             HKEY hive = "HKCU".equals(entry.getHive()) ? WinReg.HKEY_CURRENT_USER : WinReg.HKEY_LOCAL_MACHINE;
-            if (registryValueExistsSafe(hive, entry.getKeyPath(), entry.getValueName())) {
+            if (registryValueExistsSafe(hive, keyPath, entry.getValueName())) {
                 throw new IOException("Cannot restore: registry value \"" + entry.getValueName()
                         + "\" already exists. Remove it first. Backup kept.");
             }
-            if (!Advapi32Util.registryKeyExists(hive, entry.getKeyPath())) {
-                Advapi32Util.registryCreateKey(hive, entry.getKeyPath());
+            if (!Advapi32Util.registryKeyExists(hive, keyPath)) {
+                Advapi32Util.registryCreateKey(hive, keyPath);
             }
             boolean expandSz = "REG_EXPAND_SZ".equalsIgnoreCase(entry.getRegistryValueType());
-            setRegistryStringPreservingType(hive, entry.getKeyPath(), entry.getValueName(), entry.getCommand(), expandSz);
+            setRegistryStringPreservingType(hive, keyPath, entry.getValueName(), entry.getCommand(), expandSz);
 
             // RunOnce has no Approved overlay consulted by Windows; writing one only
             // creates a legacy orphan — and for 32-bit the target IS the Run32
             // overlay, corrupting a same-named Run entry. Skip for RunOnce.
-            if (!StartupConstants.isRunOnceKey(entry.getKeyPath())) {
-                String approvedKeyPath = StartupConstants.toApprovedPath(entry.getKeyPath());
-                if (!approvedKeyPath.equals(entry.getKeyPath())) {
+            if (!StartupConstants.isRunOnceKey(keyPath)) {
+                String approvedKeyPath = StartupConstants.toApprovedPath(keyPath);
+                if (!approvedKeyPath.equals(keyPath)) {
                     if (!Advapi32Util.registryKeyExists(hive, approvedKeyPath)) {
                         Advapi32Util.registryCreateKey(hive, approvedKeyPath);
                     }
@@ -1408,51 +1416,39 @@ public class StartupService {
                 }
             }
         } else if ("Folder".equals(entry.getType())) {
-            // Restore startup folder file
-            String backupXml = entry.getBackupXmlName();
-            if (backupXml == null || backupXml.isBlank()) backupXml = entry.getValueName();
-            Path src = backupFolder.resolve(backupXml);
-            if (!Files.exists(src)) {
-                // Try alternative – maybe backup folder contains the file
-                try (var s = Files.list(backupFolder)) {
-                    var opt = s.filter(Files::isRegularFile).findFirst();
-                    if (opt.isPresent()) src = opt.get();
-                }
-            }
-            if (src != null && Files.exists(src)) {
-                if (entry.getKeyPath() == null || entry.getKeyPath().isBlank()) {
-                    throw new IOException("Backup entry is corrupt (missing original file path). Backup kept.");
-                }
-                Path dest;
-                try {
-                    dest = Path.of(entry.getKeyPath());
-                } catch (Exception e) {
-                    throw new IOException("Backup entry has invalid file path. Backup kept: " + e.getMessage());
-                }
-                if (dest.getParent() == null) {
-                    throw new IOException("Backup entry has invalid file path (no parent). Backup kept.");
-                }
-                StartupBackupValidation.assertFolderRestoreTargetAbsent(entry.getKeyPath());
-                Files.createDirectories(dest.getParent());
-                Files.copy(src, dest);
-                // If backup was enabled=true we leave as is; if disabled, rename to .disabled? Original file had enabled state; folder item enabled means file exists without .disabled
-                // Ensure correct enabled state – if backup says disabled, need to disable after restore
-                if (!entry.isEnabled()) {
-                    Path disabled = dest.resolveSibling(dest.getFileName() + ".disabled");
-                    if (Files.exists(dest)) Files.move(dest, disabled, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                }
-            } else {
-                throw new FileNotFoundException("Backup file missing for startup folder item: " + backupXml);
+            Path src = StartupBackupValidation.resolveConfinedFolderPayload(backupFolder, entry);
+            Path dest = StartupBackupValidation.resolveConfinedFolderDest(entry.getKeyPath());
+            StartupBackupValidation.assertFolderRestoreTargetAbsent(dest);
+            Files.createDirectories(dest.getParent());
+            Files.copy(src, dest, LinkOption.NOFOLLOW_LINKS);
+            if (!entry.isEnabled()) {
+                Path disabled = dest.resolveSibling(dest.getFileName() + ".disabled");
+                Files.move(dest, disabled);
             }
         } else if ("Task".equals(entry.getType())) {
             Path xmlName = entry.getBackupXmlName() == null || entry.getBackupXmlName().isBlank()
                     ? Path.of("task.xml") : Path.of(entry.getBackupXmlName());
-            Path xmlPath = backupFolder.resolve(xmlName.getFileName().toString());
-            if (!Files.exists(xmlPath)) {
+            String xmlFileName = xmlName.getFileName().toString();
+            if (!StartupBackupValidation.isSafePayloadName(xmlFileName)) {
+                throw new IOException("Backup entry is corrupt (invalid task payload name). Backup kept.");
+            }
+            Path xmlRoot = backupFolder.toAbsolutePath().normalize();
+            Path xmlPath = xmlRoot.resolve(xmlFileName).normalize();
+            if (!xmlPath.startsWith(xmlRoot) || !StartupBackupValidation.isSafeBackupPayloadFile(xmlPath)) {
                 throw new FileNotFoundException("Backup XML file missing: " + xmlPath);
             }
             String tp = entry.getTaskPath();
             if (tp == null || tp.isBlank()) tp = "\\";
+            String xml;
+            try {
+                xml = Files.readString(xmlPath);
+            } catch (IOException e) {
+                throw new IOException("Failed to read backup XML: " + e.getMessage(), e);
+            }
+            if (!StartupBackupValidation.taskXmlUriMatches(xml, tp, entry.getName())) {
+                throw new IOException("Backup XML task URI does not match \"" + entry.getName()
+                        + "\". Backup kept.");
+            }
 
             // Export strips passwords by design. A Password-logon task cannot be
             // restored without re-entering credentials — fail fast with an actionable
@@ -1460,12 +1456,9 @@ public class StartupService {
             String logonType = entry.getTaskLogonType();
             String principalUser = entry.getTaskPrincipalUserId();
             if (logonType == null || logonType.isBlank()) {
-                try {
-                    String[] parsed = parseTaskPrincipal(Files.readString(xmlPath));
-                    if (!parsed[0].isBlank()) principalUser = parsed[0];
-                    if (!parsed[1].isBlank()) logonType = parsed[1];
-                } catch (Exception ignored) {
-                }
+                String[] parsed = parseTaskPrincipal(xml);
+                if (!parsed[0].isBlank()) principalUser = parsed[0];
+                if (!parsed[1].isBlank()) logonType = parsed[1];
             }
             if (logonType != null && logonType.toLowerCase(java.util.Locale.ROOT).contains("password")) {
                 throw new IOException("Cannot restore task \"" + entry.getName() + "\" automatically: "
@@ -1548,18 +1541,7 @@ public class StartupService {
     }
 
     private void deleteDirectoryRecursively(Path path) throws IOException {
-        if (Files.exists(path)) {
-            try (var stream = Files.walk(path)) {
-                stream.sorted(Comparator.reverseOrder())
-                        .forEach(p -> {
-                            try {
-                                Files.deleteIfExists(p);
-                            } catch (IOException e) {
-                                AppLogger.warning("Failed to delete backup file: " + p + ": " + e.getMessage());
-                            }
-                        });
-            }
-        }
+        BackupHealth.deleteTree(path);
     }
 
     // ── Startup Folder Support (merged into REGISTRY) ─────────────────────────
@@ -1796,13 +1778,113 @@ public class StartupService {
 
     // ── Helper Utilities ──────────────────────────────────────────────────────
 
-    private static String startTypeToScArg(String startType) {
+    /**
+     * {@code sc.exe} treats {@code start=} as the option name and the next argv
+     * as the value. A single {@code "start= disabled"} token is quoted by
+     * ProcessBuilder and ignored.
+     */
+    public static List<String> scConfigCommand(String serviceName, String scStartValue) {
+        if (!isSafeScServiceName(serviceName)) {
+            throw new IllegalArgumentException("Invalid service name.");
+        }
+        if (!isAllowedScStartValue(scStartValue)) {
+            throw new IllegalArgumentException("Unsupported service start type.");
+        }
+        return List.of("sc.exe", "config", serviceName, "start=", scStartValue);
+    }
+
+    /** Rejects sc.exe remote-server syntax ({@code \\host}) and flag-like names. */
+    public static boolean isSafeScServiceName(String serviceName) {
+        if (serviceName == null || serviceName.isBlank()) {
+            return false;
+        }
+        if (serviceName.startsWith("-") || serviceName.startsWith("\\\\")) {
+            return false;
+        }
+        for (int i = 0; i < serviceName.length(); i++) {
+            char c = serviceName.charAt(i);
+            if (c == '\\' || c == '/' || c < 32) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Colon-bound {@code -File} parameters so a task named {@code -Action} cannot
+     * steal the next switch.
+     */
+    public static String[] taskStateArgs(String taskName, String taskPath, String action) {
+        if (taskName == null || taskName.isBlank()) {
+            throw new IllegalArgumentException("Task name and action must not be blank.");
+        }
+        if (!"Enable".equals(action) && !"Disable".equals(action) && !"TestExists".equals(action)) {
+            throw new IllegalArgumentException("Unsupported scheduled-task action.");
+        }
+        if (taskPath == null || taskPath.isBlank()) {
+            taskPath = "\\";
+        }
+        return new String[] {
+                "-TaskName:" + taskName,
+                "-TaskPath:" + taskPath,
+                "-Action:" + action
+        };
+    }
+
+    private static boolean isAllowedScStartValue(String scStartValue) {
+        return "auto".equals(scStartValue) || "delayed-auto".equals(scStartValue)
+                || "demand".equals(scStartValue) || "disabled".equals(scStartValue)
+                || "boot".equals(scStartValue) || "system".equals(scStartValue);
+    }
+
+    public static Integer parseScQueryStartCode(String qcOutput) {
+        if (qcOutput == null || qcOutput.isBlank()) {
+            return null;
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("START_TYPE\\s*:\\s*(\\d+)", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(qcOutput);
+        if (!m.find()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(m.group(1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    public static boolean startCodeMatchesScArg(int code, String scStartValue) {
+        if (scStartValue == null) {
+            return false;
+        }
+        return switch (scStartValue) {
+            case "disabled" -> code == 4;
+            case "demand" -> code == 3;
+            case "auto", "delayed-auto" -> code == 2;
+            case "system" -> code == 1;
+            case "boot" -> code == 0;
+            default -> false;
+        };
+    }
+
+    private Integer queryServiceStartCode(String serviceName) throws IOException, InterruptedException {
+        if (!isSafeScServiceName(serviceName)) {
+            throw new IOException("Invalid service name.");
+        }
+        ProcessResult qc = processRunner.run(List.of("sc.exe", "qc", serviceName));
+        return parseScQueryStartCode(qc.combinedOutput());
+    }
+
+    static String startTypeToScArg(String startType) {
         if (startType == null) return "demand";
         return switch (startType.toLowerCase(Locale.ROOT)) {
             case "automatic" -> "auto";
             case "automatic (delayed start)" -> "delayed-auto";
             case "manual" -> "demand";
             case "disabled" -> "disabled";
+            case "boot" -> "boot";
+            case "system" -> "system";
             default -> "demand";
         };
     }

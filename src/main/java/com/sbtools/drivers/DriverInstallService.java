@@ -5,6 +5,7 @@ import com.sbtools.backup.SystemRestoreService;
 import com.sbtools.drivers.catalog.CatalogEntry;
 import com.sbtools.drivers.catalog.DriverCatalogDatabase;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
+import com.sbtools.drivers.model.InstalledDriver;
 import com.sbtools.drivers.model.InstallStatus;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.util.AppLogger;
@@ -339,7 +340,7 @@ public class DriverInstallService {
             } catch (IOException e) {
                 if (e.getMessage() != null && e.getMessage().contains("HTML page")) {
                     AppLogger.info("Download returned HTML, attempting to scrape actual download URL from: " + downloadUrl);
-                    String scrapedUrl = scrapeDownloadUrlFromPage(downloadUrl);
+                    String scrapedUrl = scrapeDownloadUrlFromPage(downloadUrl, candidate);
                     if (scrapedUrl != null && !scrapedUrl.equals(downloadUrl)) {
                         if (!DriverInstallTrust.isTrustedHttpsUrl(scrapedUrl, candidate.source())) {
                             cleanupTempFiles(driverFile);
@@ -472,15 +473,16 @@ public class DriverInstallService {
             if (lowerName.endsWith(".zip.exe") && !sfxExecutable) {
                 AppLogger.info("Self-extracting ZIP archive detected, extracting: " + driverFile);
                 ProcessResult installResult = installDriverFile(driverFile, candidate);
-                if (!installResult.success()) {
-                    cleanupTempFiles(driverFile);
-                    return new InstallResult(InstallStatus.INSTALL_FAILED, false,
-                            "Self-extracting archive installation failed: " + installResult.combinedOutput());
-                }
-                AppLogger.info("Driver installed from self-extracting archive: " + driverFile);
                 cleanupTempFiles(driverFile);
-                return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed from " + driverFile.toString());
+                return fromInstallerProcess(installResult, "Driver installed from " + driverFile);
             } else if ((lowerName.endsWith(".exe") || sfxExecutable) && magicArchiveExt == null) {
+                if (DriverInstallTrust.categoryConflicts(driverFile.getFileName().toString(), candidate.installed())
+                        || DriverInstallTrust.categoryConflicts(candidate.downloadUrl(), candidate.installed())) {
+                    cleanupTempFiles(driverFile);
+                    return new InstallResult(InstallStatus.BLOCKED_UNTRUSTED, false,
+                            "Blocked: installer does not match device class ("
+                                    + candidate.installed().friendlyName() + ").");
+                }
                 AppLogger.info("Launching silent installer: " + driverFile);
 
                 DriverSilentInstallerArgs.IntelPackageFamily intelFamily =
@@ -531,20 +533,14 @@ public class DriverInstallService {
             }
             stage = "driver package installation";
             ProcessResult installResult = installDriverFile(driverFile, candidate);
-            if (!installResult.success()) {
-                cleanupTempFiles(driverFile);
-                return new InstallResult(InstallStatus.INSTALL_FAILED, false,
-                        "Installation failed: " + installResult.combinedOutput());
-            }
-            AppLogger.info("Driver installed successfully from: " + driverFile);
             cleanupTempFiles(driverFile);
-            return new InstallResult(InstallStatus.SUCCESS, false, "Driver installed from " + driverFile.toString());
+            return fromInstallerProcess(installResult, "Driver installed from " + driverFile);
         } catch (Exception e) {
             return installFailure(stage, e);
         }
     }
 
-    private String scrapeDownloadUrlFromPage(String pageUrl) {
+    private String scrapeDownloadUrlFromPage(String pageUrl, DriverUpdateCandidate candidate) {
         try {
             HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(URI.create(pageUrl))
@@ -573,20 +569,14 @@ public class DriverInstallService {
             }
 
             String html = resp.body();
-            // Quote- and query-tolerant (mirrors the provider link pattern):
-            // minified pages use single quotes and CDN links carry ?ver= tails.
             java.util.regex.Pattern p = java.util.regex.Pattern.compile(
                     "href\\s*=\\s*['\"](https?://[^'\"]+\\.(?:exe|zip|msi))(?:[?#][^'\"]*)?['\"]",
                     java.util.regex.Pattern.CASE_INSENSITIVE);
             java.util.regex.Matcher m = p.matcher(html);
-            // Vendor-CDN matches only. No firstFallback: returning an
-            // arbitrary exe/zip link lets an attacker-controlled page pick
-            // the installed binary (untrusted-code risk).
+            java.util.List<String> found = new java.util.ArrayList<>();
             while (m.find()) {
                 String url = decodeHtmlEntities(m.group(1));
                 String lower = url.toLowerCase();
-                // Vendor-CDN matches only, aligned with isTrustedSource hosts:
-                // anything else stays on the manual-download path.
                 if (lower.contains("drivers.amd.com") || lower.contains("download.amd.com")
                         || lower.contains("downloadmirror.intel.com") || lower.contains("download.intel.com")
                         || lower.contains("nvidia.com") || lower.contains("nvdlcdn.com") || lower.contains("geforce.com")
@@ -595,10 +585,11 @@ public class DriverInstallService {
                         || lower.contains("hp.com") || lower.contains("lenovo.com") || lower.contains("lenovo-images.com")
                         || lower.contains("dell.com") || lower.contains("dellcdn.com") || lower.contains("dell-cdn.com")
                         || lower.contains("asus.com") || lower.contains("asusnet.net")) {
-                    return url;
+                    found.add(url);
                 }
             }
-            return null;
+            InstalledDriver installed = candidate == null ? null : candidate.installed();
+            return DriverInstallTrust.pickBestDownloadUrl(found, installed);
         } catch (Exception e) {
             AppLogger.warning("Error scraping download page: " + e.getMessage());
         }
@@ -1085,20 +1076,14 @@ public class DriverInstallService {
             if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.info("Installing MSI driver package: " + driverFile);
             ProcessResult result = runMsiexecQuietInstall(driverFile);
-            boolean msiReboot = isRebootRequiredExitCode(result.exitCode());
-            if (result.success() || msiReboot) {
-                return new ProcessResult(0, "", msiReboot
-                        ? "Driver installed silently via MSI. A restart is required."
-                        : "Driver installed silently via MSI.");
+            if (result.success() || isRebootRequiredExitCode(result.exitCode())) {
+                return result;
             }
             if (cancellationFlag.get()) throw new java.util.concurrent.CancellationException("Installation cancelled");
             AppLogger.warning("MSI /qn failed, trying /quiet: " + result.combinedOutput());
             ProcessResult fallbackResult = runMsiexecQuietInstallAlt(driverFile);
-            boolean fallbackReboot = isRebootRequiredExitCode(fallbackResult.exitCode());
-            if (fallbackResult.success() || fallbackReboot) {
-                return new ProcessResult(0, "", fallbackReboot
-                        ? "Driver installed silently via MSI. A restart is required."
-                        : "Driver installed silently via MSI.");
+            if (fallbackResult.success() || isRebootRequiredExitCode(fallbackResult.exitCode())) {
+                return fallbackResult;
             }
             return new ProcessResult(1, "", "MSI installation failed: " + fallbackResult.combinedOutput());
         }
@@ -1142,15 +1127,36 @@ public class DriverInstallService {
         }
         if (all.isEmpty()) return null;
         if (all.size() == 1) return all.get(0);
-        String osArch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
-        boolean is64 = osArch.contains("64") || osArch.contains("amd64");
-        for (Path p : all) {
-            String s = p.toString().toLowerCase(java.util.Locale.ROOT);
-            if (is64 && (s.contains("x64") || s.contains("_64") || s.contains("64bit"))) return p;
-            if (!is64 && (s.contains("x86") || s.contains("_32") || s.contains("32bit"))) return p;
+        Path picked = pickSetupExeForOsArch(all, System.getProperty("os.arch", ""));
+        if (picked == null && all.size() > 1) {
+            AppLogger.warning("Multiple setup.exe in bundle, no arch-tagged match — refusing arbitrary pick");
         }
-        AppLogger.warning("Multiple setup.exe in bundle, no arch-tagged match — using " + all.get(0));
-        return all.get(0);
+        return picked;
+    }
+
+    /**
+     * Prefers an arch-tagged setup.exe. ARM64 is not x64 ({@code aarch64}
+     * contains {@code 64}). Untagged multi-setup bundles return null.
+     */
+    static Path pickSetupExeForOsArch(java.util.List<Path> all, String osArch) {
+        if (all == null || all.isEmpty()) return null;
+        if (all.size() == 1) return all.get(0);
+        String arch = osArch == null ? "" : osArch.toLowerCase(java.util.Locale.ROOT);
+        boolean isArm64 = arch.contains("aarch64") || arch.contains("arm64");
+        boolean isX64 = !isArm64 && (arch.contains("amd64") || arch.contains("x86_64") || arch.contains("64"));
+        Path tagged = null;
+        for (Path p : all) {
+            if (p == null) continue;
+            String s = p.toString().toLowerCase(java.util.Locale.ROOT);
+            boolean pathArm = s.contains("arm64") || s.contains("aarch64");
+            boolean pathX64 = !pathArm && (s.contains("x64") || s.contains("amd64")
+                    || s.contains("64bit") || s.contains("_64"));
+            boolean pathX86 = s.contains("x86") || s.contains("_32") || s.contains("32bit");
+            if (isArm64 && pathArm) return p;
+            if (!isArm64 && isX64 && pathX64 && tagged == null) tagged = p;
+            if (!isArm64 && !isX64 && pathX86 && tagged == null) tagged = p;
+        }
+        return tagged;
     }
 
     private Path findFile(Path dir, String nameOrExtension) throws IOException {
@@ -1421,6 +1427,7 @@ public class DriverInstallService {
                     reboot ? "Driver installed silently. A restart is required."
                             : "Driver installed silently.");
         }
+        // 5103 and other non-MSI codes are failures: do not skip post-install verify.
         if (WindowsInstallerInvoke.isUsageHelpOutput(result.combinedOutput())) {
             AppLogger.warning("Installer failed with usage help in output (exit " + result.exitCode() + "): "
                     + truncateInstallerOutput(result.combinedOutput()));
@@ -1474,8 +1481,29 @@ public class DriverInstallService {
         return result;
     }
 
-    private static boolean isRebootRequiredExitCode(int exitCode) {
-        return exitCode == 3010 || exitCode == 1641 || exitCode == 5103;
+    static InstallResult fromInstallerProcess(ProcessResult result, String successMsg) {
+        if (result == null) {
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false, "Installation failed: no installer result.");
+        }
+        if (WindowsInstallerInvoke.isUsageHelpOutput(result.stdout(), result.stderr())) {
+            return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                    WindowsInstallerInvoke.INVALID_INVOCATION_MESSAGE);
+        }
+        boolean reboot = isRebootRequiredExitCode(result.exitCode());
+        if (result.success() || reboot) {
+            String base = successMsg == null || successMsg.isBlank() ? "Driver installed." : successMsg;
+            return new InstallResult(InstallStatus.SUCCESS, reboot,
+                    reboot ? base + (base.endsWith(".") ? " A restart is required." : ". A restart is required.")
+                            : base);
+        }
+        return new InstallResult(InstallStatus.INSTALL_FAILED, false,
+                "Installation failed: " + truncateInstallerOutput(result.combinedOutput()));
+    }
+
+    /** MSI-documented success+reboot only. 5103 is not a success code. */
+    static boolean isRebootRequiredExitCode(int exitCode) {
+        return exitCode == ProcessResult.MSI_SUCCESS_REBOOT_REQUIRED
+                || exitCode == ProcessResult.MSI_SUCCESS_REBOOT_INITIATED;
     }
 
     /**

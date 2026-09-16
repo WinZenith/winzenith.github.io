@@ -34,8 +34,13 @@ public record StorageInfo(
             @JsonProperty("fsType") String fsType,
             @JsonProperty("sizeBytes") long sizeBytes,
             @JsonProperty("freeBytes") long freeBytes,
-            @JsonProperty("diskIndex") int diskIndex
+            @JsonProperty("diskIndex") Integer diskIndex
     ) {
+        public Partition {
+            if (diskIndex == null) {
+                diskIndex = -1;
+            }
+        }
         public String formatSize() {
             return DataSizeFormatter.formatBytes(sizeBytes);
         }

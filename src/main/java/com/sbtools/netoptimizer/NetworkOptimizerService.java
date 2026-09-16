@@ -3,12 +3,16 @@ package com.sbtools.netoptimizer;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sbtools.util.AppLogger;
+import com.sbtools.util.AppPaths;
 import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessRunner;
 import com.sbtools.util.ProcessResult;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,17 +25,19 @@ public class NetworkOptimizerService {
     private final NetworkChangeLog changeLog = new NetworkChangeLog();
     private final NetworkSnapshotStore snapshotStore = new NetworkSnapshotStore();
     private final NetworkStateStore stateStore = new NetworkStateStore();
-    // SAFE_NAME: allow Unicode letters/numbers for localized adapter names (e.g., Réseau, Łącze) plus common symbols; block injection chars "'\"`;|&<>\$%!+=\n
-    private static final Pattern SAFE_NAME = Pattern.compile("^[\\p{L}\\p{N} _\\-().*#]+$");
+    // SAFE_NAME: Unicode letters/numbers for localized adapter names (e.g., Réseau, Łącze).
+    // No * or ?: ipconfig / Enable-NetAdapter treat those as wildcards.
+    private static final Pattern SAFE_NAME = Pattern.compile("^[\\p{L}\\p{N} _\\-().#]+$");
     // SAFE_HOST: hostname, IPv4 or IPv6. Allow alnum, dot, hyphen, underscore, colon for IPv6.
     private static final Pattern SAFE_HOST = Pattern.compile("^[a-zA-Z0-9._\\-:]+$");
     private static final Pattern IPV4_PATTERN = Pattern.compile("^((25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\.){3}(25[0-5]|2[0-4]\\d|[01]?\\d\\d?)$");
 
-    private static List<String> powershellCommand(String command) {
-        return List.of("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command);
+    private String sanitizeName(String name) {
+        return sanitizeAdapterName(name);
     }
 
-    private String sanitizeName(String name) {
+    /** Package-visible for safety tests. Rejects ipconfig/netsh wildcard chars. */
+    static String sanitizeAdapterName(String name) {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Adapter name is required");
         }
@@ -39,8 +45,11 @@ public class NetworkOptimizerService {
         if (trimmed.length() > 128) {
             throw new IllegalArgumentException("Adapter name too long");
         }
-        // Block obvious injection characters that could escape psQuote context
-        if (trimmed.contains(";") || trimmed.contains("|") || trimmed.contains("&") || trimmed.contains("`") || trimmed.contains("$") || trimmed.contains("\n") || trimmed.contains("\r")) {
+        if (trimmed.indexOf('*') >= 0 || trimmed.indexOf('?') >= 0) {
+            throw new IllegalArgumentException("Adapter name must not contain wildcard characters (* or ?)");
+        }
+        if (trimmed.contains(";") || trimmed.contains("|") || trimmed.contains("&") || trimmed.contains("`")
+                || trimmed.contains("$") || trimmed.contains("\n") || trimmed.contains("\r")) {
             throw new IllegalArgumentException("Invalid adapter name: " + name);
         }
         if (!SAFE_NAME.matcher(trimmed).matches()) {
@@ -113,37 +122,94 @@ public class NetworkOptimizerService {
     }
 
     private List<NetworkAdapterRow> parseAdapterJsonArray(String stdout) {
-        if (stdout == null || stdout.isBlank() || "[]".equals(stdout)) {
+        if (stdout == null || stdout.isBlank() || "[]".equals(stdout.trim())) {
             return List.of();
         }
-        try {
-            List<Map<String, Object>> raw = mapper.readValue(stdout,
-                    new TypeReference<List<Map<String, Object>>>() {});
-            List<NetworkAdapterRow> adapters = new ArrayList<>();
-            for (Map<String, Object> entry : raw) {
-                try {
-                    String name = str(entry, "Name");
-                    if (name.isBlank()) continue;
-                    String desc = str(entry, "InterfaceDescription");
-                    String status = str(entry, "Status");
-                    String speed = str(entry, "LinkSpeed");
-                    String mac = str(entry, "MacAddress");
-                    String ip = str(entry, "IPAddress");
-                    String adminStatus = str(entry, "AdminStatus");
-                    boolean adminEnabled = "Up".equalsIgnoreCase(adminStatus) || "Enabled".equalsIgnoreCase(adminStatus);
-                    boolean enabled = adminEnabled;
-                    String dhcp = str(entry, "Dhcp");
-                    String gateway = str(entry, "Gateway");
-                    String dns = str(entry, "DnsServers");
-                    adapters.add(new NetworkAdapterRow(name, desc, status, speed, mac, ip, enabled, dhcp, gateway, dns));
-                } catch (Exception e) {
-                    AppLogger.warning("Failed to parse adapter entry: " + e.getMessage());
-                }
-            }
-            return adapters;
-        } catch (Exception je) {
+        List<Map<String, Object>> raw = parseJsonMapList(mapper, stdout);
+        if (raw == null) {
             return null;
         }
+        List<NetworkAdapterRow> adapters = new ArrayList<>();
+        for (Map<String, Object> entry : raw) {
+            try {
+                String name = str(entry, "Name");
+                if (name.isBlank()) continue;
+                String desc = str(entry, "InterfaceDescription");
+                String status = str(entry, "Status");
+                String speed = str(entry, "LinkSpeed");
+                String mac = str(entry, "MacAddress");
+                String ip = str(entry, "IPAddress");
+                String adminStatus = str(entry, "AdminStatus");
+                boolean adminEnabled = "Up".equalsIgnoreCase(adminStatus) || "Enabled".equalsIgnoreCase(adminStatus);
+                boolean enabled = adminEnabled;
+                String dhcp = str(entry, "Dhcp");
+                String gateway = str(entry, "Gateway");
+                String dns = str(entry, "DnsServers");
+                adapters.add(new NetworkAdapterRow(name, desc, status, speed, mac, ip, enabled, dhcp, gateway, dns));
+            } catch (Exception e) {
+                AppLogger.warning("Failed to parse adapter entry: " + e.getMessage());
+            }
+        }
+        return adapters;
+    }
+
+    /**
+     * PS 5.1 ConvertTo-Json unwraps a one-element array to a bare object/string.
+     * Package-visible for safety tests.
+     */
+    static List<Map<String, Object>> parseJsonMapList(ObjectMapper mapper, String json) {
+        if (json == null || json.isBlank() || "[]".equals(json.trim())) return List.of();
+        String t = json.trim();
+        try {
+            if (t.startsWith("[")) {
+                List<Map<String, Object>> raw = mapper.readValue(t,
+                        new TypeReference<List<Map<String, Object>>>() {});
+                return raw != null ? raw : List.of();
+            }
+            if (t.startsWith("{")) {
+                Map<String, Object> single = mapper.readValue(t,
+                        new TypeReference<Map<String, Object>>() {});
+                return single != null && !single.isEmpty() ? List.of(single) : List.of();
+            }
+        } catch (Exception e) {
+            return null;
+        }
+        return null;
+    }
+
+    static List<String> coerceStringList(Object value) {
+        if (value == null) return List.of();
+        if (value instanceof List<?> list) {
+            List<String> out = new ArrayList<>();
+            for (Object o : list) {
+                if (o != null) {
+                    String s = o.toString().trim();
+                    if (!s.isEmpty()) out.add(s);
+                }
+            }
+            return out;
+        }
+        String s = value.toString().trim();
+        if (s.isEmpty() || "[]".equals(s)) return List.of();
+        return List.of(s);
+    }
+
+    static List<String> parseJsonStringList(ObjectMapper mapper, String json) {
+        if (json == null || json.isBlank() || "[]".equals(json.trim())) return List.of();
+        String t = json.trim();
+        try {
+            if (t.startsWith("[")) {
+                List<String> raw = mapper.readValue(t, new TypeReference<List<String>>() {});
+                return raw != null ? raw : List.of();
+            }
+            if (t.startsWith("\"")) {
+                String s = mapper.readValue(t, String.class);
+                return s != null && !s.isBlank() ? List.of(s) : List.of();
+            }
+        } catch (Exception e) {
+            return List.of();
+        }
+        return List.of();
     }
 
     private static final java.util.regex.Pattern WIRELESS_DESC =
@@ -195,7 +261,7 @@ public class NetworkOptimizerService {
                 String failMsg = "Optimization did not fully apply (exit code " + pr.exitCode()
                         + "). Lines marked OK succeeded in this run; the system may be in a mixed state.";
                 if (partialApply) {
-                    failMsg += " Use 'Reset to Defaults' on the Optimization tab (or Snapshots…) to undo changes.";
+                    failMsg += " Use 'Reset to Defaults' on the Optimization tab to undo changes.";
                 }
                 return OperationResult.fail(failMsg, details);
             }
@@ -205,7 +271,16 @@ public class NetworkOptimizerService {
                     formatted != null ? formatted : stdout);
         } catch (Exception e) {
             AppLogger.warning("Failed to apply optimization: " + e.getMessage());
-            return OperationResult.fail("Failed to apply optimization: " + e.getMessage());
+            String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+            if (msg.toLowerCase().contains("timed out")) {
+                logChange("Apply Optimization", preset.getDisplayName(),
+                        "TIMEOUT — some TCP/registry writes may already be in effect", false);
+                return OperationResult.fail(
+                        "Optimization timed out after writes may have started. "
+                                + "The system may be in a mixed TCP state. Use 'Reset to Defaults' on the Optimization tab. Reboot required.",
+                        "TCP settings: unknown — OK\nTCP settings: unknown — FAILED");
+            }
+            return OperationResult.fail("Failed to apply optimization: " + msg);
         }
     }
 
@@ -216,26 +291,21 @@ public class NetworkOptimizerService {
      */
     private String formatOptimizeResults(String stdout) {
         if (stdout == null || stdout.isBlank()) return null;
-        try {
-            List<Map<String, Object>> raw = mapper.readValue(stdout,
-                    new TypeReference<List<Map<String, Object>>>() {});
-            if (raw == null || raw.isEmpty()) return null;
-            StringBuilder sb = new StringBuilder();
-            for (Map<String, Object> entry : raw) {
-                String key = firstPresent(entry, "Key", "key", "name", "Name");
-                String value = firstPresent(entry, "Value", "value");
-                Object okObj = firstPresentObj(entry, "Success", "success", "ok", "Ok");
-                boolean ok = okObj instanceof Boolean b ? b : false;
-                if (key.isEmpty() && value.isEmpty()) continue;
-                if (sb.length() > 0) sb.append('\n');
-                sb.append(key.isEmpty() ? "(unnamed setting)" : key).append(": ")
-                        .append(value.isEmpty() ? "-" : value)
-                        .append(ok ? " — OK" : " — FAILED");
-            }
-            return sb.length() > 0 ? sb.toString() : null;
-        } catch (Exception e) {
-            return null;
+        List<Map<String, Object>> raw = parseJsonMapList(mapper, stdout);
+        if (raw == null || raw.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder();
+        for (Map<String, Object> entry : raw) {
+            String key = firstPresent(entry, "Key", "key", "name", "Name");
+            String value = firstPresent(entry, "Value", "value");
+            Object okObj = firstPresentObj(entry, "Success", "success", "ok", "Ok");
+            boolean ok = asBool(okObj);
+            if (key.isEmpty() && value.isEmpty()) continue;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(key.isEmpty() ? "(unnamed setting)" : key).append(": ")
+                    .append(value.isEmpty() ? "-" : value)
+                    .append(ok ? " — OK" : " — FAILED");
         }
+        return sb.length() > 0 ? sb.toString() : null;
     }
 
     private static boolean isPartialOptimizeApply(String formatted) {
@@ -265,7 +335,7 @@ public class NetworkOptimizerService {
                 Map<String, Object> result = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 Object success = result.get("success");
-                boolean ok = success instanceof Boolean && (Boolean) success;
+                boolean ok = asBool(success);
                 String msg = str(result, "message");
                 if (ok) logChange("Flush DNS Cache", "All", msg, true);
                 return ok ? OperationResult.ok(msg) : OperationResult.fail(msg);
@@ -282,72 +352,220 @@ public class NetworkOptimizerService {
     }
 
     public OperationResult resetNetworkStack() {
+        Path dumpPath = null;
+        try {
+            dumpPath = exportIpConfigDump("before-network-stack-reset");
+        } catch (Exception e) {
+            AppLogger.warning("ipconfig dump before stack reset failed: " + e.getMessage());
+        }
         try {
             Path script = PowerShellScripts.resolve("net-reset.ps1");
             ProcessResult pr = new ProcessRunner(60).run(
                     ProcessRunner.powershellScript(script.toString()));
-            String stdout = pr.stdout().trim();
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {
-                Map<String, Object> result = mapper.readValue(stdout,
-                        new TypeReference<Map<String, Object>>() {});
-                Object success = result.get("success");
-                boolean ok = success instanceof Boolean && (Boolean) success;
-                if (ok) logChange("Reset Network Stack", "TCP/IP + Winsock", "Reboot required.", true);
-                return ok
-                        ? OperationResult.ok("Network stack reset. Reboot required.", stdout)
-                        : OperationResult.fail("Network stack reset failed.", stdout);
+                try {
+                    Map<String, Object> result = mapper.readValue(stdout,
+                            new TypeReference<Map<String, Object>>() {});
+                    StackResetOutcome outcome = parseStackResetOutcome(result);
+                    String details = formatStackResetDetails(result, dumpPath);
+                    return finishStackReset(outcome, details);
+                } catch (Exception je) {
+                    AppLogger.warning("Failed to parse stack-reset JSON: " + je.getMessage());
+                    String details = formatUnknownStackResetDetails(dumpPath, stdout);
+                    logChange("Reset Network Stack", "TCP/IP + Winsock", details, false);
+                    return OperationResult.fail(
+                            "Network stack reset ran but the result could not be read. "
+                                    + "TCP/IP or Winsock may already be reset. Reboot required.",
+                            details);
+                }
             }
-            boolean ok = pr.exitCode() == 0;
-            if (ok) logChange("Reset Network Stack", "TCP/IP + Winsock", "Reboot required.", true);
-            return ok
-                    ? OperationResult.ok("Network stack reset. Reboot required.")
-                    : OperationResult.fail("Reset failed with exit code " + pr.exitCode());
+            if (pr.exitCode() == 0) {
+                String details = formatUnknownStackResetDetails(dumpPath, "exit 0, empty stdout");
+                logChange("Reset Network Stack", "TCP/IP + Winsock", "Reboot required.", true);
+                return OperationResult.ok("Network stack reset. Reboot required.", details);
+            }
+            // Script ran but produced no JSON: netsh may already have mutated the stack.
+            String details = formatUnknownStackResetDetails(dumpPath, "exit " + pr.exitCode() + ", empty stdout");
+            logChange("Reset Network Stack", "TCP/IP + Winsock", details, false);
+            return OperationResult.fail(
+                    "Network stack reset ran but the result could not be read. "
+                            + "TCP/IP or Winsock may already be reset. Reboot required.",
+                    details);
         } catch (Exception e) {
             AppLogger.warning("Failed to reset network stack: " + e.getMessage());
-            return OperationResult.fail("Failed to reset network stack: " + e.getMessage());
+            String details = formatUnknownStackResetDetails(dumpPath, e.getMessage());
+            return OperationResult.fail("Failed to reset network stack: " + e.getMessage(), details);
         }
+    }
+
+    record StackResetOutcome(boolean ipResetOk, boolean winsockOk) {
+        boolean anyDestructive() { return ipResetOk || winsockOk; }
+        boolean fullSuccess() { return ipResetOk && winsockOk; }
+    }
+
+    static StackResetOutcome parseStackResetOutcome(Map<String, Object> data) {
+        if (data == null) return new StackResetOutcome(false, false);
+        if (!data.containsKey("ipResetOk") && !data.containsKey("winsockOk")) {
+            boolean all = data.get("success") instanceof Boolean b && b;
+            return new StackResetOutcome(all, all);
+        }
+        return new StackResetOutcome(asBool(data.get("ipResetOk")), asBool(data.get("winsockOk")));
+    }
+
+    private static boolean asBool(Object v) {
+        if (v instanceof Boolean b) return b;
+        if (v instanceof String s) return "true".equalsIgnoreCase(s.trim());
+        return false;
+    }
+
+    static String formatStackResetDetails(Map<String, Object> data, Path dumpPath) {
+        StringBuilder sb = new StringBuilder();
+        Object results = data != null ? data.get("results") : null;
+        List<Map<String, Object>> list = new ArrayList<>();
+        if (results instanceof List<?> rawList) {
+            for (Object item : rawList) {
+                if (item instanceof Map<?, ?> m) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> typed = (Map<String, Object>) m;
+                    list.add(typed);
+                }
+            }
+        } else if (results instanceof Map<?, ?> m) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> typed = (Map<String, Object>) m;
+            list.add(typed);
+        }
+        for (Map<String, Object> m : list) {
+            String key = m.get("Key") != null ? m.get("Key").toString() : "";
+            String value = m.get("Value") != null ? m.get("Value").toString() : "";
+            boolean ok = "completed".equalsIgnoreCase(value);
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(key.isEmpty() ? "(unnamed)" : key).append(": ")
+                    .append(value.isEmpty() ? "-" : value)
+                    .append(ok ? " — OK" : " — FAILED");
+        }
+        if (dumpPath != null) {
+            if (sb.length() > 0) sb.append('\n');
+            sb.append("IP config dump: ").append(dumpPath);
+        }
+        return sb.toString();
+    }
+
+    /** Both lines FAILED so this cannot trip {@link OperationResult#partialApply()}. */
+    static String formatUnknownStackResetDetails(Path dumpPath, String extra) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("TCP/IP Reset: unknown — FAILED\nWinsock Reset: unknown — FAILED");
+        if (dumpPath != null) sb.append("\nIP config dump: ").append(dumpPath);
+        if (extra != null && !extra.isBlank()) sb.append('\n').append(extra);
+        return sb.toString();
+    }
+
+    private OperationResult finishStackReset(StackResetOutcome outcome, String details) {
+        String marked = ensureResetMarkers(outcome, details);
+        if (outcome.fullSuccess()) {
+            logChange("Reset Network Stack", "TCP/IP + Winsock", marked, true);
+            return OperationResult.ok("Network stack reset. Reboot required.", marked);
+        }
+        if (outcome.anyDestructive()) {
+            logChange("Reset Network Stack", "TCP/IP + Winsock",
+                    "PARTIAL — some reset steps completed. Reboot required.\n" + marked, false);
+            String msg = outcome.ipResetOk()
+                    ? "TCP/IP was reset but Winsock did not complete. Static IP/DNS may already be gone. Reboot required."
+                    : "Winsock was reset but TCP/IP reset did not complete. Reboot required.";
+            return OperationResult.fail(msg, marked);
+        }
+        logChange("Reset Network Stack", "TCP/IP + Winsock", marked, false);
+        return OperationResult.fail("Network stack reset failed.", marked);
+    }
+
+    static String ensureResetMarkers(StackResetOutcome outcome, String details) {
+        String d = details != null ? details : "";
+        if (d.contains(" — OK") || d.contains(" — FAILED")) return d;
+        String synth = (outcome.ipResetOk() ? "TCP/IP Reset: completed — OK" : "TCP/IP Reset: failed — FAILED")
+                + "\n" + (outcome.winsockOk() ? "Winsock Reset: completed — OK" : "Winsock Reset: failed — FAILED");
+        return d.isBlank() ? synth : synth + "\n" + d;
+    }
+
+    private Path exportIpConfigDump(String reason) throws Exception {
+        String body = getIpConfigAll();
+        Path dir = exportDir();
+        Files.createDirectories(dir);
+        String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        Path out = dir.resolve("ipconfig-" + stamp + ".txt");
+        String header = "# " + (reason != null ? reason : "dump") + "\n";
+        Files.writeString(out, header + (body != null ? body : ""));
+        return out;
+    }
+
+    private static Path exportDir() {
+        Path base = AppPaths.portableBaseDir();
+        return base != null
+                ? base.resolve(".winzenith").resolve("exports")
+                : Path.of(System.getProperty("user.home"), ".winzenith", "exports");
     }
 
     public OperationResult resetWinsock() {
         try {
-            ProcessResult pr = new ProcessRunner(60).run(powershellCommand("netsh winsock reset"));
-            boolean ok = pr.exitCode() == 0;
+            ProcessResult pr = new ProcessRunner(60).run(List.of("netsh.exe", "winsock", "reset"));
             String out = pr.combinedOutput();
             if (out != null && out.toLowerCase().contains("access") && out.toLowerCase().contains("denied")) {
                 return OperationResult.fail("Winsock reset requires Administrator privileges.", out);
             }
-            if (ok) logChange("Reset Winsock", "Winsock catalog", "Reboot recommended.", true);
+            boolean ok = pr.exitCode() == 0 || looksLikeWinsockReset(out);
+            if (ok) logChange("Reset Winsock", "Winsock catalog", "Reboot required.", true);
             return ok
-                    ? OperationResult.ok("Winsock reset. Reboot recommended.", out)
+                    ? OperationResult.ok("Winsock reset. Reboot required.", out)
                     : OperationResult.fail("Winsock reset failed.", out);
         } catch (Exception e) {
             AppLogger.warning("Failed to reset winsock: " + e.getMessage());
-            return OperationResult.fail("Failed to reset winsock: " + e.getMessage());
+            String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+            if (msg.toLowerCase().contains("timed out")) {
+                return OperationResult.fail(
+                        "Winsock reset timed out and may already have completed. Reboot required.", msg);
+            }
+            return OperationResult.fail("Failed to reset winsock: " + msg);
         }
+    }
+
+    static boolean looksLikeWinsockReset(String out) {
+        if (out == null || out.isBlank()) return false;
+        String t = out.toLowerCase();
+        if (t.contains("access") && t.contains("denied")) return false;
+        return t.contains("successfully reset");
     }
 
     public OperationResult renewIp(String adapterName) {
         try {
             String safeName = sanitizeName(adapterName);
-            // Call ipconfig directly without cmd.exe to avoid cmd metachar issues; ProcessBuilder handles spaces via quoting
-            ProcessResult release = new ProcessRunner(30).run(
-                    List.of("ipconfig", "/release", safeName));
-            if (release.exitCode() != 0) {
-                AppLogger.warning("ipconfig /release failed: " + release.combinedOutput());
-                // Don't abort if adapter uses static IP; still try renew
-                String relOut = release.combinedOutput();
-                if (relOut != null && relOut.toLowerCase().contains("no operation can be performed")) {
-                    // Adapter not DHCP - inform but continue
+            Path script = PowerShellScripts.resolve("net-ip-renew.ps1");
+            ProcessResult pr = new ProcessRunner(90).run(
+                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", safeName));
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+            if (!stdout.isEmpty()) {
+                try {
+                    Map<String, Object> data = mapper.readValue(stdout,
+                            new TypeReference<Map<String, Object>>() {});
+                    boolean ok = asBool(data.get("success"));
+                    String msg = str(data, "message");
+                    String detail = str(data, "detail");
+                    if (ok) {
+                        logChange("Renew IP", safeName, "ipconfig /renew (no release)", true);
+                        return OperationResult.ok(msg.isEmpty()
+                                ? ("IP address renewed for " + safeName + ".") : msg, detail);
+                    }
+                    return OperationResult.fail(msg.isEmpty() ? "IP renewal failed." : msg, detail);
+                } catch (Exception je) {
+                    AppLogger.warning("Failed to parse IP-renew JSON: " + je.getMessage());
                 }
             }
-            ProcessResult renew = new ProcessRunner(30).run(
-                    List.of("ipconfig", "/renew", safeName));
-            if (renew.exitCode() != 0) {
-                return OperationResult.fail("IP renewal failed.",
-                        "release: " + release.combinedOutput() + "\nrenew: " + renew.combinedOutput());
+            if (pr.exitCode() == 0) {
+                logChange("Renew IP", safeName, "ipconfig /renew (no release)", true);
+                return OperationResult.ok("IP address renewed for " + safeName + ".", pr.combinedOutput());
             }
-            logChange("Renew IP", safeName, "ipconfig /release + /renew", true);
-            return OperationResult.ok("IP address renewed for " + safeName + ".", renew.stdout());
+            return OperationResult.fail("IP renewal failed.", pr.combinedOutput());
+        } catch (IllegalArgumentException e) {
+            return OperationResult.fail(e.getMessage());
         } catch (Exception e) {
             AppLogger.warning("Failed to renew IP: " + e.getMessage());
             return OperationResult.fail("Failed to renew IP: " + e.getMessage());
@@ -372,7 +590,7 @@ public class NetworkOptimizerService {
                     Map<String, Object> data = mapper.readValue(stdout,
                             new TypeReference<Map<String, Object>>() {});
                     Object success = data.get("success");
-                    boolean ok = success instanceof Boolean && (Boolean) success;
+                    boolean ok = asBool(success);
                     String msg = str(data, "message");
                     String out = pr.combinedOutput();
                     if (!ok && out != null && out.toLowerCase().contains("access") && out.toLowerCase().contains("denied")) {
@@ -436,7 +654,8 @@ public class NetworkOptimizerService {
 
     public TcpSettings getCurrentTcpSettings() {
         try {
-            ProcessResult pr = new ProcessRunner(30).run(powershellCommand("netsh int tcp show global"));
+            ProcessResult pr = new ProcessRunner(30).run(
+                    List.of("netsh.exe", "int", "tcp", "show", "global"));
             String out = pr.stdout();
             if (out == null || out.isBlank()) {
                 String combined = pr.combinedOutput();
@@ -475,16 +694,13 @@ public class NetworkOptimizerService {
                 Map<String, Object> data = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 Object success = data.get("success");
-                boolean ok = success instanceof Boolean && (Boolean) success;
+                boolean ok = asBool(success);
                 if (!ok) {
                     String err = str(data, "error");
                     return DnsServersQuery.failure(err.isEmpty() ? "Failed to read DNS for adapter." : err);
                 }
                 Object dnsObj = data.get("dnsServers");
-                if (dnsObj instanceof List<?> list) {
-                    return DnsServersQuery.ok(list.stream().map(Object::toString).toList());
-                }
-                return DnsServersQuery.ok(List.of());
+                return DnsServersQuery.ok(coerceStringList(dnsObj));
             }
             return DnsServersQuery.failure("No output from DNS query.");
         } catch (IllegalArgumentException e) {
@@ -520,7 +736,7 @@ public class NetworkOptimizerService {
                 Map<String, Object> data = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 Object success = data.get("success");
-                boolean ok = success instanceof Boolean && (Boolean) success;
+                boolean ok = asBool(success);
                 String msg = str(data, "message");
                 if (ok) {
                     String target = !p1.isEmpty() ? p1 + (!p2.isEmpty() ? ", " + p2 : "") : "DHCP";
@@ -625,7 +841,7 @@ public class NetworkOptimizerService {
                     ProcessRunner.powershellScript(script.toString()));
             String stdout = pr.stdout().trim();
             if (!stdout.isEmpty() && !"[]".equals(stdout)) {
-                return mapper.readValue(stdout, new TypeReference<List<String>>() {});
+                return parseJsonStringList(mapper, stdout);
             }
         } catch (Exception e) {
             AppLogger.warning("Failed to get Wi-Fi profiles: " + e.getMessage());
@@ -643,7 +859,7 @@ public class NetworkOptimizerService {
                 Map<String, Object> data = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 Object success = data.get("success");
-                boolean ok = success instanceof Boolean && (Boolean) success;
+                boolean ok = asBool(success);
                 String msg = str(data, "message");
                 if (ok) logChange("Disconnect Wi-Fi", "Wi-Fi", "", true);
                 return ok ? OperationResult.ok(msg) : OperationResult.fail(msg);
@@ -675,7 +891,7 @@ public class NetworkOptimizerService {
                 Map<String, Object> data = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 Object success = data.get("success");
-                boolean ok = success instanceof Boolean && (Boolean) success;
+                boolean ok = asBool(success);
                 String msg = str(data, "message");
                 if (ok) logChange("Forget Wi-Fi Profile", safeSsid, "", true);
                 return ok ? OperationResult.ok(msg) : OperationResult.fail(msg);
@@ -695,15 +911,20 @@ public class NetworkOptimizerService {
      * Validates a Wi-Fi profile name before it reaches netsh. The name is
      * concatenated into a {@code name="..."} argument, so a double quote would
      * break out and inject extra netsh arguments (wrong profile deleted).
-     * Passed via {@code -File} argv the PowerShell layer itself is safe; this
-     * guards the netsh quoting layer. Spaces are significant in SSIDs and kept.
+     * {@code *} / {@code ?} are netsh wildcards: {@code name=*} deletes every
+     * saved profile. Passed via {@code -File} argv the PowerShell layer itself
+     * is safe; this guards the netsh quoting/wildcard layer. Spaces in SSIDs
+     * are kept.
      */
-    private static String sanitizeSsid(String ssid) {
+    static String sanitizeSsid(String ssid) {
         if (ssid == null || ssid.isBlank()) {
             throw new IllegalArgumentException("SSID is required.");
         }
         if (ssid.length() > 32) {
             throw new IllegalArgumentException("SSID must be 32 characters or less.");
+        }
+        if (ssid.indexOf('*') >= 0 || ssid.indexOf('?') >= 0) {
+            throw new IllegalArgumentException("SSID must not contain wildcard characters (* or ?).");
         }
         for (int i = 0; i < ssid.length(); i++) {
             char c = ssid.charAt(i);
@@ -819,10 +1040,26 @@ public class NetworkOptimizerService {
             Path script = PowerShellScripts.resolve("net-traceroute.ps1");
             ProcessResult pr = new ProcessRunner(60 + (long) maxHops * 5).run(
                     ProcessRunner.powershellScript(script.toString(), "-TargetHost", safe, "-MaxHops", String.valueOf(maxHops)));
-            String stdout = pr.stdout().trim();
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+            if (!stdout.isEmpty() && stdout.startsWith("{")) {
+                try {
+                    Map<String, Object> data = mapper.readValue(stdout,
+                            new TypeReference<Map<String, Object>>() {});
+                    String err = str(data, "error");
+                    if (!err.isEmpty()) {
+                        throw new IllegalStateException(err);
+                    }
+                } catch (IllegalStateException e) {
+                    throw e;
+                } catch (Exception ignored) {
+                    // Not an error object — try hop-array parse below.
+                }
+            }
             if (!stdout.isEmpty() && !"[]".equals(stdout)) {
-                List<Map<String, Object>> raw = mapper.readValue(stdout,
-                        new TypeReference<List<Map<String, Object>>>() {});
+                List<Map<String, Object>> raw = parseJsonMapList(mapper, stdout);
+                if (raw == null) {
+                    throw new IllegalStateException("Failed to parse traceroute output.");
+                }
                 List<TracerouteHop> hops = new ArrayList<>();
                 for (Map<String, Object> entry : raw) {
                     try {
@@ -836,20 +1073,24 @@ public class NetworkOptimizerService {
                         AppLogger.warning("Failed to parse traceroute hop: " + e.getMessage());
                     }
                 }
-                return hops;
+                if (!hops.isEmpty()) return hops;
             }
+            String err = pr.stderr() != null && !pr.stderr().isBlank() ? pr.stderr().trim() : stdout;
+            throw new IllegalStateException(err.isEmpty()
+                    ? "Traceroute returned no hops for " + host + "."
+                    : err);
         } catch (IllegalArgumentException e) {
             AppLogger.warning("Invalid host for traceroute: " + e.getMessage());
             throw e;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new java.util.concurrent.CancellationException("Operation cancelled");
-        } catch (java.util.concurrent.CancellationException e) {
+        } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
             AppLogger.warning("Failed to traceroute: " + e.getMessage());
+            throw new IllegalStateException("Traceroute failed: " + e.getMessage(), e);
         }
-        return List.of();
     }
 
     // ------------------------------------------------------------------
@@ -962,7 +1203,7 @@ public class NetworkOptimizerService {
         if ("TCP No Delay".equalsIgnoreCase(key)) {
             return current.tcpNoDelay() == null ? "default (absent)" : current.tcpNoDelay();
         }
-        // Stable keys from net-tcp-snapshot.ps1 (locale-independent ordinal netsh parse)
+        // Stable keys from net-tcp-snapshot.ps1 (name-matched netsh lines)
         Map<String, String> tcp = current.tcpSettings() != null ? current.tcpSettings() : Map.of();
         String stable = tcp.get(key);
         if (stable != null && !stable.isBlank()) {
@@ -1252,8 +1493,8 @@ public class NetworkOptimizerService {
                     ProcessRunner.powershellScript(script.toString()));
             String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (stdout.isEmpty() || "[]".equals(stdout)) return List.of();
-            List<Map<String, Object>> raw = mapper.readValue(stdout,
-                    new TypeReference<List<Map<String, Object>>>() {});
+            List<Map<String, Object>> raw = parseJsonMapList(mapper, stdout);
+            if (raw == null) return List.of();
             List<WifiNetwork> out = new ArrayList<>();
             for (Map<String, Object> e : raw) {
                 try {

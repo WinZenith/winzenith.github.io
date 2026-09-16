@@ -12,6 +12,7 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
@@ -271,7 +272,7 @@ class AdaptersPanel extends VBox {
         String action = enable ? "Enable" : "Disable";
         statusLabel.setText(action + " " + selected.getName() + "...");
 
-        AppExecutors.ioPool().submit(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.setAdapterState(selected.getName(), enable);
                 Platform.runLater(() -> {
@@ -342,11 +343,18 @@ class AdaptersPanel extends VBox {
         NetworkAdapterRow selected = adapterTable.getSelectionModel().getSelectedItem();
         if (selected == null || busy.get()) return;
         if (!requireAdmin()) return;
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Renew DHCP lease for '" + selected.getName() + "'?\n\n"
+                        + "The current address is kept until a new lease is obtained.",
+                ButtonType.YES, ButtonType.NO);
+        confirm.setTitle(com.sbtools.util.UiText.label("Confirm renew"));
+        confirm.setHeaderText(null);
+        if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
 
         busy.set(true);
         statusLabel.setText("Renewing IP for " + selected.getName() + "...");
 
-        AppExecutors.ioPool().submit(() -> {
+        currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 var result = service.renewIp(selected.getName());
                 Platform.runLater(() -> {

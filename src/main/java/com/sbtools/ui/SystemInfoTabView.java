@@ -14,6 +14,8 @@ import com.sbtools.systeminfo.PrinterInfo;
 import com.sbtools.systeminfo.RamInfo;
 import com.sbtools.systeminfo.StorageInfo;
 import com.sbtools.systeminfo.SystemInfoData;
+import com.sbtools.systeminfo.SystemInfoExportPath;
+import com.sbtools.systeminfo.SystemInfoLoadGate;
 import com.sbtools.systeminfo.SystemInfoReportGenerator;
 import com.sbtools.systeminfo.SystemInfoService;
 import com.sbtools.systeminfo.TemperatureInfo;
@@ -33,6 +35,7 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
@@ -55,7 +58,6 @@ import javafx.scene.layout.VBox;
 import javafx.stage.FileChooser;
 
 import java.io.File;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -97,14 +99,9 @@ public class SystemInfoTabView extends BorderPane {
     private final TabPane tabPane = new TabPane();
 
     private SystemInfoData currentData;
-    private final java.util.concurrent.atomic.AtomicBoolean isLoading = new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile java.util.concurrent.Future<?> currentTask;
     private final java.util.concurrent.atomic.AtomicBoolean cancellationToken = new java.util.concurrent.atomic.AtomicBoolean(false);
-    // Exactly-once guard for the ref-counted global busy flag: loadInfo() acquires
-    // once, and both the worker-thread finally and the FX-thread cleanup must not
-    // each decrement (previously 1 acquire / 2 releases corrupted BusyProperty's
-    // counter and could clear another tab's still-running busy state).
-    private final java.util.concurrent.atomic.AtomicBoolean busyHeld = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final SystemInfoLoadGate loadGate = new SystemInfoLoadGate();
     private volatile Boolean lastAdminHint;
 
     public SystemInfoTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
@@ -156,7 +153,7 @@ public class SystemInfoTabView extends BorderPane {
             statusLabel.setText("System information is only available on Windows.");
             loadButton.setDisable(true);
         } else {
-            // AdminCheck spawns powershell.exe (up to ~5s) â€” never block the FX
+            // AdminCheck spawns powershell.exe (up to ~5s) Ã¢â‚¬â€ never block the FX
             // thread for it. Resolve off-FX and publish the banner on FX.
             refreshAdminWarningAsync();
             // Stale-while-revalidate (v3.1): render last snapshot instantly from
@@ -192,10 +189,12 @@ public class SystemInfoTabView extends BorderPane {
             statusLabel.setText("Export in progress. Wait for it to finish or try again shortly.");
             return;
         }
-        if (!isLoading.compareAndSet(false, true)) return;
-        // Decouple from global busy but also set it for outer UI dimming
-        busy.set(true);
-        busyHeld.set(true);
+        SystemInfoLoadGate.Begin begin = loadGate.tryBegin();
+        if (!begin.started()) return;
+        if (begin.acquiredBusy()) {
+            busy.set(true);
+        }
+        final int generation = begin.generation();
         refreshAdminWarningAsync();
         cancellationToken.set(false);
         loadButton.setDisable(true);
@@ -211,91 +210,83 @@ public class SystemInfoTabView extends BorderPane {
 
         final java.util.concurrent.atomic.AtomicBoolean servedFromMemoryCache =
                 new java.util.concurrent.atomic.AtomicBoolean(false);
-        currentTask = gatherExecutor.submit(() -> {
-            try {
-                if (cancellationToken.get()) throw new InterruptedException("Cancelled");
-                SystemInfoData data = service.gatherSystemInfo(
-                        (section, progress) -> Platform.runLater(() -> {
-                            if ("cached".equals(section)) {
-                                servedFromMemoryCache.set(true);
-                                statusLabel.setText("Loaded from cache.");
-                            } else {
-                                statusLabel.setText("Loading " + section + "\u2026");
-                            }
-                            progressBar.setProgress(progress);
-                        }),
-                        forceRefresh,
-                        cancellationToken
-                );
-                if (cancellationToken.get()) throw new InterruptedException("Cancelled");
-                Platform.runLater(() -> {
-                    try {
-                        currentData = data;
-                        buildTabs(data);
-                    // B3 fix: surface empty-state clearly instead of silent blank
-                    // Note: buildTabs now inserts placeholder when data is empty, so tabPane is never empty after.
-                    // Check data content directly for correct status message.
-                    if (servedFromMemoryCache.get()) {
-                        statusLabel.setText(cachedLoadStatusMessage(data));
-                    } else if (isDataMostlyEmpty(data)) {
-                        statusLabel.setText(emptyDataStatusMessage(data));
-                    } else if (tabPane.getTabs().isEmpty()) {
-                        statusLabel.setText(emptyDataStatusMessage(data));
-                    } else if (hasAnyWarningsOrPartial(data)) {
-                        statusLabel.setText("System information loaded (partial \u2014 some data unavailable).");
-                    } else {
-                        statusLabel.setText("System information loaded.");
-                    }
-                    progressBar.setProgress(1);
-                    refreshButton.setDisable(false);
-                    exportButton.setDisable(false);
-                    copyButton.setDisable(false);
-                    copyTabButton.setDisable(false);
-                    } catch (Exception renderEx) {
-                        // buildTabs runs on the FX thread, outside the worker try/catch:
-                        // never let a single bad section kill the FX update silently.
-                        AppLogger.error("Failed to render system info", renderEx);
-                        statusLabel.setText("Failed to display system information: " + renderEx.getMessage());
-                    }
-                });
-            } catch (InterruptedException ce) {
-                Thread.currentThread().interrupt();
-                Platform.runLater(() -> statusLabel.setText("Cancelled."));
-            } catch (Exception ex) {
-                if (cancellationToken.get()) {
-                    Platform.runLater(() -> statusLabel.setText("Cancelled."));
-                } else {
-                    AppLogger.error("Failed to load system info", ex);
+        try {
+            currentTask = gatherExecutor.submit(() -> {
+                try {
+                    if (cancellationToken.get()) throw new InterruptedException("Cancelled");
+                    SystemInfoData data = service.gatherSystemInfo(
+                            (section, progress) -> Platform.runLater(() -> {
+                                if (loadGate.isStale(generation)) return;
+                                if ("cached".equals(section)) {
+                                    servedFromMemoryCache.set(true);
+                                    statusLabel.setText("Loaded from cache.");
+                                } else {
+                                    statusLabel.setText("Loading " + section + "\u2026");
+                                }
+                                progressBar.setProgress(progress);
+                            }),
+                            forceRefresh,
+                            cancellationToken
+                    );
+                    if (cancellationToken.get()) throw new InterruptedException("Cancelled");
                     Platform.runLater(() -> {
-                        statusLabel.setText("Failed: " + ex.getMessage());
-                        new Alert(Alert.AlertType.ERROR, "Failed to load system information:\n" + ex.getMessage()).showAndWait();
+                        if (loadGate.isStale(generation)) return;
+                        try {
+                            currentData = data;
+                            buildTabs(data);
+                            if (servedFromMemoryCache.get()) {
+                                statusLabel.setText(cachedLoadStatusMessage(data));
+                            } else if (isDataMostlyEmpty(data)) {
+                                statusLabel.setText(emptyDataStatusMessage(data));
+                            } else if (tabPane.getTabs().isEmpty()) {
+                                statusLabel.setText(emptyDataStatusMessage(data));
+                            } else if (hasAnyWarningsOrPartial(data)) {
+                                statusLabel.setText("System information loaded (partial \u2014 some data unavailable).");
+                            } else {
+                                statusLabel.setText("System information loaded.");
+                            }
+                            progressBar.setProgress(1);
+                            refreshButton.setDisable(false);
+                            exportButton.setDisable(false);
+                            copyButton.setDisable(false);
+                            copyTabButton.setDisable(false);
+                        } catch (Exception renderEx) {
+                            AppLogger.error("Failed to render system info", renderEx);
+                            statusLabel.setText("Failed to display system information: " + renderEx.getMessage());
+                            if (tabPane.getTabs().isEmpty()) {
+                                try {
+                                    tabPane.getTabs().add(buildEmptyStateTab(data));
+                                } catch (Exception ignored) {}
+                            }
+                        }
                     });
+                } catch (InterruptedException ce) {
+                    Thread.currentThread().interrupt();
+                    Platform.runLater(() -> {
+                        if (!loadGate.isStale(generation)) statusLabel.setText("Cancelled.");
+                    });
+                } catch (Exception ex) {
+                    if (cancellationToken.get()) {
+                        Platform.runLater(() -> {
+                            if (!loadGate.isStale(generation)) statusLabel.setText("Cancelled.");
+                        });
+                    } else {
+                        AppLogger.error("Failed to load system info", ex);
+                        Platform.runLater(() -> {
+                            if (loadGate.isStale(generation)) return;
+                            statusLabel.setText("Failed: " + ex.getMessage());
+                            new Alert(Alert.AlertType.ERROR, "Failed to load system information:\n" + ex.getMessage()).showAndWait();
+                        });
+                    }
+                } finally {
+                    Platform.runLater(() -> finishLoad(generation));
                 }
-            } finally {
-                // Ensure loading flag is cleared even if FX toolkit is shutting down and runLater never executes.
-                // Busy is released exactly once via busyHeld, on the FX thread only:
-                // BusyProperty wraps a JavaFX property and must never be touched
-                // off-FX (previously 1 acquire / 2 releases corrupted the counter
-                // and could clear another tab's still-running busy state).
-                isLoading.set(false);
-                Platform.runLater(() -> {
-                    releaseBusyOnce();
-                    isLoading.set(false);
-                    if (!exportInProgress.get()) {
-                        loadButton.setDisable(false);
-                    }
-                    cancelButton.setDisable(true);
-                    spinner.setVisible(false);
-                    progressBar.setVisible(false);
-                    if (currentData != null) {
-                        refreshButton.setDisable(false);
-                        exportButton.setDisable(false);
-                        copyButton.setDisable(false);
-                        copyTabButton.setDisable(false);
-                    }
-                });
-            }
-        });
+            });
+        } catch (RuntimeException ex) {
+            AppLogger.error("Failed to start system info gather", ex);
+            finishLoad(generation);
+            statusLabel.setText("Failed: " + ex.getMessage());
+        }
     }
 
     private void cancelLoading() {
@@ -306,9 +297,22 @@ public class SystemInfoTabView extends BorderPane {
         cancelButton.setDisable(true);
     }
 
-    private void releaseBusyOnce() {
-        if (busyHeld.compareAndSet(true, false)) {
+    private void finishLoad(int generation) {
+        if (!loadGate.finishIfCurrent(generation)) return;
+        if (loadGate.releaseBusyIfCurrent(generation)) {
             try { busy.set(false); } catch (Exception ignored) {}
+        }
+        if (!exportInProgress.get()) {
+            loadButton.setDisable(false);
+        }
+        cancelButton.setDisable(true);
+        spinner.setVisible(false);
+        progressBar.setVisible(false);
+        if (currentData != null) {
+            refreshButton.setDisable(false);
+            exportButton.setDisable(false);
+            copyButton.setDisable(false);
+            copyTabButton.setDisable(false);
         }
     }
 
@@ -332,63 +336,76 @@ public class SystemInfoTabView extends BorderPane {
 
     private void buildTabs(SystemInfoData data) {
         tabPane.getTabs().clear();
+        if (data == null) {
+            tabPane.getTabs().add(buildEmptyStateTab(null));
+            return;
+        }
 
         if (data.cpu() != null || data.os() != null) {
-            tabPane.getTabs().add(buildOverviewTab(data));
+            addTabSafe(() -> buildOverviewTab(data));
         }
         if (data.cpu() != null) {
-            tabPane.getTabs().add(buildCpuTab(data.cpu()));
+            addTabSafe(() -> buildCpuTab(data.cpu()));
         }
         if (data.gpu() != null && !data.gpu().isEmpty()) {
-            tabPane.getTabs().add(buildGpuTab(data.gpu()));
+            addTabSafe(() -> buildGpuTab(data.gpu()));
         }
         if (data.ram() != null) {
-            tabPane.getTabs().add(buildRamTab(data.ram()));
+            addTabSafe(() -> buildRamTab(data.ram()));
         }
         if (data.os() != null) {
-            tabPane.getTabs().add(buildOsTab(data.os()));
+            addTabSafe(() -> buildOsTab(data.os()));
         }
         if (data.storage() != null) {
-            tabPane.getTabs().add(buildStorageTab(data.storage()));
+            addTabSafe(() -> buildStorageTab(data.storage()));
         }
         if (data.motherboard() != null || data.bios() != null) {
-            tabPane.getTabs().add(buildMotherboardTab(data.motherboard(), data.bios()));
+            addTabSafe(() -> buildMotherboardTab(data.motherboard(), data.bios()));
         }
         if (data.networkAdapters() != null && !data.networkAdapters().isEmpty()) {
-            tabPane.getTabs().add(buildNetworkTab(data.networkAdapters()));
+            addTabSafe(() -> buildNetworkTab(data.networkAdapters()));
         }
         if (data.audioDevices() != null && !data.audioDevices().isEmpty()) {
-            tabPane.getTabs().add(buildAudioTab(data.audioDevices()));
+            addTabSafe(() -> buildAudioTab(data.audioDevices()));
         }
         if (data.battery() != null) {
-            tabPane.getTabs().add(buildBatteryTab(data.battery()));
+            addTabSafe(() -> buildBatteryTab(data.battery()));
         }
         if (data.temperatures() != null && !data.temperatures().isEmpty()) {
-            tabPane.getTabs().add(buildTemperaturesTab(data.temperatures()));
+            addTabSafe(() -> buildTemperaturesTab(data.temperatures()));
         }
         if (data.others() != null && !data.others().isEmpty()) {
-            tabPane.getTabs().add(buildOthersTab(data.others()));
+            addTabSafe(() -> buildOthersTab(data.others()));
         }
         if (data.usbDevices() != null && !data.usbDevices().isEmpty()) {
-            tabPane.getTabs().add(buildUsbTab(data.usbDevices()));
+            addTabSafe(() -> buildUsbTab(data.usbDevices()));
         }
         if (data.monitors() != null && !data.monitors().isEmpty()) {
-            tabPane.getTabs().add(buildMonitorTab(data.monitors()));
+            addTabSafe(() -> buildMonitorTab(data.monitors()));
         }
         if (data.printers() != null && !data.printers().isEmpty()) {
-            tabPane.getTabs().add(buildPrinterTab(data.printers()));
+            addTabSafe(() -> buildPrinterTab(data.printers()));
         }
 
         if (data.warnings() != null && !data.warnings().isEmpty()) {
-            tabPane.getTabs().add(buildWarningsTab(data));
+            addTabSafe(() -> buildWarningsTab(data));
         } else if (data.timings() != null && !data.timings().isEmpty()) {
-            // v3.1: timings alone are worth a Diagnostics tab even without warnings
-            tabPane.getTabs().add(buildWarningsTab(data));
+            addTabSafe(() -> buildWarningsTab(data));
         }
 
-        // B3 fix: never leave tabPane empty â€” show placeholder so user understands failure vs. blank
         if (tabPane.getTabs().isEmpty()) {
             tabPane.getTabs().add(buildEmptyStateTab(data));
+        }
+    }
+
+    private void addTabSafe(java.util.function.Supplier<Tab> maker) {
+        try {
+            Tab t = maker.get();
+            if (t != null) {
+                tabPane.getTabs().add(t);
+            }
+        } catch (Exception ex) {
+            AppLogger.error("Failed to render system info section", ex);
         }
     }
 
@@ -487,7 +504,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ CPU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ CPU Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildCpuTab(CpuInfo cpu) {
         GridPane grid = createInfoGrid();
@@ -511,7 +528,7 @@ public class SystemInfoTabView extends BorderPane {
         return UiTab.tab("CPU", wrapGrid(grid));
     }
 
-    // â”€â”€ GPU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ GPU Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildGpuTab(List<GpuInfo> gpus) {
         VBox container = new VBox(16);
@@ -546,7 +563,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ RAM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ RAM Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildRamTab(RamInfo ram) {
         VBox container = new VBox(16);
@@ -580,7 +597,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ OS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ OS Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildOsTab(OsInfo os) {
         GridPane grid = createInfoGrid();
@@ -600,7 +617,7 @@ public class SystemInfoTabView extends BorderPane {
         return UiTab.tab("OS", wrapGrid(grid));
     }
 
-    // â”€â”€ Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Storage Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildStorageTab(StorageInfo storage) {
         VBox container = new VBox(16);
@@ -625,7 +642,7 @@ public class SystemInfoTabView extends BorderPane {
                 if (storage.partitions() != null) {
                     final int diskIdx = i;
                     List<StorageInfo.Partition> diskParts = storage.partitions().stream()
-                            .filter(p -> p.diskIndex() == diskIdx)
+                            .filter(p -> p != null && p.diskIndex() == diskIdx)
                             .toList();
                     if (!diskParts.isEmpty()) {
                         container.getChildren().add(UILabel.sectionTitle("  Partitions on Disk " + (i + 1)));
@@ -649,7 +666,7 @@ public class SystemInfoTabView extends BorderPane {
         // Show partitions not assigned to any disk
         if (storage.partitions() != null && !storage.partitions().isEmpty()) {
             List<StorageInfo.Partition> unassigned = storage.partitions().stream()
-                    .filter(p -> p.diskIndex() < 0)
+                    .filter(p -> p != null && p.diskIndex() < 0)
                     .toList();
             if (!unassigned.isEmpty()) {
                 container.getChildren().add(UILabel.sectionTitle("Other Partitions"));
@@ -686,7 +703,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Motherboard / BIOS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Motherboard / BIOS Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildMotherboardTab(MotherboardInfo mb, BiosInfo bios) {
         VBox container = new VBox(16);
@@ -722,7 +739,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Others â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Others Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildOthersTab(List<OtherDevice> devices) {
         VBox container = new VBox(8);
@@ -861,7 +878,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Overview Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildOverviewTab(SystemInfoData data) {
         VBox container = new VBox(16);
@@ -978,7 +995,7 @@ public class SystemInfoTabView extends BorderPane {
         return card;
     }
 
-    // â”€â”€ Network â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Network Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // v3.1: virtualized TableView + search + detail pane. Previous per-adapter
     // VBox cards created N GridPanes and stalled on hosts with many virtual
     // adapters; TableView renders only visible rows and supports sorting.
@@ -1043,7 +1060,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Audio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Audio Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildAudioTab(List<AudioDeviceInfo> devices) {
         TextField search = new TextField();
@@ -1097,7 +1114,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ USB Devices â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ USB Devices Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildUsbTab(List<UsbDeviceInfo> devices) {
         TextField search = new TextField();
@@ -1152,7 +1169,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Monitors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Monitors Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildMonitorTab(List<MonitorInfo> monitors) {
         TextField search = new TextField();
@@ -1209,7 +1226,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Printers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Printers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildPrinterTab(List<PrinterInfo> printers) {
         TextField search = new TextField();
@@ -1267,7 +1284,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Battery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Battery Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildBatteryTab(BatteryInfo battery) {
         VBox container = new VBox(16);
@@ -1294,7 +1311,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Temperatures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Temperatures Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildTemperaturesTab(List<TemperatureInfo> temperatures) {
         VBox container = new VBox(16);
@@ -1345,7 +1362,7 @@ public class SystemInfoTabView extends BorderPane {
         return row + 1;
     }
 
-    // â”€â”€ Warnings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Warnings Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private Tab buildWarningsTab(SystemInfoData data) {
         List<String> warnings = data.warnings() != null ? data.warnings() : List.of();
@@ -1399,7 +1416,7 @@ public class SystemInfoTabView extends BorderPane {
         return tab;
     }
 
-    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
     private static boolean containsLower(String value, String lower) {
         return value != null && !value.isBlank() && value.toLowerCase().contains(lower);
@@ -1535,7 +1552,7 @@ public class SystemInfoTabView extends BorderPane {
         }
     }
 
-    // â”€â”€ Export / Copy â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Export / Copy Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // v3.1: reports delegate to SystemInfoReportGenerator (single implementation,
     // header metadata, TOC). Export runs off-FX so large payloads never freeze UI.
 
@@ -1597,47 +1614,27 @@ public class SystemInfoTabView extends BorderPane {
             return;
         }
 
-        // Resolve target path + format synchronously (cheap), render + write off-FX.
         FileChooser.ExtensionFilter selectedFilter = fileChooser.getSelectedExtensionFilter();
-        String ext = "";
+        String filterExt = "";
         if (selectedFilter != null) {
             List<String> extensions = selectedFilter.getExtensions();
             if (!extensions.isEmpty()) {
-                ext = extensions.get(0).replace("*", "");
+                filterExt = extensions.get(0).replace("*", "");
             }
         }
-        // Determine extension from selected filter first, but respect user's typed extension
-        String typedNameLower = file.getName().toLowerCase();
-        boolean typedHasExt = typedNameLower.endsWith(".json") || typedNameLower.endsWith(".html") || typedNameLower.endsWith(".txt");
-        if (!typedHasExt && ext.isEmpty()) {
-            ext = ".txt";
-        } else if (typedHasExt) {
-            if (typedNameLower.endsWith(".json")) {
-                ext = ".json";
-            } else if (typedNameLower.endsWith(".html")) {
-                ext = ".html";
-            } else {
-                ext = ".txt";
-            }
-        } else if (ext.isEmpty()) {
-            ext = ".txt";
+        SystemInfoExportPath.Resolution resolved = SystemInfoExportPath.resolve(file, filterExt);
+        if (resolved == null) {
+            return;
         }
-
-        // Correctly strip existing extension using lastIndexOf to handle .html (5 chars) and .json (5 chars)
-        String fileName = file.getName();
-        String baseName = fileName;
-        int dotIdx = fileName.lastIndexOf('.');
-        if (dotIdx > 0) {
-            String existingExt = fileName.substring(dotIdx).toLowerCase();
-            if (existingExt.equals(".txt") || existingExt.equals(".json") || existingExt.equals(".html")) {
-                baseName = fileName.substring(0, dotIdx);
+        if (resolved.needsOverwriteConfirm()) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                    "File already exists:\n" + resolved.target().getAbsolutePath() + "\nOverwrite?");
+            if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                return;
             }
         }
-        if (baseName.isBlank()) {
-            baseName = "system-info";
-        }
-        final File target = new File(file.getParent(), baseName + ext);
-        final String finalExt = ext;
+        final File target = resolved.target();
+        final String finalExt = resolved.extension();
         final SystemInfoData snapshot = currentData;
         final Boolean adminHint = adminHintFast();
 
@@ -1645,30 +1642,40 @@ public class SystemInfoTabView extends BorderPane {
         exportInProgress.set(true);
         exportButton.setDisable(true);
         loadButton.setDisable(true);
-        exportExecutor.submit(() -> {
-            try {
-                String content;
-                if (".json".equals(finalExt)) {
-                    content = JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValueAsString(snapshot);
-                } else if (".html".equals(finalExt)) {
-                    content = SystemInfoReportGenerator.generateHtmlReport(snapshot, adminHint);
-                } else {
-                    content = SystemInfoReportGenerator.generatePlainTextReport(snapshot, adminHint);
+        try {
+            exportExecutor.submit(() -> {
+                Exception fail = null;
+                try {
+                    String content;
+                    if (".json".equals(finalExt)) {
+                        content = JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValueAsString(snapshot);
+                    } else if (".html".equals(finalExt)) {
+                        content = SystemInfoReportGenerator.generateHtmlReport(snapshot, adminHint);
+                    } else {
+                        content = SystemInfoReportGenerator.generatePlainTextReport(snapshot, adminHint);
+                    }
+                    Files.writeString(target.toPath(), content, StandardCharsets.UTF_8);
+                } catch (Exception ex) {
+                    fail = ex;
+                    AppLogger.error("Failed to export system info", ex);
                 }
-                Files.writeString(target.toPath(), content, StandardCharsets.UTF_8);
-                Platform.runLater(() -> {
-                    statusLabel.setText("Exported to: " + target.getName());
-                    finishExportUi();
-                });
-            } catch (Exception ex) {
-                AppLogger.error("Failed to export system info", ex);
+                final Exception error = fail;
                 Platform.runLater(() -> {
                     finishExportUi();
-                    String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
-                    new Alert(Alert.AlertType.ERROR, "Failed to export: " + msg).showAndWait();
+                    if (error != null) {
+                        String msg = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+                        new Alert(Alert.AlertType.ERROR, "Failed to export: " + msg).showAndWait();
+                    } else {
+                        statusLabel.setText("Exported to: " + target.getName());
+                    }
                 });
-            }
-        });
+            });
+        } catch (RuntimeException ex) {
+            AppLogger.error("Failed to start system info export", ex);
+            finishExportUi();
+            String msg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            new Alert(Alert.AlertType.ERROR, "Failed to export: " + msg).showAndWait();
+        }
     }
 
     private static String generatePlainTextReport(SystemInfoData data) {
@@ -1686,7 +1693,7 @@ public class SystemInfoTabView extends BorderPane {
     private void finishExportUi() {
         exportInProgress.set(false);
         exportButton.setDisable(currentData == null);
-        if (!isLoading.get()) {
+        if (!loadGate.isLoading()) {
             loadButton.setDisable(false);
         }
     }
@@ -1700,10 +1707,14 @@ public class SystemInfoTabView extends BorderPane {
         exportInProgress.set(false);
         gatherExecutor.shutdownNow();
         exportExecutor.shutdownNow();
+        boolean shouldRelease = loadGate.disposeAndReleaseBusy();
+        if (!shouldRelease) return;
         if (Platform.isFxApplicationThread()) {
-            releaseBusyOnce();
+            try { busy.set(false); } catch (Exception ignored) {}
         } else {
-            Platform.runLater(this::releaseBusyOnce);
+            Platform.runLater(() -> {
+                try { busy.set(false); } catch (Exception ignored) {}
+            });
         }
     }
 }

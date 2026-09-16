@@ -131,7 +131,21 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
         }
     }
 
+    private String cachedResolveDeviceId;
+    private String[] cachedResolveInfo;
+
     private String[] resolveDriverInfo(InstalledDriver driver) {
+        String deviceId = driver == null || driver.deviceId() == null ? "" : driver.deviceId();
+        if (deviceId.equals(cachedResolveDeviceId)) {
+            return cachedResolveInfo;
+        }
+        String[] info = resolveDriverInfoUncached(driver);
+        cachedResolveDeviceId = deviceId;
+        cachedResolveInfo = info;
+        return info;
+    }
+
+    private String[] resolveDriverInfoUncached(InstalledDriver driver) {
         int[] psidPfid = lookupPsidPfid(driver);
         if (psidPfid == null) {
             AppLogger.warning("NVIDIA: Could not determine psid/pfid for " + driver.friendlyName());
@@ -213,27 +227,20 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
         // longer key (e.g. "1060" must not pick "1060 3GB" arbitrarily).
 
         AppLogger.debug("NVIDIA: GPU not found in local database, querying lookupValueSearch API");
+        Integer inferredPsid = inferPsid(gpuName);
+        if (inferredPsid == null) {
+            AppLogger.warning("NVIDIA: No psid for unmapped GPU " + gpuName + " — manual download only");
+            return null;
+        }
         try {
             String lookupUrl = LOOKUP_URL + "?TypeID=3";
             String xml = httpGet(lookupUrl);
-            if (xml == null) return null;
-
-            String lowerGpuName = gpuName != null ? gpuName.toLowerCase() : "";
-            Pattern pfidPattern = Pattern.compile(
-                    "<Name>([^<]*(?:GTX|RTX|GT)[^<]*)</Name>\\s*<ID>(\\d+)</ID>", Pattern.CASE_INSENSITIVE);
-            Matcher m = pfidPattern.matcher(xml);
-
-            while (m.find()) {
-                String name = m.group(1).trim();
-                String pfidStr = m.group(2);
-                String normalizedName = normalizeGpuName(name);
-                if (normalizedName != null && !normalizedName.isBlank()
-                        && containsWholeTokens(lowerGpuName, normalizedName.toLowerCase())
-                        && !hasQualifierMismatch(lowerGpuName, normalizedName.toLowerCase())) {
-                    int pfid = Integer.parseInt(pfidStr);
-                    return new int[]{107, pfid};
-                }
+            Integer pfid = parsePfidFromLookupXml(xml, gpuName);
+            if (pfid == null) {
+                AppLogger.warning("NVIDIA: No pfid in lookup XML for " + gpuName);
+                return null;
             }
+            return new int[]{inferredPsid, pfid};
         } catch (Exception e) {
             AppLogger.warning("NVIDIA: lookupValueSearch failed: " + e.getMessage());
         }
@@ -241,7 +248,60 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
         return null;
     }
 
+    /**
+     * Series ID from the GPU model number. Never default to Turing (107).
+     */
+    static Integer inferPsid(String gpuName) {
+        if (gpuName == null || gpuName.isBlank()) return null;
+        Matcher m = Pattern.compile("(?i)(?:rtx|gtx|gt)\\s*(\\d{3,4})").matcher(gpuName);
+        if (!m.find()) return null;
+        int model;
+        try {
+            model = Integer.parseInt(m.group(1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (model >= 1600 && model < 1700) return 107;
+        int series = model / 100;
+        return switch (series) {
+            case 50 -> 124;
+            case 40 -> 114;
+            case 30 -> 110;
+            case 20 -> 107;
+            case 16 -> 107;
+            case 10, 7 -> 101;
+            default -> null;
+        };
+    }
+
+    static Integer parsePfidFromLookupXml(String xml, String gpuName) {
+        if (xml == null || gpuName == null) return null;
+        String lowerGpuName = gpuName.toLowerCase(java.util.Locale.ROOT);
+        Pattern pfidPattern = Pattern.compile(
+                "<Name>([^<]*(?:GTX|RTX|GT)[^<]*)</Name>\\s*<ID>(\\d+)</ID>", Pattern.CASE_INSENSITIVE);
+        Matcher m = pfidPattern.matcher(xml);
+        while (m.find()) {
+            String name = m.group(1).trim();
+            String pfidStr = m.group(2);
+            String normalizedName = normalizeGpuNameStatic(name);
+            if (normalizedName != null && !normalizedName.isBlank()
+                    && containsWholeTokens(lowerGpuName, normalizedName.toLowerCase(java.util.Locale.ROOT))
+                    && !hasQualifierMismatch(lowerGpuName, normalizedName.toLowerCase(java.util.Locale.ROOT))) {
+                try {
+                    return Integer.parseInt(pfidStr);
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
     private String normalizeGpuName(String name) {
+        return normalizeGpuNameStatic(name);
+    }
+
+    static String normalizeGpuNameStatic(String name) {
         if (name == null) return null;
         String n = name.trim();
         n = n.replaceAll("(?i)\\bNVIDIA\\b\\s*", "");

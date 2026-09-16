@@ -1,5 +1,6 @@
 package com.sbtools.ui;
 
+import com.sbtools.cleaner.CleanupService;
 import com.sbtools.drivers.DriverScanService;
 import com.sbtools.drivers.catalog.WindowsUpdateCatalogProvider;
 import com.sbtools.software.SoftwareUpdateService;
@@ -39,8 +40,8 @@ public final class DashboardScanCoordinator {
             + 15;
     /** Soft budget for the software sub-scan. */
     public static final long SOFTWARE_TIMEOUT_SECONDS = SoftwareUpdateService.DEFAULT_SCAN_ALL_TIMEOUT_SECONDS;
-    /** Soft budget for the cleanup sub-scan (40 categories, file walks). */
-    public static final long CLEANUP_TIMEOUT_SECONDS = 240;
+    /** Soft budget for the cleanup sub-scan (matches {@link CleanupService} overall). */
+    public static final long CLEANUP_TIMEOUT_SECONDS = CleanupService.SCAN_OVERALL_TIMEOUT_SECONDS;
 
     private DashboardScanCoordinator() {
     }
@@ -92,7 +93,7 @@ public final class DashboardScanCoordinator {
                 overallTimeoutSecs, perTaskTokens, 30, 100);
     }
 
-    private static Set<Integer> awaitAllInterruptible(
+    static Set<Integer> awaitAllInterruptible(
             List<Future<?>> tasks,
             long[] perTaskTimeoutSecs,
             BooleanSupplier isStale,

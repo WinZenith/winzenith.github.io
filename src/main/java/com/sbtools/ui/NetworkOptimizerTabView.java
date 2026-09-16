@@ -7,8 +7,10 @@ import com.sbtools.util.AppPaths;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
@@ -85,8 +87,8 @@ public class NetworkOptimizerTabView extends BorderPane {
         changeLogPanel = new ChangeLogPanel(service, busy);
 
         Tab adaptersTab = UiTab.tab("Network adapters", adaptersPanel);
-        Tab optimizationTab = UiTab.tab("Optimization", optimizationPanel);
-        Tab dnsTab = UiTab.tab("DNS & cache", dnsCachePanel);
+        Tab optimizationTab = UiTab.tab("Optimization", scrollable(optimizationPanel));
+        Tab dnsTab = UiTab.tab("DNS & cache", scrollable(dnsCachePanel));
         Tab adapterSettingsTab = UiTab.tab("Adapter settings", adapterSettingsPanel);
         Tab wifiTab = UiTab.tab("Wi-Fi", wiFiPanel);
         Tab connectionOverviewTab = UiTab.tab("Connection overview", connectionOverviewPanel);
@@ -126,7 +128,7 @@ public class NetworkOptimizerTabView extends BorderPane {
         rebootBox.setStyle("-fx-padding: 0 8 0 0; -fx-background-color: #44272a;");
         rebootBox.managedProperty().bind(rebootLabel.managedProperty());
         rebootBox.visibleProperty().bind(rebootLabel.visibleProperty());
-        VBox topContainer = new VBox(adminWarningLabel, rebootBox, tabPane);
+        VBox topContainer = new VBox(adminWarningLabel, rebootBox, statusLabel, tabPane);
         VBox.setVgrow(tabPane, javafx.scene.layout.Priority.ALWAYS);
 
         initialLoadingSpinner.setMaxSize(24, 24);
@@ -149,6 +151,15 @@ public class NetworkOptimizerTabView extends BorderPane {
             updateRebootBanner();
             adaptersPanel.loadAdapters(this::hideInitialLoadingOverlay);
         });
+    }
+
+    private static ScrollPane scrollable(Node content) {
+        ScrollPane sp = new ScrollPane(content);
+        sp.setFitToWidth(true);
+        sp.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        sp.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        sp.setStyle("-fx-background-color: transparent; -fx-background: transparent;");
+        return sp;
     }
 
     private void hideInitialLoadingOverlay() {

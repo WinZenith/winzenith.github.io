@@ -310,6 +310,12 @@ class WiFiPanel extends VBox {
             statusLabel.setText("Please wait, another operation is in progress...");
             return;
         }
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Disconnect from the current Wi-Fi network?\n\nYou will lose wireless connectivity until you reconnect.",
+                ButtonType.YES, ButtonType.NO);
+        confirm.setTitle(com.sbtools.util.UiText.label("Confirm disconnect"));
+        confirm.setHeaderText(null);
+        if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
         busy.set(true);
         statusLabel.setText("Disconnecting Wi-Fi...");
         currentTask = AppExecutors.ioPool().submit(() -> {

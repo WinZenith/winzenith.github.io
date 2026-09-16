@@ -100,39 +100,70 @@ public class PrivacyTracesCleaner implements CleanerExtension {
         if (token != null && token.isCancelled()) return cleaned;
 
         if (com.sbtools.util.AppPaths.isWindows()) {
+            cleaned += cleanPrivacyRegistry(backupRootOrNull, token, cleaned);
+        }
+
+        return cleaned;
+    }
+
+    private long cleanPrivacyRegistry(java.nio.file.Path backupRootOrNull,
+            com.sbtools.util.CancellationToken token, long fileBytesAlready) {
+        long registryDeleted = 0;
+        if (backupRootOrNull == null) {
+            com.sbtools.util.AppLogger.warning(
+                    "Registry backup required for privacy traces — skipping registry delete");
+            return 0;
+        }
         try {
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER,
                     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU")) {
-                Map<String, Object> values = Advapi32Util.registryGetValues(WinReg.HKEY_CURRENT_USER,
-                        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU");
-                for (String key : values.keySet()) {
-                    if (token != null && token.isCancelled()) break;
-                    if (!"MRUListEx".equals(key) && !"MRUList".equals(key)) {
-                        try { Advapi32Util.registryDeleteValue(WinReg.HKEY_CURRENT_USER,
-                                "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU", key); } catch (Throwable ignored) {}
+                Path backup = backupRootOrNull.resolve("registry-HKCU-RunMRU.reg");
+                if (!CleanerUtils.exportRegistryKey(
+                        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU", backup)) {
+                    com.sbtools.util.AppLogger.warning(
+                            "Registry backup failed for RunMRU — skipping delete for safety");
+                } else {
+                    Map<String, Object> values = Advapi32Util.registryGetValues(WinReg.HKEY_CURRENT_USER,
+                            "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU");
+                    for (String key : values.keySet()) {
+                        if (token != null && token.isCancelled()) break;
+                        if (!"MRUListEx".equals(key) && !"MRUList".equals(key)) {
+                            try {
+                                Advapi32Util.registryDeleteValue(WinReg.HKEY_CURRENT_USER,
+                                        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RunMRU", key);
+                                registryDeleted++;
+                            } catch (Throwable ignored) {}
+                        }
                     }
                 }
             }
         } catch (Throwable ignored) {}
+
+        if (token != null && token.isCancelled()) {
+            return fileBytesAlready > 0 ? 0 : registryDeleted;
         }
 
-        if (token != null && token.isCancelled()) return cleaned;
-
-        if (com.sbtools.util.AppPaths.isWindows()) {
         try {
             String recentDocsPath = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs";
             if (Advapi32Util.registryKeyExists(WinReg.HKEY_CURRENT_USER, recentDocsPath)) {
-                String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CURRENT_USER, recentDocsPath);
-                for (String subKey : subKeys) {
-                    if (token != null && token.isCancelled()) break;
-                    try {
-                        Advapi32Util.registryDeleteKey(WinReg.HKEY_CURRENT_USER, recentDocsPath + "\\" + subKey);
-                    } catch (Throwable ignored) {}
+                Path backup = backupRootOrNull.resolve("registry-HKCU-RecentDocs.reg");
+                if (!CleanerUtils.exportRegistryKey("HKCU\\" + recentDocsPath, backup)) {
+                    com.sbtools.util.AppLogger.warning(
+                            "Registry backup failed for RecentDocs — skipping delete for safety");
+                } else {
+                    String[] subKeys = Advapi32Util.registryGetKeys(WinReg.HKEY_CURRENT_USER, recentDocsPath);
+                    for (String subKey : subKeys) {
+                        if (token != null && token.isCancelled()) break;
+                        try {
+                            Advapi32Util.registryDeleteKey(WinReg.HKEY_CURRENT_USER, recentDocsPath + "\\" + subKey);
+                            registryDeleted++;
+                        } catch (Throwable ignored) {}
+                    }
                 }
             }
         } catch (Throwable ignored) {}
-        }
-
-        return cleaned;
+        // Item-only signal when no files were freed so the service does not
+        // report success-with-zero / hide a completed registry clean.
+        return fileBytesAlready > 0 ? 0 : registryDeleted;
     }
 }

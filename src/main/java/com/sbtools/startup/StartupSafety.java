@@ -54,7 +54,18 @@ public final class StartupSafety {
         if (item == null || item.getType() != StartupItemType.SERVICE) {
             return false;
         }
-        return item.isEnabled() && isCriticalService(item.getName());
+        if (!item.isEnabled()) {
+            return false;
+        }
+        if (isCriticalService(item.getName())) {
+            return true;
+        }
+        String st = item.getServiceStartType();
+        if (st == null || st.isBlank()) {
+            return false;
+        }
+        String lower = st.toLowerCase(Locale.ROOT);
+        return "boot".equals(lower) || "system".equals(lower);
     }
 
     /**

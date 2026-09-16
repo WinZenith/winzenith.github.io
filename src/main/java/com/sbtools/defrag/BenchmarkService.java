@@ -266,15 +266,31 @@ public class BenchmarkService {
     }
 
     private static void deleteRecursively(java.nio.file.Path path) throws IOException {
-        if (!java.nio.file.Files.exists(path)) return;
-        try (var walk = java.nio.file.Files.walk(path)) {
-            walk.sorted(java.util.Comparator.reverseOrder())
-                    .forEach(p -> {
-                        try {
-                            java.nio.file.Files.deleteIfExists(p);
-                        } catch (Exception ignored) {
-                        }
-                    });
+        if (path == null) return;
+        java.nio.file.LinkOption noFollow = java.nio.file.LinkOption.NOFOLLOW_LINKS;
+        if (!java.nio.file.Files.exists(path, noFollow)) return;
+        // Never follow junctions/symlinks (Files.walk follows Windows junctions).
+        if (java.nio.file.Files.isSymbolicLink(path) || isReparsePoint(path)) {
+            java.nio.file.Files.deleteIfExists(path);
+            return;
+        }
+        if (java.nio.file.Files.isDirectory(path, noFollow)) {
+            try (var ds = java.nio.file.Files.newDirectoryStream(path)) {
+                for (java.nio.file.Path child : ds) {
+                    deleteRecursively(child);
+                }
+            }
+        }
+        java.nio.file.Files.deleteIfExists(path);
+    }
+
+    private static boolean isReparsePoint(java.nio.file.Path path) {
+        try {
+            Object rp = java.nio.file.Files.getAttribute(path, "dos:isReparsePoint",
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            return rp instanceof Boolean && (Boolean) rp;
+        } catch (Exception e) {
+            return true;
         }
     }
 }

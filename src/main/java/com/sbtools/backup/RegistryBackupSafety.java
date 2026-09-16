@@ -102,6 +102,11 @@ public final class RegistryBackupSafety {
 
     public static void validateSections(List<RegSection> sections, Path sourceFile) throws IOException {
         for (RegSection s : sections) {
+            if (s.deletion()) {
+                throw new IOException("Registry file " + sourceFile.getFileName()
+                        + " contains a key-deletion section ([-key]), which backup export never writes.\n"
+                        + "Refusing restore of " + s.hivePath());
+            }
             if (!isAllowedHivePath(s.hivePath())) {
                 throw new IOException("Registry file " + sourceFile.getFileName()
                         + " targets a key outside the allowed backup scope:\n" + s.hivePath());

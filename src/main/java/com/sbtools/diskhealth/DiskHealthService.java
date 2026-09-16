@@ -58,8 +58,7 @@ public class DiskHealthService {
 
             List<DiskHealthInfo> drives = new ArrayList<>();
             JsonNode drivesNode = root.has("drives") ? root.get("drives") : root;
-            if (drivesNode.isArray()) {
-                for (JsonNode node : drivesNode) {
+            for (JsonNode node : driveNodes(drivesNode)) {
                     DiskHealthInfo info = JsonMapper.mapper().treeToValue(node, DiskHealthInfo.class);
                     if (node.has("rawSmartAttributes") && node.get("rawSmartAttributes").isArray()) {
                         List<SmartAttribute> attrs = new ArrayList<>();
@@ -70,7 +69,6 @@ public class DiskHealthService {
                     }
                     applyWmiThresholdOverride(info);
                     drives.add(info);
-                }
             }
             return new HealthResult(drives, smartctlAvailable);
         } catch (Exception e) {
@@ -84,7 +82,7 @@ public class DiskHealthService {
      * when sector counters already show damage. Mirrors disk-health.ps1 thresholds
      * so stale scripts still get correct UI coloring.
      */
-    private static void applyWmiThresholdOverride(DiskHealthInfo info) {
+    static void applyWmiThresholdOverride(DiskHealthInfo info) {
         if (info == null) return;
         String s = info.getHealthStatus();
         if (s == null) return;
@@ -97,5 +95,17 @@ public class DiskHealthService {
         }
         if (worst > 10) info.setHealthStatus("Critical");
         else if (worst > 0) info.setHealthStatus("Caution");
+    }
+
+    /** PS ConvertTo-Json collapses a 1-element array to an object. */
+    static List<JsonNode> driveNodes(JsonNode drivesNode) {
+        List<JsonNode> out = new ArrayList<>();
+        if (drivesNode == null || drivesNode.isNull() || drivesNode.isMissingNode()) return out;
+        if (drivesNode.isArray()) {
+            drivesNode.forEach(out::add);
+        } else if (drivesNode.isObject()) {
+            out.add(drivesNode);
+        }
+        return out;
     }
 }

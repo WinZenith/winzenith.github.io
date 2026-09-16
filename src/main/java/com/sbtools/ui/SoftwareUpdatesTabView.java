@@ -183,12 +183,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
         // Sync initial
         batchProgressListener.changed(null, null, viewModel.showBatchProgressProperty().get());
 
-        retryFailedListener = (obs, oldVal, newVal) -> {
-            retryFailedButton.setVisible(Boolean.TRUE.equals(newVal));
-            retryFailedButton.setDisable(!Boolean.TRUE.equals(newVal));
-        };
+        retryFailedListener = (obs, oldVal, newVal) -> syncRetryFailedButton();
         viewModel.showRetryFailedProperty().addListener(retryFailedListener);
-        retryFailedListener.changed(null, null, viewModel.showRetryFailedProperty().get());
+        syncRetryFailedButton();
 
         viewModel.setOnWingetNotAvailable(this::showWingetNotAvailableDialog);
     }
@@ -238,6 +235,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
             updateSelectedButton.setDisable(isBusy || viewModel.getRows().stream().noneMatch(r -> r.selectedProperty().get()));
             selectAllButton.setDisable(isBusy || viewModel.getRows().isEmpty());
             deselectAllButton.setDisable(isBusy || viewModel.getRows().isEmpty());
+            syncRetryFailedButton();
         };
         busy.addListener(busyListener);
         viewModel.busyProperty().addListener(busyListener);
@@ -561,6 +559,14 @@ public class SoftwareUpdatesTabView extends BorderPane {
         updateSelectedButton.setDisable(!any || isBusy);
         selectAllButton.setDisable(!hasRows || isBusy);
         deselectAllButton.setDisable(!hasRows || isBusy);
+        syncRetryFailedButton();
+    }
+
+    private void syncRetryFailedButton() {
+        boolean show = viewModel.showRetryFailedProperty().get();
+        boolean isBusy = viewModel.busyProperty().get() || busy.get();
+        retryFailedButton.setVisible(show);
+        retryFailedButton.setDisable(!show || isBusy);
     }
 
     private void updateSelected() {

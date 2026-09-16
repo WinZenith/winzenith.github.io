@@ -49,19 +49,17 @@ function Get-SmartFromWmi {
     try {
         $instances = Get-CimInstance -Namespace 'root\wmi' -ClassName $ClassName -ErrorAction SilentlyContinue
         if (-not $instances) { return $null }
+        $n = [regex]::Escape([string]$DiskNumber)
         foreach ($inst in $instances) {
             $iname = $inst.InstanceName
-            if ($iname -and ($iname -match "Disk$DiskNumber" -or $iname -match "_$DiskNumber" -or $iname -match "\.$DiskNumber" -or $iname -match "PhysicalDrive$DiskNumber")) {
+            if (-not $iname) { continue }
+            # Digit-bounded: Disk1 must not match Disk10 / PhysicalDrive11.
+            if ($iname -match "(?i)(?:^|[^0-9])Disk$n(?:[^0-9]|$)" -or
+                $iname -match "(?i)PhysicalDrive$n(?:[^0-9]|$)") {
                 return $inst
             }
         }
-        if ($instances.Count -eq 1) { return $instances[0] }
-        foreach ($inst in $instances) {
-            if ($inst.PSObject.Properties['Size']) {
-                $s = [uint64]$inst.Size
-                if ($s -gt 0 -and [math]::Abs([double]$s - [double]$SizeBytes) -lt 1048576) { return $inst }
-            }
-        }
+        # Fail closed: never attach another disk's instance (size-similar or sole leftover).
     } catch {}
     return $null
 }
@@ -141,16 +139,28 @@ $allWin32Disks = Get-CimInstance -ClassName Win32_DiskDrive -ErrorAction Silentl
 $results = @()
 
 foreach ($phys in $physicalDisks) {
-    $diskNum = [int]$phys.DeviceId
+    # Fail closed: a non-numeric DeviceId must not keep the previous disk's number
+    # (SilentlyContinue would otherwise reuse DiskN SMART/partitions).
+    $diskNum = -1
+    if ($null -ne $phys.DeviceId -and ("$($phys.DeviceId)" -match '^\d+$')) {
+        $diskNum = [int]$phys.DeviceId
+    }
     $mediaType = if ($phys.MediaType) { $phys.MediaType.ToString() } else { 'Unknown' }
     $healthStatus = if ($phys.HealthStatus) { $phys.HealthStatus.ToString() } else { 'Unknown' }
     $operationalStatus = if ($phys.OperationalStatus) { ($phys.OperationalStatus | Select-Object -First 1).ToString() } else { 'Unknown' }
     $model = if ($phys.FriendlyName) { $phys.FriendlyName } else { '' }
     $serial = if ($phys.SerialNumber) { $phys.SerialNumber.Trim() } else { '' }
     $interfaceType = if ($phys.BusType) { $phys.BusType.ToString() } else { '' }
+    # NVMe Unspecified -> SSD (same mapping as get-drives.ps1)
+    if ($mediaType -ne 'HDD' -and $mediaType -ne 'SSD' -and ($interfaceType -eq 'NVMe' -or $interfaceType -eq '17')) {
+        $mediaType = 'SSD'
+    }
     $sizeBytes = if ($phys.Size) { [uint64]$phys.Size } else { 0 }
 
-    $partitions = Get-Partition -DiskNumber $diskNum -ErrorAction SilentlyContinue
+    $partitions = $null
+    if ($diskNum -ge 0) {
+        $partitions = Get-Partition -DiskNumber $diskNum -ErrorAction SilentlyContinue
+    }
     $driveLetters = @()
     if ($partitions) {
         foreach ($p in $partitions) {
@@ -203,7 +213,7 @@ foreach ($phys in $physicalDisks) {
         }
     }
 
-    if ($dataSource -eq 'wmi') {
+    if ($dataSource -eq 'wmi' -and $diskNum -ge 0) {
         $reliability = Get-SmartFromWmi -ClassName 'StorageReliabilityCounter' -DiskNumber $diskNum -SizeBytes $sizeBytes
         if ($reliability) {
             if ($reliability.PSObject.Properties['Temperature']) {
@@ -218,14 +228,8 @@ foreach ($phys in $physicalDisks) {
                 $v = [int]$reliability.Wear
                 if ($v -ge 0 -and $v -le 100) { $wearLevel = $v }
             }
-            if ($reliability.PSObject.Properties['ReadErrorsTotal']) {
-                $v = [long]$reliability.ReadErrorsTotal
-                if ($v -gt 0) { $reallocatedSectors = $v }
-            }
-            if ($reliability.PSObject.Properties['WriteErrorsTotal']) {
-                $v = [long]$reliability.WriteErrorsTotal
-                if ($v -gt 0) { $uncorrectableSectors = $v }
-            }
+            # Do not map ReadErrorsTotal/WriteErrorsTotal onto SMART sector columns
+            # (those counters are not attributes 5/197/198 and cause false Critical).
         }
 
         $isNvme = $interfaceType -eq 'NVMe'
@@ -369,7 +373,7 @@ foreach ($phys in $physicalDisks) {
                 $nvmeId++
             }
         }
-    } else {
+    } elseif ($diskNum -ge 0) {
         $ataSmart = Get-SmartFromWmi -ClassName 'MSStorageDriver_SmartData' -DiskNumber $diskNum -SizeBytes $sizeBytes
         if (-not $ataSmart) { $ataSmart = Get-SmartFromWmi -ClassName 'MSStorageDriver_FailurePredictData' -DiskNumber $diskNum -SizeBytes $sizeBytes }
         if ($ataSmart -and $ataSmart.PSObject.Properties['VendorSpecific']) {
@@ -421,7 +425,8 @@ foreach ($phys in $physicalDisks) {
     }
 }
 
-@{
-    drives = $results
+# -InputObject + @() so a single disk stays a JSON array (PS collapse would hide it).
+ConvertTo-Json -InputObject ([ordered]@{
+    drives = @($results)
     smartctlAvailable = ($null -ne $smartctlPath)
-} | ConvertTo-Json -Depth 5 -Compress
+}) -Depth 5 -Compress

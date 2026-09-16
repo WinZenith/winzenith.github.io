@@ -179,6 +179,9 @@ public class DriversTabView extends BorderPane {
     // results instead of leaving empty / half-seeded tables.
     private volatile List<DriverRow> preScanOutdated = List.of();
     private volatile List<DriverRow> preScanUpToDate = List.of();
+    // Stop Scan restores immediately then waits for the worker finally to
+    // drop the SCAN lease. The seed callback skips a second restore.
+    private volatile boolean scanStopping;
 
     private DriversOperationGate.Lease tryAcquireOperation(DriversOperationGate.Owner owner) {
         DriversOperationGate.Lease lease = operationGate.tryAcquire(owner);
@@ -543,7 +546,7 @@ public class DriversTabView extends BorderPane {
                 }
             });
             stopBtn.setOnAction(e -> {
-                installService.cancel();
+                stopInstall();
                 stopBtn.setDisable(true);
             });
 
@@ -747,10 +750,10 @@ public class DriversTabView extends BorderPane {
         }
         if (scanFuture != null) {
             scanFuture.cancel(true);
-            scanFuture = null;
         }
         DriversOperationGate.Lease lease = scanLease;
         if (lease != null && isLeaseCurrent(lease)) {
+            scanStopping = true;
             try {
                 DriversScanSnapshot.restore(outdatedRows, upToDateRows,
                         preScanOutdated, preScanUpToDate, installCells);
@@ -758,11 +761,10 @@ public class DriversTabView extends BorderPane {
             } catch (Exception restoreEx) {
                 AppLogger.warning("Stop-scan restore failed: " + restoreEx.getMessage());
             }
-            releaseOperation(lease);
-            progressBar.setVisible(false);
-            progressLabel.setVisible(false);
+            // Keep the SCAN lease until the worker finally so Install/Backup
+            // cannot start while catalog HTTP is still draining.
+            setStatus("Stopping\u2026");
             updateControlStates();
-            setStatus("Scan stopped.");
         }
     }
 
@@ -785,6 +787,7 @@ public class DriversTabView extends BorderPane {
         }
         final DriversOperationGate.Lease capturedScanLease = tryAcquireOperation(DriversOperationGate.Owner.SCAN);
         if (capturedScanLease == null) return;
+        scanStopping = false;
         CancellationToken previousToken = scanToken;
         if (previousToken != null) {
             previousToken.cancel();
@@ -856,11 +859,13 @@ public class DriversTabView extends BorderPane {
                 }
                     Platform.runLater(() -> {
                         if (token.isCancelled()) {
-                        DriversScanSnapshot.restore(outdatedRows, upToDateRows,
-                                preScanOutdated, preScanUpToDate, installCells);
-                        filterTables();
-                        return;
-                    }
+                            if (!scanStopping) {
+                                DriversScanSnapshot.restore(outdatedRows, upToDateRows,
+                                        preScanOutdated, preScanUpToDate, installCells);
+                                filterTables();
+                            }
+                            return;
+                        }
                     progressBar.setProgress(0.2);
                     progressLabel.setText("20%");
                     setStatus("Listed " + installed.size() + " device(s). Checking update sources…");
@@ -1002,6 +1007,9 @@ public class DriversTabView extends BorderPane {
                     releaseOperation(capturedScanLease);
                     progressBar.setVisible(false);
                     progressLabel.setVisible(false);
+                    if (token.isCancelled()) {
+                        setStatus("Scan stopped.");
+                    }
                     updateControlStates();
                 });
             }
@@ -1170,14 +1178,16 @@ public class DriversTabView extends BorderPane {
         removeBtn.setOnAction(e -> {
             String selected = listView.getSelectionModel().getSelectedItem();
             if (selected != null) {
-                final String selId = extractExcludedId(selected);
+                final String selKey = DriverScanService.normalizeDeviceKey(extractExcludedId(selected));
                 excludedIds.remove(selected);
                 try {
                     settingsStore.update(cur -> cur.withExcludedDriverIds(new ArrayList<>(excludedIds)));
                     AppSettings refreshed = settingsStore.load();
-                    if (refreshed.excludedDriverIds() != null && refreshed.excludedDriverIds().stream().anyMatch(s -> extractExcludedId(s).equals(selId))) {
+                    if (refreshed.excludedDriverIds() != null && refreshed.excludedDriverIds().stream().anyMatch(s ->
+                            DriverScanService.normalizeDeviceKey(extractExcludedId(s)).equals(selKey))) {
                         AppLogger.warning("Ignored entry still present after remove (legacy store); retrying purge");
-                        settingsStore.update(cur2 -> cur2.withExcludedDriverIds(cur2.excludedDriverIds() == null ? new ArrayList<>() : cur2.excludedDriverIds().stream().filter(s -> !extractExcludedId(s).equals(selId)).toList()));
+                        settingsStore.update(cur2 -> cur2.withExcludedDriverIds(cur2.excludedDriverIds() == null ? new ArrayList<>() : cur2.excludedDriverIds().stream()
+                                .filter(s -> !DriverScanService.normalizeDeviceKey(extractExcludedId(s)).equals(selKey)).toList()));
                     }
                     // The tables hold per-scan row instances: an un-ignored
                     // driver cannot reappear without re-enumeration, so tell
@@ -1289,7 +1299,8 @@ public class DriversTabView extends BorderPane {
                 DriverInstallService.InstallResult result = installService.install(c, settings, allowRestoreOnly);
                 final boolean wasCancelled = installCancelFlag.get() || installService.isCancelled();
                 if (wasCancelled && result.installed()) {
-                    AppLogger.warning("Install completed after cancel request for " + friendlyAtInstall);
+                    AppLogger.warning("Install completed after cancel request for " + friendlyAtInstall
+                            + " — treating as installed");
                 }
                 try {
                     catalog.clearWindowsUpdateCache();
@@ -1299,11 +1310,11 @@ public class DriversTabView extends BorderPane {
                 } catch (Exception ex) {
                     AppLogger.warning("Failed to clear provider cache: " + ex.getMessage());
                 }
-                if (wasCancelled) {
+                if (wasCancelled && !result.installed()) {
                     Platform.runLater(() -> {
-                        statusLabel.setText("Install cancelled for " + friendlyAtInstall
-                                + ". No changes assumed — scan again to verify.");
-                        recordHistory(row, c, false, "cancelled by user");
+                        statusLabel.setText("Install interrupted for " + friendlyAtInstall
+                                + " — scan again to verify (the installer may have changed the device).");
+                        recordHistory(row, c, false, "cancelled by user; scan to verify");
                         DriverActionCell live = installCells.remove(row);
                         if (live != null) {
                             live.setIdle();
@@ -1708,7 +1719,9 @@ public class DriversTabView extends BorderPane {
             settingsStore.update(current -> {
                 java.util.List<String> excluded = current.excludedDriverIds() == null
                         ? new java.util.ArrayList<>() : new java.util.ArrayList<>(current.excludedDriverIds());
-                boolean alreadyExcluded = excluded.stream().anyMatch(s -> extractExcludedId(s).equals(deviceId));
+                String key = DriverScanService.normalizeDeviceKey(deviceId);
+                boolean alreadyExcluded = excluded.stream().anyMatch(s ->
+                        DriverScanService.normalizeDeviceKey(extractExcludedId(s)).equals(key));
                 if (!alreadyExcluded) {
                     excluded.add(friendly + "\u001F" + deviceId);
                 }
@@ -2225,18 +2238,20 @@ public class DriversTabView extends BorderPane {
                             catalog.clearWindowsUpdateCache();
                             if (c.source() != null && !c.source().isBlank()) catalog.clearCacheForProvider(c.source());
                         } catch (Exception ex) { AppLogger.warning("Cache clear failed: " + ex.getMessage()); }
-                        // Stop Install during the 900s pnputil/installer phase:
-                        // a post-cancel success must not count as succeeded nor
-                        // move the row to Up-to-Date (single-install parity).
                         boolean cancelledAfterInstall = installCancelFlag.get() || installService.isCancelled();
-                        if (cancelledAfterInstall) {
+                        if (cancelledAfterInstall && result.installed()) {
+                            AppLogger.warning("Batch install completed after cancel request for "
+                                    + row.installed().friendlyName() + " — treating as installed");
+                        }
+                        if (cancelledAfterInstall && !result.installed()) {
                             skipped++;
                             int remaining = total - idx - 1;
                             if (remaining > 0) skipped += remaining;
-                            failureDetails.add(row.installed().friendlyName() + ": cancelled by user");
-                            recordHistory(row, c, false, "cancelled by user");
-                            AppLogger.warning("Batch install completed after cancel request for "
-                                    + row.installed().friendlyName() + " — treated as cancelled");
+                            failureDetails.add(row.installed().friendlyName()
+                                    + ": install interrupted — scan to verify");
+                            recordHistory(row, c, false, "cancelled by user; scan to verify");
+                            AppLogger.warning("Batch install interrupted for "
+                                    + row.installed().friendlyName());
                             Platform.runLater(() -> {
                                 DriverActionCell cell = installCells.remove(row);
                                 if (cell != null) {
@@ -2280,6 +2295,11 @@ public class DriversTabView extends BorderPane {
                                     }
                                 });
                             }
+                            if (cancelledAfterInstall) {
+                                int remaining = total - idx - 1;
+                                if (remaining > 0) skipped += remaining;
+                                break;
+                            }
                         } else {
                             failed++;
                             failureDetails.add(row.installed().friendlyName() + ": " + result.message());
@@ -2295,8 +2315,9 @@ public class DriversTabView extends BorderPane {
                     } catch (java.util.concurrent.CancellationException cex) {
                         installCancelFlag.set(true);
                         skipped++;
-                        failureDetails.add(row.installed().friendlyName() + ": cancelled by user");
-                        AppLogger.warning("Batch install cancelled at " + row.installed().friendlyName());
+                        failureDetails.add(row.installed().friendlyName()
+                                + ": install interrupted — scan to verify");
+                        AppLogger.warning("Batch install interrupted at " + row.installed().friendlyName());
                         Platform.runLater(() -> {
                             DriverActionCell cell = installCells.remove(row);
                             if (cell != null) {
@@ -2307,7 +2328,8 @@ public class DriversTabView extends BorderPane {
                     } catch (Exception ex) {
                         if (installCancelFlag.get() || installService.isCancelled()) {
                             skipped++;
-                            failureDetails.add(row.installed().friendlyName() + ": cancelled by user");
+                            failureDetails.add(row.installed().friendlyName()
+                                    + ": install interrupted — scan to verify");
                             break;
                         }
                         failed++;

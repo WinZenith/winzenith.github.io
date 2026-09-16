@@ -9,7 +9,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
-import java.util.stream.Stream;
 
 public class GradleCacheCleaner implements CleanerExtension {
 
@@ -18,25 +17,19 @@ public class GradleCacheCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        long totalSize = 0;
-        int itemCount = 0;
-        String userHome = CleanerUtils.safeEnv("USERPROFILE");
-        if (userHome != null) {
-            Path caches = Paths.get(userHome, ".gradle", "caches");
-            if (Files.isDirectory(caches)) {
-                // Real layout is caches/<ver>/modules-2/files-2.1/<group>/<artifact>/<ver>/<hash>/file
-                // (depth 6-8): depth 3 stopped at version dirs and reported ~0.
-                try (Stream<Path> walk = Files.walk(caches, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                    totalSize = stats.getSum();
-                    itemCount = (int) stats.getCount();
-                } catch (Exception ignored) {}
-            }
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        Path caches = cachesDir();
+        if (caches == null) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText(CleanerUtils.formatBytes(0));
+            return;
         }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+        CleanerUtils.scanDirectorySizes(row, List.of(caches), CleanerUtils.DEFAULT_SCAN_MAX_DEPTH, token);
     }
 
     @Override
@@ -47,27 +40,15 @@ public class GradleCacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
+        Path caches = cachesDir();
+        if (caches == null || !CleanerUtils.isSafeToCleanDirectory(caches)) return 0;
+        return CleanerUtils.deleteDirectoryContents(caches, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH, token);
+    }
+
+    private Path cachesDir() {
         String userHome = CleanerUtils.safeEnv("USERPROFILE");
-        if (userHome == null) return 0;
+        if (userHome == null) return null;
         Path caches = Paths.get(userHome, ".gradle", "caches");
-        if (!Files.isDirectory(caches) || !CleanerUtils.isSafeToCleanDirectory(caches)) return 0;
-        long cleaned = 0;
-        try (Stream<Path> walk = Files.walk(caches, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
-            List<Path> sorted = walk.sorted(java.util.Comparator.reverseOrder()).toList();
-            for (Path f : sorted) {
-                if (token != null && token.isCancelled()) break;
-                if (f.equals(caches)) continue;
-                try {
-                    if (Files.isRegularFile(f)) {
-                        long size = Files.size(f);
-                        CleanerUtils.deletePermanently(f, token);
-                        if (!Files.exists(f)) cleaned += size;
-                    } else if (Files.isDirectory(f)) {
-                        com.sbtools.cleaner.CleanerUtils.deleteDirectoryIfEmptySafe(f, token);
-                    }
-                } catch (Exception ignored) {}
-            }
-        } catch (Exception ignored) {}
-        return cleaned;
+        return Files.isDirectory(caches) ? caches : null;
     }
 }

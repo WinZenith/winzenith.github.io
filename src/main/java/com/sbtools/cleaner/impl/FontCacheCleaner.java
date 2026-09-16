@@ -39,12 +39,12 @@ public class FontCacheCleaner implements CleanerExtension {
         if (probe.isEmpty()) return 0L;
         // Only restart services that were running: starting a stopped/disabled
         // service changes system state beyond the cleanup.
-        boolean fontWasRunning = CleanerUtils.isWindowsServiceRunning("FontCache");
-        boolean font3WasRunning = CleanerUtils.isWindowsServiceRunning("FontCache3.0.0.0");
-        stopService("FontCache");
-        if (token != null && token.isCancelled()) { if (fontWasRunning) startService("FontCache"); if (font3WasRunning) startService("FontCache3.0.0.0"); return 0L; }
-        stopService("FontCache3.0.0.0");
+        boolean fontWasRunning = CleanerUtils.serviceShouldBeRestoredAfterStop("FontCache");
+        boolean font3WasRunning = CleanerUtils.serviceShouldBeRestoredAfterStop("FontCache3.0.0.0");
         try {
+            stopService("FontCache");
+            if (token != null && token.isCancelled()) return 0L;
+            stopService("FontCache3.0.0.0");
             if (token != null && token.isCancelled()) return 0L;
             List<Path> dirs = new ArrayList<>();
             CleanerUtils.addEnvPath(dirs, "WINDIR", "ServiceProfiles", "LocalService", "AppData", "Local", "FontCache");
@@ -60,8 +60,7 @@ public class FontCacheCleaner implements CleanerExtension {
             ProcessBuilder pb = new ProcessBuilder("net", "stop", serviceName);
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean ok = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
-            if (!ok) p.destroyForcibly();
+            if (!CleanerUtils.waitForProcessUninterruptibly(p, 15_000L)) p.destroyForcibly();
         } catch (Exception e) {
             AppLogger.warning("Failed to stop service " + serviceName + ": " + e.getMessage());
         }
@@ -72,8 +71,8 @@ public class FontCacheCleaner implements CleanerExtension {
             ProcessBuilder pb = new ProcessBuilder("net", "start", serviceName);
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean ok = p.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
-            if (!ok) p.destroyForcibly();
+            // Must finish even if the clean was cancelled — otherwise fonts stay broken.
+            CleanerUtils.waitForProcessUninterruptibly(p, 15_000L);
         } catch (Exception e) {
             AppLogger.warning("Failed to start service " + serviceName + ": " + e.getMessage());
         }

@@ -130,7 +130,6 @@ public final class BrowserChannelRunning {
         if (expectedExe == null || expectedExe.isBlank()) return false;
         String exeLower = expectedExe.toLowerCase(Locale.ROOT);
         String catalogUserData = normalizePath(BrowserExtensionService.userDataDirFor(browser));
-        String normProfile = normalizePath(profilePath);
         boolean multiChannel = MULTI_CHANNEL_EXES.contains(exeLower);
 
         if (!snapshot.detailedOk()) {
@@ -155,34 +154,12 @@ public final class BrowserChannelRunning {
                 return true;
             }
 
-            if ("firefox.exe".equals(exeLower)) {
-                if (firefoxTargetsProfile(proc.commandLine(), normProfile)) {
-                    return true;
-                }
-                continue;
-            }
-
+            // firefox/brave/vivaldi: any matching exe means that browser is open.
             if (!multiChannel) {
                 return true;
             }
         }
         return false;
-    }
-
-    private static boolean firefoxTargetsProfile(String commandLine, String normProfile) {
-        if (commandLine == null || commandLine.isBlank()) {
-            return normProfile.isBlank();
-        }
-        String lower = commandLine.toLowerCase(Locale.ROOT);
-        if (normProfile.isBlank()) {
-            return !lower.contains("-profile") && !lower.contains("-p ");
-        }
-        String profileLower = normProfile.toLowerCase(Locale.ROOT);
-        if (lower.contains(profileLower)) return true;
-        int idx = lower.indexOf("-profile");
-        if (idx < 0) return false;
-        String tail = commandLine.substring(idx);
-        return tail.toLowerCase(Locale.ROOT).contains(profileLower);
     }
 
     private static String parseUserDataDir(String commandLine) {

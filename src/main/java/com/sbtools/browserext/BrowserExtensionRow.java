@@ -102,6 +102,10 @@ public class BrowserExtensionRow {
     public BooleanProperty managedProperty() { return managed; }
     public boolean isManaged() { return managed.get(); }
 
+    public boolean isOrphaned() {
+        return "orphaned".equalsIgnoreCase(getInstallSource());
+    }
+
     public StringProperty installSourceProperty() { return installSource; }
     public String getInstallSource() { return installSource.get(); }
 

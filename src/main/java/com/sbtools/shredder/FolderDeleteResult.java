@@ -2,6 +2,7 @@ package com.sbtools.shredder;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -43,5 +44,19 @@ public class FolderDeleteResult {
 
     @JsonProperty("scheduledForReboot")
     public List<String> getScheduledForReboot() { return scheduledForReboot; }
-    public void setScheduledForReboot(List<String> v) { scheduledForReboot = v; }
+    /** PS ConvertTo-Json collapses a 1-element array to a string. */
+    @JsonProperty("scheduledForReboot")
+    public void setScheduledForReboot(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        if (node != null && !node.isNull() && !node.isMissingNode()) {
+            if (node.isArray()) {
+                for (JsonNode n : node) {
+                    if (n != null && n.isTextual() && !n.asText().isBlank()) out.add(n.asText());
+                }
+            } else if (node.isTextual() && !node.asText().isBlank()) {
+                out.add(node.asText());
+            }
+        }
+        scheduledForReboot = out;
+    }
 }

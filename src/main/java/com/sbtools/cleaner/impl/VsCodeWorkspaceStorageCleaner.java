@@ -56,13 +56,7 @@ public class VsCodeWorkspaceStorageCleaner implements CleanerExtension {
                 for (Path entry : ds) {
                     if (token != null && token.isCancelled()) break;
                     try {
-                        if (!Files.isDirectory(entry, java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue;
-                        if (Files.isSymbolicLink(entry)) continue;
-                        try {
-                            Object reparse = Files.getAttribute(entry, "dos:isReparsePoint",
-                                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                            if (Boolean.TRUE.equals(reparse)) continue;
-                        } catch (Exception ignored) {}
+                        if (!CleanerUtils.isRealDirectory(entry)) continue;
                         EntryStats stats = statEntry(entry, token);
                         if (stats == null) continue;
                         if (stats.newestModified > 0 && stats.newestModified < cutoff) {
@@ -105,13 +99,7 @@ public class VsCodeWorkspaceStorageCleaner implements CleanerExtension {
                 for (Path entry : ds) {
                     if (token != null && token.isCancelled()) break;
                     try {
-                        if (!Files.isDirectory(entry, java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue;
-                        if (Files.isSymbolicLink(entry)) continue;
-                        try {
-                            Object reparse = Files.getAttribute(entry, "dos:isReparsePoint",
-                                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                            if (Boolean.TRUE.equals(reparse)) continue;
-                        } catch (Exception ignored) {}
+                        if (!CleanerUtils.isRealDirectory(entry)) continue;
                         EntryStats stats = statEntry(entry, token);
                         if (stats != null && stats.newestModified > 0 && stats.newestModified < cutoff) {
                             staleEntries.add(entry);
@@ -159,13 +147,7 @@ public class VsCodeWorkspaceStorageCleaner implements CleanerExtension {
                 @Override
                 public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
-                    if (attrs.isSymbolicLink() || attrs.isOther()) return FileVisitResult.SKIP_SUBTREE;
-                    try {
-                        if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
-                        Object reparse = Files.getAttribute(d, "dos:isReparsePoint",
-                                java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                        if (Boolean.TRUE.equals(reparse)) return FileVisitResult.SKIP_SUBTREE;
-                    } catch (Exception ignored) {}
+                    if (CleanerUtils.shouldSkipWalkDir(d, entry, attrs)) return FileVisitResult.SKIP_SUBTREE;
                     long m = attrs.lastModifiedTime() != null ? attrs.lastModifiedTime().toMillis() : 0L;
                     newest.accumulateAndGet(m, Math::max);
                     return FileVisitResult.CONTINUE;

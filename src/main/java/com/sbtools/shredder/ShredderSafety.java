@@ -188,6 +188,81 @@ public final class ShredderSafety {
                 : validateFileForShred(rawPath) != null;
     }
 
+    /**
+     * Reboot-delete must not follow links or touch OS paths. Recycle Bin wipe
+     * items already proven under {@code X:\$Recycle.Bin\} are allowed.
+     */
+    public static String validateForRebootDelete(String rawPath) {
+        if (rawPath == null || rawPath.isBlank()) return "Path is empty.";
+        if (isTrustedRecycleBinPath(rawPath)) return null;
+        String fileBlock = validateFileForShred(rawPath);
+        if (fileBlock == null) return null;
+        try {
+            Path p = Paths.get(rawPath);
+            if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)
+                    || Files.isDirectory(p.toAbsolutePath().normalize(), LinkOption.NOFOLLOW_LINKS)) {
+                return validateFolderForShred(rawPath);
+            }
+        } catch (Exception ignored) {
+        }
+        return fileBlock;
+    }
+
+    /**
+     * Recycle Bin wipe only: allow a file/folder that is already proven to live
+     * under {@code X:\$Recycle.Bin\...}. Normal shred still blocks these paths.
+     */
+    public static String validateRecycleBinItemForWipe(String rawPath) {
+        if (rawPath == null || rawPath.isBlank()) return "Path is empty.";
+        if (!isTrustedRecycleBinPath(rawPath)) {
+            return "Not a trusted Recycle Bin path (must be under X:\\$Recycle.Bin\\):\n" + rawPath;
+        }
+        return null;
+    }
+
+    /**
+     * Trust boundary for Recycle Bin wipe: path must be contained under
+     * {@code X:\$Recycle.Bin\} (not the root itself) and must not be a link.
+     * Original-location paths are rejected so wipe never shreds a live file.
+     */
+    public static boolean isTrustedRecycleBinPath(String rawPath) {
+        if (rawPath == null || rawPath.isBlank()) return false;
+        try {
+            Path p = Paths.get(rawPath).toAbsolutePath().normalize();
+            String s = p.toString().toLowerCase(Locale.ROOT).replace('/', '\\');
+            s = stripLongPrefixStr(s);
+            if (!s.matches("^[a-z]:\\\\\\$recycle\\.bin\\\\.+")) return false;
+            try {
+                if (Files.isSymbolicLink(p)) return false;
+                Object rp = Files.getAttribute(p, "dos:isReparsePoint", LinkOption.NOFOLLOW_LINKS);
+                if (rp instanceof Boolean && (Boolean) rp) return false;
+                Path cur = p;
+                while (cur != null) {
+                    try {
+                        if (Files.isSymbolicLink(cur)) return false;
+                        Object a = Files.getAttribute(cur, "dos:isReparsePoint",
+                                LinkOption.NOFOLLOW_LINKS);
+                        if (a instanceof Boolean && (Boolean) a && !cur.equals(p)) return false;
+                    } catch (Exception ignored) {
+                    }
+                    cur = cur.getParent();
+                }
+                try {
+                    Path real = p.toRealPath();
+                    String rs = real.toString().toLowerCase(Locale.ROOT).replace('/', '\\');
+                    rs = stripLongPrefixStr(rs);
+                    if (!rs.matches("^[a-z]:\\\\\\$recycle\\.bin\\\\.+")) return false;
+                } catch (Exception ignored) {
+                    // Missing file: prefix + ancestor checks above already passed.
+                }
+            } catch (Exception ignored) {
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static String stripLongPrefixStr(String s) {
         if (s == null) return null;
         if (s.startsWith("\\\\?\\UNC\\")) return "\\\\" + s.substring(8);

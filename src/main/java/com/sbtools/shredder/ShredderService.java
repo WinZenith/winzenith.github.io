@@ -15,17 +15,21 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 public class ShredderService {
 
-    private static final long TIMEOUT_SECONDS = 3600;
+    private static final long TIMEOUT_SECONDS = 0;
     private final ProcessRunner processRunner = new ProcessRunner(TIMEOUT_SECONDS);
     private final List<String> knownTempFiles = new CopyOnWriteArrayList<>();
 
@@ -34,11 +38,18 @@ public class ShredderService {
     }
 
     public ShredderResult secureDelete(String filePath, int passCount) throws IOException, InterruptedException {
+        return secureDelete(filePath, passCount, false);
+    }
+
+    private ShredderResult secureDelete(String filePath, int passCount, boolean recycleWipe)
+            throws IOException, InterruptedException {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Secure erase is only available on Windows.");
         }
         // Defense-in-depth: UI validates, but direct service callers must not bypass it.
-        String blocked = ShredderSafety.validateFileForShred(filePath);
+        String blocked = recycleWipe
+                ? ShredderSafety.validateRecycleBinItemForWipe(filePath)
+                : ShredderSafety.validateFileForShred(filePath);
         if (blocked != null) {
             return new ShredderResult(filePath, false, false, false, "Blocked for safety: " + blocked);
         }
@@ -60,11 +71,20 @@ public class ShredderService {
     public FolderDeleteResult secureDeleteFolder(String folderPath, int passCount,
                                                  Consumer<String> progressCallback,
                                                  AtomicBoolean cancelled) throws IOException, InterruptedException {
+        return secureDeleteFolder(folderPath, passCount, progressCallback, cancelled, false);
+    }
+
+    private FolderDeleteResult secureDeleteFolder(String folderPath, int passCount,
+                                                 Consumer<String> progressCallback,
+                                                 AtomicBoolean cancelled,
+                                                 boolean recycleWipe) throws IOException, InterruptedException {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Secure erase is only available on Windows.");
         }
         // Defense-in-depth: UI validates, but direct service callers must not bypass it.
-        String blocked = ShredderSafety.validateFolderForShred(folderPath);
+        String blocked = recycleWipe
+                ? ShredderSafety.validateRecycleBinItemForWipe(folderPath)
+                : ShredderSafety.validateFolderForShred(folderPath);
         if (blocked != null) {
             return new FolderDeleteResult(false, "Blocked for safety: " + blocked, 0, 0, List.of());
         }
@@ -100,17 +120,83 @@ public class ShredderService {
         if (json.isBlank()) {
             return new FolderDeleteResult(false, "No result returned by secure folder delete.", 0, 0, List.of());
         }
+        FolderDeleteResult parsed;
         try {
-            return JsonMapper.mapper().readValue(json, FolderDeleteResult.class);
+            parsed = JsonMapper.mapper().readValue(json, FolderDeleteResult.class);
         } catch (Exception e) {
             AppLogger.error("Failed to parse folder delete result", e);
             return new FolderDeleteResult(false, "Parse error: " + e.getMessage(), 0, 0, List.of());
         }
+        return finalizeFolderRebootSchedule(parsed, recycleWipe);
+    }
+
+    /**
+     * PS lists locked paths as scheduledForReboot but does not write the registry.
+     * Actually schedule here so callers cannot treat a leftover list as success.
+     */
+    FolderDeleteResult finalizeFolderRebootSchedule(FolderDeleteResult parsed, boolean recycleWipe)
+            throws IOException, InterruptedException {
+        if (parsed == null) {
+            return new FolderDeleteResult(false, "No result returned by secure folder delete.", 0, 0, List.of());
+        }
+        List<String> pending = parsed.getScheduledForReboot();
+        if (pending == null || pending.isEmpty()) return parsed;
+        List<String> scheduled = new ArrayList<>();
+        int failures = 0;
+        for (String path : pending) {
+            if (path == null || path.isBlank()) {
+                failures++;
+                continue;
+            }
+            if (recycleWipe && !isTrustedRecycleBinPath(path)) {
+                AppLogger.warning("Skipping untrusted inner Recycle Bin path: " + path);
+                failures++;
+                continue;
+            }
+            try {
+                ShredderResult sched = scheduleForReboot(path);
+                if (sched.isSuccess()) {
+                    scheduled.add(path);
+                } else {
+                    AppLogger.warning("Failed to schedule reboot delete: " + path
+                            + " - " + (sched.getMessage() != null ? sched.getMessage() : "unknown"));
+                    failures++;
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw ie;
+            } catch (Exception e) {
+                AppLogger.error("Failed to schedule reboot delete: " + path, e);
+                failures++;
+            }
+        }
+        return applyScheduleOutcome(parsed, scheduled, failures);
+    }
+
+    static FolderDeleteResult applyScheduleOutcome(FolderDeleteResult parsed,
+                                                   List<String> scheduled, int failures) {
+        if (parsed == null) {
+            return new FolderDeleteResult(false, "No result.", 0, 0, List.of());
+        }
+        List<String> done = scheduled != null ? scheduled : List.of();
+        boolean success = parsed.isSuccess() && failures == 0;
+        String msg = parsed.getMessage() != null ? parsed.getMessage() : "";
+        if (failures > 0) {
+            success = false;
+            msg = msg + (msg.isBlank() ? "" : " ")
+                    + failures + " file(s) could not be scheduled for reboot delete.";
+        }
+        return new FolderDeleteResult(success, msg.trim(), parsed.getFilesDeleted(),
+                parsed.getFoldersDeleted(), done);
     }
 
     public ShredderResult scheduleForReboot(String filePath) throws IOException, InterruptedException {
         if (!AppPaths.isWindows()) {
             throw new UnsupportedOperationException("Reboot scheduling is only available on Windows.");
+        }
+        String blocked = ShredderSafety.validateForRebootDelete(filePath);
+        if (blocked != null) {
+            return new ShredderResult(filePath, false, false, false, "Blocked for safety: " + blocked);
         }
         Path script = PowerShellScripts.resolve("schedule-reboot-delete.ps1");
         ProcessResult result = runWithFallback(script.toString(), filePath);
@@ -178,45 +264,88 @@ public class ShredderService {
      * so every path must prove containment under X:\$Recycle.Bin\ and must not be a link.
      */
     private static boolean isTrustedRecycleBinPath(String rawPath) {
-        if (rawPath == null || rawPath.isBlank()) return false;
+        return ShredderSafety.isTrustedRecycleBinPath(rawPath);
+    }
+
+    /** $R / $r leaf under X:\$Recycle.Bin\<sid>\ — the actual recycle payload. */
+    static boolean isRecycleBinStorageName(String name) {
+        if (name == null || name.length() < 2) return false;
+        return name.charAt(0) == '$' && (name.charAt(1) == 'R' || name.charAt(1) == 'r');
+    }
+
+    static List<String> mergeRecycleWipeTargets(List<String> recyclePaths) {
+        LinkedHashMap<String, String> byKey = new LinkedHashMap<>();
+        if (recyclePaths != null) {
+            for (String path : recyclePaths) {
+                addRecycleWipeTarget(byKey, path);
+            }
+        }
+        for (String found : listRecycleBinStorageItems()) {
+            addRecycleWipeTarget(byKey, found);
+        }
+        return new ArrayList<>(byKey.values());
+    }
+
+    private static void addRecycleWipeTarget(LinkedHashMap<String, String> byKey, String path) {
+        if (path == null || path.isBlank()) return;
+        if (!isTrustedRecycleBinPath(path)) {
+            AppLogger.warning("Skipping untrusted Recycle Bin path (outside $Recycle.Bin or link): " + path);
+            return;
+        }
+        String key = path.replace('/', '\\').toLowerCase(Locale.ROOT);
+        byKey.putIfAbsent(key, path);
+    }
+
+    static List<String> listRecycleBinStorageItems() {
+        List<String> out = new ArrayList<>();
+        File[] roots;
         try {
-            java.nio.file.Path p = java.nio.file.Paths.get(rawPath).toAbsolutePath().normalize();
-            String s = p.toString().toLowerCase(java.util.Locale.ROOT).replace('/', '\\');
-            if (s.startsWith("\\\\?\\unc\\")) s = "\\\\" + s.substring(8);
-            else if (s.startsWith("\\\\?\\")) s = s.substring(4);
-            if (!s.matches("^[a-z]:\\\\\\$recycle\\.bin\\\\.*")) return false;
-            try {
-                if (java.nio.file.Files.isSymbolicLink(p)) return false;
-                Object rp = java.nio.file.Files.getAttribute(p, "dos:isReparsePoint",
-                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                if (rp instanceof Boolean && (Boolean) rp) return false;
-                // Ancestor links (e.g. $Recycle.Bin\SID\plantedJunction\file) would
-                // otherwise pass the prefix check but resolve outside the bin.
-                java.nio.file.Path cur = p;
-                while (cur != null) {
-                    try {
-                        if (java.nio.file.Files.isSymbolicLink(cur)) return false;
-                        Object a = java.nio.file.Files.getAttribute(cur, "dos:isReparsePoint",
-                                java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                        if (a instanceof Boolean && (Boolean) a && !cur.equals(p)) return false;
+            roots = File.listRoots();
+        } catch (Exception e) {
+            return out;
+        }
+        if (roots == null) return out;
+        for (File root : roots) {
+            if (root == null) continue;
+            Path rb = root.toPath().resolve("$Recycle.Bin");
+            if (!isUsableDirectory(rb)) continue;
+            try (DirectoryStream<Path> sids = Files.newDirectoryStream(rb)) {
+                for (Path sid : sids) {
+                    if (!isUsableDirectory(sid)) continue;
+                    try (DirectoryStream<Path> kids = Files.newDirectoryStream(sid)) {
+                        for (Path kid : kids) {
+                            Path name = kid.getFileName();
+                            if (name == null || !isRecycleBinStorageName(name.toString())) continue;
+                            if (isReparsePoint(kid)) continue;
+                            String abs = kid.toAbsolutePath().normalize().toString();
+                            if (isTrustedRecycleBinPath(abs)) out.add(abs);
+                        }
                     } catch (Exception ignored) {
                     }
-                    cur = cur.getParent();
-                }
-                try {
-                    java.nio.file.Path real = p.toRealPath();
-                    String rs = real.toString().toLowerCase(java.util.Locale.ROOT).replace('/', '\\');
-                    if (rs.startsWith("\\\\?\\unc\\")) rs = "\\\\" + rs.substring(8);
-                    else if (rs.startsWith("\\\\?\\")) rs = rs.substring(4);
-                    if (!rs.matches("^[a-z]:\\\\\\$recycle\\.bin\\\\.*")) return false;
-                } catch (Exception ignored) {
-                    // Missing file: prefix + ancestor checks above already passed.
                 }
             } catch (Exception ignored) {
             }
-            return true;
+        }
+        return out;
+    }
+
+    private static boolean isUsableDirectory(Path p) {
+        try {
+            return p != null
+                    && Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)
+                    && !isReparsePoint(p);
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    private static boolean isReparsePoint(Path p) {
+        try {
+            if (p == null || Files.isSymbolicLink(p)) return true;
+            Object rp = Files.getAttribute(p, "dos:isReparsePoint", LinkOption.NOFOLLOW_LINKS);
+            return rp instanceof Boolean && (Boolean) rp;
+        } catch (Exception e) {
+            return true;
         }
     }
 
@@ -275,6 +404,8 @@ public class ShredderService {
                 for (JsonNode node : filesNode) {
                     entries.add(JsonMapper.mapper().treeToValue(node, RecycleBinEntry.class));
                 }
+            } else if (filesNode != null && filesNode.isObject()) {
+                entries.add(JsonMapper.mapper().treeToValue(filesNode, RecycleBinEntry.class));
             }
             return new RecycleBinResult(entries, totalSize, fileCount);
         } catch (Exception e) {
@@ -296,14 +427,18 @@ public class ShredderService {
         int skippedMissing = 0;
         boolean wasCancelled = false;
 
-        for (int i = 0; i < recyclePaths.size(); i++) {
+        // COM Path is often a shell namespace GUID, so recyclePath is empty even
+        // when $R* files exist. Union trusted COM paths with a $Recycle.Bin walk.
+        List<String> targets = mergeRecycleWipeTargets(recyclePaths);
+
+        for (int i = 0; i < targets.size(); i++) {
             if (cancelled != null && cancelled.get()) {
                 wasCancelled = true;
                 break;
             }
-            String path = recyclePaths.get(i);
+            String path = targets.get(i);
             int current = i + 1;
-            int total = recyclePaths.size();
+            int total = targets.size();
 
             if (progressCallback != null) {
                 progressCallback.accept("Securely deleting (" + current + "/" + total + "): " + new File(path).getName());
@@ -321,30 +456,53 @@ public class ShredderService {
             }
 
             try {
-                ShredderResult result = secureDelete(path, passCount);
-                if (result.isDeleted()) {
-                    filesDeleted++;
-                    // Reliability fix: deleting $R data directly leaves the $I metadata
-                    // orphaned (ghost entries in Explorer). Remove the sibling $I file
-                    // (plain delete — tiny metadata, no shred needed) after success.
-                    deleteSiblingRecycleMetadata(path);
-                } else if (result.isScheduledForReboot()) {
-                    try {
-                        ShredderResult sched = scheduleForReboot(path);
-                        if (sched.isSuccess()) {
-                            scheduledForReboot.add(path);
-                        } else {
-                            AppLogger.warning("Failed to schedule recycle bin entry for reboot: " + path + " - " + sched.getMessage());
-                            failed++;
-                        }
-                    } catch (Exception se) {
-                        AppLogger.error("Failed to schedule reboot delete for: " + path, se);
+                boolean isDir = java.nio.file.Files.isDirectory(file.toPath(),
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                if (isDir) {
+                    FolderDeleteResult fr = secureDeleteFolder(path, passCount, progressCallback, cancelled, true);
+                    if (cancelled != null && cancelled.get()) {
+                        wasCancelled = true;
+                        break;
+                    }
+                    filesDeleted += fr.getFilesDeleted();
+                    foldersDeleted += fr.getFoldersDeleted();
+                    List<String> innerScheduled = fr.getScheduledForReboot() != null
+                            ? fr.getScheduledForReboot() : List.of();
+                    scheduledForReboot.addAll(innerScheduled);
+                    if (!file.exists()) {
+                        deleteSiblingRecycleMetadata(path);
+                    }
+                    if (!fr.isSuccess()) {
+                        AppLogger.warning("Failed to securely delete recycle bin folder: " + path
+                                + " - " + (fr.getMessage() != null ? fr.getMessage() : "unknown error"));
                         failed++;
                     }
                 } else {
-                    AppLogger.warning("Failed to securely delete recycle bin entry: " + path
-                            + " - " + (result.getMessage() != null ? result.getMessage() : "unknown error"));
-                    failed++;
+                    ShredderResult result = secureDelete(path, passCount, true);
+                    if (result.isDeleted()) {
+                        filesDeleted++;
+                        // Reliability fix: deleting $R data directly leaves the $I metadata
+                        // orphaned (ghost entries in Explorer). Remove the sibling $I file
+                        // (plain delete — tiny metadata, no shred needed) after success.
+                        deleteSiblingRecycleMetadata(path);
+                    } else if (result.isScheduledForReboot()) {
+                        try {
+                            ShredderResult sched = scheduleForReboot(path);
+                            if (sched.isSuccess()) {
+                                scheduledForReboot.add(path);
+                            } else {
+                                AppLogger.warning("Failed to schedule recycle bin entry for reboot: " + path + " - " + sched.getMessage());
+                                failed++;
+                            }
+                        } catch (Exception se) {
+                            AppLogger.error("Failed to schedule reboot delete for: " + path, se);
+                            failed++;
+                        }
+                    } else {
+                        AppLogger.warning("Failed to securely delete recycle bin entry: " + path
+                                + " - " + (result.getMessage() != null ? result.getMessage() : "unknown error"));
+                        failed++;
+                    }
                 }
             } catch (Exception e) {
                 String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
@@ -373,11 +531,12 @@ public class ShredderService {
             return new FolderDeleteResult(false, "Recycle Bin wipe cancelled by user.",
                     filesDeleted, foldersDeleted, scheduledForReboot);
         }
-        boolean anyHandled = filesDeleted > 0 || !scheduledForReboot.isEmpty();
+        boolean anyHandled = filesDeleted > 0 || foldersDeleted > 0 || !scheduledForReboot.isEmpty();
         boolean success = anyHandled && failed == 0;
         String message;
         if (success) {
-            message = "Recycle Bin wipe: " + filesDeleted + " files securely deleted.";
+            message = "Recycle Bin wipe: " + filesDeleted + " files securely deleted"
+                    + (foldersDeleted > 0 ? ", " + foldersDeleted + " folders removed." : ".");
         } else if (!anyHandled) {
             message = "Recycle Bin wipe failed: no items were deleted"
                     + (failed > 0 ? " (" + failed + " failed)" : "")
@@ -498,12 +657,11 @@ public class ShredderService {
                 cancelPoller.start();
 
                 try {
-                    boolean finished = process.waitFor(3600, TimeUnit.SECONDS);
+                    // No wall-clock kill: HDD free-space wipe of hundreds of GB
+                    // (multi-pass) routinely exceeds 1 hour. Cancel poller + stop
+                    // flag remain the only abort path.
+                    process.waitFor();
                     try { cancelPoller.interrupt(); } catch (Exception ignored) {}
-                    if (!finished) {
-                        process.destroyForcibly();
-                        throw new IOException("Free space wipe timed out for drive " + driveLetter + ".");
-                    }
                 } catch (InterruptedException e) {
                     process.destroyForcibly();
                     try { cancelPoller.interrupt(); } catch (Exception ignored) {}
@@ -529,27 +687,23 @@ public class ShredderService {
                     throw new IOException("Free space wipe produced no completion signal on drive "
                             + driveLetter + ". Aborted to avoid false success.");
                 }
-                WipeProgress terminal = doneSignals.get(doneSignals.size() - 1);
-                String terminalMsg = terminal.getMessage() != null ? terminal.getMessage() : "";
-                String lowerMsg = terminalMsg.toLowerCase();
-                boolean terminalError = lowerMsg.contains("insufficient")
-                        || lowerMsg.contains("not found")
-                        || lowerMsg.contains("drive not found")
-                        || lowerMsg.contains("failed")
-                        || lowerMsg.contains("timed out")
-                        || lowerMsg.contains("no completion")
-                        || (terminal.isDone() && terminal.getPercent() == 0 && terminal.getPass() == 0
-                            && !lowerMsg.contains("wipe completed"));
-                if (terminalError) {
-                    String detail = terminalMsg.isBlank()
-                            ? "unknown error (no completion message)"
-                            : terminalMsg;
+                WipeProgress errorSignal = null;
+                for (WipeProgress p : doneSignals) {
+                    if (isWipeTerminalError(p)) errorSignal = p;
+                }
+                if (errorSignal != null) {
+                    String detail = errorSignal.getMessage() != null && !errorSignal.getMessage().isBlank()
+                            ? errorSignal.getMessage() : "unknown error (no completion message)";
                     driveFailures.add(driveLetter + ": " + detail);
-                    // Fail fast for single-drive wipes; for multi-drive continue so
-                    // other drives still get wiped, then report combined failure below.
                     if (driveLetters.size() <= 1) {
                         throw new IOException("Free space wipe failed on drive " + driveLetter + ": " + detail);
                     }
+                    continue;
+                }
+                WipeProgress terminal = doneSignals.get(doneSignals.size() - 1);
+                String terminalMsg = terminal.getMessage() != null ? terminal.getMessage() : "";
+                String lowerMsg = terminalMsg.toLowerCase();
+                if (lowerMsg.contains("stopped by user")) {
                     continue;
                 }
             }
@@ -576,6 +730,19 @@ public class ShredderService {
         }
         knownTempFiles.clear();
         sweepOrphanedTempFiles();
+    }
+
+    static boolean isWipeTerminalError(WipeProgress p) {
+        if (p == null || !p.isDone()) return false;
+        String m = p.getMessage() != null ? p.getMessage().toLowerCase() : "";
+        if (m.contains("wipe completed")) return false;
+        if (m.contains("stopped by user")) return false;
+        if (m.contains("insufficient") || m.contains("not found") || m.contains("drive not found")
+                || m.contains("failed") || m.contains("timed out") || m.contains("no completion")
+                || m.contains("blocked") || m.contains("ssd")) {
+            return true;
+        }
+        return p.getPercent() == 0 && p.getPass() == 0;
     }
 
     public static void sweepOrphanedTempFiles() {

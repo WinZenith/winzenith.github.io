@@ -130,13 +130,35 @@ public final class BrowserProcessProbe {
     }
 
     private static Snapshot fallbackTasklist() {
-        Set<String> exes = queryTasklistImageNames();
-        boolean ok = lastProbeOk;
-        return new Snapshot(List.of(), false, exes, ok);
+        TasklistOutcome o = queryTasklistImageNames();
+        return new Snapshot(List.of(), false, o.exes, o.ok);
     }
 
-    private static Set<String> queryTasklistImageNames() {
+    static Set<String> parseTasklistImageNames(String output) {
         Set<String> out = new HashSet<>();
+        if (output == null || output.isBlank()) return out;
+        for (String line : output.split("\\R")) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+            if (trimmed.startsWith("\"")) {
+                int end = trimmed.indexOf('"', 1);
+                if (end > 1) out.add(trimmed.substring(1, end).toLowerCase(Locale.ROOT));
+            } else {
+                out.add(trimmed.split("[,\\s]")[0].toLowerCase(Locale.ROOT));
+            }
+        }
+        return out;
+    }
+
+    /** Empty/timeout/failed tasklist is unreliable — never inherit a prior probeOk. */
+    static boolean tasklistProbeOk(String output, boolean timedOut) {
+        return !timedOut && output != null && !output.isBlank();
+    }
+
+    private record TasklistOutcome(Set<String> exes, boolean ok) {
+    }
+
+    private static TasklistOutcome queryTasklistImageNames() {
         Process p = null;
         boolean timedOut = false;
         try {
@@ -154,28 +176,16 @@ public final class BrowserProcessProbe {
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     p.destroyForcibly();
-                    return out;
+                    return new TasklistOutcome(Set.of(), false);
                 }
             }
             String output = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
-            if (output.isEmpty()) return out;
-            for (String line : output.split("\\R")) {
-                String trimmed = line.trim();
-                if (trimmed.isEmpty()) continue;
-                if (trimmed.startsWith("\"")) {
-                    int end = trimmed.indexOf('"', 1);
-                    if (end > 1) out.add(trimmed.substring(1, end).toLowerCase(Locale.ROOT));
-                } else {
-                    out.add(trimmed.split("[,\\s]")[0].toLowerCase(Locale.ROOT));
-                }
+            if (!tasklistProbeOk(output, timedOut)) {
+                return new TasklistOutcome(Set.of(), false);
             }
-            if (!timedOut && !out.isEmpty()) {
-                lastProbeOk = true;
-            } else if (timedOut) {
-                lastProbeOk = false;
-            }
+            return new TasklistOutcome(parseTasklistImageNames(output), true);
         } catch (Exception ignored) {
-            lastProbeOk = false;
+            return new TasklistOutcome(Set.of(), false);
         } finally {
             if (p != null) {
                 try {
@@ -188,6 +198,5 @@ public final class BrowserProcessProbe {
                 }
             }
         }
-        return out;
     }
 }

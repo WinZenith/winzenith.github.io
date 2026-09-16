@@ -6,6 +6,7 @@ import com.sbtools.util.JsonMapper;
 import com.sbtools.util.PowerShellScripts;
 import com.sbtools.util.ProcessResult;
 import com.sbtools.util.ProcessRunner;
+import com.sbtools.util.VersionCompare;
 import com.sbtools.util.WindowsUpdateInstallResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import javafx.application.Platform;
@@ -316,15 +317,15 @@ public class SoftwareUpdateService {
                     AppLogger.warning("Skipping winget entry with missing id: name=" + name + " available=" + available);
                     continue;
                 }
-                // winget ids never contain whitespace: one inside means the line was sliced
-                // with wrong column positions (localized header, wrapped prose) — skip it
-                // instead of queuing an uninstallable phantom row.
-                if (id.matches(".*\\s.*")) continue;
+                // winget ids never contain whitespace or shell metacharacters: those
+                // mean the line was sliced with wrong column positions — skip instead
+                // of queuing an uninstallable phantom row (install also rejects these).
+                if (!isSafeWingetPackageId(id)) continue;
                 // Summary/note lines that survive to here (localized "N upgrades available"
                 // etc.) carry no version digits in either version field — real rows always do.
                 if (!version.matches(".*\\d.*") && !available.matches(".*\\d.*")) continue;
                 if (name == null || name.isBlank()) name = id;
-                if (!available.equals(version)) {
+                if (VersionCompare.isOlder(version, available)) {
                     out.add(new SoftwareUpdateEntry(id, name, version, available));
                 }
             } catch (Exception ignored) {
@@ -541,9 +542,13 @@ public class SoftwareUpdateService {
                         AppLogger.warning("Skipping JSON entry with missing id: name=" + name);
                         continue;
                     }
+                    if (!isSafeWingetPackageId(id)) {
+                        AppLogger.warning("Skipping JSON entry with malformed id: " + id);
+                        continue;
+                    }
                     if (name == null || name.isBlank()) name = id;
-                    // Some winget JSON returns Available == Version when no update; filter
-                    if (!available.equals(version)) {
+                    // Equal spellings ("1.0" vs "1.0.0") and downgrades are not updates.
+                    if (VersionCompare.isOlder(version, available)) {
                         results.add(new SoftwareUpdateEntry(id, name, version, available, "winget", null, sizeBytes));
                     }
                 }
@@ -636,24 +641,14 @@ public class SoftwareUpdateService {
                         }
                         if (!containsToken && !name.isBlank()) {
                             String[] nameWords = name.split("\\s+");
-                            // Only count meaningful words (4+ chars) and require higher bar
-                            long matchedWords = java.util.Arrays.stream(nameWords)
-                                    .map(w -> w.replace("-", "").replace("_", ""))
-                                    .filter(w -> w.length() >= 4 && fileName.contains(w))
-                                    .count();
-                            int required = nameWords.length == 1 ? 1 : 2;
-                            // For single-word packages, require longer name to be distinctive
-                            if (nameWords.length == 1) {
-                                if (nameWords[0].length() >= 6 && fileName.contains(nameWords[0].replace("-", "").replace("_", ""))) {
-                                    // Still require idToken hint for single-word to reduce false positives
-                                    // If idToken not matched, be more conservative: need 6+ char word
-                                    containsToken = true;
-                                    // If name is very generic (e.g., "Code", "Zoom", "Slack" len 4-5), require additional signal:
-                                    // check that fileName also contains version-like pattern or is under winget cache (already ensured)
-                                    // For Downloads root, we already require 6+ chars, so "code" (4) won't match.
-                                }
-                            } else {
-                                if (matchedWords >= required) {
+                            // Single-word names (Zoom, Slack, ...) need the idToken hit above.
+                            // Name-only match is too generic even at 6+ chars.
+                            if (nameWords.length >= 2) {
+                                long matchedWords = java.util.Arrays.stream(nameWords)
+                                        .map(w -> w.replace("-", "").replace("_", ""))
+                                        .filter(w -> w.length() >= 4 && fileName.contains(w))
+                                        .count();
+                                if (matchedWords >= 2) {
                                     containsToken = true;
                                 }
                             }
@@ -847,6 +842,10 @@ public class SoftwareUpdateService {
         if (updateId == null || updateId.isBlank()) {
             throw new IOException("Missing Windows Update identifier; cannot install");
         }
+        // Flows into wu-install.ps1 UpdateID='…': reject quotes/metacharacters (same guard as drivers).
+        if (!isSafeWindowsUpdateId(updateId)) {
+            throw new IOException("Windows Update install blocked: malformed update ID");
+        }
         Path script = PowerShellScripts.resolve("wu-install.ps1");
         if (cancelled == null && entry == null) {
             return runner.run(ProcessRunner.powershellScriptNonInteractive(script.toString(), updateId), timeoutSeconds);
@@ -982,6 +981,19 @@ public class SoftwareUpdateService {
     public static boolean isRebootExitCode(int exitCode) {
         return exitCode == ProcessResult.MSI_SUCCESS_REBOOT_REQUIRED
                 || exitCode == ProcessResult.MSI_SUCCESS_REBOOT_INITIATED;
+    }
+
+    /** GUID-shaped UpdateID for WUA criteria; quotes/spaces would break or broaden the search. */
+    static boolean isSafeWindowsUpdateId(String updateId) {
+        return updateId != null && updateId.matches("^[\\w\\{\\}-]+$");
+    }
+
+    /**
+     * Winget {@code --id} values (Publisher.App, plus {@code +} in VCRedist ids).
+     * Rejects whitespace and shell metacharacters before {@code cmd.exe /c} fallback.
+     */
+    static boolean isSafeWingetPackageId(String packageId) {
+        return packageId != null && packageId.matches("^[\\w.+-]+$");
     }
 
     /**
@@ -1257,6 +1269,7 @@ public class SoftwareUpdateService {
         }
 
         // Warm the shared in-memory cache only on clean, complete, non-cancelled scans.
+        // Empty success invalidates so a later failed scan cannot resurrect stale rows.
         // Partial (cancelled/timed-out/error) results must never poison it — the ViewModel
         // stale-fallback explicitly labels cached data, so only full successes qualify here.
         try {
@@ -1265,8 +1278,14 @@ public class SoftwareUpdateService {
             boolean wuOk = wuFuture.isDone() && !wuFuture.isCancelled() && !wuFuture.isCompletedExceptionally();
             boolean hasErrors = (lastWingetError != null && !lastWingetError.isBlank())
                     || (lastWindowsUpdateError != null && !lastWindowsUpdateError.isBlank());
-            if (!userCancelled && wingetOk && wuOk && !hasErrors && !allUpdates.isEmpty()) {
-                SoftwareUpdateScanCache.put(allUpdates, lastWingetError, lastWindowsUpdateError);
+            if (!userCancelled && wingetOk && wuOk && !hasErrors) {
+                if (allUpdates.isEmpty()) {
+                    // Clean "up to date" must drop the previous snapshot, otherwise a
+                    // later failed scan resurrects stale available rows for 5 minutes.
+                    SoftwareUpdateScanCache.invalidate();
+                } else {
+                    SoftwareUpdateScanCache.put(allUpdates, lastWingetError, lastWindowsUpdateError);
+                }
             }
         } catch (Exception ignored) {}
 
@@ -1301,6 +1320,9 @@ public class SoftwareUpdateService {
             throws IOException, CancellationException {
         if (packageId == null || packageId.isBlank()) {
             throw new IOException("Missing package identifier; cannot run winget upgrade");
+        }
+        if (!isSafeWingetPackageId(packageId)) {
+            throw new IOException("winget upgrade blocked: malformed package ID");
         }
         // Never pass --force: it overrides winget hash/applicability safeguards and turns
         // phantom same-version rows into forced reinstalls. --exact keeps --id precise,

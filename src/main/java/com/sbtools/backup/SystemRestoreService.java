@@ -48,12 +48,13 @@ public class SystemRestoreService {
             if (err.isBlank() && !r.stderr().isBlank()) err = r.stderr().trim();
             if (err.isBlank() && !r.stdout().isBlank() && !scriptSuccess) err = r.combinedOutput();
             if (!scriptSuccess && err.isBlank()) err = "unknown error";
-            if (scriptSuccess) {
-                AppLogger.info("System restore point created: " + description);
+            RestorePointResult coerced = coerceVerified(scriptSuccess, seq, err);
+            if (coerced.success()) {
+                AppLogger.info("System restore point created: " + description + " (seq=" + coerced.sequenceNumber() + ")");
             } else {
-                AppLogger.warning("System restore point creation failed: " + (err.isBlank() ? r.combinedOutput() : err));
+                AppLogger.warning("System restore point creation failed: " + (coerced.error().isBlank() ? r.combinedOutput() : coerced.error()));
             }
-            return new RestorePointResult(scriptSuccess, seq, err);
+            return coerced;
         } catch (java.util.concurrent.CancellationException ce) {
             throw ce;
         } catch (Exception e) {
@@ -65,6 +66,22 @@ public class SystemRestoreService {
             AppLogger.warning("Failed to create restore point: " + msg);
             return new RestorePointResult(false, -1, msg);
         }
+    }
+
+    /**
+     * Checkpoint-Computer can return without throwing while listing finds no
+     * new point (seq=-1). Callers treat success as a safety net, so unverified
+     * creates must not report success.
+     */
+    static RestorePointResult coerceVerified(boolean success, int sequenceNumber, String error) {
+        String err = error == null ? "" : error;
+        if (success && sequenceNumber < 0) {
+            return new RestorePointResult(false, sequenceNumber,
+                    err.isBlank()
+                            ? "UNVERIFIED: Windows accepted the checkpoint but no new restore point was listed."
+                            : err);
+        }
+        return new RestorePointResult(success, sequenceNumber, err);
     }
 
     public List<SystemRestoreRow> listRestorePoints() throws IOException {

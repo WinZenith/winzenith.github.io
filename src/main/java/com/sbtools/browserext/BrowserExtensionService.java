@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -509,8 +510,9 @@ public class BrowserExtensionService {
             if (extId == null || extId.isBlank()) return false;
             // Policy/default/system extensions are re-enforced by the browser:
             // refuse instead of reporting false success.
-            if (ext.isManaged()) {
-                AppLogger.warning("Refusing toggle of managed extension " + ext.getBrowser() + ":"
+            if (ext.isManaged() || ext.isOrphaned()) {
+                AppLogger.warning("Refusing toggle of " + (ext.isOrphaned() ? "orphaned" : "managed")
+                        + " extension " + ext.getBrowser() + ":"
                         + extId + " (source=" + ext.getInstallSource() + ")");
                 return false;
             }
@@ -520,7 +522,7 @@ public class BrowserExtensionService {
             String pp = ext.getProfilePath();
             if (pp != null && !pp.isBlank()) {
                 profileDir = Paths.get(pp);
-                if (!Files.exists(profileDir)) return false;
+                if (!Files.isDirectory(profileDir)) return false;
             } else {
                 // Legacy fallback: walk up from path until a profile marker is
                 // found (Preferences / Secure Preferences / extensions.json).
@@ -555,68 +557,10 @@ public class BrowserExtensionService {
                     }
                     cursor = cursor.getParent();
                 }
-                if (profileDir == null || !Files.exists(profileDir)) return false;
+                if (profileDir == null || !Files.isDirectory(profileDir)) return false;
             }
 
-            Path script = PowerShellScripts.resolve("browser-extensions.ps1");
-            List<String> cmd;
-            String toggleBrowser = ext.getBrowser() != null ? ext.getBrowser() : "";
-            try {
-                cmd = ProcessRunner.powershellScript(script.toString(),
-                        "-Action", "Toggle",
-                        "-Browser", toggleBrowser,
-                        "-ProfilePath", profileDir.toString(),
-                        "-ExtId", extId,
-                        "-Enable", String.valueOf(enable));
-            } catch (Exception e) {
-                cmd = ProcessRunner.bestPowerShellScript(script.toString(),
-                        "-Action", "Toggle",
-                        "-Browser", toggleBrowser,
-                        "-ProfilePath", profileDir.toString(),
-                        "-ExtId", extId,
-                        "-Enable", String.valueOf(enable));
-            }
-            ProcessResult pr;
-            try {
-                pr = new ProcessRunner(30).run(cmd, 30, cancelled);
-            } catch (java.util.concurrent.CancellationException ce) {
-                throw ce;
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return false;
-            } catch (IOException ioe) {
-                if (cancelled != null && cancelled.get()) return false;
-                if (cmd.get(0).equalsIgnoreCase("powershell.exe")) {
-                    cmd = ProcessRunner.pwshScript(script.toString(),
-                            "-Action", "Toggle",
-                            "-Browser", toggleBrowser,
-                            "-ProfilePath", profileDir.toString(),
-                            "-ExtId", extId,
-                            "-Enable", String.valueOf(enable));
-                    try {
-                        pr = new ProcessRunner(30).run(cmd, 30, cancelled);
-                    } catch (InterruptedException ie2) {
-                        Thread.currentThread().interrupt();
-                        return false;
-                    }
-                } else {
-                    throw ioe;
-                }
-            }
-            if (cancelled != null && cancelled.get()) return false;
-            String stdout = pr.stdout().trim();
-            // Handle BOM
-            if (stdout.startsWith("\uFEFF")) stdout = stdout.substring(1);
-            boolean success = "true".equalsIgnoreCase(stdout);
-            if (!success) {
-                String err = pr.stderr().trim();
-                AppLogger.warning("Toggle PowerShell returned: '" + stdout + "' stderr=" + err);
-                // Surface lock error specifically
-                if (err.toLowerCase().contains("locked") || err.toLowerCase().contains("browser may be running")) {
-                    AppLogger.warning("Toggle blocked by file lock (browser running) for " + ext.getBrowser() + ":" + extId);
-                }
-            }
-            return success;
+            return BrowserProfileToggle.toggle(profileDir, extId, enable, cancelled);
         } catch (java.util.concurrent.CancellationException ce) {
             AppLogger.info("Toggle cancelled for " + ext.getExtensionId());
             return false;
@@ -702,8 +646,108 @@ public class BrowserExtensionService {
         return "";
     }
 
+    /** {@code browser|profilePath|extensionId} — unique across profiles. */
+    public static String ignoredKey(BrowserExtensionRow row) {
+        if (row == null) return "";
+        String profile = row.getProfilePath() != null ? row.getProfilePath() : "";
+        return nvl(row.getBrowser()) + "|" + profile + "|" + nvl(row.getExtensionId());
+    }
+
+    /** Legacy {@code browser:extensionId} still accepted when reading settings. */
+    public static String legacyIgnoredKey(BrowserExtensionRow row) {
+        if (row == null) return "";
+        return nvl(row.getBrowser()) + ":" + nvl(row.getExtensionId());
+    }
+
+    public static boolean matchesIgnoredId(BrowserExtensionRow row, String id) {
+        return row != null && id != null && !id.isBlank()
+                && (id.equals(ignoredKey(row)) || id.equals(legacyIgnoredKey(row)));
+    }
+
     /**
-     * Lists Preferences/extensions.json backups created by the PS toggle
+     * Persist ignored IDs without dropping entries whose rows are not in the
+     * current scan. Loaded rows win: ignored → qualified key, un-ignored → drop.
+     */
+    public static List<String> mergeIgnoredIds(List<String> persisted, List<BrowserExtensionRow> rows) {
+        List<BrowserExtensionRow> safeRows = rows == null ? List.of() : rows;
+        LinkedHashSet<String> out = new LinkedHashSet<>();
+        if (persisted != null) {
+            for (String id : persisted) {
+                if (id == null || id.isBlank()) continue;
+                BrowserExtensionRow match = null;
+                for (BrowserExtensionRow row : safeRows) {
+                    if (matchesIgnoredId(row, id)) {
+                        match = row;
+                        break;
+                    }
+                }
+                if (match == null) {
+                    out.add(id);
+                } else if (match.isIgnored()) {
+                    out.add(ignoredKey(match));
+                }
+            }
+        }
+        for (BrowserExtensionRow row : safeRows) {
+            if (row != null && row.isIgnored()) out.add(ignoredKey(row));
+        }
+        return List.copyOf(out);
+    }
+
+    /** Persisted ignore IDs that do not match any loaded row (still shown in Manage Ignored). */
+    public static List<String> unmatchedIgnoredIds(List<String> persisted, List<BrowserExtensionRow> rows) {
+        if (persisted == null || persisted.isEmpty()) return List.of();
+        List<String> out = new ArrayList<>();
+        for (String id : persisted) {
+            if (id == null || id.isBlank()) continue;
+            boolean matched = false;
+            if (rows != null) {
+                for (BrowserExtensionRow row : rows) {
+                    if (matchesIgnoredId(row, id)) {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if (!matched) out.add(id);
+        }
+        return List.copyOf(out);
+    }
+
+    /** One-line label for a persisted ignore key when the row is not loaded. */
+    public static String describeIgnoredId(String id) {
+        if (id == null || id.isBlank()) return "";
+        String[] pipe = id.split("\\|", 3);
+        if (pipe.length == 3) {
+            String browser = pipe[0];
+            String profile = pipe[1];
+            String extId = pipe[2];
+            String leaf = profile;
+            try {
+                if (profile != null && !profile.isBlank()) {
+                    java.nio.file.Path p = Paths.get(profile);
+                    if (p.getFileName() != null) leaf = p.getFileName().toString();
+                }
+            } catch (Exception ignored) {
+            }
+            if (leaf != null && !leaf.isBlank()) {
+                return "• " + extId + " (" + browser + " — " + leaf + ")";
+            }
+            return "• " + extId + " (" + browser + ")";
+        }
+        int colon = id.indexOf(':');
+        if (colon > 0 && colon < id.length() - 1) {
+            return "• " + id.substring(colon + 1) + " (" + id.substring(0, colon) + ")";
+        }
+        return "• " + id;
+    }
+
+    private static String nvl(String s) {
+        return s == null ? "" : s;
+    }
+
+    /**
+     * Lists Preferences/extensions.json backups created during enable/disable
      * ({@code Preferences.bak.*}, {@code Secure Preferences.bak.*},
      * {@code extensions.json.bak.*}) newest-first. Returns empty list when the
      * profile dir is missing — never throws.
@@ -740,30 +784,84 @@ public class BrowserExtensionService {
      */
     public static boolean restoreProfileBackup(Path backupFile) {
         if (backupFile == null || !Files.exists(backupFile)) return false;
+        if (!BrowserProfileToggle.beginMutation()) {
+            AppLogger.warning("Refusing restore: another browser-profile write is in progress");
+            return false;
+        }
+        Path live = null;
+        Path tmp = null;
+        Path undo = null;
+        boolean success = false;
         try {
             String name = backupFile.getFileName().toString();
             String liveName = name;
             int bakIdx = name.indexOf(".bak.");
             if (bakIdx > 0) liveName = name.substring(0, bakIdx);
-            Path live = backupFile.getParent().resolve(liveName);
-            Path tmp = live.resolveSibling("." + liveName + ".restore.tmp");
+            if (!BrowserProfileToggle.isAllowedLiveName(liveName)) {
+                AppLogger.warning("Refusing restore of unexpected live file: " + liveName);
+                return false;
+            }
+            if (!BrowserProfileToggle.backupLooksValid(backupFile, liveName)) {
+                AppLogger.warning("Refusing restore of invalid/empty JSON backup: " + backupFile);
+                return false;
+            }
+            Path parent = backupFile.getParent();
+            if (parent == null || !Files.isDirectory(parent)) return false;
+            live = parent.resolve(liveName);
+            if (Files.isRegularFile(live) && BrowserProfileToggle.isLocked(live)) {
+                AppLogger.warning("Refusing restore: live file is locked: " + live);
+                return false;
+            }
+            if (Files.isRegularFile(live)) {
+                undo = live.resolveSibling("." + liveName + ".undo.tmp");
+                Files.copy(live, undo, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            tmp = live.resolveSibling("." + liveName + ".restore.tmp");
             Files.copy(backupFile, tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             try {
                 Files.move(tmp, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
                         java.nio.file.StandardCopyOption.ATOMIC_MOVE);
             } catch (java.nio.file.AtomicMoveNotSupportedException e) {
                 Files.move(tmp, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            } finally {
-                try {
-                    Files.deleteIfExists(tmp);
-                } catch (Exception ignored) {
-                }
+            }
+            if (!BrowserProfileToggle.backupLooksValid(live, liveName)) {
+                AppLogger.warning("Restore verification failed for " + live);
+                restoreUndo(undo, live);
+                return false;
             }
             AppLogger.info("Restored browser profile backup: " + backupFile + " -> " + live);
+            success = true;
             return true;
         } catch (Exception e) {
             AppLogger.warning("Failed to restore profile backup: " + e.getMessage());
+            restoreUndo(undo, live);
             return false;
+        } finally {
+            try {
+                if (tmp != null) Files.deleteIfExists(tmp);
+            } catch (Exception ignored) {
+            }
+            if (success) {
+                try {
+                    if (undo != null) Files.deleteIfExists(undo);
+                } catch (Exception ignored) {
+                }
+            }
+            BrowserProfileToggle.endMutation();
+        }
+    }
+
+    private static void restoreUndo(Path undo, Path live) {
+        if (undo == null || live == null || !Files.isRegularFile(undo)) return;
+        try {
+            try {
+                Files.move(undo, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(undo, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to put original live file back after restore failure: " + e.getMessage());
         }
     }
 }

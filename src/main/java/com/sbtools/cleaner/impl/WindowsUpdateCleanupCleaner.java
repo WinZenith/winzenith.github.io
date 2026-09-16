@@ -5,7 +5,6 @@ import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 import com.sbtools.util.AppLogger;
-import com.sbtools.util.ProcessManager;
 import com.sbtools.util.WindowsServicingSafety;
 import com.sbtools.util.WindowsVersionUtil;
 
@@ -46,20 +45,26 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
             row.setSizeOrCountText("Skipped (pending system restart: " + reasons + ")");
             return;
         }
+        if (CleanerUtils.isWindowsUpdateBusy()) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("Skipped (Windows Update / DISM already active)");
+            return;
+        }
         long totalSize = 0;
         int itemCount = 0;
         Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image", "/AnalyzeComponentStore");
             pb.redirectErrorStream(true);
-            p = ProcessManager.start(pb);
-            // Cancellable wait: poll in 1s slices so Cancel promptly kills DISM
-            // instead of blocking the worker for the full 120s budget.
+            p = startDismUntracked(pb);
+            // Cancellable wait: poll in 1s slices so Cancel unblocks promptly.
+            // Never kill DISM — that can leave CBS servicing corrupted.
             boolean finished = false;
             long deadline = System.currentTimeMillis() + 120_000L;
             while (System.currentTimeMillis() < deadline) {
                 if (token != null && token.isCancelled()) {
-                    p.destroyForcibly();
+                    AppLogger.info("DISM analyze cancel requested — not killing");
                     row.setTotalBytes(0);
                     row.setItemCount(0);
                     row.setSizeOrCountText("Canceled");
@@ -71,7 +76,7 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                     if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    p.destroyForcibly();
+                    AppLogger.info("DISM analyze interrupted — not killing");
                     row.setSizeOrCountText("Canceled");
                     row.setScanStatus(CleanupRow.ScanStatus.ERROR);
                     row.setErrorMessage("Scan canceled by user");
@@ -79,7 +84,7 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 }
             }
             if (!finished) {
-                p.destroyForcibly();
+                AppLogger.warning("DISM analyze timed out — not killing");
                 row.setTotalBytes(0);
                 row.setItemCount(0);
                 row.setSizeOrCountText("Timed out");
@@ -108,9 +113,7 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 }
             }
         } catch (Exception ignored) {
-            if (p != null) {
-                try { p.destroyForcibly(); } catch (Exception ignored2) {}
-            }
+            AppLogger.warning("DISM analyze failed; leaving process running if still alive");
         }
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
@@ -140,29 +143,43 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                     + String.join("; ", WindowsServicingSafety.getPendingReasons()) + ")");
             return 0;
         }
+        if (CleanerUtils.isWindowsUpdateBusy()) {
+            AppLogger.info("Skipping DISM component cleanup: Windows Update / DISM already active");
+            return 0;
+        }
         long cleaned = 0;
         Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image", "/StartComponentCleanup");
             pb.redirectErrorStream(true);
-            p = ProcessManager.start(pb);
+            p = startDismUntracked(pb);
             boolean finished = false;
+            boolean cancelRequested = false;
             long deadline = System.currentTimeMillis() + 900_000L;
             while (System.currentTimeMillis() < deadline) {
                 if (token != null && token.isCancelled()) {
-                    AppLogger.info("DISM component cleanup canceled by user");
-                    p.destroyForcibly();
-                    throw new java.util.concurrent.CancellationException("DISM cleanup canceled");
+                    cancelRequested = true;
+                    AppLogger.info("DISM component cleanup cancel requested — waiting for process to finish (not killing)");
+                    break;
                 }
                 try {
                     if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    p.destroyForcibly();
-                    throw new java.util.concurrent.CancellationException("DISM cleanup canceled");
+                    cancelRequested = true;
+                    AppLogger.info("DISM component cleanup interrupted — waiting for process to finish (not killing)");
+                    break;
                 }
             }
-            if (finished) {
+            if (!finished) {
+                if (cancelRequested) {
+                    waitForProcessNoKill(p);
+                    throw new java.util.concurrent.CancellationException(
+                            "DISM cleanup canceled after component cleanup finished");
+                }
+                AppLogger.warning("DISM cleanup timed out after ~15 minutes — waiting for process (not killing)");
+                waitForProcessNoKill(p);
+            } else {
                 if (token != null && token.isCancelled()) {
                     AppLogger.info("DISM cleanup canceled after process finished");
                     return 0L;
@@ -176,18 +193,33 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                     // DISM output, shared singleton across parallel scans).
                     cleaned = parseCleanedBytes(output);
                 }
-            } else {
-                AppLogger.warning("DISM cleanup timed out after ~15 minutes");
-                p.destroyForcibly();
             }
         } catch (java.util.concurrent.CancellationException ce) {
-            if (p != null) try { p.destroyForcibly(); } catch (Exception ignored) {}
             throw ce;
         } catch (Exception e) {
             if (e instanceof java.util.concurrent.CancellationException) throw (java.util.concurrent.CancellationException) e;
             AppLogger.warning("DISM cleanup failed: " + e.getMessage());
         }
         return cleaned;
+    }
+
+    /**
+     * DISM must not be registered with ProcessManager: app exit / shutdown
+     * would destroyForcibly it and can corrupt CBS.
+     */
+    private static Process startDismUntracked(ProcessBuilder pb) throws java.io.IOException {
+        return pb.start();
+    }
+
+    private static void waitForProcessNoKill(Process p) {
+        if (p == null) return;
+        while (p.isAlive()) {
+            try {
+                p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.interrupted();
+            }
+        }
     }
 
     private String parseSizeFromLine(String line) {

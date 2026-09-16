@@ -2,7 +2,7 @@ param([string]$TargetHost = "", [int]$MaxHops = 30)
 
 try {
     if (-not $TargetHost) {
-        Write-Output '[]'
+        ConvertTo-Json -Compress @{ error = "Host parameter is required" }
         exit 1
     }
 
@@ -58,5 +58,6 @@ try {
 
     ConvertTo-Json -Compress @($hops) -Depth 3
 } catch {
-    Write-Output '[]'
+    ConvertTo-Json -Compress @{ error = $_.Exception.Message }
+    exit 1
 }

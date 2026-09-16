@@ -185,3 +185,241 @@ INFO: Dropping duplicate software update entry for id=abc
 Sep 13, 2026 8:07:58 PM com.sbtools.util.AppLogger warning
 WARNING: Dashboard snapshot load failed: Unexpected character ('n' (code 110)): was expecting double-quote to start field name
  at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 2]
+Sep 14, 2026 7:48:23 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 7:48:23 AM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: entry x has no lastVerified — using it with warning
+Sep 14, 2026 7:48:23 AM com.sbtools.util.AppLogger info
+INFO: DriverCatalogDatabase: Loaded 99 catalog entries (bundled)
+Sep 14, 2026 6:41:47 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 6:41:47 PM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: entry x has no lastVerified — treating as stale
+Sep 14, 2026 6:41:48 PM com.sbtools.util.AppLogger info
+INFO: DriverCatalogDatabase: Loaded 95 catalog entries (bundled)
+Sep 14, 2026 6:41:48 PM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: dropped 1 duplicate catalog id(s) (first wins)
+Sep 14, 2026 6:43:39 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 6:43:39 PM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: entry x has no lastVerified — treating as stale
+Sep 14, 2026 6:43:39 PM com.sbtools.util.AppLogger info
+INFO: DriverCatalogDatabase: Loaded 95 catalog entries (bundled)
+Sep 14, 2026 6:43:39 PM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: dropped 1 duplicate catalog id(s) (first wins)
+Sep 14, 2026 6:45:44 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 6:45:44 PM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: entry x has no lastVerified — treating as stale
+Sep 14, 2026 6:45:44 PM com.sbtools.util.AppLogger info
+INFO: DriverCatalogDatabase: Loaded 95 catalog entries (bundled)
+Sep 14, 2026 6:45:44 PM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: dropped 1 duplicate catalog id(s) (first wins)
+Sep 14, 2026 6:55:28 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 6:55:28 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping unsafe delete directory: C:\Users\durot\AppData\Local\Temp\wz-junc-clean4552667337923768921\cache
+Sep 14, 2026 6:56:09 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 6:56:09 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping unsafe delete directory: C:\Users\durot\AppData\Local\Temp\wz-junc-clean14594280904051035080\cache
+Sep 14, 2026 6:57:37 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 6:57:37 PM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: entry x has no lastVerified — treating as stale
+Sep 14, 2026 6:57:37 PM com.sbtools.util.AppLogger info
+INFO: DriverCatalogDatabase: Loaded 93 catalog entries (bundled)
+Sep 14, 2026 6:57:37 PM com.sbtools.util.AppLogger warning
+WARNING: DriverCatalogDatabase: dropped 1 duplicate catalog id(s) (first wins)
+Sep 14, 2026 7:43:36 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 7:43:36 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping delete through junction/symlink parent: C:\Users\durot\AppData\Local\Temp\wz-del-junc7261441724001905690\link\Login Data
+Sep 14, 2026 8:12:40 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 8:12:40 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping untrusted Recycle Bin path (outside $Recycle.Bin or link): C:\Users\Public\Documents\secret.txt
+Sep 14, 2026 8:23:53 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 8:23:53 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-rollback18194235476755883592\Preferences: state mismatch after write. Restoring backup.
+Sep 14, 2026 8:23:54 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-ff572624364122451731\extensions.json: state mismatch after write. Restoring backup.
+Sep 14, 2026 8:23:54 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of unexpected live file: hosts
+Sep 14, 2026 8:24:56 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 14, 2026 8:24:56 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-rollback1003288204316532567\Preferences: state mismatch after write. Restoring backup.
+Sep 14, 2026 8:24:56 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-ff1838732724529973000\extensions.json: state mismatch after write. Restoring backup.
+Sep 14, 2026 8:24:56 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of unexpected live file: hosts
+Sep 15, 2026 5:35:07 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 15, 2026 5:35:07 PM com.sbtools.util.AppLogger warning
+WARNING: Skipping untrusted Recycle Bin path (outside $Recycle.Bin or link): C:\Users\Public\Documents\secret.txt
+Sep 15, 2026 5:35:34 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 15, 2026 5:35:34 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-rollback12596995538764620483\Preferences: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:35:34 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-ff9201214796331788611\extensions.json: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:35:35 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of unexpected live file: hosts
+Sep 15, 2026 5:35:35 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad16235318650092667232\Preferences.bak.1
+Sep 15, 2026 5:35:35 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad16235318650092667232\Preferences.bak.2
+Sep 15, 2026 5:35:35 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad16235318650092667232\extensions.json.bak.1
+Sep 15, 2026 5:35:35 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-ok3486180877131897721\Preferences.bak.ok -> C:\Users\durot\AppData\Local\Temp\bxt-restore-ok3486180877131897721\Preferences
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-rollback4354494410641285862\Preferences: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-ff16000210376125947631\extensions.json: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of unexpected live file: hosts
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad9755803094763841419\Preferences.bak.1
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad9755803094763841419\Preferences.bak.2
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad9755803094763841419\Preferences.bak.3
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad9755803094763841419\extensions.json.bak.1
+Sep 15, 2026 5:36:31 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-ok7312914571963756523\Preferences.bak.ok -> C:\Users\durot\AppData\Local\Temp\bxt-restore-ok7312914571963756523\Preferences
+Sep 15, 2026 5:43:20 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 15, 2026 5:43:20 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-rollback18380715005712060407\Preferences: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:43:20 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-ff7500832337189103546\extensions.json: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:43:21 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of unexpected live file: hosts
+Sep 15, 2026 5:43:21 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad2450167503501738297\Preferences.bak.1
+Sep 15, 2026 5:43:21 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad2450167503501738297\Preferences.bak.2
+Sep 15, 2026 5:43:21 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad2450167503501738297\Preferences.bak.3
+Sep 15, 2026 5:43:21 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad2450167503501738297\extensions.json.bak.1
+Sep 15, 2026 5:43:21 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-ok5757150050912200733\Preferences.bak.ok -> C:\Users\durot\AppData\Local\Temp\bxt-restore-ok5757150050912200733\Preferences
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-rollback3170812259115887440\Preferences: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-ff5240057944450625787\extensions.json: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of unexpected live file: hosts
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad8242828489100161397\Preferences.bak.1
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad8242828489100161397\Preferences.bak.2
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad8242828489100161397\Preferences.bak.3
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad8242828489100161397\extensions.json.bak.1
+Sep 15, 2026 5:49:07 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-ok2604133917456818158\Preferences.bak.ok -> C:\Users\durot\AppData\Local\Temp\bxt-restore-ok2604133917456818158\Preferences
+Sep 15, 2026 5:49:08 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore: live file is locked: C:\Users\durot\AppData\Local\Temp\bxt-restore-lock984835813453048613\Preferences
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-rollback12304523175660206270\Preferences: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger warning
+WARNING: Write verification failed for C:\Users\durot\AppData\Local\Temp\bxt-ff14590358843414693009\extensions.json: state mismatch after write. Restoring backup.
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of unexpected live file: hosts
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad2742453939607862283\Preferences.bak.1
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad2742453939607862283\Preferences.bak.2
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad2742453939607862283\Preferences.bak.3
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of invalid/empty JSON backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-bad2742453939607862283\extensions.json.bak.1
+Sep 15, 2026 5:49:42 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup: C:\Users\durot\AppData\Local\Temp\bxt-restore-ok12540175073925689478\Preferences.bak.ok -> C:\Users\durot\AppData\Local\Temp\bxt-restore-ok12540175073925689478\Preferences
+Sep 15, 2026 5:49:43 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore: live file is locked: C:\Users\durot\AppData\Local\Temp\bxt-restore-lock14788716683510128588\Preferences
+Sep 15, 2026 9:08:22 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 15, 2026 9:08:22 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing toggle of orphaned extension Chrome:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (source=orphaned)
+Sep 15, 2026 9:08:22 PM com.sbtools.util.AppLogger warning
+WARNING: Extension default-theme@mozilla.org is a system/built-in add-on and cannot be toggled.
+Sep 15, 2026 9:08:22 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing restore of unexpected live file: Cookies
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=20876
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=20876
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=21092
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=21092
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Running: C:\Users\durot\AppData\Local\Microsoft\WindowsApps\winget.exe --version
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=18972
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=18972
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Running: C:\Users\durot\AppData\Local\Microsoft\WindowsApps\winget.exe upgrade --source winget
+Sep 16, 2026 7:57:26 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=21240
+Sep 16, 2026 7:57:28 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=21240
+Sep 16, 2026 7:57:29 PM com.sbtools.util.AppLogger info
+INFO: JVM shutdown hook: terminating tracked processes
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=18900
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=18900
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Running: where.exe winget
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=15668
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Running: C:\Users\durot\AppData\Local\Microsoft\WindowsApps\winget.exe --version
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=15668
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=20220
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=20220
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Running: C:\Users\durot\AppData\Local\Microsoft\WindowsApps\winget.exe upgrade --source winget
+Sep 16, 2026 7:57:42 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=21204
+Sep 16, 2026 7:57:45 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=21204
+Sep 16, 2026 7:57:45 PM com.sbtools.util.AppLogger info
+INFO: Running: powershell.exe -NoProfile -NonInteractive -NoLogo -ExecutionPolicy Bypass -File C:\Users\durot\IdeaProjects\BasicSDriverUpdate\ps-scripts\wu-search-updates.ps1
+Sep 16, 2026 7:57:45 PM com.sbtools.util.AppLogger info
+INFO: Registered process key=19660
+Sep 16, 2026 7:58:01 PM com.sbtools.util.AppLogger info
+INFO: Process exited key=19660
+Sep 16, 2026 7:58:01 PM com.sbtools.util.AppLogger info
+INFO: Found 1 Windows Update(s)
+Sep 16, 2026 7:58:01 PM com.sbtools.util.AppLogger info
+INFO: JVM shutdown hook: terminating tracked processes

@@ -58,19 +58,23 @@ public class OemSynapticsCatalogProvider extends AbstractOemCatalogProvider {
             java.util.regex.Pattern linkPattern = java.util.regex.Pattern.compile(
                     "href\\s*=\\s*\"([^\"]+\\.(?:exe|zip|msi|cab))\"", java.util.regex.Pattern.CASE_INSENSITIVE);
             java.util.regex.Matcher m = linkPattern.matcher(body);
+            java.util.List<String> found = new java.util.ArrayList<>();
             while (m.find()) {
                 String url = m.group(1);
                 if (url.startsWith("//")) url = "https:" + url;
                 else if (url.startsWith("/")) url = "https://www.synaptics.com" + url;
                 String lower = url.toLowerCase();
                 if ((lower.contains("synaptics") || lower.contains("softpaq") || lower.contains("hp.com") || lower.contains("lenovo.com")) && isLikelyStable(url)) {
-                    AppLogger.info("Synaptics: Found download URL: " + url);
-                    return decodeHtmlEntities(url);
+                    found.add(decodeHtmlEntities(url));
                 }
             }
+            String picked = com.sbtools.drivers.DriverInstallTrust.pickBestDownloadUrl(found, driver);
+            if (picked != null) {
+                AppLogger.info("Synaptics: Found download URL: " + picked);
+                return picked;
+            }
         }
-        // Synaptics drivers are often hosted on OEM (HP/Lenovo) – try OEM fallback via Microsoft Update Catalog pattern
-        AppLogger.info("Synaptics: No direct Synaptics-hosted download, will rely on Windows Update or OEM site");
+        AppLogger.info("Synaptics: No device-matching download found, will rely on Windows Update or OEM site");
         return null;
     }
 }

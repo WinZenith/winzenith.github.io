@@ -1,5 +1,8 @@
 package com.sbtools.startup;
 
+import java.util.Locale;
+import java.util.Set;
+
 public final class StartupConstants {
 
     private StartupConstants() {}
@@ -61,6 +64,54 @@ public final class StartupConstants {
 
     public static boolean isWow6432Key(String keyPath) {
         return keyPath != null && keyPath.contains("Wow6432Node");
+    }
+
+    private static final Set<String> RESTORE_RUN_KEYS = Set.of(
+            REG_RUN.toLowerCase(Locale.ROOT),
+            REG_RUN_ONCE.toLowerCase(Locale.ROOT),
+            REG_RUN_DISABLED.toLowerCase(Locale.ROOT),
+            REG_WOW6432_RUN.toLowerCase(Locale.ROOT),
+            REG_WOW6432_RUN_ONCE.toLowerCase(Locale.ROOT),
+            REG_WOW6432_RUN_DISABLED.toLowerCase(Locale.ROOT));
+
+    /**
+     * True only for the Run / RunOnce / RunDisabled keys this app backs up.
+     * Rejects Winlogon, Policies, and {@code ..} traversal.
+     */
+    public static boolean isAllowedRestoreRunKey(String keyPath) {
+        return canonicalizeRestoreRunKey(keyPath) != null;
+    }
+
+    /** Canonical constant for a whitelisted restore key, or null if refused. */
+    public static String canonicalizeRestoreRunKey(String keyPath) {
+        String n = normalizeRegKey(keyPath);
+        if (n.isEmpty() || n.contains("..")) {
+            return null;
+        }
+        String lower = n.toLowerCase(Locale.ROOT);
+        if (!RESTORE_RUN_KEYS.contains(lower)) {
+            return null;
+        }
+        if (REG_WOW6432_RUN.equalsIgnoreCase(n)) return REG_WOW6432_RUN;
+        if (REG_WOW6432_RUN_ONCE.equalsIgnoreCase(n)) return REG_WOW6432_RUN_ONCE;
+        if (REG_WOW6432_RUN_DISABLED.equalsIgnoreCase(n)) return REG_WOW6432_RUN_DISABLED;
+        if (REG_RUN_ONCE.equalsIgnoreCase(n)) return REG_RUN_ONCE;
+        if (REG_RUN_DISABLED.equalsIgnoreCase(n)) return REG_RUN_DISABLED;
+        return REG_RUN;
+    }
+
+    static String normalizeRegKey(String keyPath) {
+        if (keyPath == null || keyPath.isBlank()) {
+            return "";
+        }
+        String s = keyPath.replace('/', '\\').trim();
+        while (s.contains("\\\\")) {
+            s = s.replace("\\\\", "\\");
+        }
+        if (s.startsWith("\\")) {
+            s = s.substring(1);
+        }
+        return s;
     }
 
     public static byte[] enabledBytes() {

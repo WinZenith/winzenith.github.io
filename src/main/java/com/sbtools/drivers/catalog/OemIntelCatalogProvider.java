@@ -142,9 +142,10 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
                 String url = m.group(1);
                 // Gate: the first exe in an OEM search payload can be a BIOS
                 // or utility binary, not the Intel driver (wrong-file
-                // auto-install). Require an OEM/Intel host plus a
-                // wireless/graphics token.
-                if (isPlausibleOemDriverUrl(url, mfr)) {
+                // auto-install). Only Intel-trusted hosts may become a
+                // downloadUrl — install trust would BLOCKED_UNTRUSTED a
+                // Dell/HP/Lenovo URL with source "Intel".
+                if (isPlausibleOemDriverUrl(url)) {
                     AppLogger.info("Intel: Found download URL in OEM JSON response: " + url);
                     return url;
                 }
@@ -155,7 +156,7 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
             m = hrefPattern.matcher(body);
             while (m.find()) {
                 String url = m.group(1);
-                if (isPlausibleOemDriverUrl(url, mfr)) {
+                if (isPlausibleOemDriverUrl(url)) {
                     AppLogger.info("Intel: Found download URL in OEM HTML response: " + url);
                     return url;
                 }
@@ -167,31 +168,16 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
     }
 
     /**
-     * Plausibility gate for OEM-fallback URLs: same-vendor-or-OEM host plus a
-     * wireless/graphics token (and no pre-release marker). The old check
-     * ({@code contains(".exe")}) matched every exe on the page, including
-     * BIOS and utility binaries.
+     * Plausibility gate for OEM-fallback URLs: Intel-trusted host plus a
+     * wireless/graphics token (and no pre-release marker). OEM-host payloads
+     * cannot pass {@code DriverInstallTrust} for source Intel.
      */
-    private boolean isPlausibleOemDriverUrl(String url, SystemManufacturer.Manufacturer mfr) {
+    private boolean isPlausibleOemDriverUrl(String url) {
         if (url == null || url.isBlank()) return false;
-        String lower = url.toLowerCase();
-        boolean hostOk;
-        try {
-            String host = new URI(url).getHost();
-            if (host == null) return false;
-            host = host.toLowerCase();
-            boolean intelHost = host.contains("intel.com");
-            boolean oemHost = switch (mfr) {
-                case LENOVO -> host.contains("lenovo.com") || host.contains("lenovo-images.com");
-                case DELL -> host.contains("dell.com") || host.contains("dellcdn.com") || host.contains("dell-cdn.com");
-                case HP -> host.contains("hp.com") || host.contains("hpe.com");
-                default -> false;
-            };
-            hostOk = intelHost || oemHost;
-        } catch (Exception e) {
+        if (!com.sbtools.drivers.DriverInstallTrust.isTrustedHttpsUrl(url, "Intel")) {
             return false;
         }
-        if (!hostOk) return false;
+        String lower = url.toLowerCase();
         boolean tokenOk = lower.contains("intel") || lower.contains("wifi") || lower.contains("wireless")
                 || lower.contains("bluetooth") || lower.contains("gfx") || lower.contains("graphics")
                 || lower.contains("arc") || lower.contains("iris") || lower.contains("killer")
@@ -257,50 +243,52 @@ public class OemIntelCatalogProvider extends AbstractOemCatalogProvider {
         return null;
     }
 
-    private boolean matchesDriver(InstalledDriver driver, String detectionValue) {
-        if (detectionValue == null || detectionValue.isEmpty()) return false;
+    static boolean matchesDriver(InstalledDriver driver, String detectionValue) {
+        if (driver == null || detectionValue == null || detectionValue.isEmpty()) return false;
 
-        String hwId = driver.hardwareIds() != null ? driver.hardwareIds().toUpperCase() : "";
-        String devId = driver.deviceId() != null ? driver.deviceId().toUpperCase() : "";
-        String dv = detectionValue.toUpperCase();
+        String hwId = driver.hardwareIds() != null ? driver.hardwareIds().toUpperCase(java.util.Locale.ROOT) : "";
+        String devId = driver.deviceId() != null ? driver.deviceId().toUpperCase(java.util.Locale.ROOT) : "";
+        String dv = detectionValue.toUpperCase(java.util.Locale.ROOT);
+        String hwHaystack = hwId + " " + devId;
 
-        if (hwId.contains(dv) || devId.contains(dv)) {
+        String dvVen = hwToken(dv, "VEN_");
+        String dvDev = hwToken(dv, "DEV_");
+        String dvVid = hwToken(dv, "VID_");
+        String dvPid = hwToken(dv, "PID_");
+        String hwVen = hwToken(hwHaystack, "VEN_");
+        String hwDev = hwToken(hwHaystack, "DEV_");
+        String hwVid = hwToken(hwHaystack, "VID_");
+        String hwPid = hwToken(hwHaystack, "PID_");
+        if (dvVen != null && dvDev != null && dvVen.equals(hwVen) && dvDev.equals(hwDev)) {
+            return true;
+        }
+        if (dvVid != null && dvPid != null && dvVid.equals(hwVid) && dvPid.equals(hwPid)) {
+            return true;
+        }
+        // ACPI ids have no VEN/DEV; require a full ACPI\PRODUCT token, not a prefix.
+        if (dv.contains("ACPI\\") && dv.length() >= 12
+                && (hwId.contains(dv) || devId.contains(dv))) {
             return true;
         }
 
-        String devPart = extractDevId(dv);
-        if (devPart != null && (hwId.contains(devPart) || devId.contains(devPart))) {
-            return true;
-        }
-
-        String friendlyName = driver.friendlyName() != null ? driver.friendlyName().toUpperCase() : "";
-        if (!friendlyName.isEmpty() && !dv.isEmpty()) {
-            if (friendlyName.contains(dv) || dv.contains(friendlyName)) {
-                return true;
-            }
-            String namePart = extractNamePart(friendlyName);
-            String dvPart = extractNamePart(dv);
-            if (namePart != null && dvPart != null && namePart.equals(dvPart)) {
-                return true;
-            }
-        }
-
-        return false;
+        String friendlyName = driver.friendlyName() != null ? driver.friendlyName().toUpperCase(java.util.Locale.ROOT) : "";
+        String namePart = extractNamePart(friendlyName);
+        String dvPart = extractNamePart(dv);
+        return namePart != null && namePart.equals(dvPart);
     }
 
-    private String extractNamePart(String s) {
+    private static String hwToken(String haystack, String prefix) {
+        if (haystack == null || haystack.isEmpty()) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                prefix + "([0-9A-F]{4})", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(haystack);
+        return m.find() ? prefix + m.group(1).toUpperCase(java.util.Locale.ROOT) : null;
+    }
+
+    static String extractNamePart(String s) {
+        if (s == null || s.isEmpty()) return null;
         Pattern p = Pattern.compile("(WIRELESS[- ]?AC[- ]?\\d+|BLUETOOTH[- ]?\\d+|UHD[- ]?GRAPHICS[- ]?\\d+|I\\d+G\\d+)");
         Matcher m = p.matcher(s);
         return m.find() ? m.group(1).replaceAll("[\\s-]+", "") : null;
-    }
-
-    private String extractDevId(String detectionValue) {
-        Pattern p = Pattern.compile("VEN_[0-9A-F]{4}&DEV_([0-9A-F]{4})", Pattern.CASE_INSENSITIVE);
-        Matcher m = p.matcher(detectionValue);
-        if (m.find()) {
-            return "DEV_" + m.group(1);
-        }
-        return null;
     }
 
     private String extractDownloadUrl(JsonNode config) {

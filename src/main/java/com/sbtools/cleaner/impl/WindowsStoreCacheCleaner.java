@@ -5,8 +5,12 @@ import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 
-import java.nio.file.*;
-import java.util.stream.Stream;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 
 public class WindowsStoreCacheCleaner implements CleanerExtension {
 
@@ -17,35 +21,14 @@ public class WindowsStoreCacheCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        long totalSize = 0;
-        int itemCount = 0;
-        String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
-        if (localAppData != null) {
-            Path packagesDir = Paths.get(localAppData, "Packages");
-            if (Files.isDirectory(packagesDir)) {
-                try (DirectoryStream<Path> ds = Files.newDirectoryStream(packagesDir)) {
-                    for (Path pkg : ds) {
-                        if (Files.isDirectory(pkg)) {
-                            Path localCache = pkg.resolve("LocalCache");
-                            if (Files.isDirectory(localCache)) {
-                                try (Stream<Path> walk = Files.walk(localCache, 1)) {
-                                    long cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS;
-                                    var stats = walk.filter(Files::isRegularFile)
-                                            .filter(f -> { try { return !Files.isHidden(f); } catch (Exception e) { return true; } })
-                                            .filter(f -> { try { return f.toFile().lastModified() > 0 && f.toFile().lastModified() < cutoff; } catch (Exception e) { return false; } })
-                                            .collect(java.util.stream.Collectors.summarizingLong(f -> f.toFile().length()));
-                                    totalSize += stats.getSum();
-                                    itemCount += (int) stats.getCount();
-                                } catch (Exception ignored) {}
-                            }
-                        }
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        List<Path> caches = getCacheDirs();
+        long cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS;
+        CleanerUtils.scanFilesMatching(row, caches, 1, f -> isStaleCacheFile(f, cutoff), token);
     }
 
     @Override
@@ -56,38 +39,39 @@ public class WindowsStoreCacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
+        long cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS;
         long cleaned = 0;
-        String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
-        if (localAppData != null) {
-            Path packagesDir = Paths.get(localAppData, "Packages");
-            if (Files.isDirectory(packagesDir)) {
-                try (DirectoryStream<Path> ds = Files.newDirectoryStream(packagesDir)) {
-                    for (Path pkg : ds) {
-                        if (token != null && token.isCancelled()) break;
-                        if (Files.isDirectory(pkg)) {
-                            Path localCache = pkg.resolve("LocalCache");
-                            if (Files.isDirectory(localCache) && CleanerUtils.isSafeToCleanDirectory(localCache)) {
-                                try (Stream<Path> walk = Files.walk(localCache, 1)) {
-                                    long cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS;
-                                    for (Path f : (Iterable<Path>) walk::iterator) {
-                                        if (token != null && token.isCancelled()) break;
-                                        if (!f.equals(localCache) && Files.isRegularFile(f)) {
-                                            try {
-                                                if (!Files.isHidden(f) && f.toFile().lastModified() > 0 && f.toFile().lastModified() < cutoff) {
-                                                    long size = Files.size(f);
-                                                    CleanerUtils.deletePermanently(f, token);
-                                                    if (!Files.exists(f)) cleaned += size;
-                                                }
-                                            } catch (Exception ignored) {}
-                                        }
-                                    }
-                                } catch (Exception ignored) {}
-                            }
-                        }
-                    }
-                } catch (Exception ignored) {}
-            }
+        for (Path localCache : getCacheDirs()) {
+            if (token != null && token.isCancelled()) break;
+            cleaned += CleanerUtils.deleteFilesMatching(localCache, 1, token, f -> isStaleCacheFile(f, cutoff));
         }
         return cleaned;
+    }
+
+    private static boolean isStaleCacheFile(Path f, long cutoff) {
+        try {
+            if (Files.isHidden(f)) return false;
+            long modified = Files.getLastModifiedTime(f).toMillis();
+            return modified > 0 && modified < cutoff;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private List<Path> getCacheDirs() {
+        List<Path> dirs = new ArrayList<>();
+        String localAppData = CleanerUtils.safeEnv("LOCALAPPDATA");
+        if (localAppData == null) return dirs;
+        Path packagesDir = Paths.get(localAppData, "Packages");
+        if (!Files.isDirectory(packagesDir)) return dirs;
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(packagesDir)) {
+            for (Path pkg : ds) {
+                if (Files.isDirectory(pkg)) {
+                    Path localCache = pkg.resolve("LocalCache");
+                    if (Files.isDirectory(localCache)) dirs.add(localCache);
+                }
+            }
+        } catch (Exception ignored) {}
+        return dirs;
     }
 }

@@ -69,14 +69,7 @@ public class ItunesBackupsCleaner implements CleanerExtension {
     }
 
     static boolean isBackupChildDir(Path backup) {
-        if (backup == null || !Files.isDirectory(backup)) return false;
-        try {
-            if (Files.isSymbolicLink(backup)) return false;
-            Object reparse = Files.getAttribute(backup, "dos:isReparsePoint",
-                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
-            if (Boolean.TRUE.equals(reparse)) return false;
-        } catch (Exception ignored) {}
-        return true;
+        return CleanerUtils.isRealDirectory(backup);
     }
 
     static long[] measureBackupTree(Path backup, com.sbtools.util.CancellationToken token) {
@@ -88,13 +81,7 @@ public class ItunesBackupsCleaner implements CleanerExtension {
                 @Override
                 public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
-                    if (attrs.isSymbolicLink() || attrs.isOther()) return FileVisitResult.SKIP_SUBTREE;
-                    try {
-                        if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
-                        Object reparse = Files.getAttribute(d, "dos:isReparsePoint",
-                                java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                        if (Boolean.TRUE.equals(reparse)) return FileVisitResult.SKIP_SUBTREE;
-                    } catch (Exception ignored) {}
+                    if (CleanerUtils.shouldSkipWalkDir(d, backup, attrs)) return FileVisitResult.SKIP_SUBTREE;
                     return FileVisitResult.CONTINUE;
                 }
 

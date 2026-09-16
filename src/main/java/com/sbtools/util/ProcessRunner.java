@@ -23,6 +23,10 @@ public class ProcessRunner {
         this(600);
     }
 
+    /**
+     * @param defaultTimeoutSeconds wall-clock limit in seconds; {@code <= 0} means
+     *                              wait until the process exits or is cancelled
+     */
     public ProcessRunner(long defaultTimeoutSeconds) {
         this.defaultTimeoutSeconds = defaultTimeoutSeconds;
     }
@@ -54,22 +58,32 @@ public class ProcessRunner {
         Thread stdoutReader = startStreamReader(process.getInputStream(), stdoutBuf);
         Thread stderrReader = startStreamReader(process.getErrorStream(), stderrBuf);
         try {
-            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, timeoutSeconds));
+            final boolean timed = timeoutSeconds > 0;
+            final long deadlineNanos = timed
+                    ? System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
+                    : 0L;
             while (true) {
                 if (cancelled != null && cancelled.get()) {
                     killProcessTree(process);
                     joinReaders(stdoutReader, stderrReader);
                     throw new CancellationException("Operation cancelled by user");
                 }
-                long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
-                if (remainingMs <= 0) {
-                    killProcessTree(process);
-                    joinReaders(stdoutReader, stderrReader);
-                    throw new IOException("Process timed out after " + timeoutSeconds + "s");
-                }
-                boolean finished = process.waitFor(Math.min(100, remainingMs), TimeUnit.MILLISECONDS);
-                if (finished) {
-                    break;
+                if (timed) {
+                    long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+                    if (remainingMs <= 0) {
+                        killProcessTree(process);
+                        joinReaders(stdoutReader, stderrReader);
+                        throw new IOException("Process timed out after " + timeoutSeconds + "s");
+                    }
+                    boolean finished = process.waitFor(Math.min(100, remainingMs), TimeUnit.MILLISECONDS);
+                    if (finished) {
+                        break;
+                    }
+                } else {
+                    boolean finished = process.waitFor(100, TimeUnit.MILLISECONDS);
+                    if (finished) {
+                        break;
+                    }
                 }
             }
             joinReaders(stdoutReader, stderrReader);
@@ -107,8 +121,9 @@ public class ProcessRunner {
 
     /**
      * Same as {@link #runStreaming(List, Consumer, Consumer, AtomicBoolean)} but with an
-     * explicit end-to-end timeout. If the process is still running after timeoutSeconds, it
-     * is forcibly destroyed and an IOException is thrown.
+     * explicit end-to-end timeout. {@code timeoutSeconds <= 0} waits until exit or cancel
+     * (used for Optimize-Volume / long disk jobs). A positive value force-kills the
+     * process after that many seconds.
      */
     public ProcessResult runStreaming(List<String> command, Consumer<String> lineCallback,
                              Consumer<Double> progressCallback, AtomicBoolean cancelled,
@@ -148,14 +163,17 @@ public class ProcessRunner {
         reader.setDaemon(true);
         reader.start();
 
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(Math.max(1, timeoutSeconds));
+        final boolean timed = timeoutSeconds > 0;
+        final long deadlineNanos = timed
+                ? System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
+                : 0L;
         try {
             while (process.isAlive()) {
                 if (cancelled != null && cancelled.get()) {
                     killProcessTree(process);
                     throw new CancellationException("Operation cancelled by user");
                 }
-                if (System.nanoTime() > deadlineNanos) {
+                if (timed && System.nanoTime() > deadlineNanos) {
                     killProcessTree(process);
                     throw new IOException("Process timed out after " + timeoutSeconds + "s");
                 }

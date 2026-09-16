@@ -57,6 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     private Button presetButton;
     private Button cleanButton;
     private Button historyButton;
+    private Button ignoredButton;
     private Button cancelButton;
     private Button exportButton;
     private Button refreshButton;
@@ -84,6 +85,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         presetButton = new Button("Presets...");
         cleanButton = new Button("Clean selected");
         historyButton = new Button("History");
+        ignoredButton = new Button("Ignored...");
         cancelButton = new Button("Cancel");
         exportButton = new Button("Export...");
         refreshButton = new Button("Refresh selected");
@@ -135,12 +137,13 @@ import java.util.concurrent.atomic.AtomicInteger;
             CleanupHistoryDialog dialog = new CleanupHistoryDialog(historyStore, this::updateSummary);
             dialog.showAndWait();
         });
+        ignoredButton.setOnAction(e -> showIgnoredDialog());
         cancelButton.setOnAction(e -> cancelActive());
         exportButton.setOnAction(e -> exportScanCsv());
         refreshButton.setOnAction(e -> refreshSelected());
 
         HBox top = new HBox(6, scanButton, refreshButton, selectAllButton, deselectAllButton, presetButton,
-                cleanButton, historyButton, exportButton, progressBar, statusLabel, cancelButton);
+                cleanButton, historyButton, ignoredButton, exportButton, progressBar, statusLabel, cancelButton);
         top.setAlignment(Pos.CENTER_LEFT);
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
@@ -164,6 +167,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             exportButton.setDisable(newVal || sessionRows.isEmpty());
             cleanButton.setDisable(newVal || getSelectedCount() == 0);
             historyButton.setDisable(newVal);
+            ignoredButton.setDisable(newVal);
             cancelButton.setDisable(!newVal);
             table.setDisable(newVal);
         });
@@ -180,6 +184,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
         exportButton.setDisable(true);
         refreshButton.setDisable(true);
+        refreshIgnoredButton();
 
         VBox content = new VBox(top, filterRow, center);
         VBox.setVgrow(center, Priority.ALWAYS);
@@ -302,10 +307,96 @@ import java.util.concurrent.atomic.AtomicInteger;
                 return current.toBuilder().ignoredCleanupCategories(ignored).build();
             });
             sessionRows.remove(row);
+            refreshIgnoredButton();
             statusLabel.setText(row.getCategory().getDisplayName() + " will be ignored in future scans.");
         } catch (Exception e) {
             AppLogger.warning("Failed to ignore cleanup category: " + e.getMessage());
             new Alert(Alert.AlertType.ERROR, "Could not ignore category:\n" + java.util.Objects.toString(e.getMessage(), e.toString())).showAndWait();
+        }
+    }
+
+    private java.util.List<String> loadIgnoredNames() {
+        try {
+            java.util.List<String> raw = settingsStore.load().ignoredCleanupCategories();
+            if (raw == null || raw.isEmpty()) return new java.util.ArrayList<>();
+            java.util.List<String> names = new java.util.ArrayList<>();
+            for (String n : raw) {
+                if (n != null && !n.isBlank() && !names.contains(n)) names.add(n);
+            }
+            return names;
+        } catch (Exception e) {
+            AppLogger.warning("Failed to load ignored cleanup categories: " + e.getMessage());
+            return new java.util.ArrayList<>();
+        }
+    }
+
+    private void saveIgnoredNames(java.util.List<String> names) throws java.io.IOException {
+        java.util.List<String> snapshot = java.util.List.copyOf(names);
+        settingsStore.update(current -> current.toBuilder().ignoredCleanupCategories(snapshot).build());
+    }
+
+    private void refreshIgnoredButton() {
+        if (ignoredButton == null) return;
+        int n = loadIgnoredNames().size();
+        ignoredButton.setText(n == 0 ? "Ignored..." : "Ignored (" + n + ")...");
+    }
+
+    private static String ignoredDisplayName(String stored) {
+        if (stored == null || stored.isBlank()) return stored;
+        try {
+            return CleanupCategory.valueOf(stored).getDisplayName();
+        } catch (IllegalArgumentException e) {
+            return stored;
+        }
+    }
+
+    private void showIgnoredDialog() {
+        if (busy.get()) return;
+        java.util.List<String> ignored = loadIgnoredNames();
+        if (ignored.isEmpty()) {
+            new Alert(Alert.AlertType.INFORMATION, "No ignored cleanup categories.\nRight-click a row to ignore one.").showAndWait();
+            refreshIgnoredButton();
+            return;
+        }
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle(com.sbtools.util.AppInfo.DISPLAY_NAME);
+        dialog.setHeaderText("Ignored categories — excluded from Scan until restored.");
+        ListView<String> list = new ListView<>(javafx.collections.FXCollections.observableArrayList(ignored));
+        list.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
+        list.setPrefHeight(220);
+        list.setCellFactory(lv -> new ListCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : ignoredDisplayName(item));
+            }
+        });
+        dialog.getDialogPane().setContent(list);
+        ButtonType unignoreSel = new ButtonType("Unignore selected");
+        ButtonType unignoreAll = new ButtonType("Unignore all");
+        dialog.getDialogPane().getButtonTypes().addAll(unignoreSel, unignoreAll, ButtonType.CLOSE);
+        ButtonType chosen = dialog.showAndWait().orElse(ButtonType.CLOSE);
+        if (chosen == ButtonType.CLOSE || chosen == ButtonType.CANCEL) return;
+        try {
+            if (chosen == unignoreAll) {
+                saveIgnoredNames(java.util.List.of());
+                statusLabel.setText("All ignored categories restored. Click Scan to include them.");
+            } else {
+                java.util.Set<String> selected = new java.util.HashSet<>(list.getSelectionModel().getSelectedItems());
+                if (selected.isEmpty()) {
+                    new Alert(Alert.AlertType.INFORMATION, "Select one or more categories to restore.").showAndWait();
+                    return;
+                }
+                ignored.removeIf(selected::contains);
+                saveIgnoredNames(ignored);
+                statusLabel.setText("Restored " + selected.size() + " categor"
+                        + (selected.size() == 1 ? "y" : "ies") + ". Click Scan to include them.");
+            }
+            refreshIgnoredButton();
+        } catch (Exception e) {
+            AppLogger.warning("Failed to restore ignored cleanup categories: " + e.getMessage());
+            new Alert(Alert.AlertType.ERROR, "Could not update ignored list:\n"
+                    + java.util.Objects.toString(e.getMessage(), e.toString())).showAndWait();
         }
     }
 
@@ -524,13 +615,15 @@ import java.util.concurrent.atomic.AtomicInteger;
             item.setOnAction(e -> {
                 if (busy.get()) return;
                 Set<CleanupCategory> cats = preset.getCategories();
-                // Presets define the full intended selection (e.g. Safe Only), not
-                // only visible rows — apply across sessionRows so hidden categories
-                // cannot remain selected after a risk/search filter.
+                // Clear search/risk first so the preset selection is visible.
+                // Applying across hidden rows used to leave HIGH categories
+                // checked while the table showed only the filtered subset.
+                if (searchField != null) searchField.setText("");
+                if (riskFilter != null) riskFilter.setValue("All risks");
                 for (CleanupRow row : sessionRows) {
                     row.setSelected(cats.contains(row.getCategory()));
                 }
-                updateCleanButtonState();
+                applyTableFilter();
             });
             menu.getItems().add(item);
         }
@@ -789,7 +882,8 @@ import java.util.concurrent.atomic.AtomicInteger;
         }
 
         boolean registrySelected = selected.stream()
-                .anyMatch(r -> r.getCategory() == CleanupCategory.REGISTRY);
+                .anyMatch(r -> r.getCategory() == CleanupCategory.REGISTRY
+                        || r.getCategory() == CleanupCategory.PRIVACY_TRACES);
 
         boolean hasHighRisk = selected.stream()
                 .anyMatch(r -> r.getCategory().getRiskLevel() == CleanupCategory.RiskLevel.HIGH);
@@ -828,12 +922,14 @@ import java.util.concurrent.atomic.AtomicInteger;
         }
 
         // Second explicit confirmation for irreversible user-data destruction
-        // (browser logins/cookies, iOS backups, Docker, previous Windows install).
+        // (browser logins/cookies, iOS backups, Docker, previous Windows install,
+        // Office Upload Center document copies).
         java.util.List<CleanupRow> destructive = selected.stream()
                 .filter(r -> r.getCategory() == CleanupCategory.WEB_BROWSING_TRACES
                         || r.getCategory() == CleanupCategory.ITUNES_BACKUPS
                         || r.getCategory() == CleanupCategory.DOCKER_CACHE
-                        || r.getCategory() == CleanupCategory.OLD_WINDOWS_INSTALL)
+                        || r.getCategory() == CleanupCategory.OLD_WINDOWS_INSTALL
+                        || r.getCategory() == CleanupCategory.OFFICE_DOCUMENT_CACHE)
                 .toList();
         if (!destructive.isEmpty()) {
             String destructiveBody = "You selected categories that PERMANENTLY delete user data or system rollback state:\n\n"
@@ -841,9 +937,10 @@ import java.util.concurrent.atomic.AtomicInteger;
                             .map(r -> "  [!] " + r.getCategory().getDisplayName() + " — " + r.getCategory().getDescription())
                             .collect(java.util.stream.Collectors.joining("\n"))
                     + "\n\nWeb browsing cleanup removes saved passwords, cookies, and history when the browser is closed. "
-                    + "iTunes backups cannot be recovered. Docker prune removes dangling build cache "
-                    + "and unused networks (tagged images, containers, and volumes are preserved). "
-                    + "Removing Windows.old prevents rollback to the previous Windows version.\n\n"
+                    + "iTunes backups cannot be recovered. Docker builder prune removes build cache "
+                    + "only (images, containers, and volumes are preserved). "
+                    + "Removing Windows.old prevents rollback to the previous Windows version. "
+                    + "Office Document Cache holds local copies of unsynced Office/OneDrive documents.\n\n"
                     + "Type-understanding: click OK only if you have independent backups.";
             Alert destructiveAlert = new Alert(Alert.AlertType.WARNING, null, ButtonType.OK, ButtonType.CANCEL);
             destructiveAlert.setHeaderText("Irreversible Deletion — Confirm Again");
@@ -860,7 +957,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             Alert backupPrompt = new Alert(Alert.AlertType.CONFIRMATION);
             backupPrompt.setTitle(com.sbtools.util.UiText.label("Registry backup"));
             backupPrompt.setHeaderText("Registry backup will be created automatically");
-            backupPrompt.setContentText("Invalid registry entries will be exported to a .reg file before deletion.\n\n"
+            backupPrompt.setContentText("Registry keys will be exported to a .reg file before deletion.\n\n"
                     + "If the backup cannot be created, registry deletion is skipped for safety.\n\n"
                     + "Continue with automatic backup?");
             ButtonType continueBtn = new ButtonType("Continue with backup");
@@ -1124,7 +1221,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                 String err = result != null && result.error() != null && !result.error().isBlank() ? result.error() : "unknown error";
                 // A restore point already exists within 24h (Windows frequency
                 // limit) — protection is present, proceed without prompting.
-                if (err.contains("FREQUENCY_LIMIT")) {
+                if (err.contains("FREQUENCY_LIMIT") && !err.contains("0x80042316")) {
                     AppLogger.info("Restore point frequency limit hit, proceeding (protection exists)");
                     doClean.run();
                     return;

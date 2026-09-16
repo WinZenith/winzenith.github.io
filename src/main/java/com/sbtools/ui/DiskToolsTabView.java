@@ -275,7 +275,10 @@ public class DiskToolsTabView extends BorderPane {
         intelligentDefragBtn.setTooltip(new Tooltip("Full defrag for HDD, ReTrim for SSD"));
 
         defragModeCombo.getSelectionModel().select(0);
-        defragModeCombo.setTooltip(new Tooltip("Auto: best mode per drive type\nQuick: lighter/faster defrag\nDeep: full defrag + free space consolidation"));
+        defragModeCombo.setTooltip(new Tooltip(
+                "Auto: Trim SSD, Full defrag HDD\n"
+                + "Quick: same Optimize-Volume -Defrag as Full (Windows has no lighter switch); SSDs Trim\n"
+                + "Deep: full defrag + free space consolidation; SSDs Trim"));
 
         stopBtn.getStyleClass().add("danger");
         stopBtn.setVisible(false);
@@ -476,6 +479,7 @@ public class DiskToolsTabView extends BorderPane {
             }
         }
         updateTableHeight();
+        updateDefragButtons();
     }
 
     private BooleanProperty createDriveSelectedProp(String driveLetter) {
@@ -490,9 +494,14 @@ public class DiskToolsTabView extends BorderPane {
         return prop;
     }
 
+    private List<DriveInfo> selectedVisibleDrives() {
+        return filteredDrives.stream()
+                .filter(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get())
+                .toList();
+    }
+
     private void updateDefragButtons() {
-        boolean anySelected = allDrives.stream()
-                .anyMatch(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get());
+        boolean anySelected = !selectedVisibleDrives().isEmpty();
         boolean isBusy = defragBusy.get();
         analyzeBtn.setDisable(isBusy || !anySelected);
         intelligentDefragBtn.setDisable(isBusy || !anySelected);
@@ -599,9 +608,7 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void startAnalyze() {
-        List<DriveInfo> selected = allDrives.stream()
-                .filter(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get())
-                .toList();
+        List<DriveInfo> selected = selectedVisibleDrives();
         if (selected.isEmpty() || defragBusy.get()) return;
 
         if (currentAnalyzeThread != null && currentAnalyzeThread.isAlive()) {
@@ -688,9 +695,7 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void startIntelligentDefrag() {
-        List<DriveInfo> selected = allDrives.stream()
-                .filter(d -> driveSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get())
-                .toList();
+        List<DriveInfo> selected = selectedVisibleDrives();
         if (selected.isEmpty() || defragBusy.get()) return;
 
         if (currentDefragThread != null && currentDefragThread.isAlive()) {
@@ -746,9 +751,15 @@ public class DiskToolsTabView extends BorderPane {
 
         StringBuilder drivesInfo = new StringBuilder();
         for (DriveInfo d : selected) {
+            String action = d.isSsd() ? "Trim" : switch (defragMode) {
+                case "Quick" -> "Defrag";
+                case "Deep" -> "Deep defrag + free space";
+                default -> "Full defrag";
+            };
             drivesInfo.append(d.getDriveLetter()).append(" (")
                     .append(d.getSizeFormatted()).append(", ")
-                    .append(d.getMediaType());
+                    .append(d.getMediaType()).append(", ")
+                    .append(action);
             if (analyzedDrives.contains(d.getDriveLetter())) {
                 drivesInfo.append(", ").append(d.getFragmentationPercent()).append("% frag");
             }
@@ -756,9 +767,9 @@ public class DiskToolsTabView extends BorderPane {
         }
 
         String modeDescription = switch (defragMode) {
-            case "Quick" -> "Quick defrag (faster, lighter pass)";
-            case "Deep" -> "Deep defrag (full defrag + free space consolidation)";
-            default -> "Auto (best mode per drive type: SSD=Trim, HDD=Full)";
+            case "Quick" -> "Quick (same Optimize-Volume defrag as Full; SSDs Trim)";
+            case "Deep" -> "Deep (defrag + free space; SSDs Trim)";
+            default -> "Auto (SSD=Trim, HDD=Full defrag)";
         };
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
@@ -1088,7 +1099,7 @@ public class DiskToolsTabView extends BorderPane {
             addSmartRow(row++, "Power-On Hours", DiskHealthInfo.formatDuration(info.getPowerOnHours()));
             hasSmartSection = true;
         }
-        if (info.isSsd() && info.getWearLevel() >= 0) {
+        if (info.getWearLevel() >= 0) {
             if (hasSmartSection) { addSmartSeparator(row++); hasSmartSection = false; }
             addSmartRow(row++, "Wear (used)", info.getWearLevel() + "% used");
             hasSmartSection = true;
@@ -1784,7 +1795,7 @@ public class DiskToolsTabView extends BorderPane {
 
         List<String> recyclePaths = entries.stream()
                 .map(RecycleBinEntry::getRecyclePath)
-                .filter(p -> p != null && !p.isBlank())
+                .map(p -> p == null ? "" : p)
                 .toList();
 
         newDaemonThread(() -> {
@@ -1799,15 +1810,14 @@ public class DiskToolsTabView extends BorderPane {
                         // Refresh to reflect partial progress instead of clearing.
                         loadRecycleBin();
                     } else if (result.isSuccess()) {
-                        recycleBinEntries.clear();
                         recycleBinStatus.setText("Recycle Bin securely wiped: " + result.getFilesDeleted() + " item(s) removed.");
-                        recycleBinSummary.setText("");
-                        secureWipeRecycleBinBtn.setDisable(true);
                         String msg = "Recycle Bin securely wiped.\n" + result.getFilesDeleted() + " file(s) overwritten.";
                         if (!result.getScheduledForReboot().isEmpty()) {
                             msg += "\n" + result.getScheduledForReboot().size() + " file(s) scheduled for deletion on next reboot.";
                         }
                         new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
+                        // Re-query so leftovers on other volumes are not hidden by a local clear.
+                        loadRecycleBin();
                     } else {
                         recycleBinStatus.setText("Recycle Bin wipe failed: " + result.getMessage());
                         new Alert(Alert.AlertType.ERROR, "Recycle Bin wipe failed:\n" + result.getMessage()
@@ -1973,19 +1983,7 @@ public class DiskToolsTabView extends BorderPane {
 
         newDaemonThread(() -> {
             try {
-                int fileCount = 0;
-                try (var walk = java.nio.file.Files.walk(f.toPath(), 64)) {
-                    fileCount = (int) walk.filter(p -> {
-                        try {
-                            return java.nio.file.Files.isRegularFile(p,
-                                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                        } catch (Exception ex) {
-                            return false;
-                        }
-                    }).count();
-                } catch (Exception ignored) {
-                    fileCount = countFilesRecursive(f);
-                }
+                int fileCount = countFilesRecursive(f);
                 final int countedFiles = fileCount;
                 Platform.runLater(() -> {
                     secureBusy.set(false);
@@ -2044,15 +2042,6 @@ public class DiskToolsTabView extends BorderPane {
                 FolderDeleteResult result = shredderService.secureDeleteFolder(folderPath, passCount,
                         msg -> Platform.runLater(() -> secureDeleteStatus.setText(msg)),
                         secureCancelled);
-                if (result.isSuccess() && !result.getScheduledForReboot().isEmpty()) {
-                    for (String path : result.getScheduledForReboot()) {
-                        try {
-                            shredderService.scheduleForReboot(path);
-                        } catch (Exception ex) {
-                            AppLogger.error("Failed to schedule reboot delete: " + path, ex);
-                        }
-                    }
-                }
                 Platform.runLater(() -> {
                     if (secureCancelled.get()) {
                         secureDeleteStatus.setText("Folder deletion cancelled.");
@@ -2439,6 +2428,10 @@ public class DiskToolsTabView extends BorderPane {
         });
         vlCol.setPrefWidth(120);
 
+        TableColumn<DriveInfo, String> typeCol = UiColumn.of("Type");
+        typeCol.setCellValueFactory(c -> c.getValue().mediaTypeProperty());
+        typeCol.setPrefWidth(70);
+
         TableColumn<DriveInfo, String> szCol = UiColumn.of("Total Size");
         szCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getSizeFormatted()));
         szCol.setPrefWidth(100);
@@ -2447,7 +2440,7 @@ public class DiskToolsTabView extends BorderPane {
         frCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue().getFreeFormatted()));
         frCol.setPrefWidth(100);
 
-        wipeDriveTable.getColumns().addAll(checkCol, dlCol, vlCol, szCol, frCol);
+        wipeDriveTable.getColumns().addAll(checkCol, dlCol, vlCol, typeCol, szCol, frCol);
         wipeDriveTable.setPrefHeight(180);
 
         VBox section = new VBox(8, header, desc, capWarning, presetRow, controls, wipeDriveTable);

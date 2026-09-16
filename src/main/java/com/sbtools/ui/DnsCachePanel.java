@@ -1,10 +1,12 @@
 package com.sbtools.ui;
 
+import com.sbtools.backup.SystemRestoreService;
 import com.sbtools.netoptimizer.NetworkAdapterRow;
 import com.sbtools.netoptimizer.NetworkOptimizerService;
 import com.sbtools.netoptimizer.PingResult;
 import com.sbtools.netoptimizer.TracerouteHop;
 import com.sbtools.util.AppExecutors;
+import com.sbtools.util.AppLogger;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.geometry.Insets;
@@ -544,7 +546,10 @@ class DnsCachePanel extends VBox {
         }
         if (!requireAdmin()) return;
         Alert warn = new Alert(Alert.AlertType.WARNING,
-                "Resetting the network stack requires a system reboot. Continue?");
+                "This resets the TCP/IP stack and Winsock catalog.\n\n"
+                        + "Static IP addresses, custom DNS, routes, and IPsec settings can be lost. "
+                        + "A system restore point is created first, and an ipconfig dump is saved for reference. "
+                        + "A reboot is required afterwards.\n\nContinue?");
         warn.setTitle(com.sbtools.util.UiText.label("Confirm reset"));
         warn.setHeaderText(com.sbtools.util.UiText.label("Reset network stack"));
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
@@ -552,20 +557,70 @@ class DnsCachePanel extends VBox {
             return;
         }
         busy.set(true);
-        statusLabel.setText("Resetting network stack...");
+        statusLabel.setText("Creating restore point before stack reset...");
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
+                boolean restoreOk = true;
+                String restoreErr = null;
+                try {
+                    var rp = new SystemRestoreService().createRestorePoint("WinZenith network stack reset");
+                    if (!rp.success()) {
+                        restoreOk = false;
+                        restoreErr = rp.error() != null ? rp.error() : "unknown error";
+                        AppLogger.warning("Restore point before stack reset failed: " + restoreErr);
+                    }
+                } catch (Exception e) {
+                    restoreOk = false;
+                    restoreErr = e.getMessage() != null ? e.getMessage() : e.toString();
+                    AppLogger.warning("Restore point before stack reset failed: " + restoreErr);
+                }
+                if (!restoreOk) {
+                    final String err = restoreErr;
+                    java.util.concurrent.FutureTask<ButtonType> gateTask = new java.util.concurrent.FutureTask<>(
+                            () -> new Alert(Alert.AlertType.CONFIRMATION,
+                                    "Restore point could not be created:\n" + err
+                                            + "\n\nThe safety net is missing. Continue with network stack reset anyway?\n"
+                                            + "Static IP/DNS may still be lost.",
+                                    ButtonType.YES, ButtonType.NO).showAndWait().orElse(ButtonType.NO));
+                    Platform.runLater(gateTask);
+                    ButtonType choice;
+                    try {
+                        choice = gateTask.get();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        choice = ButtonType.NO;
+                    } catch (Exception ex) {
+                        choice = ButtonType.NO;
+                    }
+                    if (choice != ButtonType.YES) {
+                        Platform.runLater(() -> statusLabel.setText(
+                                "Stack reset cancelled — no changes applied (restore point failed)."));
+                        return;
+                    }
+                    AppLogger.warning("User accepted network stack reset without restore point.");
+                }
+                Platform.runLater(() -> statusLabel.setText("Resetting network stack..."));
                 try { service.captureSnapshot("before reset-network-stack"); } catch (Exception ignored) {}
                 var result = service.resetNetworkStack();
-                if (result.success()) {
-                    try { service.markRebootRequired("Network stack reset"); } catch (Exception ignored) {}
+                boolean destructive = result.success() || result.rebootRequired();
+                if (destructive) {
+                    String reason = result.success()
+                            ? "Network stack reset"
+                            : "Network stack reset (partial — reboot required)";
+                    try { service.markRebootRequired(reason); } catch (Exception ignored) {}
                 }
                 Platform.runLater(() -> {
-                    statusLabel.setText(result.success() ? "Network stack reset. Reboot required." : "Reset failed.");
-                    if (result.success() && onRebootStateChanged != null) {
+                    statusLabel.setText(result.success()
+                            ? "Network stack reset. Reboot required."
+                            : (result.rebootRequired()
+                                    ? "Network stack partially reset. Reboot required."
+                                    : "Reset failed."));
+                    if (destructive && onRebootStateChanged != null) {
                         onRebootStateChanged.run();
                     }
-                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                    Alert.AlertType type = result.success() ? Alert.AlertType.INFORMATION
+                            : (result.rebootRequired() ? Alert.AlertType.WARNING : Alert.AlertType.ERROR);
+                    new Alert(type,
                             result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });
             } catch (Exception e) {
@@ -586,7 +641,10 @@ class DnsCachePanel extends VBox {
         }
         if (!requireAdmin()) return;
         Alert warn = new Alert(Alert.AlertType.WARNING,
-                "Resetting Winsock may require a reboot. Continue?");
+                "This resets the Winsock catalog.\n\n"
+                        + "VPN clients and security software that install layered service providers "
+                        + "may stop working until reinstalled. A system restore point is created first. "
+                        + "A reboot is required afterwards.\n\nContinue?");
         warn.setTitle(com.sbtools.util.UiText.label("Confirm reset"));
         warn.setHeaderText("Reset Winsock");
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
@@ -594,20 +652,66 @@ class DnsCachePanel extends VBox {
             return;
         }
         busy.set(true);
-        statusLabel.setText("Resetting Winsock...");
+        statusLabel.setText("Creating restore point before Winsock reset...");
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
+                boolean restoreOk = true;
+                String restoreErr = null;
+                try {
+                    var rp = new SystemRestoreService().createRestorePoint("WinZenith Winsock reset");
+                    if (!rp.success()) {
+                        restoreOk = false;
+                        restoreErr = rp.error() != null ? rp.error() : "unknown error";
+                        AppLogger.warning("Restore point before Winsock reset failed: " + restoreErr);
+                    }
+                } catch (Exception e) {
+                    restoreOk = false;
+                    restoreErr = e.getMessage() != null ? e.getMessage() : e.toString();
+                    AppLogger.warning("Restore point before Winsock reset failed: " + restoreErr);
+                }
+                if (!restoreOk) {
+                    final String err = restoreErr;
+                    java.util.concurrent.FutureTask<ButtonType> gateTask = new java.util.concurrent.FutureTask<>(
+                            () -> new Alert(Alert.AlertType.CONFIRMATION,
+                                    "Restore point could not be created:\n" + err
+                                            + "\n\nThe safety net is missing. Continue with Winsock reset anyway?",
+                                    ButtonType.YES, ButtonType.NO).showAndWait().orElse(ButtonType.NO));
+                    Platform.runLater(gateTask);
+                    ButtonType choice;
+                    try {
+                        choice = gateTask.get();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        choice = ButtonType.NO;
+                    } catch (Exception ex) {
+                        choice = ButtonType.NO;
+                    }
+                    if (choice != ButtonType.YES) {
+                        Platform.runLater(() -> statusLabel.setText(
+                                "Winsock reset cancelled — no changes applied (restore point failed)."));
+                        return;
+                    }
+                    AppLogger.warning("User accepted Winsock reset without restore point.");
+                }
+                Platform.runLater(() -> statusLabel.setText("Resetting Winsock..."));
                 try { service.captureSnapshot("before reset-winsock"); } catch (Exception ignored) {}
                 var result = service.resetWinsock();
-                if (result.success()) {
+                boolean destructive = result.success() || result.rebootRequired();
+                if (destructive) {
                     try { service.markRebootRequired("Winsock reset"); } catch (Exception ignored) {}
                 }
                 Platform.runLater(() -> {
-                    statusLabel.setText(result.success() ? "Winsock reset. Reboot recommended." : "Reset failed.");
-                    if (result.success() && onRebootStateChanged != null) {
+                    statusLabel.setText(result.success()
+                            ? "Winsock reset. Reboot required."
+                            : (result.rebootRequired()
+                                    ? "Winsock reset may have completed. Reboot required."
+                                    : "Reset failed."));
+                    if (destructive && onRebootStateChanged != null) {
                         onRebootStateChanged.run();
                     }
-                    new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
+                    Alert.AlertType type = result.success() ? Alert.AlertType.INFORMATION
+                            : (result.rebootRequired() ? Alert.AlertType.WARNING : Alert.AlertType.ERROR);
+                    new Alert(type,
                             result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
                 });
             } catch (Exception e) {
@@ -700,6 +804,15 @@ class DnsCachePanel extends VBox {
             return;
         }
 
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Set DNS servers on '" + adapter + "' to:\n"
+                        + primary + (secondary.isEmpty() ? "" : ", " + secondary)
+                        + "\n\nThis replaces the current DNS configuration.",
+                ButtonType.YES, ButtonType.NO);
+        confirm.setTitle(com.sbtools.util.UiText.label("Confirm DNS"));
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Apply DNS servers"));
+        if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
+
         busy.set(true);
         statusLabel.setText("Setting DNS servers...");
 
@@ -734,6 +847,12 @@ class DnsCachePanel extends VBox {
             return;
         }
         if (!requireAdmin()) return;
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Reset DNS on '" + adapter + "' to automatic (DHCP)?\n\nCustom DNS servers will be removed.",
+                ButtonType.YES, ButtonType.NO);
+        confirm.setTitle(com.sbtools.util.UiText.label("Confirm DNS"));
+        confirm.setHeaderText(com.sbtools.util.UiText.label("Reset DNS to DHCP"));
+        if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
         busy.set(true);
         statusLabel.setText("Resetting DNS to DHCP...");
 

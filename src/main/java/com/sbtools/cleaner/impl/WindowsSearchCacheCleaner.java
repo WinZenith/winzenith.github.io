@@ -11,7 +11,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
 
 public class WindowsSearchCacheCleaner implements CleanerExtension {
 
@@ -25,21 +24,12 @@ public class WindowsSearchCacheCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        long totalSize = 0;
-        int itemCount = 0;
-        for (Path dir : getSafeSearchCacheDirs()) {
-            if (dir != null && Files.isDirectory(dir)) {
-                try (Stream<Path> walk = Files.walk(dir, SCAN_DEPTH)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> p.toFile().length()));
-                    totalSize += stats.getSum();
-                    itemCount += (int) stats.getCount();
-                } catch (Exception ignored) {}
-            }
-        }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(CleanerUtils.formatBytes(totalSize) + (itemCount > 0 ? " (" + itemCount + " files)" : ""));
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        CleanerUtils.scanDirectorySizes(row, getSafeSearchCacheDirs(), SCAN_DEPTH, token);
     }
 
     @Override
@@ -56,6 +46,9 @@ public class WindowsSearchCacheCleaner implements CleanerExtension {
         boolean stoppedByUs = false;
         if (searchWasRunning) {
             stoppedByUs = stopService("WSearch");
+            if (!stoppedByUs && !CleanerUtils.isWindowsServiceRunning("WSearch")) {
+                stoppedByUs = true;
+            }
             if (!stoppedByUs) {
                 AppLogger.warning("Skipping Windows Search cache: could not stop WSearch");
                 return 0;
@@ -72,7 +65,7 @@ public class WindowsSearchCacheCleaner implements CleanerExtension {
             }
             return cleaned;
         } finally {
-            if (stoppedByUs) startService("WSearch");
+            if (searchWasRunning) startService("WSearch");
         }
     }
 
@@ -81,8 +74,7 @@ public class WindowsSearchCacheCleaner implements CleanerExtension {
             ProcessBuilder pb = new ProcessBuilder("net", "stop", serviceName);
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean ok = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-            if (!ok) {
+            if (!CleanerUtils.waitForProcessUninterruptibly(p, 30_000L)) {
                 p.destroyForcibly();
                 return false;
             }
@@ -98,8 +90,7 @@ public class WindowsSearchCacheCleaner implements CleanerExtension {
             ProcessBuilder pb = new ProcessBuilder("net", "start", serviceName);
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean ok = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-            if (!ok) p.destroyForcibly();
+            CleanerUtils.waitForProcessUninterruptibly(p, 30_000L);
         } catch (Exception e) {
             AppLogger.warning("Failed to start service " + serviceName + ": " + e.getMessage());
         }

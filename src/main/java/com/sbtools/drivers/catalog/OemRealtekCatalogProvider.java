@@ -78,8 +78,8 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
         AppLogger.info("Realtek: Resolving direct download URL for " + driver.friendlyName());
 
         String categoryUrl = detectCategoryUrl(driver);
-        // Try category-specific page first, then generic vendorPageUrl, then fallback to passed vendorPageUrl
         String[] urlsToTry = new String[]{categoryUrl, getVendorPageUrl(driver), vendorPageUrl};
+        java.util.List<String> found = new java.util.ArrayList<>();
         for (String tryUrl : urlsToTry) {
             if (tryUrl == null || tryUrl.isBlank()) continue;
             String body = httpGet(tryUrl);
@@ -96,18 +96,24 @@ public class OemRealtekCatalogProvider extends AbstractOemCatalogProvider {
                     url = "https://www.realtek.com" + url;
                 }
                 if (url.toLowerCase().contains("realtek.com") && !url.contains("DownloadList") && isLikelyStable(url)) {
-                    AppLogger.info("Realtek: Found download URL: " + url);
-                    return url;
+                    found.add(url);
                 }
             }
         }
 
-        AppLogger.info("Realtek: No direct download found via category pages, trying generic scrape fallback");
-        // Fallback to generic AbstractOemCatalogProvider logic (vendorPageUrl)
-        String fallback = super.resolveDirectDownloadUrl(driver, vendorPageUrl);
-        if (fallback != null) return fallback;
+        String picked = com.sbtools.drivers.DriverInstallTrust.pickBestDownloadUrl(found, driver);
+        if (picked != null && com.sbtools.drivers.DriverInstallTrust.hasDeviceModelToken(driver)
+                && com.sbtools.drivers.DriverInstallTrust.tokenScore(picked, driver) == 0) {
+            AppLogger.info("Realtek: refusing first-link download that does not name device "
+                    + driver.friendlyName());
+            return null;
+        }
+        if (picked != null) {
+            AppLogger.info("Realtek: Found download URL: " + picked);
+            return picked;
+        }
 
-        AppLogger.info("Realtek: No direct download found, user will be directed to vendor website");
+        AppLogger.info("Realtek: No device-matching download found, user will be directed to vendor website");
         return null;
     }
 }

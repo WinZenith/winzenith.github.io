@@ -18,6 +18,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -79,7 +80,13 @@ public final class DriverCatalogDatabase {
     }
 
     public static boolean isFresh(CatalogEntry entry, java.time.Instant now) {
-        if (entry == null || entry.lastVerified() == null || now == null) {
+        if (entry == null || now == null) {
+            return false;
+        }
+        if (entry.lastVerified() == null) {
+            AppLogger.warning("DriverCatalogDatabase: entry "
+                    + (entry.id() == null ? "?" : entry.id())
+                    + " has no lastVerified — treating as stale");
             return false;
         }
         long days = java.time.temporal.ChronoUnit.DAYS.between(entry.lastVerified(), now);
@@ -168,7 +175,7 @@ public final class DriverCatalogDatabase {
         // Merge: refreshed wins on id conflict; validate each refreshed entry.
         Map<String, CatalogEntry> merged = new HashMap<>();
         for (CatalogEntry e : bundled) {
-            if (e != null && e.id() != null) merged.put(e.id(), e);
+            if (e != null && e.id() != null) merged.putIfAbsent(e.id(), e);
         }
         int accepted = 0;
         for (CatalogEntry e : refreshed) {
@@ -197,7 +204,7 @@ public final class DriverCatalogDatabase {
             try {
                 if (p == null || !Files.exists(p) || Files.size(p) == 0) continue;
                 byte[] data = Files.readAllBytes(p);
-                List<CatalogEntry> list = MAPPER.readValue(data, LIST_TYPE);
+                List<CatalogEntry> list = dedupeByIdFirstWins(MAPPER.readValue(data, LIST_TYPE));
                 if (list == null || list.isEmpty()) continue;
                 long mtime;
                 try {
@@ -280,11 +287,32 @@ public final class DriverCatalogDatabase {
                 return List.of();
             }
             byte[] data = is.readAllBytes();
-            return MAPPER.readValue(data, LIST_TYPE);
+            return dedupeByIdFirstWins(MAPPER.readValue(data, LIST_TYPE));
         } catch (Exception e) {
             AppLogger.warning("DriverCatalogDatabase: Failed to load bundled catalog: " + e.getMessage());
             return List.of();
         }
+    }
+
+    static List<CatalogEntry> dedupeByIdFirstWins(List<CatalogEntry> in) {
+        if (in == null || in.isEmpty()) {
+            return List.of();
+        }
+        Map<String, CatalogEntry> map = new LinkedHashMap<>();
+        int dropped = 0;
+        for (CatalogEntry e : in) {
+            if (e == null || e.id() == null || e.id().isBlank()) {
+                continue;
+            }
+            if (map.putIfAbsent(e.id(), e) != null) {
+                dropped++;
+            }
+        }
+        if (dropped > 0) {
+            AppLogger.warning("DriverCatalogDatabase: dropped " + dropped
+                    + " duplicate catalog id(s) (first wins)");
+        }
+        return new ArrayList<>(map.values());
     }
 
     /**

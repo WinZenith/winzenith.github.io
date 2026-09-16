@@ -64,17 +64,18 @@ public class RegistryCleaner implements CleanerExtension {
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
         if (!com.sbtools.util.AppPaths.isWindows()) return 0L;
+        long deleted = 0;
         for (String keyPath : SAFE_DELETE_HKCU_RUN_PATHS) {
             if (token != null && token.isCancelled()) break;
-            deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_CURRENT_USER, keyPath, token);
+            deleted += deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_CURRENT_USER, keyPath, token);
         }
         for (String keyPath : SAFE_DELETE_HKLM_RUN_PATHS) {
             if (token != null && token.isCancelled()) break;
-            deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_LOCAL_MACHINE, keyPath, token);
+            deleted += deleteInvalidRegistryValues(backupRootOrNull, WinReg.HKEY_LOCAL_MACHINE, keyPath, token);
         }
-        if (token != null && token.isCancelled()) return 0L;
-        cleanOrphanedSharedDLLs(backupRootOrNull, token);
-        return 0;
+        if (token != null && token.isCancelled()) return deleted;
+        deleted += cleanOrphanedSharedDLLs(backupRootOrNull, token);
+        return deleted;
     }
 
     /**
@@ -184,20 +185,7 @@ public class RegistryCleaner implements CleanerExtension {
     }
 
     private boolean exportRegKey(String fullKey, Path regBackup) {
-        try {
-            java.nio.file.Files.createDirectories(regBackup.getParent());
-            ProcessBuilder exportPb = new ProcessBuilder("reg", "export", fullKey, regBackup.toString(), "/y");
-            exportPb.redirectErrorStream(true);
-            Process exportProcess = com.sbtools.util.ProcessManager.start(exportPb);
-            boolean ok = exportProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-            if (!ok) {
-                exportProcess.destroyForcibly();
-                return false;
-            }
-            return exportProcess.exitValue() == 0 && java.nio.file.Files.isRegularFile(regBackup);
-        } catch (Exception ignored) {
-            return false;
-        }
+        return CleanerUtils.exportRegistryKey(fullKey, regBackup);
     }
 
     private int countOrphanedSharedDLLs() {
@@ -277,20 +265,7 @@ public class RegistryCleaner implements CleanerExtension {
 
     private boolean backupRegKey(Path backupRootOrNull, String description, String hiveName, String keyPath) {
         if (backupRootOrNull == null) return false;
-        try {
-            Path regBackup = backupRootOrNull.resolve("registry-" + description + ".reg");
-            java.nio.file.Files.createDirectories(regBackup.getParent());
-            ProcessBuilder pb = new ProcessBuilder("reg", "export", hiveName + "\\" + keyPath, regBackup.toString(), "/y");
-            pb.redirectErrorStream(true);
-            Process p = com.sbtools.util.ProcessManager.start(pb);
-            boolean ok = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
-            if (!ok) {
-                p.destroyForcibly();
-                return false;
-            }
-            return p.exitValue() == 0 && java.nio.file.Files.isRegularFile(regBackup);
-        } catch (Exception ignored) {
-            return false;
-        }
+        Path regBackup = backupRootOrNull.resolve("registry-" + description + ".reg");
+        return CleanerUtils.exportRegistryKey(hiveName + "\\" + keyPath, regBackup);
     }
 }

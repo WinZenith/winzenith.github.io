@@ -2,6 +2,8 @@ param([string]$Preset = "Default")
 
 $results = @()
 $failed = $false
+$tcpipParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+$tcpipIfRoot = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
 
 function Add-Result($key, $value, $ok) {
     $script:results += [PSCustomObject]@{ Key = $key; Value = $value; Success = $ok }
@@ -10,11 +12,10 @@ function Add-Result($key, $value, $ok) {
 
 function Invoke-Netsh {
     param([string[]]$Args)
-    & netsh @Args 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        return $false
-    }
-    return $true
+    $out = & netsh @Args 2>&1
+    $code = $LASTEXITCODE
+    if ($null -eq $code) { $code = 1 }
+    return $code -eq 0
 }
 
 function Invoke-RegistryRemove {
@@ -23,11 +24,9 @@ function Invoke-RegistryRemove {
         Remove-ItemProperty -Path $Path -Name $Name -ErrorAction Stop | Out-Null
         return $true
     } catch {
-        # If property doesn't exist, treat as success (already default)
         if ($_.Exception.Message -like "*does not exist*" -or $_.Exception.Message -like "*Property*not found*") {
             return $true
         }
-        # Access denied or other error is real failure
         return $false
     }
 }
@@ -41,6 +40,31 @@ function Invoke-RegistrySet {
     } catch {
         return $false
     }
+}
+
+function Get-TcpInterfacePaths {
+    @(Get-ChildItem -Path $tcpipIfRoot -ErrorAction SilentlyContinue | ForEach-Object { $_.PSPath })
+}
+
+# TcpAckFrequency / TCPNoDelay are per-interface (Interfaces\{GUID}), not global Parameters.
+function Set-InterfaceDword {
+    param([string]$Name, [int]$Value)
+    $paths = Get-TcpInterfacePaths
+    if ($paths.Count -eq 0) { return $false }
+    $ok = $true
+    foreach ($p in $paths) {
+        if (-not (Invoke-RegistrySet -Path $p -Name $Name -Value $Value)) { $ok = $false }
+    }
+    return $ok
+}
+
+function Remove-AckNoDelayKey {
+    param([string]$Name)
+    $ok = Invoke-RegistryRemove -Path $tcpipParams -Name $Name
+    foreach ($p in Get-TcpInterfacePaths) {
+        if (-not (Invoke-RegistryRemove -Path $p -Name $Name)) { $ok = $false }
+    }
+    return $ok
 }
 
 switch ($Preset) {
@@ -57,9 +81,8 @@ switch ($Preset) {
         $ok = Invoke-Netsh @("int","tcp","set","global","ecncapability=disabled")
         Add-Result "ECN" "disabled" $ok
 
-        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-        $ok1 = Invoke-RegistryRemove -Path $regPath -Name "TcpAckFrequency"
-        $ok2 = Invoke-RegistryRemove -Path $regPath -Name "TCPNoDelay"
+        $ok1 = Remove-AckNoDelayKey -Name "TcpAckFrequency"
+        $ok2 = Remove-AckNoDelayKey -Name "TCPNoDelay"
         Add-Result "TCP Ack Frequency" "removed (registry default)" $ok1
         Add-Result "TCP No Delay" "removed (registry default)" $ok2
         break
@@ -74,9 +97,8 @@ switch ($Preset) {
         $ok = Invoke-Netsh @("int","tcp","set","global","rss=enabled")
         Add-Result "RSS" "enabled" $ok
 
-        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-        $ok1 = Invoke-RegistryRemove -Path $regPath -Name "TcpAckFrequency"
-        $ok2 = Invoke-RegistryRemove -Path $regPath -Name "TCPNoDelay"
+        $ok1 = Remove-AckNoDelayKey -Name "TcpAckFrequency"
+        $ok2 = Remove-AckNoDelayKey -Name "TCPNoDelay"
         Add-Result "TCP Ack Frequency" "removed (registry default)" $ok1
         Add-Result "TCP No Delay" "removed (registry default)" $ok2
         break
@@ -91,9 +113,11 @@ switch ($Preset) {
         $ok = Invoke-Netsh @("int","tcp","set","global","ecncapability=disabled")
         Add-Result "ECN" "disabled" $ok
 
-        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-        $ok1 = Invoke-RegistrySet -Path $regPath -Name "TcpAckFrequency" -Value 1
-        $ok2 = Invoke-RegistrySet -Path $regPath -Name "TCPNoDelay" -Value 1
+        # Drop stale global Parameters copies so snapshot/preview do not read a no-op location.
+        Invoke-RegistryRemove -Path $tcpipParams -Name "TcpAckFrequency" | Out-Null
+        Invoke-RegistryRemove -Path $tcpipParams -Name "TCPNoDelay" | Out-Null
+        $ok1 = Set-InterfaceDword -Name "TcpAckFrequency" -Value 1
+        $ok2 = Set-InterfaceDword -Name "TCPNoDelay" -Value 1
         Add-Result "TCP Ack Frequency" "1 (set via registry)" $ok1
         Add-Result "TCP No Delay" "1 (set via registry)" $ok2
         break
@@ -111,9 +135,8 @@ switch ($Preset) {
         $ok = Invoke-Netsh @("int","tcp","set","global","rsc=default")
         Add-Result "RSC" "default" $ok
 
-        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-        $ok1 = Invoke-RegistryRemove -Path $regPath -Name "TcpAckFrequency"
-        $ok2 = Invoke-RegistryRemove -Path $regPath -Name "TCPNoDelay"
+        $ok1 = Remove-AckNoDelayKey -Name "TcpAckFrequency"
+        $ok2 = Remove-AckNoDelayKey -Name "TCPNoDelay"
         Add-Result "TCP Ack Frequency" "removed (registry default)" $ok1
         Add-Result "TCP No Delay" "removed (registry default)" $ok2
         break

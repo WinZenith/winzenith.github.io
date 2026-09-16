@@ -15,8 +15,30 @@ if ($want -match '[\\/:*?"<>|]') {
     Write-Error "RecordedInfName must be a bare filename, not a path: $want"
     exit 1
 }
-$infs = Get-ChildItem -Path $BackupFolder -Filter $want -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ceq $want }
+# Do not use Get-ChildItem -Recurse: it descends Windows junctions into the
+# target tree. Manual walk skips ReparsePoint directories.
+$infs = @()
+$stack = New-Object System.Collections.Stack
+try {
+    $rootItem = Get-Item -LiteralPath $BackupFolder -ErrorAction Stop
+} catch {
+    Write-Error "Backup folder not found: $BackupFolder"
+    exit 1
+}
+if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    Write-Error "Refusing to restore from a junction/symlink: $BackupFolder"
+    exit 1
+}
+$stack.Push($rootItem)
+while ($stack.Count -gt 0) {
+    $dir = $stack.Pop()
+    Get-ChildItem -LiteralPath $dir.FullName -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ieq $want -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+        ForEach-Object { $infs += $_ }
+    Get-ChildItem -LiteralPath $dir.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        if (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($_) }
+    }
+}
 if (-not $infs -or @($infs).Count -eq 0) {
     Write-Error "Recorded INF $want not found in $BackupFolder"
     exit 1
@@ -87,13 +109,9 @@ if ($DeviceId -and $DeviceId.Trim()) {
             $installOutputs += "restart-device unavailable: $($_.Exception.Message)"
         }
     }
-    if (-not $restartOk -and $dev) {
-        try {
-            try { Disable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-            Start-Sleep -Milliseconds 1500
-            try { Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue; $restartOk = $true } catch {}
-        } catch {}
-    }
+    # Do not Disable/Enable as a restart fallback: a failed Enable can leave
+    # the device disabled while this script still exits 0 (staged). The UI
+    # already tells the user to reboot or use Have-Disk when bind does not switch.
 }
 
 if ($failed -eq $infs.Count) {

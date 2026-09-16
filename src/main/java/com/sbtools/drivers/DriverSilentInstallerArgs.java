@@ -3,7 +3,6 @@ package com.sbtools.drivers;
 import com.sbtools.drivers.model.DriverUpdateCandidate;
 
 import java.nio.file.Path;
-import java.util.Locale;
 import java.util.regex.Pattern;
 
 /** Vendor-documented silent-install argument lists for driver EXE packages. */
@@ -32,15 +31,6 @@ public final class DriverSilentInstallerArgs {
                 return IntelPackageFamily.BLUETOOTH_CONSUMER;
             }
         }
-        if (candidate.installed() != null) {
-            String friendly = candidate.installed().friendlyName();
-            if (containsBluetooth(friendly)) {
-                return IntelPackageFamily.BLUETOOTH_CONSUMER;
-            }
-        }
-        if (containsBluetooth(candidate.title())) {
-            return IntelPackageFamily.BLUETOOTH_CONSUMER;
-        }
         return null;
     }
 
@@ -53,9 +43,5 @@ public final class DriverSilentInstallerArgs {
             return new String[]{"/quiet"};
         }
         return null;
-    }
-
-    private static boolean containsBluetooth(String text) {
-        return text != null && text.toLowerCase(Locale.ROOT).contains("bluetooth");
     }
 }

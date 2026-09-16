@@ -206,9 +206,6 @@ public class StartupTabView extends BorderPane {
 
         busy.addListener((obs, oldVal, newVal) -> {
             scanButton.setDisable(newVal);
-            boolean hasSelection = !getSelectedTable().getSelectionModel().getSelectedItems().isEmpty();
-            toggleButton.setDisable(newVal || !hasSelection);
-            deleteButton.setDisable(newVal || !hasSelection);
             backupsButton.setDisable(newVal);
             exportButton.setDisable(newVal);
             registrySearch.setDisable(newVal);
@@ -217,6 +214,7 @@ public class StartupTabView extends BorderPane {
             statusFilter.setDisable(newVal);
             impactFilter.setDisable(newVal);
             tabPane.setDisable(newVal);
+            updateButtonStates();
         });
 
         if (!AppPaths.isWindows()) {
@@ -628,6 +626,8 @@ public class StartupTabView extends BorderPane {
                 List<StartupItem> taskItemsResult = allItems.stream().filter(i -> i.getType() == StartupItemType.TASK).collect(Collectors.toList());
                 List<StartupItem> svcItems = allItems.stream().filter(i -> i.getType() == StartupItemType.SERVICE).collect(Collectors.toList());
                 List<String> scanErrors = service.drainScanErrors();
+                boolean appsPhaseFailed = scanErrors.stream().anyMatch(e ->
+                        e.startsWith("Registry:") || e.startsWith("Startup Folder"));
                 boolean tasksPhaseFailed = scanErrors.stream().anyMatch(e -> e.startsWith("Scheduled Tasks:"));
                 boolean servicesPhaseFailed = scanErrors.stream().anyMatch(e -> e.startsWith("Windows Services:"));
 
@@ -637,7 +637,9 @@ public class StartupTabView extends BorderPane {
                         statusLabel.setText("Scan stopped; previous results kept.");
                         return;
                     }
-                    registryItems.setAll(regItems);
+                    if (!appsPhaseFailed || !regItems.isEmpty()) {
+                        registryItems.setAll(regItems);
+                    }
                     if (!tasksPhaseFailed || !taskItemsResult.isEmpty()) {
                         taskItems.setAll(taskItemsResult);
                     }
@@ -946,10 +948,20 @@ public class StartupTabView extends BorderPane {
 
         List<StartupItem> adminNeeded = selected.stream().filter(StartupSafety::requiresAdmin).toList();
         if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
+            if (adminNeeded.size() == selected.size()) {
+                Alert alert = new Alert(Alert.AlertType.WARNING);
+                alert.setTitle(com.sbtools.util.UiText.label("Administrator required"));
+                alert.setHeaderText("Deletion requires elevation");
+                alert.setContentText("Deleting HKLM / Common Startup items or system scheduled tasks "
+                        + "requires administrator privileges.\nPlease run the application as administrator.");
+                alert.initModality(Modality.APPLICATION_MODAL);
+                alert.showAndWait();
+                return;
+            }
             Alert warn = new Alert(Alert.AlertType.WARNING);
             warn.setTitle(com.sbtools.util.UiText.label("Administrator required"));
-            warn.setHeaderText("Deletion requires elevation");
-            warn.setContentText(adminNeeded.size() + " selected item(s) require administrator privileges.\n"
+            warn.setHeaderText("Some items require elevation");
+            warn.setContentText(adminNeeded.size() + " item(s) require administrator privileges and will be skipped.\n"
                     + "Only non-privileged items will be deleted. Run as administrator to delete all.");
             warn.initModality(Modality.APPLICATION_MODAL);
             warn.showAndWait();
@@ -1162,6 +1174,7 @@ public class StartupTabView extends BorderPane {
 
         restoreBtn.setDisable(true);
         deleteBackupBtn.setDisable(true);
+        final boolean[] needsRescan = {false};
 
         backupTable.getSelectionModel().selectedItemProperty().addListener((obs, oldSel, newSel) -> {
             boolean hasSel = newSel != null;
@@ -1182,6 +1195,15 @@ public class StartupTabView extends BorderPane {
                 warn.showAndWait();
                 return;
             }
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle(com.sbtools.util.UiText.label("Confirm restore"));
+            confirm.setHeaderText("Restore startup item?");
+            confirm.setContentText("Restore \"" + selected.getName() + "\" to its original location?\n"
+                    + "The backup will be removed after a successful restore.");
+            confirm.initModality(Modality.APPLICATION_MODAL);
+            if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                return;
+            }
             restoreBtn.setDisable(true);
             deleteBackupBtn.setDisable(true);
             backupTable.setDisable(true);
@@ -1198,8 +1220,13 @@ public class StartupTabView extends BorderPane {
                         backupTable.setDisable(false);
                         busy.set(false);
                         progress.setVisible(false);
+                        needsRescan[0] = true;
+                        statusLabel.setText("Restored \"" + selected.getName()
+                                + "\". Close this dialog to refresh the list.");
                         new Alert(Alert.AlertType.INFORMATION, "Startup item restored successfully.").showAndWait();
-                        scan();
+                        if (!dialog.isShowing()) {
+                            scan();
+                        }
                     });
                 } catch (Exception ex) {
                     AppLogger.error("Failed to restore startup item", ex);
@@ -1268,6 +1295,9 @@ public class StartupTabView extends BorderPane {
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.CLOSE);
 
         dialog.showAndWait();
+        if (needsRescan[0] && !busy.get()) {
+            scan();
+        }
     }
 
     public void dispose() {

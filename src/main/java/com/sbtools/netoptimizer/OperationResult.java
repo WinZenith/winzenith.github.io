@@ -22,4 +22,10 @@ public record OperationResult(boolean success, String message, String details) {
     public boolean partialApply() {
         return !success && details != null && details.contains(" — OK") && details.contains(" — FAILED");
     }
+
+    /** Stack/Winsock paths put this phrase in the message when a reboot is required. */
+    public boolean rebootRequired() {
+        if (partialApply()) return true;
+        return message != null && message.toLowerCase().contains("reboot required");
+    }
 }

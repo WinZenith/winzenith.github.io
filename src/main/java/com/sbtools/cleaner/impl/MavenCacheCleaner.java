@@ -8,7 +8,7 @@ import com.sbtools.cleaner.CleanerUtils;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.stream.Stream;
+import java.util.List;
 
 public class MavenCacheCleaner implements CleanerExtension {
 
@@ -17,31 +17,26 @@ public class MavenCacheCleaner implements CleanerExtension {
 
     @Override
     public void scan(CleanupRow row) {
-        long totalSize = 0;
-        int itemCount = 0;
-        String userHome = CleanerUtils.safeEnv("USERPROFILE");
-        if (userHome != null) {
-            Path repo = Paths.get(userHome, ".m2", "repository");
-            if (Files.isDirectory(repo) && CleanerUtils.isSafeToCleanDirectory(repo)) {
-                try (Stream<Path> walk = Files.walk(repo, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
-                    var stats = walk.filter(Files::isRegularFile)
-                            .filter(p -> {
-                                String n = p.getFileName().toString().toLowerCase();
-                                return n.endsWith("-snapshot.jar") || n.endsWith("-snapshot.pom");
-                            })
-                            .collect(java.util.stream.Collectors.summarizingLong(p -> {
-                                try { return Files.size(p); } catch (Exception e) { return p.toFile().length(); }
-                            }));
-                    totalSize = stats.getSum();
-                    itemCount = (int) stats.getCount();
-                } catch (Exception ignored) {}
-            }
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        Path repo = repoDir();
+        if (repo == null) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText("No snapshot artifacts found");
+            return;
         }
-        row.setTotalBytes(totalSize);
-        row.setItemCount(itemCount);
-        row.setSizeOrCountText(totalSize > 0
-                ? CleanerUtils.formatBytes(totalSize) + " (" + itemCount + " snapshot files)"
-                : "No snapshot artifacts found");
+        CleanerUtils.scanFilesMatching(row, List.of(repo), CleanerUtils.DEFAULT_SCAN_MAX_DEPTH,
+                MavenCacheCleaner::isSnapshotArtifact, token);
+        if (row.getItemCount() == 0) {
+            row.setSizeOrCountText("No snapshot artifacts found");
+        } else {
+            row.setSizeOrCountText(CleanerUtils.formatBytes(row.getTotalBytes())
+                    + " (" + row.getItemCount() + " snapshot files)");
+        }
     }
 
     @Override
@@ -52,27 +47,40 @@ public class MavenCacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
-        long cleaned = 0;
-        String userHome = CleanerUtils.safeEnv("USERPROFILE");
-        if (userHome == null) return 0;
-        Path repo = Paths.get(userHome, ".m2", "repository");
-        if (!Files.isDirectory(repo) || !CleanerUtils.isSafeToCleanDirectory(repo)) return 0;
-        try (Stream<Path> walk = Files.walk(repo, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH)) {
-            var matched = walk.filter(Files::isRegularFile)
-                    .filter(p -> {
-                        String n = p.getFileName().toString().toLowerCase();
-                        return n.endsWith("-snapshot.jar") || n.endsWith("-snapshot.pom");
-                    })
-                    .toList();
-            for (Path f : matched) {
-                if (token != null && token.isCancelled()) break;
-                try {
-                    long size = Files.size(f);
-                    CleanerUtils.deletePermanently(f, token);
-                    if (!Files.exists(f)) cleaned += size;
-                } catch (Exception ignored) {}
+        Path repo = repoDir();
+        if (repo == null || !CleanerUtils.isSafeToCleanDirectory(repo)) return 0;
+        return CleanerUtils.deleteFilesMatching(repo, CleanerUtils.DEFAULT_SCAN_MAX_DEPTH, token,
+                MavenCacheCleaner::isSnapshotArtifact);
+    }
+
+    private static final java.util.regex.Pattern TIMESTAMPED_SNAPSHOT =
+            java.util.regex.Pattern.compile("-\\d{8}\\.\\d{6}-\\d+\\.");
+
+    /**
+     * Maven layout: version folder {@code 1.0-SNAPSHOT/} holds both
+     * {@code -SNAPSHOT.jar} and timestamped unique versions
+     * ({@code foo-1.0-20240101.120000-1.jar}).
+     */
+    static boolean isSnapshotArtifact(Path p) {
+        if (p == null) return false;
+        Path fileName = p.getFileName();
+        if (fileName == null) return false;
+        String lower = fileName.toString().toLowerCase();
+        if (lower.contains("-snapshot.")) return true;
+        if (TIMESTAMPED_SNAPSHOT.matcher(lower).find()) return true;
+        for (Path part : p) {
+            String s = part.toString();
+            if (s.length() >= 9 && s.regionMatches(true, s.length() - 9, "-SNAPSHOT", 0, 9)) {
+                return true;
             }
-        } catch (Exception ignored) {}
-        return cleaned;
+        }
+        return false;
+    }
+
+    private Path repoDir() {
+        String userHome = CleanerUtils.safeEnv("USERPROFILE");
+        if (userHome == null) return null;
+        Path repo = Paths.get(userHome, ".m2", "repository");
+        return Files.isDirectory(repo) ? repo : null;
     }
 }

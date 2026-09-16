@@ -2,16 +2,26 @@ param([string]$FolderPath, [int]$PassCount = 3)
 $ErrorActionPreference = 'Stop'
 $result = [ordered]@{ success = $false; message = ''; filesDeleted = 0; foldersDeleted = 0; scheduledForReboot = @() }
 
+function Emit-Result {
+    ConvertTo-Json -InputObject ([ordered]@{
+        success            = [bool]$result.success
+        message            = [string]$result.message
+        filesDeleted       = [int]$result.filesDeleted
+        foldersDeleted     = [int]$result.foldersDeleted
+        scheduledForReboot = @($result.scheduledForReboot)
+    }) -Depth 3 -Compress
+}
+
 try {
     if (-not (Test-Path -LiteralPath $FolderPath -ErrorAction SilentlyContinue)) {
         $result.message = "Folder not found: $FolderPath"
-        $result | ConvertTo-Json -Depth 3 -Compress; exit 1; return
+        Emit-Result; exit 1; return
     }
     try {
         $rootItem = Get-Item -LiteralPath $FolderPath -Force -ErrorAction Stop
         if ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
             $result.message = "Refusing to shred a junction / reparse point root: $FolderPath"
-            $result | ConvertTo-Json -Depth 3 -Compress; exit 1; return
+            Emit-Result; exit 1; return
         }
     } catch {
         if ($_.Exception.Message -match 'Refusing to shred') { throw }
@@ -62,7 +72,7 @@ try {
         if ($skippedReparse.Count -gt 0) {
             $result.message += " Skipped $($skippedReparse.Count) symlink/junction(s) (not followed)."
         }
-        $result | ConvertTo-Json -Depth 3 -Compress; return
+        Emit-Result; return
     }
 
     $totalFiles = $files.Count
@@ -147,7 +157,7 @@ try {
 
 } catch {
     $result.message = $_.Exception.Message
-    $result | ConvertTo-Json -Depth 3 -Compress; exit 1
+    Emit-Result; exit 1
 }
 
-$result | ConvertTo-Json -Depth 3 -Compress
+Emit-Result

@@ -1,6 +1,7 @@
 package com.sbtools.cleaner;
 
 import com.sbtools.util.AppLogger;
+import com.sbtools.util.AppPaths;
 import com.sbtools.util.CancellationToken;
 import com.sbtools.util.FormatUtils;
 
@@ -49,6 +50,8 @@ public final class CleanerUtils {
             PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\policydefinitions");
             PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\schemas");
             PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\wbem");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\logs\\cbs");
+            PROTECTED_ABSOLUTE_PREFIXES.add(w + "\\logs\\dism");
         }
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\system32");
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\syswow64");
@@ -62,6 +65,58 @@ public final class CleanerUtils {
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\policydefinitions");
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\schemas");
         PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\wbem");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\logs\\cbs");
+        PROTECTED_ABSOLUTE_PREFIXES.add("c:\\windows\\logs\\dism");
+        addUserDataFolderPrefixes();
+        addJavaHomePrefix();
+    }
+
+    private static volatile String cachedPortablePrefix;
+
+    private static void addUserDataFolderPrefixes() {
+        addKnownFolderPrefixes(safeEnv("USERPROFILE"));
+        String home = System.getProperty("user.home");
+        if (home != null && !home.isBlank()) addKnownFolderPrefixes(home);
+        addShellKnownFolderPrefixes();
+    }
+
+    private static void addShellKnownFolderPrefixes() {
+        try {
+            addKnownFolderPath(com.sun.jna.platform.win32.Shell32Util.getKnownFolderPath(
+                    com.sun.jna.platform.win32.KnownFolders.FOLDERID_Documents));
+            addKnownFolderPath(com.sun.jna.platform.win32.Shell32Util.getKnownFolderPath(
+                    com.sun.jna.platform.win32.KnownFolders.FOLDERID_Desktop));
+            addKnownFolderPath(com.sun.jna.platform.win32.Shell32Util.getKnownFolderPath(
+                    com.sun.jna.platform.win32.KnownFolders.FOLDERID_Downloads));
+            addKnownFolderPath(com.sun.jna.platform.win32.Shell32Util.getKnownFolderPath(
+                    com.sun.jna.platform.win32.KnownFolders.FOLDERID_Pictures));
+            addKnownFolderPath(com.sun.jna.platform.win32.Shell32Util.getKnownFolderPath(
+                    com.sun.jna.platform.win32.KnownFolders.FOLDERID_Videos));
+            addKnownFolderPath(com.sun.jna.platform.win32.Shell32Util.getKnownFolderPath(
+                    com.sun.jna.platform.win32.KnownFolders.FOLDERID_Music));
+        } catch (Throwable ignored) {}
+    }
+
+    private static void addKnownFolderPath(String path) {
+        if (path == null || path.isBlank()) return;
+        String n = path.toLowerCase().replace('/', '\\');
+        if (n.endsWith("\\")) n = n.substring(0, n.length() - 1);
+        PROTECTED_ABSOLUTE_PREFIXES.add(n);
+    }
+
+    private static void addKnownFolderPrefixes(String root) {
+        if (root == null || root.isBlank()) return;
+        String base = root.toLowerCase().replace('/', '\\');
+        if (base.endsWith("\\")) base = base.substring(0, base.length() - 1);
+        for (String name : new String[]{"documents", "desktop", "downloads", "pictures", "videos"}) {
+            PROTECTED_ABSOLUTE_PREFIXES.add(base + "\\" + name);
+        }
+    }
+
+    private static void addJavaHomePrefix() {
+        String javaHome = System.getProperty("java.home");
+        if (javaHome == null || javaHome.isBlank()) return;
+        PROTECTED_ABSOLUTE_PREFIXES.add(javaHome.toLowerCase().replace('/', '\\'));
     }
 
     private CleanerUtils() {
@@ -81,7 +136,7 @@ public final class CleanerUtils {
 
     public static void addEnvPath(List<Path> list, String envName, String... subPath) {
         Path p = safeEnvPath(envName, subPath);
-        if (p != null && Files.exists(p)) {
+        if (p != null && isRealDirectory(p)) {
             list.add(p);
         }
     }
@@ -89,7 +144,7 @@ public final class CleanerUtils {
     public static void addPath(List<Path> list, String pathStr) {
         if (pathStr != null && !pathStr.isBlank()) {
             Path p = Paths.get(pathStr);
-            if (Files.exists(p)) {
+            if (isRealDirectory(p)) {
                 list.add(p);
             }
         }
@@ -140,32 +195,27 @@ public final class CleanerUtils {
             if (path.startsWith("\\\\")) {
                 return null;
             }
-            int exeIdx = path.toLowerCase().lastIndexOf(".exe");
+            String lower = path.toLowerCase();
+            int exeIdx = indexOfExeSuffix(lower);
             if (exeIdx > 0) {
-                String afterExe = path.substring(exeIdx + 4);
-                int spaceIdx = afterExe.indexOf(" -");
-                if (spaceIdx >= 0) {
-                    path = path.substring(0, exeIdx + 4 + spaceIdx);
+                // Executable only — rundll32/wscript/cmd leftover args are not the path.
+                path = path.substring(0, exeIdx + 4).trim();
+            } else {
+                int dllIdx = lower.lastIndexOf(".dll");
+                if (dllIdx > 0) {
+                    String afterDll = path.substring(dllIdx + 4);
+                    int spaceIdx = afterDll.indexOf(" ");
+                    if (spaceIdx >= 0) {
+                        path = path.substring(0, dllIdx + 4 + spaceIdx);
+                    }
                 }
-                spaceIdx = afterExe.indexOf("/");
-                if (spaceIdx >= 0) {
-                    path = path.substring(0, exeIdx + 4 + spaceIdx);
-                }
-            }
-            int dllIdx = path.toLowerCase().lastIndexOf(".dll");
-            if (dllIdx > 0) {
-                String afterDll = path.substring(dllIdx + 4);
-                int spaceIdx = afterDll.indexOf(" ");
-                if (spaceIdx >= 0) {
-                    path = path.substring(0, dllIdx + 4 + spaceIdx);
-                }
-            }
-            int cplIdx = path.toLowerCase().lastIndexOf(".cpl");
-            if (cplIdx > 0) {
-                String afterCpl = path.substring(cplIdx + 4);
-                int spaceIdx = afterCpl.indexOf(",");
-                if (spaceIdx >= 0) {
-                    path = path.substring(0, cplIdx + 4);
+                int cplIdx = path.toLowerCase().lastIndexOf(".cpl");
+                if (cplIdx > 0) {
+                    String afterCpl = path.substring(cplIdx + 4);
+                    int spaceIdx = afterCpl.indexOf(",");
+                    if (spaceIdx >= 0) {
+                        path = path.substring(0, cplIdx + 4);
+                    }
                 }
             }
         }
@@ -182,6 +232,20 @@ public final class CleanerUtils {
             return null;
         }
         return path;
+    }
+
+    /** First `.exe` that is a suffix (end of string or followed by space/quote/slash). */
+    public static int indexOfExeSuffix(String lower) {
+        if (lower == null) return -1;
+        int idx = 0;
+        while ((idx = lower.indexOf(".exe", idx)) >= 0) {
+            int end = idx + 4;
+            if (end == lower.length()) return idx;
+            char c = lower.charAt(end);
+            if (c == ' ' || c == '"' || c == '/' || c == '\t') return idx;
+            idx = end;
+        }
+        return -1;
     }
 
     public static int countDocumentsInRecentDocsBinary(byte[] data) {
@@ -221,10 +285,7 @@ public final class CleanerUtils {
                         @Override
                         public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                             if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
-                            if (attrs.isSymbolicLink() || attrs.isOther()) return FileVisitResult.SKIP_SUBTREE;
-                            try {
-                                if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
-                            } catch (Exception ignored) {}
+                            if (shouldSkipWalkDir(d, dir, attrs)) return FileVisitResult.SKIP_SUBTREE;
                             return FileVisitResult.CONTINUE;
                         }
 
@@ -275,7 +336,7 @@ public final class CleanerUtils {
                         @Override
                         public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                             if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
-                            if (attrs.isSymbolicLink() || attrs.isOther()) return FileVisitResult.SKIP_SUBTREE;
+                            if (shouldSkipWalkDir(d, dir, attrs)) return FileVisitResult.SKIP_SUBTREE;
                             return FileVisitResult.CONTINUE;
                         }
 
@@ -365,7 +426,7 @@ public final class CleanerUtils {
     public static boolean isSafeToCleanDirectory(Path dir) {
         if (dir == null) return false;
         try {
-            if (!Files.isDirectory(dir)) return false;
+            if (!isRealDirectory(dir)) return false;
             if (isProtectedPath(dir)) return false;
             Path abs = dir.toAbsolutePath().normalize();
             if (abs.getParent() == null) return false;
@@ -389,12 +450,6 @@ public final class CleanerUtils {
                 // Bare drive root itself (e.g. "c:\") is never a safe target.
                 if (absStr.equals(sd.substring(0, sd.length() - 1)) || absStr.equals(sd)) return false;
             }
-            try {
-                if (Files.isSymbolicLink(dir)) return false;
-                Object reparse = Files.getAttribute(dir, "dos:isReparsePoint",
-                        java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                if (Boolean.TRUE.equals(reparse)) return false;
-            } catch (Exception ignored) {}
             return true;
         } catch (Exception e) {
             return false;
@@ -421,7 +476,7 @@ public final class CleanerUtils {
         java.util.concurrent.atomic.AtomicLong cleaned = new java.util.concurrent.atomic.AtomicLong();
         java.util.concurrent.atomic.AtomicInteger deleted = new java.util.concurrent.atomic.AtomicInteger();
         java.util.concurrent.atomic.AtomicInteger skipped = new java.util.concurrent.atomic.AtomicInteger();
-        if (dir == null || !Files.isDirectory(dir) || isProtectedPath(dir)) {
+        if (dir == null || !isRealDirectory(dir) || isProtectedPath(dir)) {
             if (dir != null && isProtectedPath(dir)) {
                 AppLogger.warning("Skipping protected directory: " + dir);
             }
@@ -437,20 +492,7 @@ public final class CleanerUtils {
                 @Override
                 public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
-                    if (!d.equals(dir) && isProtectedPath(d)) {
-                        return FileVisitResult.SKIP_SUBTREE;
-                    }
-                    // Skip reparse points / junctions to avoid traversing outside target
-                    if (!d.equals(dir) && attrs.isOther()) {
-                        try {
-                            Object reparse = Files.getAttribute(d, "dos:isReparsePoint", java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                            if (reparse instanceof Boolean && (Boolean) reparse) return FileVisitResult.SKIP_SUBTREE;
-                        } catch (Exception ignored) {}
-                    }
-                    if (attrs.isSymbolicLink()) return FileVisitResult.SKIP_SUBTREE;
-                    try {
-                        if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
-                    } catch (Exception ignored) {}
+                    if (shouldSkipWalkDir(d, dir, attrs)) return FileVisitResult.SKIP_SUBTREE;
                     return FileVisitResult.CONTINUE;
                 }
 
@@ -462,12 +504,16 @@ public final class CleanerUtils {
                         return FileVisitResult.CONTINUE;
                     }
                     try {
-                        boolean existed = Files.exists(file);
+                        if (isReparseLike(file, attrs)) {
+                            Files.deleteIfExists(file);
+                            return FileVisitResult.CONTINUE;
+                        }
+                        boolean existed = Files.exists(file, LinkOption.NOFOLLOW_LINKS);
                         Files.deleteIfExists(file);
-                        if (!Files.exists(file) && existed) {
+                        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS) && existed) {
                             cleaned.addAndGet(attrs.size());
                             deleted.incrementAndGet();
-                        } else if (Files.exists(file)) {
+                        } else if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
                             skipped.incrementAndGet();
                         }
                     } catch (Exception e) {
@@ -552,16 +598,7 @@ public final class CleanerUtils {
                 @Override
                 public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
                     if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
-                    if (!d.equals(dir) && isProtectedPath(d)) return FileVisitResult.SKIP_SUBTREE;
-                    if (!d.equals(dir) && (attrs.isSymbolicLink() || attrs.isOther())) return FileVisitResult.SKIP_SUBTREE;
-                    if (!d.equals(dir)) {
-                        try {
-                            if (Files.isSymbolicLink(d)) return FileVisitResult.SKIP_SUBTREE;
-                            Object reparse = Files.getAttribute(d, "dos:isReparsePoint",
-                                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                            if (Boolean.TRUE.equals(reparse)) return FileVisitResult.SKIP_SUBTREE;
-                        } catch (Exception ignored) {}
-                    }
+                    if (shouldSkipWalkDir(d, dir, attrs)) return FileVisitResult.SKIP_SUBTREE;
                     return FileVisitResult.CONTINUE;
                 }
 
@@ -616,23 +653,28 @@ public final class CleanerUtils {
 
     public static void deletePermanently(Path source, CancellationToken token) {
         if (token != null && token.isCancelled()) return;
+        if (source == null) return;
         if (isProtectedPath(source)) {
             AppLogger.warning("Skipping protected path: " + source);
             return;
         }
-        // Handle reparse points / junctions safely: delete link itself, not target
         try {
-            if (Files.isSymbolicLink(source)) {
+            Path parent = source.toAbsolutePath().normalize().getParent();
+            // Intermediate junctions are followed for the leaf; refuse unless
+            // every parent component is a real directory.
+            if (parent != null && !isRealDirectory(parent)) {
+                AppLogger.warning("Skipping delete through junction/symlink parent: " + source);
+                return;
+            }
+        } catch (Exception e) {
+            return;
+        }
+        // Delete the directory entry itself (junction/symlink), never the target.
+        try {
+            if (isReparseLike(source, null)) {
                 Files.deleteIfExists(source);
                 return;
             }
-            try {
-                Object reparse = Files.getAttribute(source, "dos:isReparsePoint", java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                if (reparse instanceof Boolean && (Boolean) reparse) {
-                    Files.deleteIfExists(source);
-                    return;
-                }
-            } catch (Exception ignored) {}
         } catch (Exception ignored) {}
         try {
             Files.deleteIfExists(source);
@@ -673,6 +715,10 @@ public final class CleanerUtils {
                     return true;
                 }
             }
+            String portable = portablePrefix();
+            if (portable != null && (absStr.equals(portable) || absStr.startsWith(portable + "\\"))) {
+                return true;
+            }
 
             Path root = abs.getRoot();
             if (root != null && abs.getParent() != null && abs.getParent().equals(root)) {
@@ -697,17 +743,314 @@ public final class CleanerUtils {
         return false;
     }
 
+    private static String portablePrefix() {
+        String cached = cachedPortablePrefix;
+        if (cached != null) return cached.isEmpty() ? null : cached;
+        synchronized (CleanerUtils.class) {
+            cached = cachedPortablePrefix;
+            if (cached != null) return cached.isEmpty() ? null : cached;
+            try {
+                Path portable = AppPaths.portableBaseDir();
+                if (portable != null) {
+                    cached = portable.toAbsolutePath().normalize().toString().toLowerCase().replace('/', '\\');
+                    cachedPortablePrefix = cached;
+                    return cached;
+                }
+            } catch (Exception ignored) {}
+            cachedPortablePrefix = "";
+            return null;
+        }
+    }
+
+    /**
+     * Fail-closed process check: if process enumeration is unavailable, returns true
+     * so callers skip destructive work rather than deleting files in use.
+     */
+    public static boolean isAnyProcessRunning(String... imageNames) {
+        if (imageNames == null || imageNames.length == 0) return false;
+        java.util.Set<String> want = new java.util.HashSet<>();
+        for (String n : imageNames) {
+            if (n != null && !n.isBlank()) want.add(n.toLowerCase(java.util.Locale.ROOT));
+        }
+        if (want.isEmpty()) return false;
+        try {
+            return ProcessHandle.allProcesses().anyMatch(ph -> {
+                String cmd = ph.info().command().orElse("");
+                if (cmd.isBlank()) return false;
+                try {
+                    Path fileName = Path.of(cmd).getFileName();
+                    if (fileName == null) return false;
+                    return want.contains(fileName.toString().toLowerCase(java.util.Locale.ROOT));
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    public static boolean exportRegistryKey(String fullKey, Path dest) {
+        if (fullKey == null || fullKey.isBlank() || dest == null) return false;
+        try {
+            Files.createDirectories(dest.getParent());
+            ProcessBuilder exportPb = new ProcessBuilder("reg", "export", fullKey, dest.toString(), "/y");
+            exportPb.redirectErrorStream(true);
+            Process exportProcess = com.sbtools.util.ProcessManager.start(exportPb);
+            boolean ok = exportProcess.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+            if (!ok) {
+                exportProcess.destroyForcibly();
+                return false;
+            }
+            return exportProcess.exitValue() == 0 && Files.isRegularFile(dest);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Delete matching regular files without following junctions/symlinks.
+     */
+    public static long deleteFilesMatching(Path root, int maxDepth, CancellationToken token,
+            java.util.function.Predicate<Path> match) {
+        if (root == null || !Files.isDirectory(root) || !isSafeToCleanDirectory(root)) return 0L;
+        int depth = maxDepth > 0 ? maxDepth : DEFAULT_SCAN_MAX_DEPTH;
+        java.util.concurrent.atomic.AtomicLong cleaned = new java.util.concurrent.atomic.AtomicLong();
+        try {
+            Files.walkFileTree(root, java.util.EnumSet.noneOf(FileVisitOption.class), depth, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                    if (shouldSkipWalkDir(d, root, attrs)) return FileVisitResult.SKIP_SUBTREE;
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                    if (!attrs.isRegularFile() || isProtectedPath(file)) return FileVisitResult.CONTINUE;
+                    try {
+                        if (match != null && !match.test(file)) return FileVisitResult.CONTINUE;
+                        long size = attrs.size();
+                        deletePermanently(file, token);
+                        if (!Files.exists(file)) cleaned.addAndGet(size);
+                    } catch (Exception ignored) {}
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (Exception ignored) {}
+        return cleaned.get();
+    }
+
+    public static void scanFilesMatching(CleanupRow row, List<Path> dirs, int maxDepth,
+            java.util.function.Predicate<Path> match, CancellationToken token) {
+        java.util.concurrent.atomic.AtomicLong totalSize = new java.util.concurrent.atomic.AtomicLong();
+        java.util.concurrent.atomic.AtomicLong itemCount = new java.util.concurrent.atomic.AtomicLong();
+        int depth = maxDepth > 0 ? maxDepth : DEFAULT_SCAN_MAX_DEPTH;
+        for (Path dir : dirs) {
+            if (token != null && token.isCancelled()) break;
+            if (dir == null || !Files.isDirectory(dir) || !isSafeToCleanDirectory(dir)) continue;
+            try {
+                Files.walkFileTree(dir, java.util.EnumSet.noneOf(FileVisitOption.class), depth, new SimpleFileVisitor<>() {
+                    @Override
+                    public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
+                        if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                        if (shouldSkipWalkDir(d, dir, attrs)) return FileVisitResult.SKIP_SUBTREE;
+                        return FileVisitResult.CONTINUE;
+                    }
+
+                    @Override
+                    public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                        if (token != null && token.isCancelled()) return FileVisitResult.TERMINATE;
+                        if (!attrs.isRegularFile()) return FileVisitResult.CONTINUE;
+                        try {
+                            if (match != null && !match.test(file)) return FileVisitResult.CONTINUE;
+                            totalSize.addAndGet(attrs.size());
+                            itemCount.incrementAndGet();
+                        } catch (Exception ignored) {}
+                        return FileVisitResult.CONTINUE;
+                    }
+
+                    @Override
+                    public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                        return FileVisitResult.CONTINUE;
+                    }
+                });
+            } catch (Exception ignored) {}
+        }
+        row.setTotalBytes(totalSize.get());
+        row.setItemCount((int) itemCount.get());
+        row.setSizeOrCountText(formatBytes(totalSize.get())
+                + (itemCount.get() > 0 ? " (" + itemCount.get() + " files)" : ""));
+    }
+
+    public static boolean shouldSkipWalkDir(Path d, Path root, BasicFileAttributes attrs) {
+        if (d == null) return true;
+        if (root != null && !d.equals(root) && isProtectedPath(d)) return true;
+        return isReparseLike(d, attrs);
+    }
+
+    /**
+     * True only for a real on-disk directory with no junction/symlink in any
+     * path component. Intermediate reparse points are followed by
+     * {@code NOFOLLOW} on the leaf only, so each prefix is checked.
+     */
+    public static boolean isRealDirectory(Path p) {
+        if (p == null) return false;
+        try {
+            Path abs = p.toAbsolutePath().normalize();
+            Path cur = abs.getRoot();
+            if (cur == null) return false;
+            int names = abs.getNameCount();
+            if (names <= 0) return false;
+            for (int i = 0; i < names; i++) {
+                cur = cur.resolve(abs.getName(i));
+                BasicFileAttributes attrs = Files.readAttributes(cur, BasicFileAttributes.class,
+                        LinkOption.NOFOLLOW_LINKS);
+                if (!attrs.isDirectory() || isReparseLike(cur, attrs)) return false;
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Junction/symlink/reparse. {@code dos:isReparsePoint} is not always
+     * registered; IllegalArgumentException must not be treated as "is a
+     * junction" or every directory would be skipped. NTFS junctions still
+     * report {@code isOther()} under NOFOLLOW — load attrs when the caller
+     * did not pass them, otherwise a junction looks like a plain directory.
+     */
+    public static boolean isReparseLike(Path p, BasicFileAttributes attrs) {
+        if (p == null) return true;
+        if (attrs == null) {
+            try {
+                attrs = Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            } catch (Exception e) {
+                return true;
+            }
+        }
+        if (attrs.isSymbolicLink() || attrs.isOther()) return true;
+        try {
+            if (Files.isSymbolicLink(p)) return true;
+        } catch (Exception e) {
+            return true;
+        }
+        try {
+            Object reparse = Files.getAttribute(p, "dos:isReparsePoint", LinkOption.NOFOLLOW_LINKS);
+            return Boolean.TRUE.equals(reparse);
+        } catch (UnsupportedOperationException | IllegalArgumentException e) {
+            return false;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
     public static boolean isWindowsServiceRunning(String serviceName) {
         if (serviceName == null || serviceName.isBlank()) return false;
         try {
             ProcessBuilder pb = new ProcessBuilder("sc", "query", serviceName);
             pb.redirectErrorStream(true);
             Process p = com.sbtools.util.ProcessManager.start(pb);
-            boolean finished = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            boolean finished = waitForProcessUninterruptibly(p, 5_000L);
             if (!finished) { p.destroyForcibly(); return false; }
             String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
             return output.contains("RUNNING");
         } catch (Exception ignored) { return false; }
+    }
+
+    /**
+     * Fail-closed: running, pending, or query failure. Used to restart a
+     * service we stopped even when {@code sc query} itself failed.
+     */
+    public static boolean serviceShouldBeRestoredAfterStop(String serviceName) {
+        return windowsServiceBusyOrUnknown(serviceName);
+    }
+
+    /**
+     * Fail-closed busy check for Windows Update: wuauserv is often stopped on
+     * Win10/11 while UsoSvc (Update Orchestrator) is the process actually
+     * writing SoftwareDistribution\\Download. Unknown query results skip cleanup.
+     */
+    public static boolean isWindowsUpdateBusy() {
+        return windowsServiceBusyOrUnknown("wuauserv")
+                || windowsServiceBusyOrUnknown("UsoSvc")
+                || windowsServiceBusyOrUnknown("TrustedInstaller")
+                || dismProcessBusyOrUnknown();
+    }
+
+    /** Delivery Optimization cache: skip while DO or Windows Update is active. */
+    public static boolean isDeliveryOptimizationBusy() {
+        return isWindowsUpdateBusy() || windowsServiceBusyOrUnknown("DoSvc");
+    }
+
+    static boolean serviceQueryMeansBusy(String scQueryOutput, boolean queryOk) {
+        if (!queryOk || scQueryOutput == null || scQueryOutput.isBlank()) return true;
+        return scQueryOutput.contains("RUNNING") || scQueryOutput.contains("PENDING");
+    }
+
+    private static boolean windowsServiceBusyOrUnknown(String serviceName) {
+        if (serviceName == null || serviceName.isBlank()) return true;
+        try {
+            ProcessBuilder pb = new ProcessBuilder("sc", "query", serviceName);
+            pb.redirectErrorStream(true);
+            Process p = com.sbtools.util.ProcessManager.start(pb);
+            boolean finished = waitForProcessUninterruptibly(p, 5_000L);
+            if (!finished) {
+                p.destroyForcibly();
+                return true;
+            }
+            String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            return serviceQueryMeansBusy(output, true);
+        } catch (Exception ignored) {
+            return true;
+        }
+    }
+
+    private static boolean dismProcessBusyOrUnknown() {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("tasklist", "/FO", "CSV", "/NH");
+            pb.redirectErrorStream(true);
+            Process p = com.sbtools.util.ProcessManager.start(pb);
+            boolean finished = waitForProcessUninterruptibly(p, 5_000L);
+            if (!finished) {
+                p.destroyForcibly();
+                return true;
+            }
+            String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            return output.toLowerCase().contains("dism.exe");
+        } catch (Exception ignored) {
+            return true;
+        }
+    }
+
+    /**
+     * Wait without aborting on thread interrupt (used when a stopped Windows
+     * service must be restarted even if the user cancelled the clean).
+     * Restores the interrupt flag afterward.
+     */
+    public static boolean waitForProcessUninterruptibly(Process p, long timeoutMs) {
+        if (p == null) return true;
+        boolean interrupted = false;
+        long deadline = System.currentTimeMillis() + Math.max(0L, timeoutMs);
+        try {
+            while (p.isAlive() && System.currentTimeMillis() < deadline) {
+                try {
+                    if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) return true;
+                } catch (InterruptedException ie) {
+                    interrupted = true;
+                }
+            }
+            return !p.isAlive();
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
     }
 
     public static String formatBytes(long bytes) {

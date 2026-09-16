@@ -43,6 +43,27 @@ function RecordTiming([string]$__name, [datetime]$__start) {
         $timings[$__name] = $__ms
     } catch {}
 }
+# WMI association paths encode \\.\PHYSICALDRIVE0 as \\\\.\\PHYSICALDRIVE0.
+# CimInstance.DeviceID is already unescaped. Only collapse when 4 leading backslashes.
+function Unescape-WmiDeviceId([string]$id) {
+    if ([string]::IsNullOrWhiteSpace($id)) { return '' }
+    $id = $id.Trim()
+    $bs = [char]92
+    if ($id.Length -ge 5 -and $id[0] -eq $bs -and $id[1] -eq $bs -and $id[2] -eq $bs -and $id[3] -eq $bs -and $id[4] -eq '.') {
+        return $id.Replace("$bs$bs", "$bs")
+    }
+    return $id
+}
+function Get-CimAssocDeviceId($prop) {
+    if ($null -eq $prop) { return '' }
+    try {
+        $direct = $prop.DeviceID
+        if ($direct) { return (Unescape-WmiDeviceId ([string]$direct)) }
+    } catch {}
+    $s = [string]$prop
+    if ($s -match 'DeviceID\s*=\s*"(.+?)"') { return (Unescape-WmiDeviceId $Matches[1]) }
+    return ''
+}
 
 # ── CPU ──────────────────────────────────────────────────────────────────────
 $__secStart = Get-Date
@@ -403,14 +424,17 @@ if (ShouldRun 'storage') {
 try {
     $ErrorActionPreference = 'Stop'
     $disks = @()
-    $diskIndexMap = @{}
     $diskDeviceIdMap = @{}
+    $diskSerialMap = @{}
+    $diskWmiIndexMap = @{}
     $diskIdx = 0
     Get-CimInstance Win32_DiskDrive | ForEach-Object {
         $sizeBytes = 0
         if ($_.Size) { $sizeBytes = [uint64]$_.Size }
         $serial = ''
         try { if ($_.SerialNumber) { $serial = $_.SerialNumber.Trim() } } catch {}
+        $wmiIndex = -1
+        try { if ($null -ne $_.Index) { $wmiIndex = [int]$_.Index } } catch {}
         $disk = [ordered]@{
             model       = if ($_.Model) { $_.Model.Trim() } else { '' }
             manufacturer = if ($_.Manufacturer) { $_.Manufacturer.Trim() } else { '' }
@@ -420,35 +444,38 @@ try {
             serialNumber = $serial
             partitions  = if ($_.Partitions) { $_.Partitions } else { 0 }
         }
-        if ($serial) { $diskIndexMap[$serial] = $diskIdx }
-        if ($_.DeviceID) { $diskDeviceIdMap[[string]$_.DeviceID] = $serial }
+        if ($serial) { $diskSerialMap[$serial] = $diskIdx }
+        if ($wmiIndex -ge 0) { $diskWmiIndexMap[$wmiIndex] = $diskIdx }
+        if ($_.DeviceID) {
+            $did = [string]$_.DeviceID
+            $diskDeviceIdMap[$did] = $diskIdx
+            $unesc = Unescape-WmiDeviceId $did
+            if ($unesc -and $unesc -ne $did) { $diskDeviceIdMap[$unesc] = $diskIdx }
+        }
         $disks += $disk
         $diskIdx++
     }
 
-    # Build mapping: logical disk deviceID -> physical disk index
+    # Build mapping: logical disk deviceID -> physical disk array index (not DiskNumber)
     $logicalToPhysical = @{}
     $allLogicalToPartition = @(Get-CimInstance Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue)
     Get-CimInstance Win32_DiskDriveToDiskPartition -ErrorAction SilentlyContinue | ForEach-Object {
-        $physDeviceId = ''
-        if ([string]$_.Antecedent -match 'DeviceID\s*=\s*"(.+?)"') { $physDeviceId = $Matches[1] }
-        $partDeviceId = ''
-        if ([string]$_.Dependent -match 'DeviceID\s*=\s*"(.+?)"') { $partDeviceId = $Matches[1] }
+        $physDeviceId = Get-CimAssocDeviceId $_.Antecedent
+        $partDeviceId = Get-CimAssocDeviceId $_.Dependent
         if (-not $physDeviceId -or -not $partDeviceId) { return }
 
-        $physSerial = ''
-        if ($diskDeviceIdMap.ContainsKey($physDeviceId)) { $physSerial = $diskDeviceIdMap[$physDeviceId] }
-        if (-not $physSerial) { return }
         $physIdx = -1
-        if ($diskIndexMap.ContainsKey($physSerial)) { $physIdx = $diskIndexMap[$physSerial] }
+        if ($diskDeviceIdMap.ContainsKey($physDeviceId)) { $physIdx = $diskDeviceIdMap[$physDeviceId] }
+        if ($physIdx -lt 0) {
+            $unescPhys = Unescape-WmiDeviceId $physDeviceId
+            if ($unescPhys -and $diskDeviceIdMap.ContainsKey($unescPhys)) { $physIdx = $diskDeviceIdMap[$unescPhys] }
+        }
         if ($physIdx -lt 0) { return }
 
         $allLogicalToPartition | ForEach-Object {
-            $logPartId = ''
-            if ([string]$_.Antecedent -match 'DeviceID\s*=\s*"(.+?)"') { $logPartId = $Matches[1] }
+            $logPartId = Get-CimAssocDeviceId $_.Antecedent
             if ($logPartId -eq $partDeviceId) {
-                $logDevId = ''
-                if ([string]$_.Dependent -match 'DeviceID\s*=\s*"(.+?)"') { $logDevId = $Matches[1] }
+                $logDevId = Get-CimAssocDeviceId $_.Dependent
                 if ($logDevId) { $logicalToPhysical[$logDevId] = $physIdx }
             }
         }
@@ -474,34 +501,41 @@ try {
         $partitions += $part
     }
 
-    # Fallback via Get-Partition/Get-Disk if WMI mapping produced all -1 (Storage Spaces / ReFS)
+    # Fallback via Get-Partition/Get-Disk for still-unmapped volumes (Storage Spaces / ReFS).
+    # Match Get-Disk.Number to Win32_DiskDrive.Index, then serial, then unique model.
+    # Never treat DiskNumber as a $disks array index.
     if ($partitions.Count -gt 0) {
-        $mappedCount = @($partitions | Where-Object { $_.diskIndex -ge 0 }).Count
-        if ($mappedCount -eq 0) {
+        $unmappedCount = @($partitions | Where-Object { $_.diskIndex -lt 0 }).Count
+        if ($unmappedCount -gt 0) {
             try {
                 $partitionToDisk = @{}
                 Get-Partition -ErrorAction SilentlyContinue | ForEach-Object {
                     try {
-                        $d = Get-Disk -Number $_.DiskNumber -ErrorAction SilentlyContinue
-                        if ($d -and $_.DriveLetter) {
-                            $dev = "$($_.DriveLetter):"
-                            # Find disk index by serial or model match
-                            $diskIdxFallback = -1
-                            for ($i = 0; $i -lt $disks.Count; $i++) {
-                                if ($disks[$i].serialNumber -and $d.SerialNumber -and $disks[$i].serialNumber.Trim() -eq $d.SerialNumber.Trim()) {
-                                    $diskIdxFallback = $i; break
-                                }
-                                if ($disks[$i].model -and $d.FriendlyName -and $disks[$i].model -eq $d.FriendlyName) {
-                                    $diskIdxFallback = $i
-                                }
-                            }
-                            if ($diskIdxFallback -ge 0) { $partitionToDisk[$dev] = $diskIdxFallback }
-                            elseif ($_.DiskNumber -lt $disks.Count) { $partitionToDisk[$dev] = [int]$_.DiskNumber }
+                        if (-not $_.DriveLetter) { return }
+                        $dev = "$($_.DriveLetter):"
+                        $diskIdxFallback = -1
+                        $d = $null
+                        try { $d = Get-Disk -Number $_.DiskNumber -ErrorAction SilentlyContinue } catch {}
+                        if ($null -ne $_.DiskNumber -and $diskWmiIndexMap.ContainsKey([int]$_.DiskNumber)) {
+                            $diskIdxFallback = $diskWmiIndexMap[[int]$_.DiskNumber]
                         }
+                        if ($diskIdxFallback -lt 0 -and $d -and $d.SerialNumber) {
+                            $ser = [string]$d.SerialNumber.Trim()
+                            if ($diskSerialMap.ContainsKey($ser)) { $diskIdxFallback = $diskSerialMap[$ser] }
+                        }
+                        if ($diskIdxFallback -lt 0 -and $d -and $d.FriendlyName) {
+                            $modelHits = @()
+                            for ($i = 0; $i -lt $disks.Count; $i++) {
+                                if ($disks[$i].model -and $disks[$i].model -eq $d.FriendlyName) { $modelHits += $i }
+                            }
+                            if ($modelHits.Count -eq 1) { $diskIdxFallback = $modelHits[0] }
+                        }
+                        if ($diskIdxFallback -ge 0) { $partitionToDisk[$dev] = $diskIdxFallback }
                     } catch {}
                 }
                 if ($partitionToDisk.Count -gt 0) {
                     for ($pi = 0; $pi -lt $partitions.Count; $pi++) {
+                        if ($partitions[$pi].diskIndex -ge 0) { continue }
                         $devKey = $partitions[$pi].deviceID
                         if ($partitionToDisk.ContainsKey($devKey)) {
                             $partitions[$pi].diskIndex = $partitionToDisk[$devKey]
@@ -1058,12 +1092,41 @@ if (ShouldRun 'monitors') {
 try {
     $ErrorActionPreference = 'Stop'
     $monitors = @()
-    # v3.1: query VideoController once, reuse for all monitors (was up to 3 identical queries)
     $__cachedVcRes = $null
     try {
         $__cachedVcRes = Get-CimInstance -Query "SELECT CurrentHorizontalResolution,CurrentVerticalResolution FROM Win32_VideoController WHERE CurrentHorizontalResolution IS NOT NULL" -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $__cachedVcRes) {
             $__cachedVcRes = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.CurrentHorizontalResolution -and $_.CurrentVerticalResolution } | Select-Object -First 1
+        }
+    } catch {}
+    $monResByPnp = @{}
+    try {
+        Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue | ForEach-Object {
+            $w = 0; $h = 0
+            try { if ($_.ScreenWidth) { $w = [int]$_.ScreenWidth } } catch {}
+            try { if ($_.ScreenHeight) { $h = [int]$_.ScreenHeight } } catch {}
+            if ($w -gt 0 -and $h -gt 0 -and $_.PNPDeviceID) {
+                $monResByPnp[([string]$_.PNPDeviceID).ToUpperInvariant()] = "${w}x${h}"
+            }
+        }
+    } catch {}
+    $srcResByInstance = @{}
+    try {
+        Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorListedSupportedSourceModes -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                if (-not $_.InstanceName) { return }
+                $inst = ([string]$_.InstanceName).ToUpperInvariant()
+                $idx = 0
+                try { $idx = [int]$_.PreferredMonitorSourceModeIndex } catch {}
+                $modes = @($_.MonitorSourceModes)
+                if ($idx -ge 0 -and $idx -lt $modes.Count) {
+                    $mode = $modes[$idx]
+                    $pw = 0; $ph = 0
+                    try { $pw = [int]$mode.HorizontalActivePixels } catch {}
+                    try { $ph = [int]$mode.VerticalActivePixels } catch {}
+                    if ($pw -gt 0 -and $ph -gt 0) { $srcResByInstance[$inst] = "${pw}x${ph}" }
+                }
+            } catch {}
         }
     } catch {}
     # Primary: WmiMonitorID in root/wmi (accurate on Win10+ with DP/HDMI, not deprecated)
@@ -1079,38 +1142,36 @@ try {
             foreach ($b in $arr) { if ($b -ne 0) { $chars += [char]$b } }
             return (-join $chars).Trim()
         }
-        # Also fetch basic display params for resolution if available
-        $basicParams = @()
-        try { $basicParams = @(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBasicDisplayParams -ErrorAction SilentlyContinue) } catch {}
         for ($mi = 0; $mi -lt $wmiMonitors.Count; $mi++) {
             $wm = $wmiMonitors[$mi]
             $monName = ''
             $monMfr = ''
-            $monSerial = ''
             try { $monName = & $decode $wm.UserFriendlyName } catch {}
             try { $monMfr = & $decode $wm.ManufacturerName } catch {}
-            # Fallback to InstanceName parsing for PNP ID
             $pnpId = ''
-            try { if ($wm.InstanceName) { $pnpRaw = [string]$wm.InstanceName; $pnpId = ($pnpRaw -split '\\')[0] } } catch {}
+            $instU = ''
+            try {
+                if ($wm.InstanceName) {
+                    $pnpRaw = [string]$wm.InstanceName
+                    $instU = $pnpRaw.ToUpperInvariant()
+                    $pnpId = ($pnpRaw -split '\\')[0]
+                }
+            } catch {}
             if (-not $monName) {
                 try { $monName = ($wm.InstanceName -split '\\')[0] -replace '_', ' ' } catch {}
             }
             if (-not $monName) { $monName = "Monitor $($mi+1)" }
             $res = ''
-            if ($mi -lt $basicParams.Count) {
-                try {
-                    $bp = $basicParams[$mi]
-                    if ($bp.MaxHorizontalImageSize -and $bp.MaxVerticalImageSize) {
-                        # BasicDisplayParams does not hold resolution, try to get via VideoController match
-                        $res = ''
-                    }
-                } catch {}
+            if ($instU -and $srcResByInstance.ContainsKey($instU)) {
+                $res = $srcResByInstance[$instU]
             }
-            # Try to complement resolution via cached Win32_VideoController current resolution (primary)
-            if (-not $res) {
-                try {
-                    if ($__cachedVcRes) { $res = "$($__cachedVcRes.CurrentHorizontalResolution)x$($__cachedVcRes.CurrentVerticalResolution)" }
-                } catch {}
+            if (-not $res -and $instU) {
+                foreach ($k in @($monResByPnp.Keys)) {
+                    if ($instU.StartsWith($k) -or $k.StartsWith($instU)) {
+                        $res = $monResByPnp[$k]
+                        break
+                    }
+                }
             }
             $mon = [ordered]@{
                 name         = $monName
@@ -1168,8 +1229,9 @@ try {
             $monitors += $mon
         }
     }
-    # Enrich first monitor resolution via cached VideoController if still missing
-    if ($monitors.Count -gt 0 -and -not $monitors[0].resolution) {
+    # Primary adapter resolution is one desktop mode. Only apply it when there is a
+    # single monitor; never copy it onto the first of N (WMI order != primary).
+    if ($monitors.Count -eq 1 -and -not $monitors[0].resolution) {
         try {
             if ($__cachedVcRes) { $monitors[0].resolution = "$($__cachedVcRes.CurrentHorizontalResolution)x$($__cachedVcRes.CurrentVerticalResolution)" }
         } catch {}

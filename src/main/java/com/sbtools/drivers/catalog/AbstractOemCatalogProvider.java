@@ -58,110 +58,124 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             }
             AppLogger.debug(vendor.label() + ": Matched driver " + driver.friendlyName() + " (current version: " + driver.driverVersion() + ")");
 
-            // Try catalog database first (metadata-first matching)
-            if (catalogDatabase != null) {
-                List<CatalogEntry> catalogMatches = catalogDatabase.findMatchingEntries(driver);
-                CatalogEntry bestCatalogMatch = catalogMatches.stream()
-                        .filter(e -> vendor.label().equalsIgnoreCase(e.provider()))
-                        .findFirst()
-                        .orElse(null);
-
-                if (bestCatalogMatch != null) {
-                    AppLogger.info(vendor.label() + ": Found catalog entry for " + driver.friendlyName()
-                            + " (version: " + bestCatalogMatch.latestVersion()
-                            + ", confidence: " + String.format("%.0f", bestCatalogMatch.confidence() * 100) + "%)");
-                    DriverUpdateCandidate candidate = DriverCatalogDatabase.toCandidate(bestCatalogMatch, driver);
-
-                    // Landing-page catalog URLs (no installer file extension) must not
-                    // become downloadUrl: the installer would download an HTML page.
-                    // Resolve a direct file URL instead; fall back to manual flow.
-                    if (!hasDirectFile(candidate.downloadUrl())) {
-                        AppLogger.info(vendor.label() + ": Catalog entry has no direct file URL, resolving via provider");
-                        String vendorPageUrl = candidate.vendorPageUrl();
-                        if (vendorPageUrl == null || vendorPageUrl.isBlank()) {
-                            vendorPageUrl = getVendorPageUrl(driver);
-                        }
-                        String resolvedUrl = resolveDirectDownloadUrl(driver, vendorPageUrl);
-                        if (resolvedUrl != null && !resolvedUrl.isBlank()) {
-                            candidate = new DriverUpdateCandidate(
-                                    candidate.installed(),
-                                    candidate.availableVersion(),
-                                    candidate.source(),
-                                    candidate.packageId(),
-                                    candidate.title(),
-                                    candidate.description(),
-                                    candidate.severity(),
-                                    resolvedUrl,
-                                    candidate.vendorPageUrl()
-                            );
-                        } else {
-                            // Keep the HW-matched catalog candidate as a manual-download
-                            // flow (empty URL + vendor page) instead of dropping a
-                            // genuine update. The UI routes empty-URL candidates to
-                            // the vendor website; nothing installs silently.
-                            // The catalog version stays authoritative: do NOT fall
-                            // through to generic web scraping, whose guessed
-                            // version could displace this HW-matched one.
-                            AppLogger.info(vendor.label() + ": No direct download for "
-                                    + driver.friendlyName() + " — offering manual update to "
-                                    + candidate.availableVersion());
-                            out.add(new DriverUpdateCandidate(
-                                    candidate.installed(),
-                                    candidate.availableVersion(),
-                                    candidate.source(),
-                                    candidate.packageId(),
-                                    candidate.title(),
-                                    candidate.description(),
-                                    candidate.severity(),
-                                    "",
-                                    candidate.vendorPageUrl()));
-                            continue;
-                        }
-                    }
-
-                    if (candidate != null) {
-                        out.add(candidate);
-                        continue;
-                    }
-                }
-            }
-
-            // Fall back to web scraping (legacy path)
-            String latest = fetchLatestVersion(driver);
-            if (!isPlausibleVersion(latest)) {
-                if (latest != null) {
-                    AppLogger.warning(vendor.label() + ": Rejecting implausible scraped version '" + latest
-                            + "' for " + driver.friendlyName());
-                }
-            } else if (VersionCompare.isOlder(driver.driverVersion(), latest)) {
-                AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName() + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
-                String vendorPageUrl = getVendorPageUrl(driver);
-                String downloadUrl = resolveDirectDownloadUrl(driver, vendorPageUrl);
-                if (downloadUrl == null) {
-                    downloadUrl = "";
-                }
-                if (vendorPageUrl == null) {
-                    vendorPageUrl = "";
-                }
-                out.add(new DriverUpdateCandidate(
-                        driver,
-                        latest,
-                        vendor.label(),
-                        vendor.name() + ":" + sanitize(deviceKey(driver)),
-                        vendor.label() + " driver update available",
-                        "Check " + vendor.label() + " support site for certified package.",
-                        UpdateSeverity.RECOMMENDED,
-                        downloadUrl,
-                        vendorPageUrl
-                ));
-            } else if (latest != null) {
-                AppLogger.debug(vendor.label() + ": Driver " + driver.friendlyName() + " is up to date (current: " + driver.driverVersion() + ", latest: " + latest + ")");
+            DriverUpdateCandidate catalogCandidate = catalogCandidate(driver);
+            DriverUpdateCandidate liveCandidate = liveCandidate(driver);
+            DriverUpdateCandidate chosen = preferCandidate(catalogCandidate, liveCandidate);
+            if (chosen != null) {
+                out.add(chosen);
             }
             } catch (Exception ex) {
                 AppLogger.warning(vendor.label() + ": Skipping driver due to error: " + ex.getMessage());
             }
         }
         return out;
+    }
+
+    private DriverUpdateCandidate catalogCandidate(InstalledDriver driver) {
+        if (catalogDatabase == null) {
+            return null;
+        }
+        List<CatalogEntry> catalogMatches = catalogDatabase.findMatchingEntries(driver);
+        CatalogEntry bestCatalogMatch = catalogMatches.stream()
+                .filter(e -> vendor.label().equalsIgnoreCase(e.provider()))
+                .findFirst()
+                .orElse(null);
+        if (bestCatalogMatch == null) {
+            return null;
+        }
+        AppLogger.info(vendor.label() + ": Found catalog entry for " + driver.friendlyName()
+                + " (version: " + bestCatalogMatch.latestVersion()
+                + ", confidence: " + String.format("%.0f", bestCatalogMatch.confidence() * 100) + "%)");
+        DriverUpdateCandidate candidate = DriverCatalogDatabase.toCandidate(bestCatalogMatch, driver);
+        // Landing pages must not become downloadUrl (installer would fetch HTML).
+        // Leave the URL empty here and let liveCandidate supply a file URL.
+        if (!hasDirectFile(candidate.downloadUrl())) {
+            return withDownloadUrl(candidate, "");
+        }
+        return candidate;
+    }
+
+    private DriverUpdateCandidate liveCandidate(InstalledDriver driver) {
+        String latest = fetchLatestVersion(driver);
+        if (!isPlausibleVersion(latest)) {
+            if (latest != null) {
+                AppLogger.warning(vendor.label() + ": Rejecting implausible scraped version '" + latest
+                        + "' for " + driver.friendlyName());
+            }
+            return null;
+        }
+        if (!VersionCompare.isOlder(driver.driverVersion(), latest)) {
+            AppLogger.debug(vendor.label() + ": Driver " + driver.friendlyName()
+                    + " is up to date (current: " + driver.driverVersion() + ", latest: " + latest + ")");
+            return null;
+        }
+        AppLogger.debug(vendor.label() + ": Update available for " + driver.friendlyName()
+                + " (current: " + driver.driverVersion() + ", latest: " + latest + ")");
+        String vendorPageUrl = getVendorPageUrl(driver);
+        String downloadUrl = resolveDirectDownloadUrl(driver, vendorPageUrl);
+        if (downloadUrl == null || !hasDirectFile(downloadUrl)) {
+            downloadUrl = "";
+        }
+        if (vendorPageUrl == null) {
+            vendorPageUrl = "";
+        }
+        return new DriverUpdateCandidate(
+                driver,
+                latest,
+                vendor.label(),
+                vendor.name() + ":" + sanitize(deviceKey(driver)),
+                vendor.label() + " driver update available",
+                "Check " + vendor.label() + " support site for certified package.",
+                UpdateSeverity.RECOMMENDED,
+                downloadUrl,
+                vendorPageUrl
+        );
+    }
+
+    /**
+     * Live version wins when newer. On a version tie, a direct installer URL
+     * wins over a manual/vendor-page catalog hit. Catalog-only when live is null.
+     */
+    static DriverUpdateCandidate preferCandidate(DriverUpdateCandidate catalog, DriverUpdateCandidate live) {
+        if (catalog == null) {
+            return live;
+        }
+        if (live == null) {
+            return catalog;
+        }
+        int cmp = VersionCompare.compare(live.availableVersion(), catalog.availableVersion());
+        if (cmp > 0) {
+            return live;
+        }
+        if (cmp < 0) {
+            return catalog;
+        }
+        boolean liveFile = hasWorkingDownload(live);
+        boolean catalogFile = hasWorkingDownload(catalog);
+        if (liveFile && !catalogFile) {
+            return live;
+        }
+        if (catalogFile && !liveFile) {
+            return catalog;
+        }
+        return liveFile ? live : catalog;
+    }
+
+    static boolean hasWorkingDownload(DriverUpdateCandidate candidate) {
+        return candidate != null && hasDirectFile(candidate.downloadUrl());
+    }
+
+    static DriverUpdateCandidate withDownloadUrl(DriverUpdateCandidate candidate, String downloadUrl) {
+        return new DriverUpdateCandidate(
+                candidate.installed(),
+                candidate.availableVersion(),
+                candidate.source(),
+                candidate.packageId(),
+                candidate.title(),
+                candidate.description(),
+                candidate.severity(),
+                downloadUrl == null ? "" : downloadUrl,
+                candidate.vendorPageUrl());
     }
 
     protected abstract String fetchLatestVersion(InstalledDriver driver);
@@ -207,7 +221,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                     return resp.body();
                 }
                 if (resp.statusCode() >= 500 && attempt < HTTP_MAX_RETRIES) {
-                    AppLogger.warning(vendor.label() + ": HTTP " + resp.statusCode() + " on " + url + " (attempt " + attempt + "/" + HTTP_MAX_RETRIES + "), retrying…");
+                    AppLogger.warning(vendor.label() + ": HTTP " + resp.statusCode() + " on " + url + " (attempt " + attempt + "/" + HTTP_MAX_RETRIES + "), retrying...");
                     try {
                         Thread.sleep(backoffMs);
                     } catch (InterruptedException ie) {
@@ -317,7 +331,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
      * @return direct download URL, or null if unable to resolve
      */
     protected String resolveDirectDownloadUrl(InstalledDriver driver, String vendorPageUrl) {
-        // Generic support-page scraping cannot prove package-to-device identity — manual only.
+        // Generic support-page scraping cannot prove package-to-device identity -- manual only.
         return null;
     }
 

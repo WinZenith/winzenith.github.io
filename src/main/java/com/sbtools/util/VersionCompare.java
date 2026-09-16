@@ -26,6 +26,13 @@ public final class VersionCompare {
         if ((aDch && bPub) || (bDch && aPub)) {
             return compareNvidiaMixed(aT, bT);
         }
+        boolean aIntelDch = isIntelDch(aT);
+        boolean bIntelDch = isIntelDch(bT);
+        boolean aIntelPub = !aIntelDch && isIntelPublic(aT);
+        boolean bIntelPub = !bIntelDch && isIntelPublic(bT);
+        if ((aIntelDch && bIntelPub) || (bIntelDch && aIntelPub)) {
+            return compareIntelMixed(aT, bT);
+        }
         String baseA = extractBaseVersion(a);
         String baseB = extractBaseVersion(b);
         String[] pa = baseA.split("\\.");
@@ -207,6 +214,45 @@ public final class VersionCompare {
             } catch (Exception e) {
                 return null;
             }
+        }
+        return null;
+    }
+
+    /**
+     * True for Intel Windows graphics versions such as {@code 31.0.101.5768}.
+     * The public Arc/Xe build is the {@code 101.xxxx} tail.
+     */
+    static boolean isIntelDch(String v) {
+        return v != null && v.matches("\\d{2}\\.\\d{1,2}\\.101\\.\\d{3,5}");
+    }
+
+    /** True for Intel public graphics versions such as {@code 101.5768}. */
+    static boolean isIntelPublic(String v) {
+        return v != null && v.matches("101\\.\\d{3,5}");
+    }
+
+    static int compareIntelMixed(String a, String b) {
+        Long keyA = intelNormalizedKey(a.trim());
+        Long keyB = intelNormalizedKey(b.trim());
+        if (keyA == null || keyB == null) {
+            return 0;
+        }
+        return Long.compare(keyA, keyB);
+    }
+
+    /** Intel GFX build key: DCH {@code NN.N.101.XXXX} and public {@code 101.XXXX} → {@code XXXX}. */
+    static Long intelNormalizedKey(String v) {
+        if (v == null || v.isBlank()) {
+            return null;
+        }
+        String t = v.trim();
+        try {
+            if (isIntelDch(t) || isIntelPublic(t)) {
+                String[] parts = t.split("\\.");
+                return Long.parseLong(parts[parts.length - 1].replaceAll("[^0-9]", ""));
+            }
+        } catch (Exception e) {
+            return null;
         }
         return null;
     }

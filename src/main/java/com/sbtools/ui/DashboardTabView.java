@@ -873,13 +873,6 @@ public class DashboardTabView extends BorderPane {
 
     // ── View Switching ────────────────────────────────────────────────────
 
-    private void showWelcomeView() {
-        welcomeBox.setVisible(true);
-        welcomeBox.setManaged(true);
-        resultsBox.setVisible(false);
-        resultsBox.setManaged(false);
-    }
-
     private void showResultsView() {
         welcomeBox.setVisible(false);
         welcomeBox.setManaged(false);
@@ -1096,6 +1089,78 @@ public class DashboardTabView extends BorderPane {
             boolean softwareProgressFailed, boolean cleanupProgressFailed) {
         if (errorRowCount > 0) return true;
         return driverProgressFailed || softwareProgressFailed || cleanupProgressFailed;
+    }
+
+    /**
+     * Soft-timeout keeps cleanup rows already returned by {@code CleanupService}.
+     * User Stop / dispose must not publish — {@code restorePreScanUi} owns the table.
+     */
+    static boolean keepCleanupResults(boolean scanStale, boolean disposed) {
+        return !scanStale && !disposed;
+    }
+
+    /** Timeout placeholder only when that category has no row (partial cleanup counts). */
+    static boolean hasTimeoutPlaceholderTarget(Iterable<IssueCategory> issues, String category, String source) {
+        if (issues == null || category == null) return false;
+        for (IssueCategory ic : issues) {
+            if (ic == null) continue;
+            if (category.equals(ic.categoryProperty().get())) return true;
+            if ("Cleanup".equals(source) && "Cleanup".equals(ic.sourceProperty().get())) return true;
+        }
+        return false;
+    }
+
+    /** Status after Stop restored pre-scan issues. Visibility stays with restorePreScanUi. */
+    static String stopScanStatus(boolean restoredIssuesEmpty) {
+        return restoredIssuesEmpty ? "Scan stopped." : "Scan stopped — previous results restored.";
+    }
+
+    /**
+     * Convert cleanup scan rows to dashboard issues. Empty/pending rows are skipped.
+     * User-cancel ERROR noise is dropped so a soft timeout can keep real partials
+     * without a wall of "canceled" rows.
+     */
+    static List<IssueCategory> issuesFromCleanupRows(List<CleanupRow> results) {
+        if (results == null || results.isEmpty()) return List.of();
+        List<IssueCategory> batch = new ArrayList<>();
+        for (CleanupRow row : results) {
+            if (row == null || row.getCategory() == null) continue;
+            if (row.getScanStatus() == CleanupRow.ScanStatus.ERROR) {
+                String detailText = row.getErrorMessage() != null && !row.getErrorMessage().isBlank()
+                        ? row.getErrorMessage() : "Scan error";
+                if (isCleanupCancelNoise(detailText)) continue;
+                batch.add(IssueCategory.error(
+                        row.getCategory().getDisplayName(),
+                        detailText,
+                        "",
+                        "Cleanup",
+                        0));
+                continue;
+            }
+            if (row.getTotalBytes() <= 0 && row.getItemCount() <= 0) {
+                continue;
+            }
+            final long sizeBytes = row.getTotalBytes();
+            final int itemCount = row.getItemCount();
+            final String detailText = sizeBytes > 0 && itemCount > 0
+                    ? formatBytes(sizeBytes) + " (" + itemCount + " files)"
+                    : sizeBytes > 0 ? formatBytes(sizeBytes)
+                    : itemCount + " item" + (itemCount == 1 ? "" : "s");
+            String sizeText = sizeBytes > 0 ? formatBytes(sizeBytes) : "";
+            batch.add(new IssueCategory(
+                    row.getCategory().getDisplayName(),
+                    detailText,
+                    sizeText,
+                    "Cleanup",
+                    sizeBytes));
+        }
+        return batch;
+    }
+
+    static boolean isCleanupCancelNoise(String message) {
+        if (message == null || message.isBlank()) return false;
+        String m = message.toLowerCase(java.util.Locale.ROOT);
+        return m.contains("canceled by user") || m.contains("cancelled by user");
     }
 
     private boolean progressCategoryNeedsRetry(int categoryIndex) {
@@ -1461,13 +1526,9 @@ public class DashboardTabView extends BorderPane {
 
     /** FX thread: timeout placeholder so Retry has a target; skip if results already landed. */
     private void addTimeoutRowIfMissing(String category, String source) {
-        boolean exists = issues.stream().anyMatch(ic ->
-                category.equals(ic.categoryProperty().get())
-                        || ("Cleanup".equals(source) && "Cleanup".equals(ic.sourceProperty().get())));
-        if (!exists) {
-            issues.add(IssueCategory.error(
-                    category, "Timed out — press Retry to rescan", "", source, 0));
-        }
+        if (hasTimeoutPlaceholderTarget(issues, category, source)) return;
+        issues.add(IssueCategory.error(
+                category, "Timed out — press Retry to rescan", "", source, 0));
     }
 
     private boolean isScanStale(int generation) {
@@ -1881,58 +1942,39 @@ public class DashboardTabView extends BorderPane {
                     activeCategories,
                     () -> updateCleanupProgress(cleanupDone.incrementAndGet(), totalCategories, generation),
                     cleanupExec, effectiveCleanupToken);
-            if (isCancelledAny(generation, parent, child)) return;
-            for (CleanupRow row : results) {
-                if (isCancelledAny(generation, parent, child)) return;
-                if (row.getScanStatus() == CleanupRow.ScanStatus.ERROR) {
-                    String detailText = row.getErrorMessage() != null ? row.getErrorMessage() : "Scan error";
-                    batch.add(IssueCategory.error(
-                            row.getCategory().getDisplayName(),
-                            detailText,
-                            "",
-                            "Cleanup",
-                            0));
-                    continue;
-                }
-                if (row.getTotalBytes() <= 0 && (row.getItemCount() <= 0)) {
-                    continue;
-                }
-                // Build display text from volatile scan counters (thread-safe) instead
-                // of reading the FX StringProperty off this worker thread.
-                final long sizeBytes = row.getTotalBytes();
-                final int itemCount = row.getItemCount();
-                final String detailText = sizeBytes > 0 && itemCount > 0
-                        ? formatBytes(sizeBytes) + " (" + itemCount + " files)"
-                        : sizeBytes > 0 ? formatBytes(sizeBytes)
-                        : itemCount + " item" + (itemCount == 1 ? "" : "s");
-                String sizeText = row.getTotalBytes() > 0 ? formatBytes(row.getTotalBytes()) : "";
-                batch.add(new IssueCategory(
-                        row.getCategory().getDisplayName(),
-                        detailText,
-                        sizeText,
-                        "Cleanup",
-                        sizeBytes));
-            }
-            updateCategoryProgress(2, "done", generation);
+            if (!keepCleanupResults(isScanStale(generation), disposed)) return;
+            batch.addAll(issuesFromCleanupRows(results));
+            boolean timedOut = isCancelledAny(generation, parent, child);
+            updateCategoryProgress(2, timedOut ? "timeout" : "done", generation);
         } catch (CancellationException ex) {
             AppLogger.info("Dashboard cleanup scan cancelled");
-            updateCategoryProgress(2, "failed", generation);
+            if (keepCleanupResults(isScanStale(generation), disposed)) {
+                updateCategoryProgress(2, "timeout", generation);
+            } else {
+                updateCategoryProgress(2, "failed", generation);
+            }
         } catch (Exception ex) {
-            if (isCancelledAny(generation, parent, child)) {
+            if (!keepCleanupResults(isScanStale(generation), disposed)) {
                 AppLogger.info("Dashboard cleanup scan cancelled");
                 updateCategoryProgress(2, "failed", generation);
                 return;
             }
-            AppLogger.warning("Dashboard cleanup scan failed: " + ex.getMessage());
-            updateCategoryProgress(2, "failed", generation);
-            batch.add(IssueCategory.error("System Cleanup", "Error: " + ex.getMessage(), "", "Cleanup", 0));
+            if (isCancelledAny(generation, parent, child)) {
+                AppLogger.info("Dashboard cleanup scan cancelled");
+                updateCategoryProgress(2, "timeout", generation);
+            } else {
+                AppLogger.warning("Dashboard cleanup scan failed: " + ex.getMessage());
+                updateCategoryProgress(2, "failed", generation);
+                batch.add(IssueCategory.error("System Cleanup", "Error: " + ex.getMessage(), "", "Cleanup", 0));
+            }
         } finally {
             try {
                 cleanupExec.shutdownNow();
             } catch (Exception ignored) {}
         }
-        // Single batched FX mutation for all cleanup rows (P1).
-        if (!batch.isEmpty()) {
+        // Soft-timeout: still publish rows CleanupService already returned.
+        // User Stop (stale generation) skipped above / here so restorePreScanUi wins.
+        if (!batch.isEmpty() && keepCleanupResults(isScanStale(generation), disposed)) {
             final List<IssueCategory> toAdd = List.copyOf(batch);
             Platform.runLater(() -> {
                 if (isScanStale(generation)) return;
@@ -2197,12 +2239,7 @@ public class DashboardTabView extends BorderPane {
         stopButton.setDisable(true);
         scanButton.setDisable(busy.get());
         restorePreScanUi(runningGen);
-        if (issues.isEmpty()) {
-            statusLabel.setText("Scan stopped.");
-            showWelcomeView();
-        } else {
-            statusLabel.setText("Scan stopped — previous results restored.");
-        }
+        statusLabel.setText(stopScanStatus(issues.isEmpty()));
         progressRow.setVisible(false);
         progressRow.setManaged(false);
     }

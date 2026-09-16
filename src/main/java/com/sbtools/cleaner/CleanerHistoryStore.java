@@ -20,8 +20,6 @@ import java.util.Map;
  */
 public class CleanerHistoryStore {
 
-    private Path historyFileOverride;
-
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .enable(SerializationFeature.INDENT_OUTPUT);
     private static final int MAX_HISTORY_ENTRIES = 50;
@@ -48,12 +46,7 @@ public class CleanerHistoryStore {
         }
     }
 
-    void setHistoryFileForTests(Path path) {
-        historyFileOverride = path;
-    }
-
     private Path getHistoryFile() {
-        if (historyFileOverride != null) return historyFileOverride;
         return AppPaths.dataDir().resolve("cleanup-history.json");
     }
 

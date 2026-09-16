@@ -150,11 +150,15 @@ public class DriverBackupService {
             try { deleteDirectory(folder); } catch (Exception ignored) {}
             throw new IOException("Driver backup failed: " + result.combinedOutput());
         }
-        // Verify backup actually produced files - fail fast if no INF was exported
-        if (countInfFiles(folder) == 0) {
+        // Record the on-disk INF: pnputil /export-driver oemN.inf writes the
+        // original package name (netwtw08.inf), not the published oemN.inf.
+        String exportedInf;
+        try {
+            exportedInf = resolveRevertInfName(folder, inf);
+        } catch (IOException infEx) {
             try { deleteDirectory(folder); } catch (Exception ignored) {}
-            throw new IOException("Driver backup produced no INF files in " + folder
-                    + ". The driver may not be exported via pnputil on this system or the INF name is incorrect.");
+            throw new IOException("Driver backup produced no usable INF in " + folder
+                    + ". " + infEx.getMessage(), infEx);
         }
 
         DriverBackupEntry entry = new DriverBackupEntry(
@@ -164,7 +168,7 @@ public class DriverBackupService {
                 now,
                 folder.toString(),
                 driver.driverVersion(),
-                inf
+                exportedInf
         );
 
         // Index next to the actual files: on fallback the primary index is
@@ -217,31 +221,25 @@ public class DriverBackupService {
             throw new IOException("Backup is outside known backup locations: " + folder
                     + ". Point the backup directory back to its original location, or use Repair if the index is stale.");
         }
-        String infName = entry.infName();
-        if (infName == null || !RECORDED_INF_NAME.matcher(infName).matches()) {
-            throw new IOException("This backup has no recorded INF name. Automatic revert is not supported.\n"
-                    + "Use Device Manager → Update driver → Browse → Let me pick → Have Disk\n"
-                    + "and point at: " + folder);
+        if (BackupHealth.isReparseOrSymlink(folder)) {
+            throw new IOException("Refusing to revert from a junction/symlink: " + folder);
         }
-        int infMatches = BackupHealth.countMatchingInfFiles(folder, infName);
-        if (infMatches < 0) {
-            throw new IOException("Backup folder is too large to verify: " + folder);
-        }
-        if (infMatches != 1) {
-            throw new IOException("Expected exactly one " + infName + " in backup folder, found " + infMatches
-                    + ". Refusing ambiguous revert.");
-        }
-        if (!Files.isDirectory(folder)) {
+        if (!Files.isDirectory(folder, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Backup folder missing: " + folder);
+        }
+        String infName;
+        try {
+            infName = resolveRevertInfName(folder, entry.infName());
+        } catch (IOException infEx) {
+            throw new IOException(infEx.getMessage()
+                    + "\nUse Device Manager → Update driver → Browse → Let me pick → Have Disk\n"
+                    + "and point at: " + folder, infEx);
         }
 
         long infCount = countInfFiles(folder);
-        if (infCount == 0) {
-            throw new IOException("Backup folder contains no .inf files: " + folder);
-        }
-
         AppLogger.info("Reverting driver: " + entry.friendlyName()
-                + " from backup [" + entry.id() + "] (" + infCount + " INF file(s))");
+                + " from backup [" + entry.id() + "] INF=" + infName
+                + " (" + infCount + " INF file(s))");
 
         Path script = PowerShellScripts.resolve("pnputil-restore.ps1");
         // deviceId may be null on corrupt index entries — script arg is optional, never pass null
@@ -271,8 +269,12 @@ public class DriverBackupService {
                 msg += out.length() > 1500 ? out.substring(0, 1500) + "…" : out;
                 msg += "\n";
             }
-            msg += "The backup was staged but Windows did not switch the active driver.\n"
-                    + "Reboot, then use Device Manager → Update driver → Browse → Let me pick → Have Disk\n"
+            if (detail.installed() > 0) {
+                msg += "The backup was staged but Windows did not switch the active driver.\n";
+            } else {
+                msg += "The backup INF was not staged.\n";
+            }
+            msg += "Reboot, then use Device Manager → Update driver → Browse → Let me pick → Have Disk\n"
                     + "and point at: " + folder;
             throw new IOException(msg);
         }
@@ -447,11 +449,20 @@ public class DriverBackupService {
     }
 
     private void cleanupEmptyParent(Path parent) {
-        if (parent == null || !Files.isDirectory(parent)) return;
-        // Only delete parent if it is directly under backupsRoot and empty
+        if (parent == null || !Files.isDirectory(parent, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return;
         try {
-            Path backupsRoot = indexPath().getParent();
-            if (backupsRoot == null || !parent.startsWith(backupsRoot)) return;
+            Path normalized = parent.toAbsolutePath().normalize();
+            boolean underKnownRoot = false;
+            for (Path root : cachedAllowedRoots()) {
+                if (root == null) continue;
+                Path r = root.toAbsolutePath().normalize();
+                if (normalized.startsWith(r) && !normalized.equals(r)
+                        && normalized.getNameCount() == r.getNameCount() + 1) {
+                    underKnownRoot = true;
+                    break;
+                }
+            }
+            if (!underKnownRoot) return;
             try (var stream = Files.list(parent)) {
                 if (stream.findFirst().isEmpty()) {
                     Files.deleteIfExists(parent);
@@ -625,6 +636,47 @@ public class DriverBackupService {
         }
     }
 
+    /**
+     * Resolves the INF to stage from a backup folder. Prefers the recorded
+     * name (case-insensitive). If it is missing — typical for legacy index
+     * entries that stored published {@code oemN.inf} while export wrote the
+     * original package INF — uses the folder's only {@code .inf}.
+     */
+    static String resolveRevertInfName(Path folder, String recordedInfName) throws IOException {
+        if (folder == null || !BackupHealth.isPathShapeSafe(folder)
+                || BackupHealth.isReparseOrSymlink(folder)
+                || !Files.isDirectory(folder, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Backup folder missing or unsafe: " + folder);
+        }
+        java.util.List<String> infs = BackupHealth.listInfBasenames(folder);
+        if (infs.isEmpty()) {
+            throw new IOException("Backup folder contains no .inf files: " + folder);
+        }
+        String recorded = recordedInfName == null ? "" : recordedInfName.trim();
+        if (!recorded.isBlank() && RECORDED_INF_NAME.matcher(recorded).matches()) {
+            java.util.List<String> matches = infs.stream()
+                    .filter(n -> n.equalsIgnoreCase(recorded))
+                    .collect(Collectors.toList());
+            if (matches.size() == 1) {
+                return matches.get(0);
+            }
+            if (matches.size() > 1) {
+                throw new IOException("Expected exactly one " + recorded + " in backup folder, found "
+                        + matches.size() + ". Refusing ambiguous revert.");
+            }
+        }
+        if (infs.size() == 1) {
+            String only = infs.get(0);
+            if (!RECORDED_INF_NAME.matcher(only).matches()) {
+                throw new IOException("Exported INF name is not a bare filename: " + only);
+            }
+            return only;
+        }
+        String want = recorded.isBlank() ? ".inf" : recorded;
+        throw new IOException("Expected exactly one " + want + " in backup folder, found " + infs.size()
+                + ". Refusing ambiguous revert.");
+    }
+
     static String sanitizeDeviceId(String deviceId) {
         if (deviceId == null || deviceId.isBlank()) {
             return "unknown";
@@ -726,26 +778,7 @@ public class DriverBackupService {
     }
 
     private void deleteDirectory(Path directory) throws IOException {
-        if (!Files.exists(directory)) {
-            return;
-        }
-        java.util.List<Path> failed = new java.util.ArrayList<>();
-        try (var stream = Files.walk(directory)) {
-            stream.sorted(Comparator.reverseOrder())
-                    .forEach(path -> {
-                        try { Files.setAttribute(path, "dos:readonly", Boolean.FALSE); } catch (Exception ignored) {}
-                        try {
-                            Files.deleteIfExists(path);
-                        } catch (IOException e) {
-                            failed.add(path);
-                            AppLogger.warning("Could not delete: " + path, e);
-                        }
-                    });
-        }
-        if (!failed.isEmpty() || Files.exists(directory)) {
-            throw new IOException("Could not delete backup folder completely: " + directory
-                    + (failed.isEmpty() ? "" : " (" + failed.size() + " path(s) failed)"));
-        }
+        BackupHealth.deleteTree(directory);
     }
 
     private boolean isIndexedBackupFolder(Path folder) {

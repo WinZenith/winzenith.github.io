@@ -62,7 +62,7 @@ public class HelpTabView extends VBox {
                 "This tab is read-only and does not modify any system settings."));
 
         getChildren().add(createFaqSection("Uninstaller",
-                "The Uninstaller tab lists installed apps. Toggle \"Desktop Apps\" / \"Windows Store Apps\" (Store list/removal is for the current Windows user), click \"Scan\" (\"Cancel\" stops listing and size loading; an active vendor uninstall is left to finish safely), and use \"Search apps...\" to filter. " +
+                "The Uninstaller tab lists installed apps. Toggle \"Desktop Apps\" / \"Windows Store Apps\" (Store list/removal is for the current Windows user), click \"Scan\" (\"Cancel\" stops listing and size loading; an active Win32 vendor uninstall is left to finish safely, while Store and winget removals are aborted), and use \"Search apps...\" to filter. " +
                 "Select an app and click \"Uninstall\" (runs the vendor uninstaller, Interactive or Silent), or \"Force Uninstall\" as a last resort without it. " +
                 "Select 2+ apps and click \"Uninstall Selected (N)\" to remove them one-by-one — each app still asks for confirmation, mode, and restore point. " +
                 "After uninstallation, the app scans for leftover files, folders, and registry entries. Review them in the leftovers dialog: files go to the Recycle Bin by default (recoverable), registry keys are backed up to .reg first (checked by default). " +
@@ -83,16 +83,16 @@ public class HelpTabView extends VBox {
                 "The System Cleanup tab scans for unnecessary files. Click \"Scan\" (\"Cancel\" stops it) to analyze 40 categories such as temporary files, browser caches, Windows update leftovers, and log files. " +
                 "Each category shows reclaimable Size / Count plus Risk (Low / Medium / High), Status, and Took time. Use Search and the Risk filter to narrow results. " +
                 "Double-click a row (or right-click > \"View details...\") to preview what will be cleaned. Select categories and click \"Clean Selected\" (HIGH-risk categories start unchecked and ask for extra confirmation; iTunes backups / Docker / Windows.old need a second irreversible-delete confirm). " +
-                "Use \"Refresh selected\" to re-scan only selected rows, \"Presets...\" for Safe / High Impact / Privacy / Maintenance / Dev Tools selections, \"Export...\" to save the scan as CSV, \"History\" for past sessions, and right-click > \"Ignore category in future scans\" to skip a category. " +
+                "Use \"Refresh selected\" to re-scan only selected rows, \"Presets...\" for Safe / High Impact / Privacy / Maintenance / Dev Tools selections, \"Export...\" to save the scan as CSV, \"History\" for past sessions, and right-click > \"Ignore category in future scans\" to skip a category (\"Ignored...\" restores skipped categories). " +
                 "If Registry is selected you are offered a .reg backup; a System Restore point can be created automatically if enabled. Some categories require admin. " +
                 "There is no registry-defragmentation tool. Always review results before cleaning."));
 
         getChildren().add(createFaqSection("Disk tools",
                 "The Disk Tools tab has four inner tabs: Defrag, Disk Health, Benchmark and Secure Erase. " +
-                "Defrag: click \"Refresh\", select drives, click \"Analyze Selected\", then \"Intelligent Defrag\" (Mode Auto / Quick / Deep, Filter All / HDD / SSD). Auto runs ReTrim on SSDs and full defrag on HDDs — SSDs are never defragmented. A color-coded grid visualizes fragmentation. Admin required. " +
+                "Defrag: click \"Refresh\", select visible drives (Filter All / HDD / SSD applies to Analyze / Intelligent Defrag), click \"Analyze Selected\", then \"Intelligent Defrag\" (Mode Auto / Quick / Deep). Auto runs ReTrim on SSDs and full defrag on HDDs — SSDs are never defragmented. Quick and Full both run Optimize-Volume -Defrag (Windows has no lighter switch); Deep adds free-space consolidation. A color-coded grid visualizes fragmentation. Intelligent Defrag requires admin. " +
                 "Disk Health: click \"Refresh\" for SMART data (model, temperature, power-on hours, SSD wear, reallocated / pending sectors, host reads/writes). " +
                 "Benchmark: pick a drive and Size (32-256 MB), click \"Start Benchmark\" for sequential read/write, 1MB / 4K IOPS and latency (\"Stop\" cancels; needs size + 100 MB free). " +
-                "Secure Erase: \"Secure File / Folder Deletion\" (Browse / Add Files, Overwrite Quick 1-pass / Standard 3-pass / Deep 7-pass, \"Secure Delete\" / \"Secure Delete Folder\" / \"Delete All\"), \"Recycle Bin Cleanup\" (\"Refresh\" + \"Secure Wipe Recycle Bin\"), and \"Free Space Wiping\" (\"Start\" / \"Stop\", 1 GB reserve kept, SSD / Unknown types blocked, system drive needs double confirmation, admin required). " +
+                "Secure Erase: \"Secure File / Folder Deletion\" (Browse / Browse Folder / Add Files, Overwrite Quick 1-pass / Standard 3-pass / Deep 7-pass; the same \"Secure Delete\" button becomes \"Secure Delete Folder\" after Browse Folder; \"Delete All\" for the table), \"Recycle Bin Cleanup\" (\"Refresh\" + \"Secure Wipe Recycle Bin\"), and \"Free Space Wiping\" (\"Start\" / \"Stop\", 1 GB reserve kept, SSD / Unknown types blocked, system drive needs double confirmation, admin required). " +
                 "Shredding and wiping are irreversible — in-use files can be scheduled for deletion on next reboot."));
 
         getChildren().add(createFaqSection("Browser extensions",
@@ -106,12 +106,12 @@ public class HelpTabView extends VBox {
                 "Changes take effect after restarting the browser. Only store-installed extensions are scanned; unpacked developer-mode extensions are not."));
 
         getChildren().add(createFaqSection("Network optimizer",
-                "The Network Optimizer has seven sub-tabs (admin required for changes; a \"Reboot required\" banner appears after stack / Winsock resets). "
+                "The Network Optimizer has seven sub-tabs (admin required for changes; a \"Reboot required\" banner appears after stack / Winsock resets, including partial stack reset). "
                 + "\"Network Adapters\" lists interfaces with status, speed, IP, DHCP, gateway and DNS; use Filter, \"Refresh\", \"Enable\" / \"Disable\", \"Renew IP\" and \"Export CSV\". "
                 + "\"Optimization\" applies TCP/IP presets (Default, Maximum Performance, Maximum Stability, Gaming). "
                 + "Use \"Preview Changes\" to diff current vs intended values and \"Show Current TCP/IP Settings\" to inspect; a snapshot is captured automatically before each \"Apply\" (plus optional \"Create system restore point\"), "
                 + "and \"Snapshots...\" shows guided restore info (read-only+ mode restores via \"Reset to Defaults\"). "
-                + "\"DNS & Cache\": \"Flush DNS Cache\", \"Reset Network Stack\" / \"Reset Winsock\" (reboot banner), per-adapter DNS with \"Apply DNS\" / \"Reset to DHCP\" (presets incl. Google / Cloudflare / OpenDNS / Quad9 + IPv6), "
+                + "\"DNS & Cache\": \"Flush DNS Cache\", \"Reset Network Stack\" (restore point + ipconfig dump first; can lose static IP/DNS; reboot banner even on partial) / \"Reset Winsock\" (restore point first; reboot banner even if the catalog may already have reset), per-adapter DNS with \"Apply DNS\" / \"Reset to DHCP\" (presets incl. Google / Cloudflare / OpenDNS / Quad9 + IPv6), "
                 + "plus opt-in diagnostics that run only on click: \"Benchmark DNS Now\", \"Probe MTU\" (suggestion only), \"Run Speed Test\", \"Ping\" / \"Traceroute\" (with \"Cancel\" and ping-history chart). "
                 + "\"Adapter Settings\" is a read-only enriched view with filter, \"Refresh Adapters\" / \"Refresh Properties\" and \"Export CSV\". "
                 + "\"Wi-Fi\" shows current connection + signal history (\"Refresh\"), read-only Nearby Networks survey (\"Scan Nearby Networks\"), and saved profiles with \"Refresh\" / \"Disconnect\" / \"Forget\" plus \"Enable / Disable Wi-Fi\". "

@@ -27,10 +27,11 @@ public class DefragService {
         DEEP
     }
 
-    private static final long TIMEOUT_SECONDS = 3600;
     private static final long GET_DRIVES_TIMEOUT_SECONDS = 30;
     private static final long METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
-    private final ProcessRunner processRunner = new ProcessRunner(TIMEOUT_SECONDS);
+    // Analyze / Optimize-Volume have no wall-clock kill (HDD jobs run for hours).
+    // Drive enumeration keeps a short timeout via GET_DRIVES_TIMEOUT_SECONDS.
+    private final ProcessRunner processRunner = new ProcessRunner(0);
     private final Map<String, MetadataCacheEntry> metadataCache = new ConcurrentHashMap<>();
 
     private record MetadataCacheEntry(long mftSizeBytes, long pageFileSizeBytes,

@@ -12,35 +12,66 @@ import java.nio.file.Path;
 
 public class DockerCacheCleaner implements CleanerExtension {
 
+    private static final java.util.regex.Pattern DOCKER_SIZE =
+            java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(B|KB|MB|GB|TB)");
+    private static final long SCAN_TIMEOUT_MS = 20_000L;
+    private static final long CLEAN_TIMEOUT_MS = 120_000L;
+
     @Override
     public CleanupCategory getCategory() { return CleanupCategory.DOCKER_CACHE; }
 
     @Override
     public java.util.List<String> describeTargets() {
         return java.util.List.of(
-                "Dangling Docker build cache / unused networks via 'docker system prune -f'",
-                "Tagged images, stopped containers and volumes are preserved");
+                "Docker build cache via 'docker builder prune -f'",
+                "Images, containers and volumes are preserved");
     }
 
     @Override
     public void scan(CleanupRow row) {
-        // Scan and clean measure different things by design: clean runs
-        // 'docker system prune -f' (dangling cache only), while the on-disk
-        // image store holds tagged images prune preserves. Reporting the
-        // store size as cleanable fabricated GBs that clean could never free
-        // (and the service then logged a bogus "nothing was cleaned" error),
-        // and post-clean rescans never cleared. Report presence only; the
-        // actual reclaimed bytes are parsed from prune output during clean.
-        String progData = CleanerUtils.safeEnv("PROGRAMDATA");
-        boolean present = false;
-        if (progData != null) {
-            present = Files.isDirectory(Path.of(progData, "Docker"));
+        scan(row, com.sbtools.util.CancellationToken.NONE);
+    }
+
+    @Override
+    public void scan(CleanupRow row, com.sbtools.util.CancellationToken token) {
+        if (token != null && token.isCancelled()) {
+            markCanceled(row);
+            return;
         }
-        row.setTotalBytes(0);
-        row.setItemCount(0);
-        row.setSizeOrCountText(present
-                ? "Docker detected - reclaimable shown after clean"
-                : CleanerUtils.formatBytes(0) + " (requires Docker)");
+        String progData = CleanerUtils.safeEnv("PROGRAMDATA");
+        boolean present = progData != null && Files.isDirectory(Path.of(progData, "Docker"));
+        if (!present) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText(CleanerUtils.formatBytes(0) + " (requires Docker)");
+            return;
+        }
+        String dfOutput;
+        try {
+            dfOutput = runDocker(java.util.List.of("docker", "system", "df"), SCAN_TIMEOUT_MS, token);
+        } catch (java.util.concurrent.CancellationException ce) {
+            markCanceled(row);
+            return;
+        }
+        if (token != null && token.isCancelled()) {
+            markCanceled(row);
+            return;
+        }
+        Long reclaimable = parseBuildCacheReclaimable(dfOutput);
+        if (reclaimable != null && reclaimable > 0) {
+            row.setTotalBytes(reclaimable);
+            row.setItemCount(1);
+            row.setSizeOrCountText(CleanerUtils.formatBytes(reclaimable) + " (build cache)");
+        } else if (reclaimable != null) {
+            row.setTotalBytes(0);
+            row.setItemCount(0);
+            row.setSizeOrCountText(CleanerUtils.formatBytes(0) + " (build cache empty)");
+        } else {
+            // Engine/CLI missing or unparseable — do not report 0 bytes; clean still prunes.
+            row.setTotalBytes(0);
+            row.setItemCount(1);
+            row.setSizeOrCountText("Docker detected — reclaimable size unknown");
+        }
     }
 
     @Override
@@ -51,19 +82,37 @@ public class DockerCacheCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
-        long cleaned = 0;
         String progData = CleanerUtils.safeEnv("PROGRAMDATA");
         if (progData == null) return 0;
         Path dockerDir = Path.of(progData, "Docker");
         if (!Files.isDirectory(dockerDir)) return 0;
         try {
-            // Dangling-only prune: removes dangling build cache/networks but
-            // preserves tagged unused images and stopped containers. The former
-            // '-af' scope destroyed dev assets beyond the advertised "cache"
-            // and beyond what the scan measures — never use it here.
-            ProcessBuilder pb = new ProcessBuilder("docker", "system", "prune", "-f");
+            // Build-cache only. `docker system prune -f` also deletes stopped
+            // containers — never use it here.
+            String fullOutput = runDocker(
+                    java.util.List.of("docker", "builder", "prune", "-f"), CLEAN_TIMEOUT_MS, token);
+            return parseReclaimedFromPrune(fullOutput);
+        } catch (java.util.concurrent.CancellationException ce) {
+            throw ce;
+        }
+    }
+
+    private static void markCanceled(CleanupRow row) {
+        row.setTotalBytes(0);
+        row.setItemCount(0);
+        row.setSizeOrCountText("Canceled");
+        row.setScanStatus(CleanupRow.ScanStatus.ERROR);
+        row.setErrorMessage("Scan canceled by user");
+    }
+
+    /** @return stdout, or empty string on timeout/failure */
+    private static String runDocker(java.util.List<String> command, long timeoutMs,
+            com.sbtools.util.CancellationToken token) {
+        Process p = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(true);
-            Process p = ProcessManager.start(pb);
+            p = ProcessManager.start(pb);
             java.io.InputStream is = p.getInputStream();
             StringBuilder output = new StringBuilder();
             Thread readerThread = new Thread(() -> {
@@ -74,46 +123,83 @@ public class DockerCacheCleaner implements CleanerExtension {
                         output.append(new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8));
                     }
                 } catch (Exception ignored) {}
-            }, "docker-prune-reader");
+            }, "docker-cmd-reader");
             readerThread.setDaemon(true);
             readerThread.start();
             boolean finished = false;
-            long deadline = System.currentTimeMillis() + 120_000L;
+            long deadline = System.currentTimeMillis() + timeoutMs;
             while (System.currentTimeMillis() < deadline) {
                 if (token != null && token.isCancelled()) {
                     p.destroyForcibly();
-                    throw new java.util.concurrent.CancellationException("Docker prune canceled");
+                    throw new java.util.concurrent.CancellationException("Docker command canceled");
                 }
-                if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+                try {
+                    if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    p.destroyForcibly();
+                    throw new java.util.concurrent.CancellationException("Docker command canceled");
+                }
             }
             readerThread.join(2000);
-            if (finished) {
-                String fullOutput = output.toString();
-                for (String line : fullOutput.split("\\n")) {
-                    if (line.contains("reclaimed")) {
-                        String upper = line.toUpperCase();
-                        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                                "(\\d+(?:\\.\\d+)?)\\s*(B|KB|MB|GB|TB)").matcher(upper);
-                        if (m.find()) {
-                            try {
-                                double val = Double.parseDouble(m.group(1));
-                                String unit = m.group(2);
-                                cleaned = switch (unit) {
-                                    case "KB" -> (long) (val * 1024L);
-                                    case "MB" -> (long) (val * 1024L * 1024L);
-                                    case "GB" -> (long) (val * 1024L * 1024L * 1024L);
-                                    case "TB" -> (long) (val * 1024L * 1024L * 1024L * 1024L);
-                                    default -> (long) val;
-                                };
-                            } catch (NumberFormatException ignored) {}
-                        }
-                        break;
-                    }
-                }
-            } else { p.destroyForcibly(); AppLogger.warning("Docker prune timed out after 120s"); }
+            if (!finished) {
+                p.destroyForcibly();
+                AppLogger.warning("Docker command timed out after " + timeoutMs + "ms: " + command);
+                return "";
+            }
+            return output.toString();
         } catch (java.util.concurrent.CancellationException ce) {
+            if (p != null && p.isAlive()) {
+                try { p.destroyForcibly(); } catch (Exception ignored) {}
+            }
             throw ce;
-        } catch (Exception e) { AppLogger.warning("Docker prune failed: " + e.getMessage()); }
-        return cleaned;
+        } catch (Exception e) {
+            AppLogger.warning("Docker command failed: " + e.getMessage());
+            return "";
+        }
+    }
+
+    /** Last size on a Build Cache row is RECLAIMABLE. Null = line missing / unparseable. */
+    static Long parseBuildCacheReclaimable(String dfOutput) {
+        if (dfOutput == null || dfOutput.isBlank()) return null;
+        for (String line : dfOutput.split("\\r?\\n")) {
+            String trimmed = line.trim();
+            if (!trimmed.toLowerCase().startsWith("build cache")) continue;
+            java.util.regex.Matcher m = DOCKER_SIZE.matcher(trimmed.toUpperCase());
+            Long last = null;
+            while (m.find()) {
+                last = toBytes(m.group(1), m.group(2));
+            }
+            return last != null ? last : 0L;
+        }
+        return null;
+    }
+
+    static long parseReclaimedFromPrune(String pruneOutput) {
+        if (pruneOutput == null || pruneOutput.isBlank()) return 0L;
+        for (String line : pruneOutput.split("\\r?\\n")) {
+            String lower = line.toLowerCase();
+            if (!lower.contains("reclaimed") && !lower.contains("total")) continue;
+            java.util.regex.Matcher m = DOCKER_SIZE.matcher(line.toUpperCase());
+            if (m.find()) {
+                return toBytes(m.group(1), m.group(2));
+            }
+        }
+        return 0L;
+    }
+
+    private static long toBytes(String number, String unit) {
+        try {
+            double val = Double.parseDouble(number);
+            return switch (unit) {
+                case "KB" -> (long) (val * 1024L);
+                case "MB" -> (long) (val * 1024L * 1024L);
+                case "GB" -> (long) (val * 1024L * 1024L * 1024L);
+                case "TB" -> (long) (val * 1024L * 1024L * 1024L * 1024L);
+                default -> (long) val;
+            };
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 }

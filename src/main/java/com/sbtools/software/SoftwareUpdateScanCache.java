@@ -14,9 +14,10 @@ import java.util.Optional;
  * mutable JavaFX properties (selected/status/progress) that the Software tab mutates —
  * sharing live objects with the Dashboard reader would race.</p>
  *
- * <p>Usage: {@code SoftwareUpdateService} writes on clean scan success;
- * {@code SoftwareUpdateViewModel} reads as a labelled stale fallback when a live scan
- * fails (avoids a false "Everything is up to date"); installs invalidate.</p>
+ * <p>Usage: {@code SoftwareUpdateService} writes on clean non-empty scan success
+ * and invalidates on clean empty success; {@code SoftwareUpdateViewModel} reads
+ * as a labelled stale fallback when a live scan fails (avoids a false
+ * "Everything is up to date"); installs invalidate.</p>
  */
 public final class SoftwareUpdateScanCache {
 

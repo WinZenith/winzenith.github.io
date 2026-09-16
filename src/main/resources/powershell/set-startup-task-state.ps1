@@ -35,6 +35,8 @@ if ($Action -eq 'Disable') {
 # Enable: re-enable Boot/Logon triggers first, then enable the task (never enable on trigger failure).
 try {
     $t = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+    $logon = ''
+    try { $logon = [string]$t.Principal.LogonType } catch {}
     $changed = $false
     if ($t.Triggers) {
         foreach ($tr in $t.Triggers) {
@@ -50,6 +52,11 @@ try {
         }
     }
     if ($changed) {
+        # Set-ScheduledTask without a password strips stored credentials.
+        if ($logon -match 'Password') {
+            Write-Error 'Cannot enable this task: it uses password logon. Re-enable it in Task Scheduler and re-enter the password.'
+            exit 1
+        }
         $t | Set-ScheduledTask -ErrorAction Stop | Out-Null
     }
     Enable-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop | Out-Null

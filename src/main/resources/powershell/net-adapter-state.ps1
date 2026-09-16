@@ -5,6 +5,11 @@ if (-not $AdapterName) {
     exit 1
 }
 
+if ($AdapterName -match '[\*\?]') {
+    ConvertTo-Json -Compress @{ success = $false; message = "Adapter name must not contain wildcard characters (* or ?)." }
+    exit 1
+}
+
 try {
     # String + Parse (repo convention, cf. browser-extensions.ps1): -File argv
     # arrives as text, and [bool] params do not bind reliably from the CLI.
