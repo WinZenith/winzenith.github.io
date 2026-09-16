@@ -1748,7 +1748,14 @@ public class UninstallerTabView extends BorderPane {
                     if (backupReg && !registryKeysToDelete.isEmpty()) {
                         try {
                             java.nio.file.Path base = com.sbtools.util.AppPaths.ensureBackupsRoot()
-                                    .resolve("uninstaller-registry");
+                                    .resolve("cleanup-backups");
+                            try {
+                                java.nio.file.Files.createDirectories(base);
+                            } catch (Exception dirEx) {
+                                base = com.sbtools.util.AppPaths.legacyBackupsRoot()
+                                        .resolve("cleanup-backups");
+                                java.nio.file.Files.createDirectories(base);
+                            }
                             String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss")
                                     .format(new java.util.Date());
                             backupDir = base.resolve(sanitizeFileName(app.getName()) + "-" + stamp);

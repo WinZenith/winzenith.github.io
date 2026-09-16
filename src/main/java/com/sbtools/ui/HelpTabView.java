@@ -73,7 +73,7 @@ public class HelpTabView extends VBox {
 
         getChildren().add(createFaqSection("Startup items/services",
                 "This tab manages startup programs and Windows service start types. Items are organized into \"Startup apps\" (Registry Run/RunOnce + Startup Folder), \"Scheduled tasks\", and \"Windows services\" (with counts). " +
-                "The services tab lists all Windows services (Automatic, Manual, and Disabled); Manual services show zero estimated boot impact. Startup Folder items (User and Common) are merged into Startup apps and toggled by renaming the shortcut (.disabled). Services cannot be deleted, only toggled. " +
+                "The services tab lists all Windows services (Automatic, Manual, and Disabled); Manual services show zero estimated boot impact. Startup Folder items (User and Common) are merged into Startup apps and toggled via StartupApproved (Task Manager–compatible); legacy .disabled renames are still recognized. Services cannot be deleted, only toggled. " +
                 "Click \"Scan\" (\"Stop\" cancels and keeps the previous results), then select an item and click \"Enable/Disable\" or \"Delete\". Only \"Delete\" creates a backup in Backups & Restore; toggling does not. Disabling a critical system service asks for extra confirmation. " +
                 "Use per-tab search plus \"Status:\" / \"Impact:\" filters, \"Select high-impact\" to select heavy enabled items, and right-click / double-click for \"Open file location\", \"Copy command\", \"Show details\" and online search. " +
                 "The footer shows total estimated boot delay (enabled items only) and last boot time. Use \"Backups & Restore\" to restore or permanently delete backups, and \"Export CSV\" for the visible tab. " +
@@ -106,7 +106,7 @@ public class HelpTabView extends VBox {
                 "Changes take effect after restarting the browser. Only store-installed extensions are scanned; unpacked developer-mode extensions are not."));
 
         getChildren().add(createFaqSection("Network optimizer",
-                "The Network Optimizer has seven sub-tabs (admin required for changes; a \"Reboot required\" banner appears after stack / Winsock resets, including partial stack reset). "
+                "The Network Optimizer has seven sub-tabs (admin required for changes; a \"Reboot required\" banner appears after TCP Optimize apply/partial and after stack / Winsock resets, including partial stack reset). "
                 + "\"Network Adapters\" lists interfaces with status, speed, IP, DHCP, gateway and DNS; use Filter, \"Refresh\", \"Enable\" / \"Disable\", \"Renew IP\" and \"Export CSV\". "
                 + "\"Optimization\" applies TCP/IP presets (Default, Maximum Performance, Maximum Stability, Gaming). "
                 + "Use \"Preview Changes\" to diff current vs intended values and \"Show Current TCP/IP Settings\" to inspect; a snapshot is captured automatically before each \"Apply\" (plus optional \"Create system restore point\"), "

@@ -495,6 +495,17 @@ public class StartupTabView extends BorderPane {
         return tabPane.getSelectionModel().getSelectedItem() == serviceTab;
     }
 
+    /** True for parallel "Registry:" timeouts and soft per-key / folder scan warnings. */
+    static boolean isAppsScanError(String err) {
+        if (err == null || err.isBlank()) {
+            return false;
+        }
+        return err.startsWith("Registry:")
+                || err.startsWith("Startup Folder")
+                || err.startsWith("HKCU ")
+                || err.startsWith("HKLM ");
+    }
+
     private void updateButtonStates() {
         TableView<StartupItem> table = getSelectedTable();
         boolean hasSelection = !table.getSelectionModel().getSelectedItems().isEmpty();
@@ -626,17 +637,16 @@ public class StartupTabView extends BorderPane {
                 List<StartupItem> taskItemsResult = allItems.stream().filter(i -> i.getType() == StartupItemType.TASK).collect(Collectors.toList());
                 List<StartupItem> svcItems = allItems.stream().filter(i -> i.getType() == StartupItemType.SERVICE).collect(Collectors.toList());
                 List<String> scanErrors = service.drainScanErrors();
-                boolean appsPhaseFailed = scanErrors.stream().anyMatch(e ->
-                        e.startsWith("Registry:") || e.startsWith("Startup Folder"));
+                boolean appsPhaseFailed = scanErrors.stream().anyMatch(StartupTabView::isAppsScanError);
                 boolean tasksPhaseFailed = scanErrors.stream().anyMatch(e -> e.startsWith("Scheduled Tasks:"));
                 boolean servicesPhaseFailed = scanErrors.stream().anyMatch(e -> e.startsWith("Windows Services:"));
 
-                double totalMs = allItems.stream().filter(StartupItem::isEnabled).mapToDouble(StartupItem::getEstimatedBootImpactMs).sum();
                 Platform.runLater(() -> {
                     if (scanCancelled.get() || gen != scanGeneration.get()) {
                         statusLabel.setText("Scan stopped; previous results kept.");
                         return;
                     }
+                    // Soft per-key errors use "HKCU Run:" etc.; empty + those must keep prior rows.
                     if (!appsPhaseFailed || !regItems.isEmpty()) {
                         registryItems.setAll(regItems);
                     }

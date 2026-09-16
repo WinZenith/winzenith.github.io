@@ -148,6 +148,13 @@ class OptimizationPanel extends VBox {
 
         resetBtn.setOnAction(e -> applyOptimization(OptimizationPreset.DEFAULT, progressBar));
 
+        busy.addListener((obs, old, nv) -> {
+            applyBtn.setDisable(nv);
+            resetBtn.setDisable(nv);
+        });
+        applyBtn.setDisable(busy.get());
+        resetBtn.setDisable(busy.get());
+
         HBox btnBox = new HBox(12, applyBtn, resetBtn, progressBar);
         btnBox.setAlignment(Pos.CENTER_LEFT);
         btnBox.setPadding(new Insets(12, 16, 12, 16));
@@ -164,7 +171,10 @@ class OptimizationPanel extends VBox {
     }
 
     private void applyOptimization(OptimizationPreset preset, ProgressBar progressBar) {
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         if (!requireAdmin()) return;
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,

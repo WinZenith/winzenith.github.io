@@ -79,6 +79,13 @@ public final class RegistryBackupSafety {
             if (trimmed.isEmpty() || trimmed.startsWith(";")) {
                 continue;
             }
+            // Value deletions ("Name"=- / @=-) are never written by our export
+            // path and would silently remove data on merge-import.
+            if (isValueDeletionLine(trimmed)) {
+                throw new IOException("Registry file " + regFile.getFileName()
+                        + " contains a value-deletion line, which backup export never writes.\n"
+                        + "Refusing restore: " + trimmed);
+            }
             var m = SECTION_HEADER.matcher(trimmed);
             if (!m.matches()) {
                 continue;
@@ -111,6 +118,41 @@ public final class RegistryBackupSafety {
                 throw new IOException("Registry file " + sourceFile.getFileName()
                         + " targets a key outside the allowed backup scope:\n" + s.hivePath());
             }
+        }
+    }
+
+    /** True for `"Name"=-` / `@=-` value-deletion lines in .reg text. */
+    static boolean isValueDeletionLine(String trimmedLine) {
+        if (trimmedLine == null || trimmedLine.isEmpty()) {
+            return false;
+        }
+        // "ValueName"=-  or  @=-  (optional whitespace around =)
+        return trimmedLine.matches("(?i)^(\"[^\"]*\"|@)\\s*=\\s*-\\s*$");
+    }
+
+    /**
+     * Session is listable for Restore when it has no .reg files (hive-only —
+     * restore UI warns) or every .reg passes allowlist / deletion checks.
+     */
+    public static boolean isRestorableSession(Path sessionDir) {
+        if (sessionDir == null || !Files.isDirectory(sessionDir, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            return false;
+        }
+        if (BackupHealth.isReparseOrSymlink(sessionDir)) {
+            return false;
+        }
+        try (var stream = Files.list(sessionDir)) {
+            List<Path> regs = stream
+                    .filter(p -> p.toString().toLowerCase(Locale.ROOT).endsWith(".reg"))
+                    .filter(p -> !BackupHealth.isReparseOrSymlink(p))
+                    .toList();
+            if (regs.isEmpty()) {
+                return true; // hive-only or empty — restore path shows its own warning
+            }
+            collectTargetKeys(regs);
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 

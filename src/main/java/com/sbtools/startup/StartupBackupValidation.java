@@ -226,7 +226,7 @@ public final class StartupBackupValidation {
     static boolean taskXmlUriMatches(String xml, String taskPath, String taskName) {
         String uri = parseTaskUri(xml);
         if (uri.isEmpty()) {
-            return true;
+            return false;
         }
         String expected = expectedTaskUri(taskPath, taskName);
         return !expected.isEmpty() && expected.equalsIgnoreCase(uri);

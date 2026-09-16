@@ -67,10 +67,20 @@ try {
             } catch {}
         }
         try { Remove-Item -LiteralPath $FolderPath -Force -ErrorAction SilentlyContinue } catch {}
-        $result.success = $true
-        $result.message = "Empty folder removed."
-        if ($skippedReparse.Count -gt 0) {
-            $result.message += " Skipped $($skippedReparse.Count) symlink/junction(s) (not followed)."
+        $folderGone = -not (Test-Path -LiteralPath $FolderPath)
+        if ($folderGone) {
+            $result.success = $true
+            $result.message = "Empty folder removed."
+            if ($skippedReparse.Count -gt 0) {
+                $result.message += " Skipped $($skippedReparse.Count) symlink/junction(s) (not followed)."
+            }
+        } else {
+            $result.success = $false
+            if ($skippedReparse.Count -gt 0) {
+                $result.message = "Could not remove folder: $($skippedReparse.Count) symlink/junction(s) were not followed and the folder still exists."
+            } else {
+                $result.message = "Could not remove empty folder: $FolderPath"
+            }
         }
         Emit-Result; return
     }
@@ -85,6 +95,11 @@ try {
 
         $stream = $null
         try {
+            # Clear ReadOnly so overwrite can proceed (matches secure-delete.ps1).
+            try {
+                if ($file.IsReadOnly) { $file.IsReadOnly = $false }
+            } catch {}
+
             if ($file.Length -eq 0) {
                 Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
                 if (-not (Test-Path -LiteralPath $file.FullName)) { $result.filesDeleted++ } else { $result.scheduledForReboot += $file.FullName }
@@ -147,7 +162,7 @@ try {
     $allFilesHandled = ($result.filesDeleted + $result.scheduledForReboot.Count) -ge $totalFiles
     $result.success = $allFilesHandled
     if ($result.scheduledForReboot.Count -gt 0) {
-        $result.message = "Secure folder delete: $($result.filesDeleted) files overwritten, $($result.foldersDeleted) folders removed, $($result.scheduledForReboot.Count) scheduled for reboot."
+        $result.message = "Folder delete: $($result.filesDeleted) files overwritten, $($result.foldersDeleted) folders removed, $($result.scheduledForReboot.Count) locked/in-use file(s) scheduled for plain reboot delete (not overwritten)."
     } else {
         $result.message = "Secure folder delete: $($result.filesDeleted) files overwritten, $($result.foldersDeleted) folders removed."
     }

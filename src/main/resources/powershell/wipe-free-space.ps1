@@ -54,25 +54,36 @@ foreach ($driveLetter in $DriveLetters) {
         continue
     }
 
+    # Fail-closed: wipe only when media is confirmed HDD. Unknown / lookup failure blocks.
+    $mediaConfirmedHdd = $false
     try {
         $part = Get-Partition -DriveLetter $drive -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($part) {
             $disk = Get-Disk -Number $part.DiskNumber -ErrorAction SilentlyContinue
             if ($disk) {
                 $phys = Get-PhysicalDisk -DeviceNumber $disk.Number -ErrorAction SilentlyContinue
-                $mt = if ($phys -and $phys.MediaType) { $phys.MediaType.ToString() } else { '' }
-                $bus = if ($phys -and $phys.BusType) { $phys.BusType.ToString() } else { '' }
-                if ($mt -eq 'SSD' -or $bus -eq 'NVMe' -or $bus -eq '17') {
-                    Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -message "Free space wipe blocked: $driveLetter is SSD/flash (no erasure guarantee)"
-                    continue
-                }
-                if ($mt -and $mt -ne 'HDD') {
-                    Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -message "Free space wipe blocked: $driveLetter media type is $mt (not HDD)"
-                    continue
+                if ($phys) {
+                    $mt = if ($phys.MediaType) { $phys.MediaType.ToString() } else { '' }
+                    $bus = if ($phys.BusType) { $phys.BusType.ToString() } else { '' }
+                    if ($mt -eq 'SSD' -or $bus -eq 'NVMe' -or $bus -eq '17') {
+                        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -message "Free space wipe blocked: $driveLetter is SSD/flash (no erasure guarantee)"
+                        continue
+                    }
+                    if ($mt -eq 'HDD') {
+                        $mediaConfirmedHdd = $true
+                    } else {
+                        $label = if ($mt) { $mt } else { 'Unknown' }
+                        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -message "Free space wipe blocked: $driveLetter media type is $label (not HDD)"
+                        continue
+                    }
                 }
             }
         }
     } catch {}
+    if (-not $mediaConfirmedHdd) {
+        Write-ProgressJson -driveLetter $driveLetter -percent 0 -pass 0 -totalPasses $PassCount -done $true -message "Free space wipe blocked: could not verify HDD media type for $driveLetter"
+        continue
+    }
 
     # Use GetRandomFileName without double extension and ensure uniqueness
     $randName = [System.IO.Path]::GetRandomFileName()

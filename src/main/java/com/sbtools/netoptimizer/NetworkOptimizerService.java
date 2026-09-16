@@ -273,12 +273,15 @@ public class NetworkOptimizerService {
             AppLogger.warning("Failed to apply optimization: " + e.getMessage());
             String msg = e.getMessage() != null ? e.getMessage() : e.toString();
             if (msg.toLowerCase().contains("timed out")) {
+                // Do not synthesize OK/FAILED markers — that would trip partialApply()
+                // and make the UI save the preset / mark reboot when writes are unknown.
                 logChange("Apply Optimization", preset.getDisplayName(),
                         "TIMEOUT — some TCP/registry writes may already be in effect", false);
                 return OperationResult.fail(
                         "Optimization timed out after writes may have started. "
-                                + "The system may be in a mixed TCP state. Use 'Reset to Defaults' on the Optimization tab. Reboot required.",
-                        "TCP settings: unknown — OK\nTCP settings: unknown — FAILED");
+                                + "The system may be in a mixed TCP state. "
+                                + "Use 'Reset to Defaults' on the Optimization tab to undo any changes.",
+                        "TIMEOUT — outcome unknown; no per-setting results available");
             }
             return OperationResult.fail("Failed to apply optimization: " + msg);
         }

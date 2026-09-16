@@ -2043,21 +2043,29 @@ public class DiskToolsTabView extends BorderPane {
                         msg -> Platform.runLater(() -> secureDeleteStatus.setText(msg)),
                         secureCancelled);
                 Platform.runLater(() -> {
-                    if (secureCancelled.get()) {
+                    if (secureCancelled.get()
+                            || (result.getMessage() != null
+                            && result.getMessage().toLowerCase().contains("cancelled"))) {
                         secureDeleteStatus.setText("Folder deletion cancelled.");
                     } else if (result.isSuccess()) {
-                        String msg = "Folder securely deleted: " + result.getFilesDeleted() + " files, "
-                                + result.getFoldersDeleted() + " folders removed.";
-                        secureDeleteStatus.setText(msg);
+                        String msg = "Folder delete finished: " + result.getFilesDeleted()
+                                + " file(s) overwritten, " + result.getFoldersDeleted() + " folder(s) removed.";
                         if (!result.getScheduledForReboot().isEmpty()) {
                             msg += "\n\n" + result.getScheduledForReboot().size()
-                                    + " file(s) scheduled for deletion on next reboot.";
+                                    + " file(s) could not be overwritten (in use / locked) and were scheduled "
+                                    + "for plain deletion on next reboot — not a multi-pass shred.";
                         }
+                        secureDeleteStatus.setText(msg);
                         new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
                     } else {
                         secureDeleteStatus.setText("Folder deletion failed.");
                         new Alert(Alert.AlertType.ERROR, "Failed to delete folder:\n" + result.getMessage()).showAndWait();
                     }
+                    updateDeleteButtons();
+                });
+            } catch (java.util.concurrent.CancellationException e) {
+                Platform.runLater(() -> {
+                    secureDeleteStatus.setText("Folder deletion cancelled.");
                     updateDeleteButtons();
                 });
             } catch (Exception e) {
@@ -2314,8 +2322,9 @@ public class DiskToolsTabView extends BorderPane {
             if (scheduleResult.isSuccess()) {
                 entry.setStatusEnum(ShredderFileEntry.Status.SCHEDULED_FOR_REBOOT);
                 new Alert(Alert.AlertType.INFORMATION,
-                        "The file is in use and could not be deleted now.\n\n"
-                                + "It has been scheduled for deletion on the next system restart.\n"
+                        "The file is in use and could not be overwritten.\n\n"
+                                + "It has been scheduled for plain deletion on the next system restart "
+                                + "(not a multi-pass shred).\n"
                                 + "Please restart your computer to complete the operation.").showAndWait();
             } else {
                 entry.setStatusEnum(ShredderFileEntry.Status.FAILED);

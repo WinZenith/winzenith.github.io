@@ -792,7 +792,7 @@ public class StartupService {
             item.setEnabled(!item.isEnabled());
         } else if (item.getType() == StartupItemType.REGISTRY) {
             String location = item.getLocation();
-            // Startup Folder items (merged) – toggle by renaming file
+            // Startup Folder items (merged) – StartupApproved (+ legacy .disabled enable)
             if (location != null && location.startsWith("Startup Folder")) {
                 boolean success = toggleStartupFolderItem(item);
                 if (!success) {
@@ -861,10 +861,16 @@ public class StartupService {
                         + (applied == null ? "unknown" : applied) + ", expected " + scStartValue
                         + "). " + errMsg);
             }
+            if ("delayed-auto".equals(scStartValue) && !isDelayedAutostartSet(serviceName)) {
+                throw new IOException("Service start type was set to Automatic but DelayedAutostart was not applied. "
+                        + errMsg);
+            }
 
             item.setServiceStartType(newStartType);
             item.setLocation("Start Type: " + newStartType);
             item.setEnabled(!item.isEnabled());
+            // Start-type toggle does not stop/start the process; clear stale Running/Stopped until rescan
+            item.setServiceState("");
         }
         invalidateCache();
         StartupAuditLog.record(StartupAuditLog.Action.TOGGLE, item,
@@ -1126,20 +1132,46 @@ public class StartupService {
     private boolean toggleStartupFolderItem(StartupItem item) throws Exception {
         Path p = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
         Path disabled = p.resolveSibling(p.getFileName() + ".disabled");
+        String abs = p.toAbsolutePath().normalize().toString();
+        HKEY hive = folderApprovedHive(item.getLocation());
+
         if (item.isEnabled()) {
             if (!Files.exists(p, LinkOption.NOFOLLOW_LINKS) || BackupHealth.isReparseOrSymlink(p)
                     || Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
                 return false;
             }
-            Files.move(p, disabled);
+            // Prefer StartupApproved (Task Manager–compatible) over renaming to .disabled
+            writeFolderApprovedState(hive, abs, false);
             return true;
         }
+
+        // Enable: legacy .disabled rename first, then clear Approved disable bit
         if (Files.exists(disabled, LinkOption.NOFOLLOW_LINKS) && !BackupHealth.isReparseOrSymlink(disabled)
                 && !Files.isDirectory(disabled, LinkOption.NOFOLLOW_LINKS)) {
             Files.move(disabled, p);
+            writeFolderApprovedState(hive, abs, true);
             return true;
         }
-        return Files.exists(p, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS);
+        if (Files.exists(p, LinkOption.NOFOLLOW_LINKS) && !BackupHealth.isReparseOrSymlink(p)
+                && !Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
+            writeFolderApprovedState(hive, abs, true);
+            return true;
+        }
+        return false;
+    }
+
+    private static HKEY folderApprovedHive(String location) {
+        if (location != null && location.contains("(Common)")) {
+            return WinReg.HKEY_LOCAL_MACHINE;
+        }
+        return WinReg.HKEY_CURRENT_USER;
+    }
+
+    private void writeFolderApprovedState(HKEY hive, String absolutePath, boolean enable) throws Exception {
+        if (!Advapi32Util.registryKeyExists(hive, StartupConstants.REG_STARTUP_APPROVED_FOLDER)) {
+            Advapi32Util.registryCreateKey(hive, StartupConstants.REG_STARTUP_APPROVED_FOLDER);
+        }
+        writeApprovedState(hive, StartupConstants.REG_STARTUP_APPROVED_FOLDER, absolutePath, enable);
     }
 
     private static String getRegistryString(HKEY hive, String keyPath, String valueName) {
@@ -1446,6 +1478,10 @@ public class StartupService {
                 throw new IOException("Failed to read backup XML: " + e.getMessage(), e);
             }
             if (!StartupBackupValidation.taskXmlUriMatches(xml, tp, entry.getName())) {
+                String uri = StartupBackupValidation.parseTaskUri(xml);
+                if (uri == null || uri.isBlank()) {
+                    throw new IOException("Backup XML is missing a task URI. Backup kept.");
+                }
                 throw new IOException("Backup XML task URI does not match \"" + entry.getName()
                         + "\". Backup kept.");
             }
@@ -1578,6 +1614,7 @@ public class StartupService {
             try (var stream = Files.list(folder)) {
                 allPaths = stream.filter(p -> !Files.isDirectory(p)).toList();
             }
+            Map<String, Object> approvedValues = loadFolderApprovedValues(folderApprovedHive(locationLabel));
             // Batch resolve .lnk targets in single PS invocation to avoid per-file process spawn
             Map<String, String> lnkTargetCache = new HashMap<>();
             List<Path> lnkPaths = new ArrayList<>();
@@ -1623,6 +1660,11 @@ public class StartupService {
                             effectivePath = p.getParent().resolve(effectiveFileName);
                             // For disabled items, try to resolve target via disabled file
                             // but fallback to effective path
+                        } else if (!folderApprovedEnabled(approvedValues,
+                                effectivePath.toAbsolutePath().normalize().toString())) {
+                            // Task Manager / Explorer StartupApproved\StartupFolder disable
+                            enabled = false;
+                            displayLocation = locationLabel + " (Disabled)";
                         }
                         String lowerEff = effectiveFileName.toLowerCase(Locale.ROOT);
                         // If .disabled file, effectiveFileName may still end with .lnk
@@ -1682,6 +1724,37 @@ public class StartupService {
             AppLogger.warning(msg);
             scanErrors.add(locationLabel + ": " + msg);
         }
+    }
+
+    private static Map<String, Object> loadFolderApprovedValues(HKEY hive) {
+        try {
+            if (Advapi32Util.registryKeyExists(hive, StartupConstants.REG_STARTUP_APPROVED_FOLDER)) {
+                return new HashMap<>(Advapi32Util.registryGetValues(hive, StartupConstants.REG_STARTUP_APPROVED_FOLDER));
+            }
+        } catch (Exception e) {
+            AppLogger.warning("Failed to read StartupApproved\\StartupFolder: " + e.getMessage());
+        }
+        return Map.of();
+    }
+
+    /** No Approved entry or non-disabled byte → enabled (Task Manager convention). */
+    static boolean folderApprovedEnabled(Map<String, Object> approved, String absolutePath) {
+        if (approved == null || approved.isEmpty() || absolutePath == null || absolutePath.isBlank()) {
+            return true;
+        }
+        Object data = approved.get(absolutePath);
+        if (data == null) {
+            for (Map.Entry<String, Object> e : approved.entrySet()) {
+                if (e.getKey() != null && e.getKey().equalsIgnoreCase(absolutePath)) {
+                    data = e.getValue();
+                    break;
+                }
+            }
+        }
+        if (!(data instanceof byte[] bytes) || bytes.length == 0) {
+            return true;
+        }
+        return StartupConstants.isEnabledByte(bytes);
     }
 
     private static Map<String, String> batchResolveLnkTargets(List<Path> lnkPaths) {
@@ -1874,6 +1947,35 @@ public class StartupService {
         }
         ProcessResult qc = processRunner.run(List.of("sc.exe", "qc", serviceName));
         return parseScQueryStartCode(qc.combinedOutput());
+    }
+
+    /**
+     * True when {@code DelayedAutostart} is 1 under the service key (required for delayed-auto).
+     */
+    static boolean isDelayedAutostartSet(String serviceName) {
+        if (!isSafeScServiceName(serviceName)) {
+            return false;
+        }
+        String keyPath = "SYSTEM\\CurrentControlSet\\Services\\" + serviceName;
+        try {
+            if (!Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
+                return false;
+            }
+            if (!Advapi32Util.registryValueExists(WinReg.HKEY_LOCAL_MACHINE, keyPath, "DelayedAutostart")) {
+                return false;
+            }
+            Object v = Advapi32Util.registryGetValue(WinReg.HKEY_LOCAL_MACHINE, keyPath, "DelayedAutostart");
+            if (v instanceof Integer i) {
+                return i == 1;
+            }
+            if (v instanceof Number n) {
+                return n.intValue() == 1;
+            }
+            return false;
+        } catch (Exception e) {
+            AppLogger.warning("Failed to read DelayedAutostart for " + serviceName + ": " + e.getMessage());
+            return false;
+        }
     }
 
     static String startTypeToScArg(String startType) {

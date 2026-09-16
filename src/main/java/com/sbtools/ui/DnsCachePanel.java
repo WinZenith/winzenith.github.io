@@ -880,10 +880,6 @@ class DnsCachePanel extends VBox {
         });
     }
 
-    private boolean isValidIpAddress(String ip) {
-        return NetworkOptimizerService.isValidIpAddress(ip);
-    }
-
     private void setDiagRunning(boolean running) {
         diagRunning.set(running);
         Platform.runLater(() -> {

@@ -213,6 +213,11 @@ public class DriverBackupService {
         if (entry == null || entry.backupFolder() == null || entry.backupFolder().isBlank()) {
             throw new IOException("Invalid backup entry");
         }
+        if (com.sbtools.util.WindowsServicingSafety.isServicingPending()) {
+            String reasons = String.join("; ", com.sbtools.util.WindowsServicingSafety.getPendingReasons());
+            throw new IOException("Cannot revert drivers while Windows servicing is pending ("
+                    + reasons + "). Reboot and try again.");
+        }
         Path folder = Path.of(entry.backupFolder());
         if (!BackupHealth.isPathShapeSafe(folder)) {
             throw new IOException("Refusing to revert from unsafe folder: " + folder);

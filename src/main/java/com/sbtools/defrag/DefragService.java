@@ -298,12 +298,13 @@ public class DefragService {
             } else {
                 try {
                     Path metaScript = PowerShellScripts.resolve("analyze-fragmentation.ps1");
+                    // MetadataOnly: skip defrag /A + Optimize-Volume (pointless on SSD)
                     ProcessResult meta = runStreamingWithFallback(metaScript,
                             line -> {
                                 if (line.startsWith("stage:") && progressCallback != null) {
                                     progressCallback.accept(line.substring(6));
                                 }
-                            }, null, cancelled, letter);
+                            }, null, cancelled, letter, "-MetadataOnly");
                     String metaJson = extractJson(meta.stdout());
                     if (!metaJson.isBlank()) {
                         var parsed = JsonMapper.mapper().readTree(metaJson);
@@ -314,6 +315,8 @@ public class DefragService {
                         metadataCache.put(letter, new MetadataCacheEntry(mftSize, pageSize, hiberSize, swapSize,
                                 System.currentTimeMillis()));
                     }
+                } catch (CancellationException e) {
+                    throw e;
                 } catch (Exception metaEx) {
                     AppLogger.warning("SSD metadata collection failed for " + letter + ": " + metaEx.getMessage());
                 }
@@ -356,6 +359,12 @@ public class DefragService {
         }
         try {
             var parsed = JsonMapper.mapper().readTree(json);
+            boolean measured = parsed.path("analysisMeasured").asBoolean(false);
+            if (!measured) {
+                throw new IOException(
+                        "Fragmentation could not be measured (analyze tools failed or returned no data). "
+                                + "Result is unknown — not a verified 0%.");
+            }
             long fragments = parsed.get("fragmentsFound").asLong(0);
             long percent = parsed.get("fragmentationPercent").asLong(0);
 

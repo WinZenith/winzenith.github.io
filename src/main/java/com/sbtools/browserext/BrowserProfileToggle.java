@@ -482,10 +482,6 @@ public final class BrowserProfileToggle {
         return live.resolveSibling(live.getFileName() + ".bak." + LocalDateTime.now().format(BAK_TS));
     }
 
-    private static String bakPrefix(String fileName) {
-        return fileName + ".bak.";
-    }
-
     private static void pruneBackups(Path dir, String prefix) {
         if (dir == null || prefix == null) return;
         try {

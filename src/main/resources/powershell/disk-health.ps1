@@ -10,7 +10,7 @@ $searchPaths = @(
     "$env:SystemDrive\smartmontools\bin\smartctl.exe"
 )
 foreach ($p in $searchPaths) {
-    if ($p -and (Test-Path $p -LiteralPath -ErrorAction SilentlyContinue)) {
+    if ($p -and (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue)) {
         $smartctlPath = $p
         break
     }

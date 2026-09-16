@@ -89,27 +89,32 @@ public class ShredderService {
             return new FolderDeleteResult(false, "Blocked for safety: " + blocked, 0, 0, List.of());
         }
         Path script = PowerShellScripts.resolve("secure-delete-folder.ps1");
-        ProcessResult result = runStreamingWithFallback(script.toString(),
-                line -> {
-                    if (line == null) return;
-                    String t = line.trim();
-                    // Surface per-file progress, hide raw JSON from status text
-                    if (t.startsWith("{") && t.contains("\"phase\"") && progressCallback != null) {
-                        try {
-                            JsonNode n = JsonMapper.mapper().readTree(t);
-                            if (n.has("phase") && "overwrite".equals(n.get("phase").asText())
-                                    && n.has("current") && n.has("total")) {
-                                progressCallback.accept("Overwriting file "
-                                        + n.get("current").asInt() + "/" + n.get("total").asInt()
-                                        + (n.has("file") ? ": " + n.get("file").asText() : ""));
-                                return;
+        ProcessResult result;
+        try {
+            result = runStreamingWithFallback(script.toString(),
+                    line -> {
+                        if (line == null) return;
+                        String t = line.trim();
+                        // Surface per-file progress, hide raw JSON from status text
+                        if (t.startsWith("{") && t.contains("\"phase\"") && progressCallback != null) {
+                            try {
+                                JsonNode n = JsonMapper.mapper().readTree(t);
+                                if (n.has("phase") && "overwrite".equals(n.get("phase").asText())
+                                        && n.has("current") && n.has("total")) {
+                                    progressCallback.accept("Overwriting file "
+                                            + n.get("current").asInt() + "/" + n.get("total").asInt()
+                                            + (n.has("file") ? ": " + n.get("file").asText() : ""));
+                                    return;
+                                }
+                            } catch (Exception ignored) {
                             }
-                        } catch (Exception ignored) {
                         }
-                    }
-                    if (t.startsWith("{") && t.contains("\"progress\"")) return;
-                    if (progressCallback != null) progressCallback.accept(line);
-                }, null, cancelled, folderPath, String.valueOf(passCount));
+                        if (t.startsWith("{") && t.contains("\"progress\"")) return;
+                        if (progressCallback != null) progressCallback.accept(line);
+                    }, null, cancelled, folderPath, String.valueOf(passCount));
+        } catch (java.util.concurrent.CancellationException e) {
+            return new FolderDeleteResult(false, "Secure folder delete cancelled by user.", 0, 0, List.of());
+        }
         if (cancelled != null && cancelled.get()) {
             return new FolderDeleteResult(false, "Secure folder delete cancelled by user.", 0, 0, List.of());
         }

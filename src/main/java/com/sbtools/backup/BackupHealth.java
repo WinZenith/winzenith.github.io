@@ -1,5 +1,7 @@
 package com.sbtools.backup;
 
+import com.sbtools.util.AppPaths;
+
 import java.io.IOException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -190,8 +192,8 @@ public final class BackupHealth {
 
     /**
      * Shape-only guard against walking system roots on a tampered index.
-     * Mirrors the historical checks in {@code RestoreRow} and
-     * {@code DriverBackupService} without requiring settings access.
+     * Paths under known app backup roots (portable, LOCALAPPDATA, custom
+     * settings dir) are allowed even when that root lives under Program Files.
      */
     public static boolean isPathShapeSafe(Path folder) {
         try {
@@ -203,6 +205,9 @@ public final class BackupHealth {
             if (s.contains("\\windows\\") || s.endsWith("\\windows") || s.equals("c:\\windows")) {
                 return false;
             }
+            if (isUnderKnownBackupRoot(norm)) {
+                return norm.getNameCount() >= 2;
+            }
             if (s.contains("\\program files") || s.contains("\\programdata")) {
                 return false;
             }
@@ -210,6 +215,40 @@ public final class BackupHealth {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /** True when folder is under portable or LOCALAPPDATA backups root (or custom settings root). */
+    private static boolean isUnderKnownBackupRoot(Path folder) {
+        for (Path root : knownBackupRoots()) {
+            try {
+                if (root != null && (folder.startsWith(root) || folder.equals(root))) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
+    }
+
+    private static List<Path> knownBackupRoots() {
+        List<Path> roots = new ArrayList<>();
+        try {
+            roots.add(AppPaths.backupsRootNoCreate().toAbsolutePath().normalize());
+        } catch (Exception ignored) {
+        }
+        try {
+            roots.add(AppPaths.legacyBackupsRoot().toAbsolutePath().normalize());
+        } catch (Exception ignored) {
+        }
+        try {
+            com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
+            if (s != null && s.backupDirectory() != null && !s.backupDirectory().isBlank()) {
+                Path custom = Path.of(s.backupDirectory().trim()).toAbsolutePath().normalize();
+                roots.add(custom);
+            }
+        } catch (Exception ignored) {
+        }
+        return roots;
     }
 
     /**

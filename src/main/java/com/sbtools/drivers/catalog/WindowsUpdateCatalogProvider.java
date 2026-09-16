@@ -239,10 +239,6 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
             "disk", "cdrom", "volsnap", "partmgr", "msports", "serenum"
     );
 
-    private static boolean matchesDriver(InstalledDriver driver, WuDriverOffer offer) {
-        return matchStrength(driver, offer) > 0;
-    }
-
     /**
      * Match evidence strength 0-4 (mirrors the numbered rules below). The
      * best-pick ranks strength before version so a weak fallback match with a

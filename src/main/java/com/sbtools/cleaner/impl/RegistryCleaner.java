@@ -81,8 +81,14 @@ public class RegistryCleaner implements CleanerExtension {
     /**
      * Fail-safe missing check: returns true only when the target drive is ready
      * and the file is definitely absent. Offline/removable/network drives,
-     * unready roots, relative paths and unexpanded variables return false
-     * (entry is kept) so transiently unavailable targets are never flagged.
+     * unready roots, relative paths, unexpanded variables, and ACL/indeterminate
+     * paths return false (entry is kept) so transiently unavailable or
+     * access-denied targets are never flagged as orphans.
+     * <p>
+     * Uses {@link Files#notExists} rather than {@code !Files.exists}: when
+     * existence cannot be determined (e.g. ACL-denied under WindowsApps), both
+     * {@code exists} and {@code notExists} return false — so {@code !exists}
+     * would wrongly treat the path as missing.
      */
     static boolean isConfidentlyMissing(String cleanPath) {
         if (cleanPath == null || cleanPath.isBlank() || cleanPath.contains("%")) return false;
@@ -111,7 +117,8 @@ public class RegistryCleaner implements CleanerExtension {
             } catch (Exception e) {
                 return false;
             }
-            return !Files.exists(p);
+            // notExists == true only when known absent; false if present OR indeterminate.
+            return Files.notExists(p);
         } catch (Exception e) {
             return false;
         }

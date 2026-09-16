@@ -34,7 +34,9 @@ public class NetworkChangeLog {
             return new ArrayList<>();
         }
         try {
-            return mapper.readValue(p.toFile(), new TypeReference<List<NetworkChangeEntry>>() {});
+            List<NetworkChangeEntry> loaded = mapper.readValue(p.toFile(),
+                    new TypeReference<List<NetworkChangeEntry>>() {});
+            return loaded != null ? loaded : new ArrayList<>();
         } catch (IOException e) {
             AppLogger.warning("Failed to load network change log: " + e.getMessage());
             return new ArrayList<>();

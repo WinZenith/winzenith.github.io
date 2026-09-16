@@ -32,6 +32,12 @@ public final class StartupConstants {
      * legacy orphans written by older versions; never write here for enable/disable.
      */
     public static final String REG_WOW6432_APPROVED_RUNONCE = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run32";
+    /**
+     * Task Manager / Explorer disable state for Startup Folder shortcuts.
+     * Value name is the absolute path of the file (User → HKCU, Common → HKLM).
+     */
+    public static final String REG_STARTUP_APPROVED_FOLDER =
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\StartupFolder";
 
     public static String toApprovedPath(String keyPath) {
         if (keyPath == null) return REG_STARTUP_APPROVED;

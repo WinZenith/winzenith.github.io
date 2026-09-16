@@ -1,6 +1,7 @@
 param(
     [string]$DriveLetter,
-    [switch]$SkipMetadata
+    [switch]$SkipMetadata,
+    [switch]$MetadataOnly
 )
 $ErrorActionPreference = 'SilentlyContinue'
 $drive = $DriveLetter -replace ':', ''
@@ -15,7 +16,10 @@ $pageFileSizeBytes = 0
 $hiberFileSizeBytes = 0
 $swapFileSizeBytes = 0
 $totalDirectories = 0
+$analysisMeasured = $false
 
+# MetadataOnly: skip defrag / Optimize-Volume (used for SSD metadata collection).
+if (-not $MetadataOnly) {
 # ── Stage 1: Fast analysis via defrag.exe /A ──
 Write-Output "stage:Analyzing fragmentation..."
 try {
@@ -25,85 +29,90 @@ try {
 if ($defragOut) {
     if ($defragOut -match 'Total fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*%') {
         $fragmentationPercent = [int]$matches[1]
+        $analysisMeasured = $true
     }
     if ($defragOut -match 'Total fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*(bytes|KB|MB|GB|TB|fragments)') {
         $val = $matches[1] -replace ',', ''
         $unit = $matches[2]
         switch ($unit) {
-            'bytes'     { $fragmentsFound = [long]$val }
-            'KB'        { $fragmentsFound = [long]$val * 1024 }
-            'MB'        { $fragmentsFound = [long]$val * 1024 * 1024 }
-            'GB'        { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
-            'TB'        { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024) }
-            'fragments' { $fragmentedFileCount = [long]$val }
+            'bytes'     { $fragmentsFound = [long]$val; $analysisMeasured = $true }
+            'KB'        { $fragmentsFound = [long]$val * 1024; $analysisMeasured = $true }
+            'MB'        { $fragmentsFound = [long]$val * 1024 * 1024; $analysisMeasured = $true }
+            'GB'        { $fragmentsFound = [long]$val * 1024 * 1024 * 1024; $analysisMeasured = $true }
+            'TB'        { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024); $analysisMeasured = $true }
+            'fragments' { $fragmentedFileCount = [long]$val; $analysisMeasured = $true }
         }
     }
     if ($fragmentsFound -eq 0 -and $defragOut -match 'Fragmented space\s*[=:]\s*([\d,]+\.?\d*)\s*(bytes|KB|MB|GB|TB|fragments)') {
         $val = $matches[1] -replace ',', ''
         $unit = $matches[2]
         switch ($unit) {
-            'bytes'     { $fragmentsFound = [long]$val }
-            'KB'        { $fragmentsFound = [long]$val * 1024 }
-            'MB'        { $fragmentsFound = [long]$val * 1024 * 1024 }
-            'GB'        { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
-            'TB'        { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024) }
-            'fragments' { $fragmentedFileCount = [long]$val }
+            'bytes'     { $fragmentsFound = [long]$val; $analysisMeasured = $true }
+            'KB'        { $fragmentsFound = [long]$val * 1024; $analysisMeasured = $true }
+            'MB'        { $fragmentsFound = [long]$val * 1024 * 1024; $analysisMeasured = $true }
+            'GB'        { $fragmentsFound = [long]$val * 1024 * 1024 * 1024; $analysisMeasured = $true }
+            'TB'        { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024); $analysisMeasured = $true }
+            'fragments' { $fragmentedFileCount = [long]$val; $analysisMeasured = $true }
         }
     }
 
-    if ($fragmentationPercent -eq 0) {
+    if (-not $analysisMeasured -or $fragmentationPercent -eq 0) {
         if ($defragOut -match 'Volume fragmentation ratio\s*[=:]\s*(\d+\.?\d*)\s*percent') {
             $fragmentationPercent = [int]$matches[1]
+            $analysisMeasured = $true
         }
         elseif ($defragOut -match 'Fragmentation ratio\s*[=:]\s*(\d+\.?\d*)\s*%') {
             $fragmentationPercent = [int]$matches[1]
+            $analysisMeasured = $true
         }
         elseif ($defragOut -match 'Fragmentation\s*[=:]\s*(\d+\.?\d*)\s*%') {
             $fragmentationPercent = [int]$matches[1]
+            $analysisMeasured = $true
         }
         elseif ($defragOut -match '\((\d+\.?\d*)\s*%\)') {
             $fragmentationPercent = [int]$matches[1]
+            $analysisMeasured = $true
         }
     }
 
     if ($fragmentedFileCount -eq 0 -and $defragOut -match 'Fragmented\s+files?\s*[=:]\s*(\d+)') {
         $fragmentedFileCount = [int]$matches[1]
+        $analysisMeasured = $true
     }
     if ($totalFileCount -eq 0 -and $defragOut -match 'Total\s+files?\s*[=:]\s*(\d+)') {
         $totalFileCount = [int]$matches[1]
     }
 }
 
-# ── Stage 2: Fallback to Optimize-Volume -Analyze if defrag /A was insufficient ──
+# ── Stage 2: Fallback to Optimize-Volume -Analyze if defrag /A produced no measurement ──
 # Prefer structured object properties (locale-independent), fall back to verbose text parsing.
-if ($fragmentationPercent -eq 0 -and $fragmentsFound -eq 0) {
+if (-not $analysisMeasured) {
     Write-Output "stage:Running deep analysis (Optimize-Volume)..."
     try {
         $optObj = Optimize-Volume -DriveLetter $drive -Analyze -ErrorAction SilentlyContinue
         if ($optObj) {
             foreach ($o in @($optObj)) {
                 try {
-                    if ($o.PSObject.Properties['FragmentationPercentage'] -and $o.FragmentationPercentage -ne $null) {
-                        $v = [int]$o.FragmentationPercentage
-                        if ($v -gt 0) { $fragmentationPercent = $v }
+                    if ($o.PSObject.Properties['FragmentationPercentage'] -and $null -ne $o.FragmentationPercentage) {
+                        $fragmentationPercent = [int]$o.FragmentationPercentage
+                        $analysisMeasured = $true
                     }
                 } catch {}
                 try {
-                    if ($o.PSObject.Properties['FragmentedSpace'] -and $o.FragmentedSpace -ne $null) {
+                    if ($o.PSObject.Properties['FragmentedSpace'] -and $null -ne $o.FragmentedSpace) {
                         $v = [long]$o.FragmentedSpace
-                        if ($v -gt 0 -and $fragmentsFound -eq 0) { $fragmentsFound = $v }
+                        if ($v -ge 0 -and $fragmentsFound -eq 0) { $fragmentsFound = $v; $analysisMeasured = $true }
                     }
                 } catch {}
                 try {
-                    if ($o.PSObject.Properties['FragmentedFiles'] -and $o.FragmentedFiles -ne $null) {
-                        $v = [int]$o.FragmentedFiles
-                        if ($v -gt 0) { $fragmentedFileCount = $v }
+                    if ($o.PSObject.Properties['FragmentedFiles'] -and $null -ne $o.FragmentedFiles) {
+                        $fragmentedFileCount = [int]$o.FragmentedFiles
+                        $analysisMeasured = $true
                     }
                 } catch {}
                 try {
-                    if ($o.PSObject.Properties['TotalFiles'] -and $o.TotalFiles -ne $null) {
-                        $v = [int]$o.TotalFiles
-                        if ($v -gt 0) { $totalFileCount = $v }
+                    if ($o.PSObject.Properties['TotalFiles'] -and $null -ne $o.TotalFiles) {
+                        $totalFileCount = [int]$o.TotalFiles
                     }
                 } catch {}
             }
@@ -120,23 +129,25 @@ if ($fragmentationPercent -eq 0 -and $fragmentsFound -eq 0) {
                 $val = $matches[1] -replace ',', ''
                 $unit = $matches[2]
                 switch ($unit) {
-                    'Bytes' { $fragmentsFound = [long]$val }
-                    'bytes' { $fragmentsFound = [long]$val }
-                    'KB'    { $fragmentsFound = [long]$val * 1024 }
-                    'MB'    { $fragmentsFound = [long]$val * 1024 * 1024 }
-                    'GB'    { $fragmentsFound = [long]$val * 1024 * 1024 * 1024 }
-                    'TB'    { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024) }
+                    'Bytes' { $fragmentsFound = [long]$val; $analysisMeasured = $true }
+                    'bytes' { $fragmentsFound = [long]$val; $analysisMeasured = $true }
+                    'KB'    { $fragmentsFound = [long]$val * 1024; $analysisMeasured = $true }
+                    'MB'    { $fragmentsFound = [long]$val * 1024 * 1024; $analysisMeasured = $true }
+                    'GB'    { $fragmentsFound = [long]$val * 1024 * 1024 * 1024; $analysisMeasured = $true }
+                    'TB'    { $fragmentsFound = [long]([double]$val * 1024 * 1024 * 1024 * 1024); $analysisMeasured = $true }
                 }
             }
         }
         if ($line -match 'Fragmentation percentage\s*:\s*([\d]+\.?\d*)') {
-            if ($fragmentationPercent -eq 0) { $fragmentationPercent = [int]$matches[1] }
+            $fragmentationPercent = [int]$matches[1]
+            $analysisMeasured = $true
         }
         if ($line -match 'Fragmentation\s*:\s*([\d]+\.?\d*)\s*%') {
-            if ($fragmentationPercent -eq 0) { $fragmentationPercent = [int]$matches[1] }
+            if (-not $analysisMeasured) { $fragmentationPercent = [int]$matches[1]; $analysisMeasured = $true }
         }
         if ($line -match 'Fragmented files\s*:\s*([\d]+)') {
             $fragmentedFileCount = [int]$matches[1]
+            $analysisMeasured = $true
         }
         if ($line -match 'Total files\s*:\s*([\d]+)') {
             $totalFileCount = [int]$matches[1]
@@ -160,6 +171,7 @@ if ($fragmentsFound -eq 0 -and $fragmentationPercent -gt 0) {
         }
     } catch {}
 }
+} # end -not $MetadataOnly
 
 # ── Stage 5: Metadata (skippable if cached in Java) ──
 if (-not $SkipMetadata) {
@@ -232,5 +244,6 @@ $result = [ordered]@{
     hiberFileSizeBytes      = $hiberFileSizeBytes
     swapFileSizeBytes       = $swapFileSizeBytes
     totalDirectories        = $totalDirectories
+    analysisMeasured        = [bool]$analysisMeasured
 }
 $result | ConvertTo-Json -Depth 2 -Compress

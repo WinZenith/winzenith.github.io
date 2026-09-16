@@ -325,6 +325,7 @@ class WiFiPanel extends VBox {
                     statusLabel.setText(result.success() ? "Disconnected." : "Disconnect failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
                             result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
+                    if (result.success()) loadCurrentInfo();
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -413,6 +414,7 @@ class WiFiPanel extends VBox {
                             : "Failed to " + (enable ? "enable" : "disable") + " Wi-Fi adapter.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
                             result.message() + (result.details() != null ? "\n\n" + result.details() : "")).showAndWait();
+                    if (result.success()) loadCurrentInfo();
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> statusLabel.setText("Failed to set Wi-Fi adapter state: " + e.getMessage()));

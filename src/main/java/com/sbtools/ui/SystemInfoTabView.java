@@ -1678,14 +1678,6 @@ public class SystemInfoTabView extends BorderPane {
         }
     }
 
-    private static String generatePlainTextReport(SystemInfoData data) {
-        return SystemInfoReportGenerator.generatePlainTextReport(data);
-    }
-
-    private static String generateHtmlReport(SystemInfoData data) {
-        return SystemInfoReportGenerator.generateHtmlReport(data);
-    }
-
     private static String nvl(String s) {
         return s != null ? s : "";
     }

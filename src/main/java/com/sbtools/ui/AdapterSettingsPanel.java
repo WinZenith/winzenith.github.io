@@ -105,6 +105,9 @@ class AdapterSettingsPanel extends VBox {
         Button exportBtn = UIButton.secondary("Export CSV");
         exportBtn.setOnAction(e -> exportCsv());
 
+        busy.addListener((obs, old, nv) -> refreshPropsBtn.setDisable(nv));
+        refreshPropsBtn.setDisable(busy.get());
+
         javafx.scene.control.TextField filterField = new javafx.scene.control.TextField();
         filterField.setPromptText("Filter properties…");
         filterField.setPrefWidth(180);
@@ -195,7 +198,10 @@ class AdapterSettingsPanel extends VBox {
             new Alert(Alert.AlertType.WARNING, "Please select an adapter.").showAndWait();
             return;
         }
-        if (busy.get()) return;
+        if (busy.get()) {
+            statusLabel.setText("Please wait, another operation is in progress...");
+            return;
+        }
         busy.set(true);
         statusLabel.setText("Loading properties for " + adapter + "...");
 

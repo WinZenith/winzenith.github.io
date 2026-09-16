@@ -1535,11 +1535,6 @@ public class DashboardTabView extends BorderPane {
         return generation != scanGeneration;
     }
 
-    private boolean isCancelled(int generation, CancellationToken token) {
-        return disposed || isScanStale(generation) || (token != null && token.isCancelled())
-                || Thread.currentThread().isInterrupted();
-    }
-
     /**
      * Parent + per-category child cancellation. The shared parent covers Stop /
      * new-scan / overall-timeout; the child covers this category's soft-budget

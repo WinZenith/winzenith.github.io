@@ -369,10 +369,11 @@ public class BackupRestoreTabView extends BorderPane {
                     }
                 });
                 RestoreRow.computeAllSizesAsync(newRows).whenComplete((v, ex) -> Platform.runLater(() -> {
+                    // Stale generation must not clear busy for a newer refresh.
+                    if (generation != rollbackRefreshGen.get()) {
+                        return;
+                    }
                     try {
-                        if (generation != rollbackRefreshGen.get()) {
-                            return;
-                        }
                         if (rollbackTable != null) {
                             rollbackTable.refresh();
                         }
@@ -387,12 +388,13 @@ public class BackupRestoreTabView extends BorderPane {
             } catch (Exception ex) {
                 AppLogger.error("Failed to load backups", ex);
                 Platform.runLater(() -> {
+                    if (generation != rollbackRefreshGen.get()) {
+                        return;
+                    }
                     try {
-                        if (generation == rollbackRefreshGen.get()) {
-                            rollbackStatusLabel.setText("Failed to load backups: " + ex.getMessage());
-                            if (rollbackSpinner != null) rollbackSpinner.setVisible(false);
-                            rollbackRefreshBusy.set(false);
-                        }
+                        rollbackStatusLabel.setText("Failed to load backups: " + ex.getMessage());
+                        if (rollbackSpinner != null) rollbackSpinner.setVisible(false);
+                        rollbackRefreshBusy.set(false);
                     } finally {
                         busy.set(false);
                     }
@@ -441,6 +443,7 @@ public class BackupRestoreTabView extends BorderPane {
         }
         busy.set(true);
         AppExecutors.ioPool().execute(() -> {
+            boolean handoffToRefresh = false;
             try {
                 if (!com.sbtools.util.AdminCheck.isRunningAsAdminFresh()) {
                     Platform.runLater(() -> new Alert(Alert.AlertType.WARNING,
@@ -452,6 +455,7 @@ public class BackupRestoreTabView extends BorderPane {
                 // version: pnputil stages the old INF but Windows may keep
                 // the newer driver bound until reboot/manual rollback.
                 String verifyMsg = verifyRevertedVersion(row);
+                handoffToRefresh = true;
                 Platform.runLater(() -> {
                     if (verifyMsg == null) {
                         new Alert(Alert.AlertType.INFORMATION,
@@ -464,13 +468,16 @@ public class BackupRestoreTabView extends BorderPane {
                                 + "\n\nRestart, then use Device Manager → Update driver → Browse → Let me pick → Have Disk"
                                 + "\nand point at:\n" + row.entry().backupFolder()).showAndWait();
                     }
+                    // refresh owns busy from here — do not clear in mutate finally
                     refreshRollback();
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
                         "Revert failed:\n" + ex.getMessage()).showAndWait());
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                if (!handoffToRefresh) {
+                    Platform.runLater(() -> busy.set(false));
+                }
             }
         });
     }
@@ -535,8 +542,10 @@ public class BackupRestoreTabView extends BorderPane {
         }
         busy.set(true);
         AppExecutors.ioPool().execute(() -> {
+            boolean handoffToRefresh = false;
             try {
                 rollbackBackupService.removeAll();
+                handoffToRefresh = true;
                 Platform.runLater(() -> {
                     new Alert(Alert.AlertType.INFORMATION, "All driver backups deleted.").showAndWait();
                     refreshRollback();
@@ -545,7 +554,9 @@ public class BackupRestoreTabView extends BorderPane {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
                         "Failed to delete backups:\n" + ex.getMessage()).showAndWait());
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                if (!handoffToRefresh) {
+                    Platform.runLater(() -> busy.set(false));
+                }
             }
         });
     }
@@ -569,8 +580,10 @@ public class BackupRestoreTabView extends BorderPane {
         }
         busy.set(true);
         AppExecutors.ioPool().execute(() -> {
+            boolean handoffToRefresh = false;
             try {
                 rollbackBackupService.removeBackupEntry(row.entry());
+                handoffToRefresh = true;
                 Platform.runLater(() -> {
                     new Alert(Alert.AlertType.INFORMATION, "Backup deleted.").showAndWait();
                     refreshRollback();
@@ -579,7 +592,9 @@ public class BackupRestoreTabView extends BorderPane {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
                         "Failed to delete backup:\n" + ex.getMessage()).showAndWait());
             } finally {
-                Platform.runLater(() -> busy.set(false));
+                if (!handoffToRefresh) {
+                    Platform.runLater(() -> busy.set(false));
+                }
             }
         });
     }
@@ -738,14 +753,15 @@ public class BackupRestoreTabView extends BorderPane {
                     confirm.setContentText("These backups are missing, empty or unreadable on disk:\n\n" + list
                             + "\nRemove their index entries? Folders (if any) are left untouched.\nNothing else will be deleted.");
                     if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
-                        // Cancelled: inner task owns cleanup from here.
-                        busy.set(false);
+                        // Cancelled: refresh owns busy from here.
                         refreshRollback();
                         return;
                     }
                     AppExecutors.ioPool().execute(() -> {
+                        boolean purgeHandoff = false;
                         try {
                             rollbackBackupService.purgeStaleIndexEntries(stale);
+                            purgeHandoff = true;
                             Platform.runLater(() -> {
                                 new Alert(Alert.AlertType.INFORMATION,
                                         "Removed " + count + " stale index entr" + (count == 1 ? "y" : "ies") + ".").showAndWait();
@@ -755,7 +771,9 @@ public class BackupRestoreTabView extends BorderPane {
                             Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
                                     "Repair failed:\n" + ex.getMessage()).showAndWait());
                         } finally {
-                            Platform.runLater(() -> busy.set(false));
+                            if (!purgeHandoff) {
+                                Platform.runLater(() -> busy.set(false));
+                            }
                         }
                     });
                 });
@@ -767,10 +785,7 @@ public class BackupRestoreTabView extends BorderPane {
                 // Only the non-handoff paths (empty / error) clean up here.
                 // Handoff path is owned by the confirm/purge chain above.
                 if (!handoff.get()) {
-                    Platform.runLater(() -> {
-                        busy.set(false);
-                        refreshRollback();
-                    });
+                    Platform.runLater(this::refreshRollback);
                 }
             }
         });
@@ -1171,6 +1186,9 @@ public class BackupRestoreTabView extends BorderPane {
                                         }
                                     }
                                     if (regCount > 0 || hivCount > 0) {
+                                        if (!com.sbtools.backup.RegistryBackupSafety.isRestorableSession(dir)) {
+                                            return; // unrestorable (out-of-scope / deletion lines) — hide
+                                        }
                                         String dirName = dir.getFileName().toString();
                                         if (seen.add(dirName)) {
                                             String date = latestModified > 0
@@ -1681,32 +1699,56 @@ public class BackupRestoreTabView extends BorderPane {
 
     /**
      * All locations that may hold registry sessions: settings-aware custom
-     * dir first, then portable and legacy fallbacks. Listing all three fixes
-     * the split-brain where driver backups honored the custom directory but
-     * registry backups did not.
+     * dir first, then portable and legacy fallbacks. Includes both
+     * {@code cleanup-backups} and legacy {@code uninstaller-registry}.
      */
     private static List<Path> registryBackupsRoots() {
         java.util.LinkedHashSet<Path> roots = new java.util.LinkedHashSet<>();
+        List<Path> bases = new ArrayList<>();
         try {
             com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
-            Path custom = AppPaths.backupsRoot(s).resolve("cleanup-backups").toAbsolutePath().normalize();
-            roots.add(custom);
+            bases.add(AppPaths.backupsRoot(s).toAbsolutePath().normalize());
         } catch (Exception ignored) {}
         try {
-            roots.add(AppPaths.backupsRoot().resolve("cleanup-backups").toAbsolutePath().normalize());
+            bases.add(AppPaths.backupsRoot().toAbsolutePath().normalize());
         } catch (Exception ignored) {}
         try {
-            roots.add(AppPaths.legacyBackupsRoot().resolve("cleanup-backups").toAbsolutePath().normalize());
+            bases.add(AppPaths.legacyBackupsRoot().toAbsolutePath().normalize());
         } catch (Exception ignored) {}
+        for (Path base : bases) {
+            if (base == null) continue;
+            roots.add(base.resolve("cleanup-backups"));
+            roots.add(base.resolve("uninstaller-registry"));
+        }
         return new ArrayList<>(roots);
     }
 
     private static Path registryBackupsBaseForWrite() {
+        Path preferred = null;
         try {
             com.sbtools.settings.AppSettings s = new com.sbtools.settings.SettingsStore().load();
-            return AppPaths.backupsRoot(s).resolve("cleanup-backups");
-        } catch (Exception ignored) {}
-        return AppPaths.backupsRoot().resolve("cleanup-backups");
+            preferred = AppPaths.backupsRoot(s).resolve("cleanup-backups");
+        } catch (Exception ignored) {
+            preferred = AppPaths.backupsRoot().resolve("cleanup-backups");
+        }
+        try {
+            Files.createDirectories(preferred);
+            Path probe = preferred.resolve(".wz-write-probe");
+            Files.writeString(probe, "ok");
+            Files.deleteIfExists(probe);
+            return preferred;
+        } catch (Exception writeEx) {
+            Path fallback = AppPaths.legacyBackupsRoot().resolve("cleanup-backups");
+            try {
+                Files.createDirectories(fallback);
+                AppLogger.warning("Registry backups root not writable (" + preferred
+                        + "), using fallback " + fallback);
+                return fallback;
+            } catch (Exception fallbackEx) {
+                AppLogger.warning("Registry backup write fallback also failed: " + fallbackEx.getMessage());
+                return preferred != null ? preferred : fallback;
+            }
+        }
     }
 
     /**
