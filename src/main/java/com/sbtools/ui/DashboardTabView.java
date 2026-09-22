@@ -550,11 +550,12 @@ public class DashboardTabView extends BorderPane {
         issuesValueLabel.setText(String.valueOf(totalDriverSoftware));
         issuesDescLabel.setText("Outdated Drivers/Software");
 
+        boolean partialCleanup = cleanupTimedOut(issues);
         spaceValueLabel.setText(formatBytes(totalSize));
-        spaceDescLabel.setText("can be freed");
+        spaceDescLabel.setText(partialCleanup ? "can be freed (partial)" : "can be freed");
 
         categoriesValueLabel.setText(String.valueOf(cleanupCategoryCount));
-        categoriesDescLabel.setText("cleanup categories");
+        categoriesDescLabel.setText(partialCleanup ? "cleanup categories (partial)" : "cleanup categories");
     }
 
     // ── Per-Category Progress (with per-category Retry) ───────────────────
@@ -847,7 +848,9 @@ public class DashboardTabView extends BorderPane {
             }
             updateSummaryCards();
             updateTimestamp();
-            statusLabel.setText("Restored last scan — press \"Scan for issues\" for fresh results.");
+            statusLabel.setText(cleanupTimedOut(restored)
+                    ? "Restored last scan — cleanup was incomplete. Press \"Scan for issues\" for fresh results."
+                    : "Restored last scan — press \"Scan for issues\" for fresh results.");
             setSnapshotNote("Restored snapshot");
         } catch (Exception e) {
             AppLogger.warning("Dashboard snapshot restore failed: " + e.getMessage());
@@ -1099,15 +1102,60 @@ public class DashboardTabView extends BorderPane {
         return !scanStale && !disposed;
     }
 
-    /** Timeout placeholder only when that category has no row (partial cleanup counts). */
-    static boolean hasTimeoutPlaceholderTarget(Iterable<IssueCategory> issues, String category, String source) {
+    /**
+     * Timeout placeholder when that category name is missing.
+     * A finished cleanup category must not hide an incomplete cleanup scan.
+     */
+    public static boolean hasTimeoutPlaceholderTarget(Iterable<IssueCategory> issues, String category) {
         if (issues == null || category == null) return false;
         for (IssueCategory ic : issues) {
             if (ic == null) continue;
             if (category.equals(ic.categoryProperty().get())) return true;
-            if ("Cleanup".equals(source) && "Cleanup".equals(ic.sourceProperty().get())) return true;
         }
         return false;
+    }
+
+    /** True when a cleanup timeout error row is present (soft-timeout placeholder or category timeout). */
+    public static boolean cleanupTimedOut(Iterable<IssueCategory> issues) {
+        if (issues == null) return false;
+        for (IssueCategory ic : issues) {
+            if (ic == null || !ic.isError()) continue;
+            String src = ic.sourceProperty().get();
+            String cat = ic.categoryProperty().get();
+            if (!"Cleanup".equals(src) && !"System Cleanup".equals(cat)) continue;
+            String detail = ic.countTextProperty().get();
+            if (detail != null && detail.toLowerCase(java.util.Locale.ROOT).contains("timed out")) return true;
+        }
+        return false;
+    }
+
+    public static String scanFinishedStatus(int totalDriverSoftware, int cleanupCategoryCount,
+            long errorCount, boolean cleanupIncomplete) {
+        String errorNote = scanErrorNote(errorCount);
+        String counts = totalDriverSoftware + " outdated driver" + (totalDriverSoftware == 1 ? "" : "s")
+                + "/software, " + cleanupCategoryCount + " cleanup categor"
+                + (cleanupCategoryCount == 1 ? "y" : "ies");
+        if (cleanupIncomplete) {
+            return "Scan incomplete — cleanup timed out. " + counts + " so far." + errorNote;
+        }
+        return "Scan complete — " + counts + " with reclaimable space." + errorNote;
+    }
+
+    public static String scanFinishedSummary(int totalDriverSoftware, int cleanupCategoryCount,
+            String sizeText, long errorCount, boolean cleanupIncomplete) {
+        String freed = cleanupIncomplete
+                ? sizeText + " can be freed (partial — cleanup timed out)."
+                : sizeText + " can be freed.";
+        return "Total: " + totalDriverSoftware + " outdated driver"
+                + (totalDriverSoftware == 1 ? "" : "s") + "/software, "
+                + cleanupCategoryCount + " cleanup categor"
+                + (cleanupCategoryCount == 1 ? "y" : "ies") + ". "
+                + freed + scanErrorNote(errorCount);
+    }
+
+    private static String scanErrorNote(long errorCount) {
+        if (errorCount <= 0) return "";
+        return " (" + errorCount + " scan error" + (errorCount == 1 ? "" : "s") + ")";
     }
 
     /** Status after Stop restored pre-scan issues. Visibility stays with restorePreScanUi. */
@@ -1355,19 +1403,12 @@ public class DashboardTabView extends BorderPane {
                         long totalSize = issues.stream()
                                 .filter(ic -> !ic.isError() && "Cleanup".equals(ic.sourceProperty().get()))
                                 .mapToLong(IssueCategory::getSizeBytes).sum();
-                        String errorNote = errorCount > 0
-                                ? " (" + errorCount + " scan error" + (errorCount == 1 ? "" : "s") + ")"
-                                : "";
-                        statusLabel.setText("Scan complete \u2014 "
-                                + totalDriverSoftware + " outdated driver" + (totalDriverSoftware == 1 ? "" : "s")
-                                + "/software, " + cleanupCategoryCount
-                                + " cleanup categor" + (cleanupCategoryCount == 1 ? "y" : "ies")
-                                + " with reclaimable space." + errorNote);
-                        summaryLabel.setText("Total: " + totalDriverSoftware + " outdated driver"
-                                + (totalDriverSoftware == 1 ? "" : "s") + "/software, "
-                                + cleanupCategoryCount + " cleanup categor"
-                                + (cleanupCategoryCount == 1 ? "y" : "ies") + ". "
-                                + formatBytes(totalSize) + " can be freed." + errorNote);
+                        boolean cleanupIncomplete = cleanupTimedOut(issues);
+                        statusLabel.setText(scanFinishedStatus(
+                                totalDriverSoftware, cleanupCategoryCount, errorCount, cleanupIncomplete));
+                        summaryLabel.setText(scanFinishedSummary(
+                                totalDriverSoftware, cleanupCategoryCount, formatBytes(totalSize),
+                                errorCount, cleanupIncomplete));
                             summaryLabel.setVisible(true);
                         }
                         updateSummaryCards();
@@ -1524,9 +1565,9 @@ public class DashboardTabView extends BorderPane {
         }
     }
 
-    /** FX thread: timeout placeholder so Retry has a target; skip if results already landed. */
+    /** FX thread: timeout placeholder so Retry has a target; skip when this category name is already present. */
     private void addTimeoutRowIfMissing(String category, String source) {
-        if (hasTimeoutPlaceholderTarget(issues, category, source)) return;
+        if (hasTimeoutPlaceholderTarget(issues, category)) return;
         issues.add(IssueCategory.error(
                 category, "Timed out — press Retry to rescan", "", source, 0));
     }
@@ -1577,6 +1618,11 @@ public class DashboardTabView extends BorderPane {
                 }
             } catch (Exception purgeEx) {
                 AppLogger.warning("Dashboard reboot purge failed: " + purgeEx.getMessage());
+            }
+            try {
+                catalogs().dropFailedProviderCache();
+            } catch (Exception dropEx) {
+                AppLogger.warning("Dashboard failed-cache drop failed: " + dropEx.getMessage());
             }
             List<DriverUpdateCandidate> candidates = catalogs().findUpdates(installed, effectiveChild);
             if (isCancelledAny(generation, parent, child)) return;
@@ -1639,12 +1685,23 @@ public class DashboardTabView extends BorderPane {
                 AppLogger.warning("Dashboard reboot-pending filter failed: " + ex.getMessage());
             }
             if (isCancelledAny(generation, parent, child)) return;
+            String failureNote = catalogs().providerFailureNote();
+            boolean catalogFailed = failureNote != null && !failureNote.isBlank();
             if (success == null && !candidates.isEmpty()) {
                 success = new IssueCategory(
                         "Outdated Drivers", candidates.size(), 0, "Drivers",
-                        topDriverDetails(candidates));
+                        catalogFailed
+                                ? withCatalogFailureNote(topDriverDetails(candidates), failureNote)
+                                : topDriverDetails(candidates));
+            } else if (success != null && catalogFailed) {
+                success = new IssueCategory(
+                        "Outdated Drivers", success.getCount(), success.getSizeBytes(), "Drivers",
+                        withCatalogFailureNote(success.getDetails(), failureNote));
             }
-            updateCategoryProgress(0, "done", generation);
+            if (catalogFailed && success == null) {
+                failure = IssueCategory.error("Outdated Drivers", failureNote, "", "Drivers", 0);
+            }
+            updateCategoryProgress(0, catalogFailed ? "failed" : "done", generation);
         } catch (CancellationException ex) {
             AppLogger.info("Dashboard driver scan cancelled");
             updateCategoryProgress(0, "failed", generation);
@@ -1673,6 +1730,18 @@ public class DashboardTabView extends BorderPane {
         } finally {
             finishSubScanProgress(generation, scansComplete, totalScans);
         }
+    }
+
+    private static List<String> withCatalogFailureNote(List<String> details, String failureNote) {
+        List<String> out = new ArrayList<>();
+        out.add("Partial scan — " + failureNote);
+        if (details != null) {
+            for (String line : details) {
+                if (out.size() >= MAX_DETAIL_LINES) break;
+                if (line != null && !line.isBlank()) out.add(line);
+            }
+        }
+        return List.copyOf(out.size() > MAX_DETAIL_LINES ? out.subList(0, MAX_DETAIL_LINES) : out);
     }
 
     private List<String> topDriverDetails(List<DriverUpdateCandidate> candidates) {
@@ -2126,7 +2195,14 @@ public class DashboardTabView extends BorderPane {
                         handlePerTaskTimeouts(Set.of(categoryIndex), generation, token);
                         Platform.runLater(() -> {
                             if (isScanStale(generation)) return;
+                            collapseDriverSoftwareRows();
+                            updateSummaryCards();
                             statusLabel.setText("Retry timed out — partial results kept.");
+                            lastScanTime = Instant.now();
+                            updateTimestamp(generation);
+                            try {
+                                DashboardSummaryStore.save(lastScanTime, new ArrayList<>(issues));
+                            } catch (Exception ignored) {}
                         });
                         return;
                     }

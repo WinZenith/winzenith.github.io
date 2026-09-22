@@ -1,3 +1,109 @@
+param([switch]$SelfTest, [string]$FixturePath = '')
+
+function Read-AtaSmartAttributeRows {
+    param($VendorData)
+    $rows = New-Object System.Collections.Generic.List[object]
+    if (-not $VendorData) { return @() }
+    $count = 0
+    try { $count = [int]$VendorData.Count } catch { return @() }
+    # ATA SMART: bytes 0-1 are the structure revision. 12-byte attributes start at offset 2.
+    # Raw value is 6 little-endian bytes at attribute+5 (not +7).
+    $n = 0
+    for ($i = 2; $n -lt 30 -and ($i + 12) -le $count; $i += 12) {
+        $n++
+        $attrId = [int]$VendorData[$i]
+        if ($attrId -le 0) { continue }
+        $raw = [long]$VendorData[$i + 5] + ([long]$VendorData[$i + 6] * 256) + ([long]$VendorData[$i + 7] * 65536) + ([long]$VendorData[$i + 8] * 16777216) + ([long]$VendorData[$i + 9] * 4294967296) + ([long]$VendorData[$i + 10] * 1099511627776)
+        $rows.Add([pscustomobject]@{
+            id    = $attrId
+            value = [int]$VendorData[$i + 3]
+            worst = [int]$VendorData[$i + 4]
+            raw   = $raw
+        })
+    }
+    return $rows.ToArray()
+}
+
+function Update-NvmeHealthStatus {
+    param([string]$HealthStatus, $CriticalWarning, $MediaErrors, [bool]$SmartFailed)
+    $status = if ($HealthStatus) { $HealthStatus } else { 'Unknown' }
+    if ($status -eq 'Critical' -or $SmartFailed) { return 'Critical' }
+    $cw = 0
+    if ($null -ne $CriticalWarning -and "$CriticalWarning" -ne '') {
+        try { $cw = [int]$CriticalWarning } catch { $cw = 0 }
+    }
+    if ($cw -ne 0) { return 'Critical' }
+    $me = 0
+    if ($null -ne $MediaErrors -and "$MediaErrors" -ne '') {
+        try { $me = [long]$MediaErrors } catch { $me = 0 }
+    }
+    if ($me -gt 0) { return 'Caution' }
+    return $status
+}
+
+function ConvertTo-DiskMediaType {
+    param($MediaType, $BusType, $SpindleSpeed)
+    $mt = if ($null -ne $MediaType -and "$MediaType" -ne '') { "$MediaType" } else { '' }
+    if ($mt -eq 'HDD' -or $mt -eq 'SSD') { return $mt }
+    $bus = if ($null -ne $BusType) { "$BusType" } else { '' }
+    $busNum = ''
+    if ($null -ne $BusType) {
+        try { $busNum = [string][int]$BusType } catch { $busNum = '' }
+    }
+    if ($bus -eq 'NVMe' -or $busNum -eq '17' -or $bus -eq 'SD' -or $busNum -eq '12' -or $bus -eq 'MMC' -or $busNum -eq '13' -or $bus -eq 'UFS' -or $busNum -eq '19' -or $bus -eq 'SCM' -or $busNum -eq '18') {
+        return 'SSD'
+    }
+    if ($null -ne $SpindleSpeed -and "$SpindleSpeed" -ne '') {
+        try {
+            $rpm = [int]$SpindleSpeed
+            if ($rpm -eq 0) { return 'SSD' }
+            if ($rpm -ge 1000) { return 'HDD' }
+        } catch {}
+    }
+    return 'Unknown'
+}
+
+if ($SelfTest) {
+    if (-not $FixturePath -or -not (Test-Path -LiteralPath $FixturePath)) {
+        Write-Error "SelfTest requires -FixturePath"
+        exit 1
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($FixturePath)
+    $parsedRows = @(Read-AtaSmartAttributeRows $bytes)
+    $reallocated = -1
+    $pending = -1
+    $uncorrectable = -1
+    foreach ($row in $parsedRows) {
+        switch ([int]$row.id) {
+            5   { if ($reallocated -lt 0) { $reallocated = [long]$row.raw } }
+            197 { if ($pending -lt 0) { $pending = [long]$row.raw } }
+            198 { if ($uncorrectable -lt 0) { $uncorrectable = [long]$row.raw } }
+        }
+    }
+    $worst = 0
+    foreach ($v in @($reallocated, $pending, $uncorrectable)) {
+        if ($v -ge 0 -and $v -gt $worst) { $worst = $v }
+    }
+    $health = 'Healthy'
+    if ($worst -gt 10) { $health = 'Critical' }
+    elseif ($worst -gt 0) { $health = 'Caution' }
+    $out = [ordered]@{
+        reallocated    = $reallocated
+        pending        = $pending
+        uncorrectable  = $uncorrectable
+        health         = $health
+        nvmeMedia      = (Update-NvmeHealthStatus 'Healthy' 0 4 $false)
+        nvmeWarn       = (Update-NvmeHealthStatus 'Healthy' 1 0 $false)
+        nvmeOk         = (Update-NvmeHealthStatus 'Healthy' 0 0 $false)
+        nvmeSmartFail  = (Update-NvmeHealthStatus 'Healthy' 0 0 $true)
+        nvmeKeep       = (Update-NvmeHealthStatus 'Critical' 0 4 $false)
+        mediaSsd       = (ConvertTo-DiskMediaType 'Unspecified' 'SATA' 0)
+        mediaHdd       = (ConvertTo-DiskMediaType 'Unspecified' 'SATA' 7200)
+    }
+    $out | ConvertTo-Json -Compress
+    exit 0
+}
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 $smartctlPath = $null
@@ -145,16 +251,14 @@ foreach ($phys in $physicalDisks) {
     if ($null -ne $phys.DeviceId -and ("$($phys.DeviceId)" -match '^\d+$')) {
         $diskNum = [int]$phys.DeviceId
     }
-    $mediaType = if ($phys.MediaType) { $phys.MediaType.ToString() } else { 'Unknown' }
     $healthStatus = if ($phys.HealthStatus) { $phys.HealthStatus.ToString() } else { 'Unknown' }
     $operationalStatus = if ($phys.OperationalStatus) { ($phys.OperationalStatus | Select-Object -First 1).ToString() } else { 'Unknown' }
     $model = if ($phys.FriendlyName) { $phys.FriendlyName } else { '' }
     $serial = if ($phys.SerialNumber) { $phys.SerialNumber.Trim() } else { '' }
     $interfaceType = if ($phys.BusType) { $phys.BusType.ToString() } else { '' }
-    # NVMe Unspecified -> SSD (same mapping as get-drives.ps1)
-    if ($mediaType -ne 'HDD' -and $mediaType -ne 'SSD' -and ($interfaceType -eq 'NVMe' -or $interfaceType -eq '17')) {
-        $mediaType = 'SSD'
-    }
+    $spindle = $null
+    if ($phys.PSObject.Properties['SpindleSpeed']) { $spindle = $phys.SpindleSpeed }
+    $mediaType = ConvertTo-DiskMediaType -MediaType $phys.MediaType -BusType $phys.BusType -SpindleSpeed $spindle
     $sizeBytes = if ($phys.Size) { [uint64]$phys.Size } else { 0 }
 
     $partitions = $null
@@ -208,7 +312,14 @@ foreach ($phys in $physicalDisks) {
         if ($parsed.ContainsKey('totalHostWrites')) { $totalHostWrites = $parsed.totalHostWrites }
         if ($parsed.ContainsKey('powerCycleCount')) { $powerCycleCount = $parsed.powerCycleCount }
 
-        if ($smartctlData.smart_status -and $smartctlData.smart_status.passed -eq $false) {
+        $smartFailed = ($smartctlData.smart_status -and $smartctlData.smart_status.passed -eq $false)
+        if ($smartctlData.nvme_smart_health_information) {
+            $cw = $null
+            $me = $null
+            if ($parsed.ContainsKey('criticalWarning')) { $cw = $parsed.criticalWarning }
+            if ($parsed.ContainsKey('mediaErrors')) { $me = $parsed.mediaErrors }
+            $healthStatus = Update-NvmeHealthStatus -HealthStatus $healthStatus -CriticalWarning $cw -MediaErrors $me -SmartFailed $smartFailed
+        } elseif ($smartFailed) {
             $healthStatus = 'Critical'
         }
     }
@@ -259,15 +370,11 @@ foreach ($phys in $physicalDisks) {
                     $v = [uint64]$nvme.DataUnitsWritten * 512000
                     if ($v -gt 0) { $totalHostWrites = $v }
                 }
-                $nvmeIsCritical = $false
-                if ($nvme.PSObject.Properties['CriticalWarning']) {
-                    if ([int]$nvme.CriticalWarning -ne 0) { $nvmeIsCritical = $true; $healthStatus = 'Critical' }
-                }
-                if ($nvme.PSObject.Properties['MediaErrors']) {
-                    if ([long]$nvme.MediaErrors -gt 0) {
-                        if (-not $nvmeIsCritical) { $healthStatus = 'Caution' }
-                    }
-                }
+                $cw = $null
+                $me = $null
+                if ($nvme.PSObject.Properties['CriticalWarning']) { $cw = $nvme.CriticalWarning }
+                if ($nvme.PSObject.Properties['MediaErrors']) { $me = $nvme.MediaErrors }
+                $healthStatus = Update-NvmeHealthStatus -HealthStatus $healthStatus -CriticalWarning $cw -MediaErrors $me -SmartFailed $false
             }
         }
 
@@ -275,23 +382,19 @@ foreach ($phys in $physicalDisks) {
             $ataSmart = Get-SmartFromWmi -ClassName 'MSStorageDriver_SmartData' -DiskNumber $diskNum -SizeBytes $sizeBytes
             if (-not $ataSmart) { $ataSmart = Get-SmartFromWmi -ClassName 'MSStorageDriver_FailurePredictData' -DiskNumber $diskNum -SizeBytes $sizeBytes }
             if ($ataSmart -and $ataSmart.PSObject.Properties['VendorSpecific']) {
-                $vendorData = $ataSmart.VendorSpecific
-                if ($vendorData -and $vendorData.Count -gt 12) {
-                    for ($i = 0; $i -lt $vendorData.Count - 11; $i += 12) {
-                        $attrId = [int]$vendorData[$i]
-                        $rawValue = [long]([int]$vendorData[$i+7]) -bor ([long]([int]$vendorData[$i+8]) -shl 8) -bor ([long]([int]$vendorData[$i+9]) -shl 16) -bor ([long]([int]$vendorData[$i+10]) -shl 24)
-                        switch ($attrId) {
-                            0x05 { if ($rawValue -ge 0 -and $reallocatedSectors -lt 0) { $reallocatedSectors = $rawValue } }
-                            0x09 { if ($rawValue -gt 0 -and $powerOnHours -lt 0) { $powerOnHours = $rawValue } }
-                            0x0C { if ($rawValue -gt 0 -and $powerCycleCount -lt 0) { $powerCycleCount = $rawValue } }
-                            0xC0 { if ($rawValue -gt 0 -and $loadCycleCount -lt 0) { $loadCycleCount = $rawValue } }
-                            # Reliability fix: 0xC4 is Reallocation Event Count, NOT pending.
-                            # Map to reallocated when still unknown; pending comes only from 0xC5.
-                            0xC4 { if ($rawValue -ge 0 -and $reallocatedSectors -lt 0) { $reallocatedSectors = $rawValue } }
-                            0xC5 { if ($rawValue -ge 0 -and $pendingSectors -lt 0) { $pendingSectors = $rawValue } } # 0xC5 = Current Pending Sector Count
-                            0xC6 { if ($rawValue -ge 0 -and $uncorrectableSectors -lt 0) { $uncorrectableSectors = $rawValue } }
-                            0xBE { if ($rawValue -gt 0 -and $rawValue -lt 200 -and $temperature -lt 0) { $temperature = $rawValue } }
-                        }
+                foreach ($row in @(Read-AtaSmartAttributeRows $ataSmart.VendorSpecific)) {
+                    $attrId = [int]$row.id
+                    $rawValue = [long]$row.raw
+                    switch ($attrId) {
+                        0x05 { if ($rawValue -ge 0 -and $reallocatedSectors -lt 0) { $reallocatedSectors = $rawValue } }
+                        0x09 { if ($rawValue -gt 0 -and $powerOnHours -lt 0) { $powerOnHours = $rawValue } }
+                        0x0C { if ($rawValue -gt 0 -and $powerCycleCount -lt 0) { $powerCycleCount = $rawValue } }
+                        0xC0 { if ($rawValue -gt 0 -and $loadCycleCount -lt 0) { $loadCycleCount = $rawValue } }
+                        # 0xC4 is Reallocation Event Count, NOT pending. Pending is only 0xC5.
+                        0xC4 { if ($rawValue -ge 0 -and $reallocatedSectors -lt 0) { $reallocatedSectors = $rawValue } }
+                        0xC5 { if ($rawValue -ge 0 -and $pendingSectors -lt 0) { $pendingSectors = $rawValue } }
+                        0xC6 { if ($rawValue -ge 0 -and $uncorrectableSectors -lt 0) { $uncorrectableSectors = $rawValue } }
+                        0xBE { if ($rawValue -gt 0 -and $rawValue -lt 200 -and $temperature -lt 0) { $temperature = $rawValue } }
                     }
                 }
             }
@@ -377,26 +480,17 @@ foreach ($phys in $physicalDisks) {
         $ataSmart = Get-SmartFromWmi -ClassName 'MSStorageDriver_SmartData' -DiskNumber $diskNum -SizeBytes $sizeBytes
         if (-not $ataSmart) { $ataSmart = Get-SmartFromWmi -ClassName 'MSStorageDriver_FailurePredictData' -DiskNumber $diskNum -SizeBytes $sizeBytes }
         if ($ataSmart -and $ataSmart.PSObject.Properties['VendorSpecific']) {
-            $vendorData = $ataSmart.VendorSpecific
-            if ($vendorData -and $vendorData.Count -gt 12) {
-                for ($i = 0; $i -lt $vendorData.Count - 11; $i += 12) {
-                    $attrId = [int]$vendorData[$i]
-                    $attrVal = [int]$vendorData[$i+3]
-                    $attrWorst = [int]$vendorData[$i+4]
-                    $rawValue = [long]([int]$vendorData[$i+7]) -bor ([long]([int]$vendorData[$i+8]) -shl 8) -bor ([long]([int]$vendorData[$i+9]) -shl 16) -bor ([long]([int]$vendorData[$i+10]) -shl 24)
-                    if ($attrId -gt 0) {
-                        $rawAttrs += [ordered]@{
-                            id        = $attrId
-                            name      = "Attribute $attrId"
-                            value     = [string]$attrVal
-                            worst     = [string]$attrWorst
-                            threshold = '-'
-                            rawValue  = [string]$rawValue
-                            flags     = ''
-                        }
-                    }
-                }
+        foreach ($row in @(Read-AtaSmartAttributeRows $ataSmart.VendorSpecific)) {
+            $rawAttrs += [ordered]@{
+                id        = [int]$row.id
+                name      = "Attribute $($row.id)"
+                value     = [string]$row.value
+                worst     = [string]$row.worst
+                threshold = '-'
+                rawValue  = [string]$row.raw
+                flags     = ''
             }
+        }
         }
     }
 

@@ -35,4 +35,31 @@ public record CpuInfo(
     public String formatL3Cache() {
         return DataSizeFormatter.formatKb(l3CacheKb);
     }
+
+    /** False for the WMI-failure shell (empty name, zero counts). */
+    public boolean reported() {
+        return name != null && !name.isBlank();
+    }
+
+    public String formatCores() {
+        return cores > 0 ? Integer.toString(cores) : "";
+    }
+
+    public String formatThreads() {
+        return logicalCpus > 0 ? Integer.toString(logicalCpus) : "";
+    }
+
+    public String formatCoreThreadCard() {
+        if (cores > 0 && logicalCpus > 0) return cores + "C / " + logicalCpus + "T";
+        if (cores > 0) return cores + "C";
+        if (logicalCpus > 0) return logicalCpus + "T";
+        return "";
+    }
+
+    public String formatCoreThreadPair() {
+        if (cores > 0 && logicalCpus > 0) return cores + " / " + logicalCpus;
+        if (cores > 0) return Integer.toString(cores);
+        if (logicalCpus > 0) return Integer.toString(logicalCpus);
+        return "";
+    }
 }

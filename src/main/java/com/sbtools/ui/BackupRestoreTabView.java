@@ -280,6 +280,16 @@ public class BackupRestoreTabView extends BorderPane {
         return table;
     }
 
+    /**
+     * Drops this operation's busy count, then starts a refresh that acquires
+     * its own. Both happen on the FX thread so the count never stays elevated
+     * and never dips in a way another event can observe between them.
+     */
+    private void releaseBusyAndRefresh() {
+        busy.set(false);
+        refreshRollback();
+    }
+
     private void refreshRollback() {
         final int generation = rollbackRefreshGen.incrementAndGet();
         busy.set(true);
@@ -369,8 +379,11 @@ public class BackupRestoreTabView extends BorderPane {
                     }
                 });
                 RestoreRow.computeAllSizesAsync(newRows).whenComplete((v, ex) -> Platform.runLater(() -> {
-                    // Stale generation must not clear busy for a newer refresh.
+                    // Each refresh acquired busy once. A stale generation releases
+                    // only its own count; set(false) must not be skipped or the
+                    // ref-count stays elevated after the newer refresh finishes.
                     if (generation != rollbackRefreshGen.get()) {
+                        busy.set(false);
                         return;
                     }
                     try {
@@ -389,6 +402,7 @@ public class BackupRestoreTabView extends BorderPane {
                 AppLogger.error("Failed to load backups", ex);
                 Platform.runLater(() -> {
                     if (generation != rollbackRefreshGen.get()) {
+                        busy.set(false);
                         return;
                     }
                     try {
@@ -457,19 +471,21 @@ public class BackupRestoreTabView extends BorderPane {
                 String verifyMsg = verifyRevertedVersion(row);
                 handoffToRefresh = true;
                 Platform.runLater(() -> {
-                    if (verifyMsg == null) {
-                        new Alert(Alert.AlertType.INFORMATION,
-                                "Driver reverted to " + row.entry().version() + " and verified active."
-                                        + " Restart if devices do not work correctly.").showAndWait();
-                    } else {
-                        new Alert(Alert.AlertType.WARNING,
-                                "Backup staged, but the active driver does not yet match "
-                                + row.entry().version() + ".\n\n" + verifyMsg
-                                + "\n\nRestart, then use Device Manager → Update driver → Browse → Let me pick → Have Disk"
-                                + "\nand point at:\n" + row.entry().backupFolder()).showAndWait();
+                    try {
+                        if (verifyMsg == null) {
+                            new Alert(Alert.AlertType.INFORMATION,
+                                    "Driver reverted to " + row.entry().version() + " and verified active."
+                                            + " Restart if devices do not work correctly.").showAndWait();
+                        } else {
+                            new Alert(Alert.AlertType.WARNING,
+                                    "Backup staged, but the active driver does not yet match "
+                                    + row.entry().version() + ".\n\n" + verifyMsg
+                                    + "\n\nRestart, then use Device Manager → Update driver → Browse → Let me pick → Have Disk"
+                                    + "\nand point at:\n" + row.entry().backupFolder()).showAndWait();
+                        }
+                    } finally {
+                        releaseBusyAndRefresh();
                     }
-                    // refresh owns busy from here — do not clear in mutate finally
-                    refreshRollback();
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
@@ -547,8 +563,11 @@ public class BackupRestoreTabView extends BorderPane {
                 rollbackBackupService.removeAll();
                 handoffToRefresh = true;
                 Platform.runLater(() -> {
-                    new Alert(Alert.AlertType.INFORMATION, "All driver backups deleted.").showAndWait();
-                    refreshRollback();
+                    try {
+                        new Alert(Alert.AlertType.INFORMATION, "All driver backups deleted.").showAndWait();
+                    } finally {
+                        releaseBusyAndRefresh();
+                    }
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
@@ -585,8 +604,11 @@ public class BackupRestoreTabView extends BorderPane {
                 rollbackBackupService.removeBackupEntry(row.entry());
                 handoffToRefresh = true;
                 Platform.runLater(() -> {
-                    new Alert(Alert.AlertType.INFORMATION, "Backup deleted.").showAndWait();
-                    refreshRollback();
+                    try {
+                        new Alert(Alert.AlertType.INFORMATION, "Backup deleted.").showAndWait();
+                    } finally {
+                        releaseBusyAndRefresh();
+                    }
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
@@ -721,9 +743,8 @@ public class BackupRestoreTabView extends BorderPane {
         if (rollbackStatusLabel != null) {
             rollbackStatusLabel.setText("Checking for stale backups...");
         }
-        // Ownership flag: once the confirm dialog is queued, the inner purge task
-        // owns busy + refresh. The outer finally must not clear/refresh early,
-        // otherwise purge runs with busy=false and refresh races the purge.
+        // Once the confirm dialog is queued, the purge task owns the busy count.
+        // The outer finally must not release early, or purge runs with busy=false.
         java.util.concurrent.atomic.AtomicBoolean handoff = new java.util.concurrent.atomic.AtomicBoolean(false);
         AppExecutors.ioPool().execute(() -> {
             try {
@@ -753,8 +774,7 @@ public class BackupRestoreTabView extends BorderPane {
                     confirm.setContentText("These backups are missing, empty or unreadable on disk:\n\n" + list
                             + "\nRemove their index entries? Folders (if any) are left untouched.\nNothing else will be deleted.");
                     if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
-                        // Cancelled: refresh owns busy from here.
-                        refreshRollback();
+                        releaseBusyAndRefresh();
                         return;
                     }
                     AppExecutors.ioPool().execute(() -> {
@@ -763,9 +783,12 @@ public class BackupRestoreTabView extends BorderPane {
                             rollbackBackupService.purgeStaleIndexEntries(stale);
                             purgeHandoff = true;
                             Platform.runLater(() -> {
-                                new Alert(Alert.AlertType.INFORMATION,
-                                        "Removed " + count + " stale index entr" + (count == 1 ? "y" : "ies") + ".").showAndWait();
-                                refreshRollback();
+                                try {
+                                    new Alert(Alert.AlertType.INFORMATION,
+                                            "Removed " + count + " stale index entr" + (count == 1 ? "y" : "ies") + ".").showAndWait();
+                                } finally {
+                                    releaseBusyAndRefresh();
+                                }
                             });
                         } catch (Exception ex) {
                             Platform.runLater(() -> new Alert(Alert.AlertType.ERROR,
@@ -785,7 +808,7 @@ public class BackupRestoreTabView extends BorderPane {
                 // Only the non-handoff paths (empty / error) clean up here.
                 // Handoff path is owned by the confirm/purge chain above.
                 if (!handoff.get()) {
-                    Platform.runLater(this::refreshRollback);
+                    Platform.runLater(this::releaseBusyAndRefresh);
                 }
             }
         });
@@ -1515,7 +1538,8 @@ public class BackupRestoreTabView extends BorderPane {
                         com.sbtools.backup.RegistryBackupSafety.createPreRestoreSnapshot(safetyDir, targetKeys);
                 if (safetySnap.exportedKeys().isEmpty() && !targetKeys.isEmpty()) {
                     final String warn = "None of the registry keys in this session currently exist on this PC.\n"
-                            + "If restore fails partway through, automatic rollback may not be possible.\n\n"
+                            + "If restore fails partway through, keys created by the restore are removed.\n"
+                            + "Values cannot be rolled back by merging the old .reg again.\n\n"
                             + "Continue anyway?";
                     CompletableFuture<Boolean> proceed = new CompletableFuture<>();
                     Platform.runLater(() -> {

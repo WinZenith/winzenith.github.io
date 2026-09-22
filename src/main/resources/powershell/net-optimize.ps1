@@ -11,8 +11,10 @@ function Add-Result($key, $value, $ok) {
 }
 
 function Invoke-Netsh {
-    param([string[]]$Args)
-    $out = & netsh @Args 2>&1
+    # $Args is automatic and stays empty, so a parameter by that name drops the
+    # netsh tokens and bare `netsh` exits 0 (false success, no TCP change).
+    param([string[]]$NetshArgs)
+    $out = & netsh @NetshArgs 2>&1
     $code = $LASTEXITCODE
     if ($null -eq $code) { $code = 1 }
     return $code -eq 0

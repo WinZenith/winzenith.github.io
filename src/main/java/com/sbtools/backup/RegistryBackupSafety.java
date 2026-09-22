@@ -181,8 +181,7 @@ public final class RegistryBackupSafety {
                 absent.add(key);
                 continue;
             }
-            String safeName = key.replace('\\', '_').replace(':', '_');
-            Path out = safetyDir.resolve("pre-restore_" + safeName + ".reg");
+            Path out = safetyDir.resolve(preRestoreFileName(key));
             if (!runRegExport(key, out)) {
                 throw new IOException("Pre-restore safety export failed for " + key);
             }
@@ -243,20 +242,7 @@ public final class RegistryBackupSafety {
     }
 
     private static boolean keyExists(String fullKey) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder("reg", "query", fullKey);
-            pb.redirectErrorStream(true);
-            Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(30, TimeUnit.SECONDS);
-            if (!finished) {
-                p.destroyForcibly();
-                return false;
-            }
-            return p.exitValue() == 0;
-        } catch (Exception e) {
-            AppLogger.warning("reg query failed for " + fullKey + ": " + e.getMessage());
-            return false;
-        }
+        return queryKeyPresence(fullKey) == KeyPresence.PRESENT;
     }
 
     /**
@@ -271,74 +257,195 @@ public final class RegistryBackupSafety {
     }
 
     /**
-     * Imports session {@code .reg} files in order. On any failure, re-applies the
-     * pre-restore safety snapshot (when provided) before throwing.
+     * Imports session {@code .reg} files in order. Refuses to start when a partial
+     * merge could not be undone. On a later failure, deletes keys already imported
+     * and, when a pre-restore export exists, imports that export. Re-import alone
+     * is not a rollback: {@code reg import} merges and leaves values the session added.
      */
     public static void importRegSessionAtomically(List<Path> regFiles, Path safetySnapshotDir) throws IOException {
         if (regFiles == null || regFiles.isEmpty()) {
             return;
         }
-        int sessionImported = 0;
+        if (safetySnapshotDir == null) {
+            throw new IOException("Refusing registry restore: no safety snapshot folder. "
+                    + "A partial merge cannot be undone.");
+        }
+        List<List<String>> keysPerFile = new ArrayList<>();
+        LinkedHashSet<String> allKeys = new LinkedHashSet<>();
         for (Path regFile : regFiles) {
+            List<RegSection> sections = parseRegFile(regFile);
+            validateSections(sections, regFile);
+            LinkedHashSet<String> keys = new LinkedHashSet<>();
+            for (RegSection s : sections) {
+                keys.add(s.hivePath());
+            }
+            keysPerFile.add(new ArrayList<>(keys));
+            allKeys.addAll(keys);
+        }
+        LinkedHashSet<String> snapshottedKeys = new LinkedHashSet<>();
+        for (String key : allKeys) {
+            KeyPresence presence = queryKeyPresence(key);
+            boolean snapshot = Files.isRegularFile(safetySnapshotDir.resolve(preRestoreFileName(key)));
+            if (snapshot) {
+                snapshottedKeys.add(key);
+            }
+            if (!rollbackCoverageSufficient(presence == KeyPresence.PRESENT, presence == KeyPresence.UNKNOWN, snapshot)) {
+                String why = presence == KeyPresence.UNKNOWN
+                        ? "key state could not be confirmed"
+                        : "no pre-restore export for an existing key";
+                throw new IOException("Refusing registry restore before any import.\n"
+                        + "Cannot undo a partial merge of:\n" + key + "\n(" + why + ").");
+            }
+        }
+        List<String> importedKeys = new ArrayList<>();
+        int sessionImported = 0;
+        for (int i = 0; i < regFiles.size(); i++) {
+            Path regFile = regFiles.get(i);
             if (!runRegImport(regFile)) {
                 String failed = regFile.getFileName().toString();
-                if (sessionImported > 0 && safetySnapshotDir != null) {
-                    if (!hasPreRestoreSafetyRegs(safetySnapshotDir)) {
-                        throw new IOException("Registry import failed at " + failed + " after " + sessionImported
-                                + " file(s) had already been merged.\n\n"
-                                + "No pre-restore .reg exports were available (keys may not have existed on this PC), "
-                                + "so automatic rollback was not possible.\n"
-                                + "Use System Restore or import a known-good registry backup session.");
-                    }
-                    try {
-                        importPreRestoreSafetyRegs(safetySnapshotDir);
-                    } catch (IOException rollbackEx) {
-                        throw new IOException("Registry import failed at " + failed
-                                + " and automatic rollback from the safety snapshot also failed: "
-                                + rollbackEx.getMessage(), rollbackEx);
-                    }
-                    throw new IOException("Registry import failed at " + failed
-                            + ". Pre-restore keys were re-applied from the safety snapshot at:\n"
-                            + safetySnapshotDir);
+                if (importedKeys.isEmpty()) {
+                    throw new IOException("Registry import failed at " + failed);
                 }
-                throw new IOException("Registry import failed at " + failed);
+                try {
+                    replaceImportedKeys(importedKeys, safetySnapshotDir, snapshottedKeys);
+                } catch (IOException rollbackEx) {
+                    throw new IOException(partialImportFailureMessage(failed, sessionImported, false)
+                            + "\n\n" + rollbackEx.getMessage(), rollbackEx);
+                }
+                throw new IOException(partialImportFailureMessage(failed, sessionImported, true)
+                        + "\n\nSafety snapshot:\n" + safetySnapshotDir);
             }
+            importedKeys.addAll(keysPerFile.get(i));
             sessionImported++;
         }
     }
 
-    private static boolean hasPreRestoreSafetyRegs(Path safetyDir) throws IOException {
-        if (safetyDir == null || !Files.isDirectory(safetyDir)) {
-            return false;
+    /** {@code pre-restore_} file name for one normalized hive path. */
+    static String preRestoreFileName(String hivePath) {
+        String normalized = normalizeHivePath(hivePath);
+        String safeName = normalized.replace('\\', '_').replace(':', '_');
+        return "pre-restore_" + safeName + ".reg";
+    }
+
+    /**
+     * A snapshot can replace the key after delete. Without one, only a
+     * confirmed-absent key is safe (delete removes what the session created).
+     * Unknown presence and no snapshot is not safe: the key may already exist.
+     */
+    static boolean rollbackCoverageSufficient(boolean keyPresent, boolean keyStateUnknown, boolean snapshotPresent) {
+        if (snapshotPresent) {
+            return true;
         }
-        try (var stream = Files.list(safetyDir)) {
-            return stream.anyMatch(p -> {
-                String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
-                return name.startsWith("pre-restore_") && name.endsWith(".reg");
-            });
+        return !keyPresent && !keyStateUnknown;
+    }
+
+    /**
+     * Failure text for a multi-file import that stopped after at least one merge.
+     * Claims the keys were restored only when replace-from-snapshot finished.
+     */
+    static String partialImportFailureMessage(String failedFile, int importedFileCount, boolean rollbackUndone) {
+        String failed = failedFile == null ? "unknown file" : failedFile;
+        if (!rollbackUndone) {
+            return "Registry import failed at " + failed + " after " + importedFileCount
+                    + " file(s) had already been merged.\n\n"
+                    + "Automatic rollback could not undo that partial merge.\n"
+                    + "The registry may still contain values from the backup.\n"
+                    + "Use System Restore or import a known-good registry backup session.";
+        }
+        return "Registry import failed at " + failed + " after " + importedFileCount
+                + " file(s) had already been merged.\n\n"
+                + "Those keys were removed and, where a pre-restore export existed, replaced from that export.";
+    }
+
+    private enum KeyPresence {
+        PRESENT, ABSENT, UNKNOWN
+    }
+
+    /**
+     * Deletes each imported key, then imports its pre-restore export when one
+     * exists. Delete is required: importing the old .reg does not remove values
+     * the session added.
+     */
+    private static void replaceImportedKeys(List<String> importedKeys, Path safetyDir, Set<String> snapshottedKeys)
+            throws IOException {
+        LinkedHashSet<String> keys = new LinkedHashSet<>();
+        if (importedKeys != null) {
+            keys.addAll(importedKeys);
+        }
+        List<String> problems = new ArrayList<>();
+        for (String key : keys) {
+            if (!deleteKeyForRollback(key)) {
+                problems.add(key + " (could not remove merged key)");
+                continue;
+            }
+            if (snapshottedKeys != null && snapshottedKeys.contains(key)) {
+                Path snap = safetyDir.resolve(preRestoreFileName(key));
+                if (!Files.isRegularFile(snap) || !runRegImport(snap)) {
+                    problems.add(key + " (removed, but pre-restore import failed)");
+                }
+            }
+        }
+        if (!problems.isEmpty()) {
+            throw new IOException(String.join("\n", problems));
         }
     }
 
-    /** Imports all {@code pre-restore_*.reg} files from a safety session directory. */
-    public static void importPreRestoreSafetyRegs(Path safetyDir) throws IOException {
-        if (safetyDir == null || !Files.isDirectory(safetyDir)) {
-            throw new IOException("Safety snapshot folder missing: " + safetyDir);
+    private static boolean deleteKeyForRollback(String fullKey) {
+        KeyPresence presence = queryKeyPresence(fullKey);
+        if (presence == KeyPresence.ABSENT) {
+            return true;
         }
-        List<Path> safetyRegs;
-        try (var stream = Files.list(safetyDir)) {
-            safetyRegs = stream
-                    .filter(p -> {
-                        String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
-                        return name.startsWith("pre-restore_") && name.endsWith(".reg");
-                    })
-                    .sorted()
-                    .toList();
+        if (presence == KeyPresence.UNKNOWN) {
+            return false;
         }
-        for (Path reg : safetyRegs) {
-            if (!runRegImport(reg)) {
-                throw new IOException("Safety rollback import failed for " + reg.getFileName());
+        try {
+            ProcessBuilder pb = new ProcessBuilder("reg", "delete", fullKey, "/f");
+            pb.redirectErrorStream(true);
+            Process p = ProcessManager.start(pb);
+            drainInBackground(p);
+            boolean finished = p.waitFor(120, TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                AppLogger.warning("reg delete timed out for " + fullKey);
+                return false;
             }
+            return queryKeyPresence(fullKey) == KeyPresence.ABSENT;
+        } catch (Exception e) {
+            AppLogger.warning("reg delete error for " + fullKey + ": " + e.getMessage());
+            return false;
         }
+    }
+
+    private static KeyPresence queryKeyPresence(String fullKey) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("reg", "query", fullKey);
+            pb.redirectErrorStream(true);
+            Process p = ProcessManager.start(pb);
+            drainInBackground(p);
+            boolean finished = p.waitFor(30, TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                return KeyPresence.UNKNOWN;
+            }
+            if (p.exitValue() == 0) {
+                return KeyPresence.PRESENT;
+            }
+            return KeyPresence.ABSENT;
+        } catch (Exception e) {
+            AppLogger.warning("reg query failed for " + fullKey + ": " + e.getMessage());
+            return KeyPresence.UNKNOWN;
+        }
+    }
+
+    private static void drainInBackground(Process process) {
+        Thread drain = new Thread(() -> {
+            try {
+                process.getInputStream().readAllBytes();
+            } catch (Exception ignored) {
+            }
+        }, "reg-output-drain");
+        drain.setDaemon(true);
+        drain.start();
     }
 
     private static boolean runRegImport(Path regFile) {

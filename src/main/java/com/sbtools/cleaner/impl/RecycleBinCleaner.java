@@ -76,8 +76,6 @@ public class RecycleBinCleaner implements CleanerExtension {
                     + "(Clear-RecycleBin when elevated can empty other users' bins)");
             return 0L;
         }
-        long size = scanRecycleBinSizeAndCount(userBins, token)[0];
-        if (token != null && token.isCancelled()) return 0L;
         java.util.concurrent.atomic.AtomicLong fallbackCleaned = new java.util.concurrent.atomic.AtomicLong(0);
         java.util.List<Path> failedDeletes = new java.util.ArrayList<>();
         try {
@@ -141,16 +139,10 @@ public class RecycleBinCleaner implements CleanerExtension {
         } catch (Exception ex2) {
             AppLogger.warning("Failed to empty Recycle Bin: " + ex2.getMessage());
         }
-        long fallback = fallbackCleaned.get();
         if (!failedDeletes.isEmpty()) {
             AppLogger.warning("Recycle Bin fallback incomplete, failed to delete " + failedDeletes.size() + " entries");
-            return fallback;
         }
-        if (fallback > 0) return fallback;
-        // Verify PowerShell fallback actually emptied the bin before reporting pre-scan size
-        long remaining = scanRecycleBinSizeAndCount(userBins, token)[0];
-        if (remaining == 0 && size > 0) return size;
-        return fallback;
+        return fallbackCleaned.get();
     }
 
     private long[] scanRecycleBinSizeAndCount(List<Path> userBins, com.sbtools.util.CancellationToken token) {

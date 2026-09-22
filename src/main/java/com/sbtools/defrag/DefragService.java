@@ -210,8 +210,8 @@ public class DefragService {
             }
         }
         if (drive.isUnknownMedia()) {
-            warnings.add("Media type is Unknown (" + drive.getMediaType() + ") — may be flash "
-                    + "(USB/SD/Spaces/RAID). Defragging flash causes wear without benefit.");
+            warnings.add("Media type is Unknown (" + drive.getMediaType()
+                    + "). Trim only — defrag runs on confirmed HDDs.");
         }
         return warnings;
     }
@@ -428,6 +428,11 @@ public class DefragService {
                        Consumer<Double> progressCallback, AtomicBoolean cancelled)
             throws IOException, CancellationException {
         if (!AppPaths.isWindows()) return;
+        if (drive == null || !DiskOpPolicy.confirmedHdd(drive.getMediaType())) {
+            String letter = drive == null ? "?" : drive.getDriveLetter();
+            throw new IOException("Defrag refused on " + letter
+                    + ": only a confirmed HDD may be defragmented. SSD and unknown media are Trim only.");
+        }
         // Deep = FULL followed by FREE_SPACE (previously mapped to FREE_SPACE only,
         // contradicting the "full + free space" tooltip). Run sequentially with
         // progress split 0-0.7 / 0.7-1.0 so the bar stays monotonic.

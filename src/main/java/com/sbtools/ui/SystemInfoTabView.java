@@ -341,16 +341,16 @@ public class SystemInfoTabView extends BorderPane {
             return;
         }
 
-        if (data.cpu() != null || data.os() != null) {
+        if ((data.cpu() != null && data.cpu().reported()) || (data.os() != null && !isBlank(data.os().name()))) {
             addTabSafe(() -> buildOverviewTab(data));
         }
-        if (data.cpu() != null) {
+        if (data.cpu() != null && data.cpu().reported()) {
             addTabSafe(() -> buildCpuTab(data.cpu()));
         }
         if (data.gpu() != null && !data.gpu().isEmpty()) {
             addTabSafe(() -> buildGpuTab(data.gpu()));
         }
-        if (data.ram() != null) {
+        if (data.ram() != null && data.ram().reported()) {
             addTabSafe(() -> buildRamTab(data.ram()));
         }
         if (data.os() != null) {
@@ -513,8 +513,8 @@ public class SystemInfoTabView extends BorderPane {
         row = addRow(grid, row, "Manufacturer", cpu.manufacturer());
         row = addRow(grid, row, "Architecture", cpu.architecture());
         row = addRow(grid, row, "Socket", cpu.socket());
-        row = addRow(grid, row, "Cores", String.valueOf(cpu.cores()));
-        row = addRow(grid, row, "Threads", String.valueOf(cpu.logicalCpus()));
+        row = addRow(grid, row, "Cores", cpu.formatCores());
+        row = addRow(grid, row, "Threads", cpu.formatThreads());
         row = addRow(grid, row, "Base Clock", cpu.formatBaseClock());
         row = addRow(grid, row, "Current Clock", cpu.formatCurrentClock());
         row = addRow(grid, row, "L2 Cache", cpu.formatL2Cache());
@@ -894,12 +894,12 @@ public class SystemInfoTabView extends BorderPane {
                     data.os().name() != null ? data.os().name() : "",
                     data.os().buildNumber() != null ? "Build " + data.os().buildNumber() : ""));
         }
-        if (data.cpu() != null) {
+        if (data.cpu() != null && data.cpu().reported()) {
             cards.getChildren().add(buildSmallInfoCard("CPU",
-                    data.cpu().name() != null ? data.cpu().name() : "",
-                    data.cpu().cores() + "C / " + data.cpu().logicalCpus() + "T"));
+                    data.cpu().name(),
+                    data.cpu().formatCoreThreadCard()));
         }
-        if (data.ram() != null) {
+        if (data.ram() != null && data.ram().reported()) {
             cards.getChildren().add(buildSmallInfoCard("RAM",
                     data.ram().formatTotal(),
                     data.ram().channel()));
@@ -929,13 +929,13 @@ public class SystemInfoTabView extends BorderPane {
             row = addRow(grid, row, "Build", data.os().buildNumber());
             row = addRow(grid, row, "Architecture", data.os().architecture());
         }
-        if (data.cpu() != null) {
+        if (data.cpu() != null && data.cpu().reported()) {
             row = addRow(grid, row, "CPU", data.cpu().name());
-            row = addRow(grid, row, "Cores / Threads", data.cpu().cores() + " / " + data.cpu().logicalCpus());
+            row = addRow(grid, row, "Cores / Threads", data.cpu().formatCoreThreadPair());
             row = addRow(grid, row, "Base Clock", data.cpu().formatBaseClock());
             row = addRow(grid, row, "Socket", data.cpu().socket());
         }
-        if (data.ram() != null) {
+        if (data.ram() != null && data.ram().reported()) {
             row = addRow(grid, row, "Total RAM", data.ram().formatTotal());
             row = addRow(grid, row, "Channel", data.ram().channel());
             if (data.ram().sticks() != null && !data.ram().sticks().isEmpty()) {
@@ -1300,7 +1300,7 @@ public class SystemInfoTabView extends BorderPane {
         row = addRow(grid, row, "Charge Rate", battery.formatChargeRate());
 
         if (battery.chargeLevel() >= 0) {
-            row = addUsageRow(grid, row, battery.chargeLevel());
+            row = addChargeRow(grid, row, battery.chargeLevel());
         }
 
         container.getChildren().add(wrapGrid(grid));
@@ -1484,22 +1484,33 @@ public class SystemInfoTabView extends BorderPane {
     }
 
     private static int addUsageRow(GridPane grid, int row, double usagePercent) {
-        if (usagePercent < 0 || Double.isNaN(usagePercent)) return row;
+        return addLevelRow(grid, row, "Usage", usagePercent, true);
+    }
 
-        Label keyLabel = new Label("Usage");
+    /** Remaining charge: a full battery stays green; a low one is the warning. */
+    private static int addChargeRow(GridPane grid, int row, double chargePercent) {
+        return addLevelRow(grid, row, "Charge", chargePercent, false);
+    }
+
+    private static int addLevelRow(GridPane grid, int row, String label, double percent, boolean highIsBad) {
+        if (percent < 0 || Double.isNaN(percent)) return row;
+
+        Label keyLabel = new Label(com.sbtools.util.UiText.label(label));
         keyLabel.getStyleClass().addAll("label", "sysinfo-label");
         keyLabel.setMaxWidth(Double.MAX_VALUE);
 
         HBox usageBox = new HBox(8);
         usageBox.setAlignment(Pos.CENTER_LEFT);
-        ProgressBar usageBar = new ProgressBar(usagePercent / 100.0);
+        ProgressBar usageBar = new ProgressBar(Math.min(percent, 100) / 100.0);
         usageBar.getStyleClass().add("sysinfo-usage-bar");
-        if (usagePercent > 90) {
+        boolean danger = highIsBad ? percent > 90 : percent < 15;
+        boolean warning = highIsBad ? percent > 75 : percent < 30;
+        if (danger) {
             usageBar.getStyleClass().add("sysinfo-usage-danger");
-        } else if (usagePercent > 75) {
+        } else if (warning) {
             usageBar.getStyleClass().add("sysinfo-usage-warning");
         }
-        Label pctLabel = new Label(String.format("%.1f%%", usagePercent));
+        Label pctLabel = new Label(String.format("%.1f%%", percent));
         pctLabel.getStyleClass().addAll("label", "sysinfo-value");
         usageBox.getChildren().addAll(usageBar, pctLabel);
 

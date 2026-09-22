@@ -133,6 +133,9 @@ public final class DriverCatalogDatabase {
             return false;
         }
         String offerNorm = normalizeHardwareId(offerHardwareId);
+        if (offerNorm.isEmpty() || isVendorOnly(offerNorm)) {
+            return false;
+        }
         java.util.List<String> parts = new java.util.ArrayList<>();
         if (driver.deviceId() != null && !driver.deviceId().isBlank()) {
             parts.add(driver.deviceId());
@@ -145,7 +148,11 @@ public final class DriverCatalogDatabase {
             }
         }
         for (String part : parts) {
-            if (matchesHardwareId(normalizeHardwareId(part), offerNorm)) {
+            String partNorm = normalizeHardwareId(part);
+            if (partNorm.isEmpty() || isVendorOnly(partNorm)) {
+                continue;
+            }
+            if (matchesHardwareId(partNorm, offerNorm)) {
                 return true;
             }
         }
@@ -277,6 +284,11 @@ public final class DriverCatalogDatabase {
         // Top confidence without any hardware evidence is not refreshable:
         // HW-strong entries still pass via the >=0.8 single-factor rule.
         if (e.confidence() >= 0.95 && (e.hardwareIds() == null || e.hardwareIds().isEmpty())) return false;
+        // Vendor-only or punctuation-only IDs prefix-match every device of that
+        // vendor (or every device). A refreshed entry must name a device.
+        if (e.hardwareIds() != null && !e.hardwareIds().isEmpty() && !hasSpecificHardwareId(e.hardwareIds())) {
+            return false;
+        }
         return true;
     }
 
@@ -696,18 +708,52 @@ public final class DriverCatalogDatabase {
      * catalog PCI\VEN_10EC&amp;DEV_0888 entries for the same codec.
      */
     private static boolean matchesHardwareId(String a, String b) {
+        // Empty normalizes from "*", "---", etc. startsWith("") is always true,
+        // so an empty id used to match every device. Vendor-only ids
+        // (PCI\VEN_10DE) are a segment prefix of every device from that vendor.
+        if (a.isEmpty() || b.isEmpty() || isVendorOnly(a) || isVendorOnly(b)) {
+            return false;
+        }
         if (a.equals(b)) {
             return true;
         }
         if (a.startsWith(b)) {
-            return b.isEmpty() || b.charAt(b.length() - 1) == '&' || b.charAt(b.length() - 1) == '\\'
-                    || a.charAt(b.length()) == '&' || a.charAt(b.length()) == '\\';
+            return segmentBoundary(b, a);
         }
         if (b.startsWith(a)) {
-            return a.isEmpty() || a.charAt(a.length() - 1) == '&' || a.charAt(a.length() - 1) == '\\'
-                    || b.charAt(a.length()) == '&' || b.charAt(a.length()) == '\\';
+            return segmentBoundary(a, b);
         }
         return matchesDeviceTokens(a, b);
+    }
+
+    /** True when {@code shorter} ends on a '&' or '\\' segment inside {@code longer}. */
+    private static boolean segmentBoundary(String shorter, String longer) {
+        if (shorter.isEmpty() || shorter.length() >= longer.length()) {
+            return false;
+        }
+        char edge = shorter.charAt(shorter.length() - 1);
+        char next = longer.charAt(shorter.length());
+        return edge == '&' || edge == '\\' || next == '&' || next == '\\';
+    }
+
+    /** VEN_/VID_ with no DEV_/PID_: matches a vendor, not a device. */
+    private static boolean isVendorOnly(String norm) {
+        boolean vendor = token(norm, "VEN_") != null || token(norm, "VID_") != null;
+        boolean device = token(norm, "DEV_") != null || token(norm, "PID_") != null;
+        return vendor && !device;
+    }
+
+    private static boolean hasSpecificHardwareId(List<String> hardwareIds) {
+        for (String hw : hardwareIds) {
+            if (hw == null || hw.isBlank()) {
+                continue;
+            }
+            String norm = normalizeHardwareId(hw);
+            if (!norm.isEmpty() && !isVendorOnly(norm)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

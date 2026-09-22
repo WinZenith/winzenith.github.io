@@ -423,3 +423,30 @@ Sep 16, 2026 7:58:01 PM com.sbtools.util.AppLogger info
 INFO: Found 1 Windows Update(s)
 Sep 16, 2026 7:58:01 PM com.sbtools.util.AppLogger info
 INFO: JVM shutdown hook: terminating tracked processes
+Sep 22, 2026 9:07:00 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 22, 2026 9:07:00 AM com.sbtools.util.AppLogger warning
+WARNING: Provider WindowsUpdate failed: Windows Update driver search failed
+Sep 22, 2026 9:07:00 AM com.sbtools.util.AppLogger warning
+WARNING: Provider WindowsUpdate failed: Windows Update driver search failed
+Sep 22, 2026 9:08:26 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 22, 2026 9:08:26 AM com.sbtools.util.AppLogger warning
+WARNING: Provider WindowsUpdate failed: Windows Update driver search failed
+Sep 22, 2026 9:08:27 AM com.sbtools.util.AppLogger warning
+WARNING: Provider WindowsUpdate failed: Windows Update driver search failed
+Sep 22, 2026 10:07:36 AM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Sep 22, 2026 10:07:36 AM com.sbtools.util.AppLogger warning
+WARNING: Refusing toggle of extone: state is in MAC-protected Secure Preferences (rewriting it drops super_mac and can reset other settings)
+Sep 22, 2026 10:07:36 AM com.sbtools.util.AppLogger warning
+WARNING: Refusing toggle: cannot read Secure Preferences: Unrecognized token 'not': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 5]
+Sep 22, 2026 10:07:36 AM com.sbtools.util.AppLogger warning
+WARNING: Extension a@b.c is managed by Firefox (system, built-in, or browser block) and cannot be toggled.
+Sep 22, 2026 10:07:36 AM com.sbtools.util.AppLogger warning
+WARNING: Extension a@b.c is managed by Firefox (system, built-in, or browser block) and cannot be toggled.
+Sep 22, 2026 10:07:37 AM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup set (2) from C:\Users\durot\AppData\Local\Temp\wz-bext17629885690816379488\restore\Preferences.bak.20260922-120000-001
+Sep 22, 2026 10:07:37 AM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup set (1) from C:\Users\durot\AppData\Local\Temp\wz-bext17629885690816379488\restore-other\Preferences.bak.SNAP

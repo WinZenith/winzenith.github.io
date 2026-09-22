@@ -33,6 +33,8 @@ public class DriverCatalogAggregator {
     private final ProviderCache cache;
     private final DriverCatalogDatabase catalogDatabase;
     private final ExecutorService pool;
+    /** Providers that failed or timed out during the most recent {@code findUpdates} call. */
+    private final java.util.Set<String> providerFailures = ConcurrentHashMap.newKeySet();
 
     public DriverCatalogAggregator(List<DriverCatalogProvider> providers) {
         this(providers, new ProviderCache(), null, null);
@@ -156,6 +158,7 @@ public class DriverCatalogAggregator {
     }
 
     public List<DriverUpdateCandidate> findUpdates(List<InstalledDriver> installed, CancellationToken token) {
+        providerFailures.clear();
         if (installed == null) return List.of();
         AppLogger.debug("CatalogAggregator: Scanning " + installed.size() + " installed drivers");
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
@@ -205,6 +208,7 @@ public class DriverCatalogAggregator {
             Consumer<String> onProviderStarted,
             Consumer<List<DriverUpdateCandidate>> onProviderFinished,
             List<DriverCatalogProvider> precomputedProviders) {
+        providerFailures.clear();
         final CancellationToken effectiveToken = token != null ? token : CancellationToken.NONE;
         if (installed == null) return;
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
@@ -317,7 +321,9 @@ public class DriverCatalogAggregator {
                     // providerCount and progress/status freeze mid-scan.
                     // deliverOnce dedups against a late finish of the same
                     // provider so progress never overshoots past 100%.
+                    // An empty timeout delivery is a failure, not "no updates".
                     if (!token.isCancelled() && !Thread.currentThread().isInterrupted()) {
+                        recordProviderFailure(task.id());
                         deliverOnce.accept(task.id(), List.of());
                     }
                 } catch (InterruptedException e) {
@@ -363,11 +369,15 @@ public class DriverCatalogAggregator {
     private List<DriverUpdateCandidate> queryProvider(
             DriverCatalogProvider provider, List<InstalledDriver> installed, CancellationToken token) {
         if (cache != null) {
-            Optional<List<DriverUpdateCandidate>> cached = cache.read(provider.id(), installed);
+            Optional<ProviderCache.CacheHit> cached = cache.readHit(provider.id(), installed);
             if (cached.isPresent()) {
                 AppLogger.debug("CatalogAggregator: cache hit for " + provider.id()
-                        + " (" + cached.get().size() + " candidates)");
-                return cached.get();
+                        + " (" + cached.get().candidates().size() + " candidates"
+                        + (cached.get().failed() ? ", failed" : "") + ")");
+                if (cached.get().failed()) {
+                    recordProviderFailure(provider.id());
+                }
+                return cached.get().candidates();
             }
         }
         if (token.isCancelled()) {
@@ -378,7 +388,15 @@ public class DriverCatalogAggregator {
         try {
             fresh = provider.findUpdates(installed);
         } catch (Exception e) {
+            if (e instanceof java.util.concurrent.CancellationException
+                    || token.isCancelled() || Thread.currentThread().isInterrupted()) {
+                return List.of();
+            }
             AppLogger.warning("Provider " + provider.id() + " failed: " + e.getMessage());
+            recordProviderFailure(provider.id());
+            if (cache != null && !token.isCancelled()) {
+                cache.write(provider.id(), installed, List.of(), true);
+            }
             return List.of();
         } finally {
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
@@ -389,9 +407,28 @@ public class DriverCatalogAggregator {
             fresh = List.of();
         }
         if (cache != null && !token.isCancelled()) {
-            cache.write(provider.id(), installed, fresh);
+            cache.write(provider.id(), installed, fresh, false);
         }
         return fresh;
+    }
+
+    /**
+     * Non-null when the last {@code findUpdates} had a provider failure or timeout.
+     * Genuine "no offers" leaves this null. Cleared at the start of the next scan.
+     */
+    public String providerFailureNote() {
+        if (providerFailures.isEmpty()) return null;
+        String msg = "Driver catalog search failed (" + String.join(", ", providerFailures) + ")";
+        return msg.length() > 200 ? msg.substring(0, 200) + "..." : msg;
+    }
+
+    /** Forgets failed negative-cache entries so the next scan contacts those providers again. */
+    public void dropFailedProviderCache() {
+        if (cache != null) cache.clearFailed();
+    }
+
+    private void recordProviderFailure(String providerId) {
+        if (providerId != null && !providerId.isBlank()) providerFailures.add(providerId);
     }
 
     private static DriverUpdateCandidate pickBetter(DriverUpdateCandidate existing, DriverUpdateCandidate incoming) {

@@ -418,6 +418,17 @@ function Scan-FirefoxExtensions {
                         $ffSource = "system"
                     }
                 }
+                # appDisabled / softDisabled are Firefox's blocklist or
+                # incompatibility flags, not the user's checkbox.
+                if (-not $ffManaged) {
+                    $browserBlocked = $false
+                    if (-not $isInstalled) { $browserBlocked = $true }
+                    if ($null -ne $addon.softDisabled -and [bool]$addon.softDisabled) { $browserBlocked = $true }
+                    if ($browserBlocked) {
+                        $ffManaged = $true
+                        $ffSource = "blocked"
+                    }
+                }
             } catch { }
             $entries += [PSCustomObject]@{
                 id = $addonId

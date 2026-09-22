@@ -78,14 +78,14 @@ public final class SystemInfoReportGenerator {
             sb.append("\n");
         }
 
-        if (data.cpu() != null) {
+        if (data.cpu() != null && data.cpu().reported()) {
             sb.append("--- CPU ---\n");
             appendField(sb, "Name", data.cpu().name());
             appendField(sb, "Manufacturer", data.cpu().manufacturer());
             appendField(sb, "Architecture", data.cpu().architecture());
             appendField(sb, "Socket", data.cpu().socket());
-            sb.append("Cores: ").append(data.cpu().cores()).append("\n");
-            sb.append("Threads: ").append(data.cpu().logicalCpus()).append("\n");
+            appendField(sb, "Cores", data.cpu().formatCores());
+            appendField(sb, "Threads", data.cpu().formatThreads());
             appendField(sb, "Base Clock", data.cpu().formatBaseClock());
             appendField(sb, "Current Clock", data.cpu().formatCurrentClock());
             appendField(sb, "L2 Cache", data.cpu().formatL2Cache());
@@ -113,7 +113,7 @@ public final class SystemInfoReportGenerator {
             }
         }
 
-        if (data.ram() != null) {
+        if (data.ram() != null && data.ram().reported()) {
             sb.append("--- RAM ---\n");
             appendField(sb, "Total", data.ram().formatTotal());
             appendField(sb, "Channel", data.ram().channel());
@@ -402,14 +402,14 @@ public final class SystemInfoReportGenerator {
             html.append("</table>");
         }
 
-        if (data.cpu() != null) {
+        if (data.cpu() != null && data.cpu().reported()) {
             html.append("<h2 id=\"sec-CPU\">CPU</h2><table>");
             html.append(row("Name", data.cpu().name()));
             html.append(row("Manufacturer", data.cpu().manufacturer()));
             html.append(row("Architecture", data.cpu().architecture()));
             html.append(row("Socket", data.cpu().socket()));
-            html.append(row("Cores", String.valueOf(data.cpu().cores())));
-            html.append(row("Threads", String.valueOf(data.cpu().logicalCpus())));
+            html.append(rowIfPresent("Cores", data.cpu().formatCores()));
+            html.append(rowIfPresent("Threads", data.cpu().formatThreads()));
             html.append(row("Base Clock", data.cpu().formatBaseClock()));
             html.append(row("Current Clock", data.cpu().formatCurrentClock()));
             html.append(row("L2 Cache", data.cpu().formatL2Cache()));
@@ -429,7 +429,7 @@ public final class SystemInfoReportGenerator {
                 html.append(row("Name", gpu.name()));
                 html.append(row("Manufacturer", gpu.manufacturer()));
                 html.append(row("Video Processor", gpu.videoProcessor()));
-                html.append(row("VRAM", gpu.formatVram()));
+                html.append(rowIfPresent("VRAM", gpu.formatVram()));
                 html.append(row("Memory Type", gpu.memoryType()));
                 html.append(row("Driver Version", gpu.driverVersion()));
                 html.append(row("Driver Date", gpu.driverDate()));
@@ -439,9 +439,9 @@ public final class SystemInfoReportGenerator {
             }
         }
 
-        if (data.ram() != null) {
+        if (data.ram() != null && data.ram().reported()) {
             html.append("<h2 id=\"sec-RAM\">RAM</h2><table>");
-            html.append(row("Total", data.ram().formatTotal()));
+            html.append(rowIfPresent("Total", data.ram().formatTotal()));
             html.append(row("Channel", data.ram().channel()));
             html.append("</table>");
             if (data.ram().sticks() != null) {
@@ -658,13 +658,13 @@ public final class SystemInfoReportGenerator {
             appendField(sb, "Build", data.os().buildNumber());
             appendField(sb, "Architecture", data.os().architecture());
         }
-        if (data.cpu() != null) {
+        if (data.cpu() != null && data.cpu().reported()) {
             appendField(sb, "CPU", data.cpu().name());
-            appendField(sb, "Cores / Threads", data.cpu().cores() + " / " + data.cpu().logicalCpus());
+            appendField(sb, "Cores / Threads", data.cpu().formatCoreThreadPair());
             appendField(sb, "Base Clock", data.cpu().formatBaseClock());
             appendField(sb, "Socket", data.cpu().socket());
         }
-        if (data.ram() != null) {
+        if (data.ram() != null && data.ram().reported()) {
             appendField(sb, "Total RAM", data.ram().formatTotal());
             appendField(sb, "Channel", data.ram().channel());
             if (data.ram().sticks() != null && !data.ram().sticks().isEmpty()) {
@@ -789,6 +789,11 @@ public final class SystemInfoReportGenerator {
 
     private static String row(String label, String value) {
         return "<tr><td>" + escapeHtml(label) + "</td><td>" + escapeHtml(value != null ? value : "") + "</td></tr>";
+    }
+
+    private static String rowIfPresent(String label, String value) {
+        if (value == null || value.isBlank()) return "";
+        return row(label, value);
     }
 
     private static String escapeHtml(String text) {

@@ -582,6 +582,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                         setTooltip(src != null && !src.isBlank()
                                 ? new Tooltip("Managed by " + (src.equals("policy") ? "enterprise policy"
                                         : src.equals("system") ? "the browser (system add-on)"
+                                        : src.equals("blocked") ? "the browser (blocklist or incompatibility)"
                                         : "default installation") + " — cannot be toggled here.")
                                 : new Tooltip("Managed by the browser or policy — cannot be toggled here."));
                     } else {
@@ -1138,7 +1139,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                 new javafx.scene.control.ChoiceDialog<>(backups.get(0), backups);
         choice.setTitle(AppInfo.DISPLAY_NAME);
         choice.setHeaderText("Restore profile backup (" + backups.size() + " found)");
-        choice.setContentText("Close all browsers first, then pick a backup to restore:");
+        choice.setContentText("Close all browsers first. Files from the same snapshot are restored together:");
         java.util.Optional<java.nio.file.Path> picked = choice.showAndWait();
         if (picked.isEmpty()) {
             setBusy(false);
@@ -1237,7 +1238,8 @@ public class BrowserExtensionsTabView extends BorderPane {
                 return;
             }
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                    "Restore\n" + sel.getFileName() + "\nover its live file?\n\nClose all browsers first. This overwrites the current Preferences/extensions.json.",
+                    "Restore\n" + sel.getFileName()
+                            + "\nand any Preferences / Secure Preferences file saved with it?\n\nClose all browsers first. This overwrites those live files.",
                     ButtonType.OK, ButtonType.CANCEL);
             confirm.setHeaderText(com.sbtools.util.UiText.label("Restore backup"));
             if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
@@ -1511,7 +1513,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             StringBuilder blockedMsg = new StringBuilder(
                     "Cannot " + action + ": " + blocked.size() + " selected extension(s) "
                             + "are managed by policy, default installation, the browser itself, "
-                            + "or leftover folders not present in Preferences.\n\n"
+                            + "blocked by the browser, or leftover folders not present in Preferences.\n\n"
                             + buildAffectedListText(blocked)
                             + "\nDeselect them and retry (use the Managed filter to find policy items).");
             new Alert(Alert.AlertType.ERROR, blockedMsg.toString()).showAndWait();
@@ -1599,7 +1601,8 @@ public class BrowserExtensionsTabView extends BorderPane {
                     detail.append('.');
                     if (f > 0) {
                         detail.append("\nClose all browsers and retry failed items."
-                                + "\nIf failures persist, check logs (Secure Preferences HMAC reset, missing Preferences, or Firefox cache restore).");
+                                + "\nChromium Secure Preferences is not modified; dropping its integrity record can reset other settings."
+                                + "\nBrowser-blocked Firefox add-ons cannot be enabled here.");
                     }
                     new Alert(Alert.AlertType.WARNING, detail.toString()).showAndWait();
                 }

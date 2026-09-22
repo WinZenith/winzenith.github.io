@@ -937,6 +937,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                             .map(r -> "  [!] " + r.getCategory().getDisplayName() + " — " + r.getCategory().getDescription())
                             .collect(java.util.stream.Collectors.joining("\n"))
                     + "\n\nWeb browsing cleanup removes saved passwords, cookies, and history when the browser is closed. "
+                    + "Firefox bookmarks are kept; browsing history stored in that same database is left in place. "
                     + "iTunes backups cannot be recovered. Docker builder prune removes build cache "
                     + "only (images, containers, and volumes are preserved). "
                     + "Removing Windows.old prevents rollback to the previous Windows version. "

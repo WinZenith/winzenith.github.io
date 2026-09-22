@@ -397,9 +397,26 @@ public class NetworkOptimizerService {
                     details);
         } catch (Exception e) {
             AppLogger.warning("Failed to reset network stack: " + e.getMessage());
-            String details = formatUnknownStackResetDetails(dumpPath, e.getMessage());
-            return OperationResult.fail("Failed to reset network stack: " + e.getMessage(), details);
+            String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+            String details = formatUnknownStackResetDetails(dumpPath, msg);
+            OperationResult failure = stackResetProcessFailure(msg, details);
+            if (failure.rebootRequired()) {
+                logChange("Reset Network Stack", "TCP/IP + Winsock", details, false);
+            }
+            return failure;
         }
+    }
+
+    /** Timeout kills netsh after ip reset may already have dropped static IP/DNS. */
+    static OperationResult stackResetProcessFailure(String message, String details) {
+        String msg = message != null ? message : "";
+        if (msg.toLowerCase().contains("timed out")) {
+            return OperationResult.fail(
+                    "Network stack reset timed out and may already have completed. "
+                            + "TCP/IP or Winsock may already be reset. Reboot required.",
+                    details);
+        }
+        return OperationResult.fail("Failed to reset network stack: " + msg, details);
     }
 
     record StackResetOutcome(boolean ipResetOk, boolean winsockOk) {

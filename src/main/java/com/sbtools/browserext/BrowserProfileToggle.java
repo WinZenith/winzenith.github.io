@@ -23,10 +23,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 /**
- * Surgical Jackson edit of Chromium Preferences / Secure Preferences and
- * Firefox {@code extensions.json}. Avoids PowerShell {@code ConvertTo-Json}
- * (single-element array collapse, number coercion) and restores the backup
- * when verify-after-write fails.
+ * Surgical Jackson edit of Chromium {@code Preferences} and Firefox
+ * {@code extensions.json}. {@code Secure Preferences} is never rewritten:
+ * its {@code super_mac} is the profile integrity record, and dropping it makes
+ * Chromium reset tracked preferences on the next launch.
+ * Avoids PowerShell {@code ConvertTo-Json} (single-element array collapse,
+ * number coercion) and restores the backup when verify-after-write fails.
  */
 public final class BrowserProfileToggle {
 
@@ -77,6 +79,8 @@ public final class BrowserProfileToggle {
             // Chromium profiles always have Preferences / Secure Preferences.
             // Prefer that over a stray extensions.json so we never edit the
             // wrong format (Firefox addons vs Chromium settings).
+            // Secure Preferences is read to decide whether the toggle is safe;
+            // it is not written (see toggleChromium).
             if (Files.isRegularFile(prefs) || Files.isRegularFile(secure)) {
                 return toggleChromium(profileDir, extensionId, enable, cancelled);
             }
@@ -95,51 +99,34 @@ public final class BrowserProfileToggle {
 
     static boolean toggleChromium(Path profileDir, String extensionId, boolean enable,
                                   AtomicBoolean cancelled) throws Exception {
-        List<Path> candidates = new ArrayList<>();
+        if (cancelled != null && cancelled.get()) return false;
         Path secure = profileDir.resolve("Secure Preferences");
         Path prefs = profileDir.resolve("Preferences");
-        if (Files.isRegularFile(secure)) candidates.add(secure);
-        if (Files.isRegularFile(prefs)) candidates.add(prefs);
-        if (candidates.isEmpty()) {
+        // Authoritative copy for current Chromium lives in Secure Preferences.
+        // Rewriting that file (or deleting super_mac) makes the browser reset
+        // tracked prefs on next launch, so refuse instead of reporting success.
+        if (securePreferencesBlockToggle(secure, extensionId)) return false;
+        if (!Files.isRegularFile(prefs)) {
             AppLogger.warning("Preferences file not found in " + profileDir);
             return false;
         }
+        if (isLocked(prefs)) {
+            AppLogger.warning("File is locked (browser may be running): " + prefs);
+            return false;
+        }
         List<Path> committedBaks = new ArrayList<>();
-        boolean anyUpdated = false;
-        boolean overallSuccess = true;
         try {
-            for (Path target : candidates) {
-                if (cancelled != null && cancelled.get()) {
-                    overallSuccess = false;
-                    break;
-                }
-                if (isLocked(target)) {
-                    AppLogger.warning("File is locked (browser may be running): " + target);
-                    overallSuccess = false;
-                    break;
-                }
-                byte[] raw = Files.readAllBytes(target);
-                JsonNode root = MAPPER.readTree(raw);
-                if (!applyChromiumEdit(root, extensionId, enable, isSecurePreferences(target))) {
-                    continue;
-                }
-                Path bak = backupPath(target);
-                if (!writeAndVerify(target, root, bak, node -> chromiumStateMatches(node, extensionId, enable))) {
-                    overallSuccess = false;
-                    break;
-                }
-                committedBaks.add(bak);
-                anyUpdated = true;
-            }
-            if (!anyUpdated) {
-                AppLogger.warning("Extension " + extensionId + " not found in Secure Preferences nor Preferences");
+            byte[] raw = Files.readAllBytes(prefs);
+            JsonNode root = MAPPER.readTree(raw);
+            if (!applyChromiumEdit(root, extensionId, enable, false)) {
+                AppLogger.warning("Extension " + extensionId + " not found in Preferences");
                 return false;
             }
-            if (!overallSuccess) {
-                AppLogger.warning("Partial toggle failure for " + extensionId + " — restoring already-written files");
-                rollbackCommitted(committedBaks);
+            Path bak = backupPath(prefs);
+            if (!writeAndVerify(prefs, root, bak, node -> chromiumStateMatches(node, extensionId, enable))) {
                 return false;
             }
+            committedBaks.add(bak);
             Boolean verified = readChromiumEnabled(profileDir, extensionId);
             if (verified == null || verified != enable) {
                 AppLogger.warning("Toggle verification failed for " + extensionId
@@ -147,12 +134,33 @@ public final class BrowserProfileToggle {
                 rollbackCommitted(committedBaks);
                 return false;
             }
-            pruneBackups(profileDir, "Secure Preferences.bak.");
             pruneBackups(profileDir, "Preferences.bak.");
             return true;
         } catch (Exception e) {
             rollbackCommitted(committedBaks);
             throw e;
+        }
+    }
+
+    /**
+     * True when this toggle must not write. Secure Preferences holds the
+     * extension, or the file exists but cannot be read (treat as protected).
+     */
+    static boolean securePreferencesBlockToggle(Path secure, String extensionId) {
+        if (secure == null || !Files.isRegularFile(secure)) return false;
+        try {
+            JsonNode root = MAPPER.readTree(Files.readAllBytes(secure));
+            JsonNode ext = root.path("extensions").path("settings").get(extensionId);
+            if (ext != null && ext.isObject()) {
+                AppLogger.warning("Refusing toggle of " + extensionId
+                        + ": state is in MAC-protected Secure Preferences"
+                        + " (rewriting it drops super_mac and can reset other settings)");
+                return true;
+            }
+            return false;
+        } catch (Exception e) {
+            AppLogger.warning("Refusing toggle: cannot read Secure Preferences: " + e.getMessage());
+            return true;
         }
     }
 
@@ -165,7 +173,8 @@ public final class BrowserProfileToggle {
         }
         JsonNode root = MAPPER.readTree(Files.readAllBytes(extJson));
         if (firefoxIsManaged(root, extensionId)) {
-            AppLogger.warning("Extension " + extensionId + " is a system/built-in add-on and cannot be toggled.");
+            AppLogger.warning("Extension " + extensionId
+                    + " is managed by Firefox (system, built-in, or browser block) and cannot be toggled.");
             return false;
         }
         if (!applyFirefoxEdit(root, extensionId, enable)) {
@@ -186,6 +195,9 @@ public final class BrowserProfileToggle {
     }
 
     static boolean applyChromiumEdit(JsonNode root, String extensionId, boolean enable, boolean secureFile) {
+        // Never edit Secure Preferences. Deleting super_mac or a per-extension
+        // MAC is what makes Chromium reset tracked preferences on next launch.
+        if (secureFile) return false;
         if (root == null || !root.isObject()) return false;
         JsonNode settings = root.path("extensions").path("settings");
         if (!settings.isObject()) return false;
@@ -196,17 +208,6 @@ public final class BrowserProfileToggle {
         int newState = enable ? 1 : 0;
         ext.put("state", newState);
         applyDisableReasons(ext, (ObjectNode) settings, enable);
-        if (secureFile) {
-            JsonNode macs = root.path("protection").path("macs").path("extensions").path("settings");
-            if (macs.isObject()) {
-                ((ObjectNode) macs).remove(extensionId);
-            }
-            JsonNode protection = root.get("protection");
-            if (protection instanceof ObjectNode p) {
-                p.remove("super_mac");
-                p.remove("superMac");
-            }
-        }
         return true;
     }
 
@@ -220,10 +221,13 @@ public final class BrowserProfileToggle {
             if (id.isEmpty() || !sanitizeExtId(id).equals(want)) continue;
             ObjectNode obj = (ObjectNode) addon;
             if (enable) {
+                // appDisabled / softDisabled are Firefox's own block (blocklist,
+                // incompatibility). Never clear them.
+                if (obj.path("appDisabled").asBoolean(false) || obj.path("softDisabled").asBoolean(false)) {
+                    return false;
+                }
                 obj.put("disabled", false);
-                obj.put("appDisabled", false);
                 if (obj.has("userDisabled")) obj.put("userDisabled", false);
-                if (obj.has("softDisabled")) obj.put("softDisabled", false);
                 if (obj.has("embedderDisabled")) obj.put("embedderDisabled", false);
                 if (obj.has("visible")) obj.put("visible", true);
                 if (obj.has("active")) obj.put("active", true);
@@ -294,6 +298,10 @@ public final class BrowserProfileToggle {
         for (JsonNode addon : addons) {
             String id = addon.path("id").asText("");
             if (id.isEmpty() || !sanitizeExtId(id).equals(want)) continue;
+            if (enable && (addon.path("appDisabled").asBoolean(false)
+                    || addon.path("softDisabled").asBoolean(false))) {
+                return false;
+            }
             boolean disabled = addon.path("disabled").asBoolean(false)
                     || addon.path("userDisabled").asBoolean(false);
             return enable != disabled;
@@ -313,6 +321,9 @@ public final class BrowserProfileToggle {
             String id = addon.path("id").asText("");
             if (id.isEmpty() || !sanitizeExtId(id).equals(want)) continue;
             if (addon.path("isSystem").asBoolean(false) || addon.path("isBuiltin").asBoolean(false)) {
+                return true;
+            }
+            if (addon.path("appDisabled").asBoolean(false) || addon.path("softDisabled").asBoolean(false)) {
                 return true;
             }
             String rootUri = addon.path("rootURI").asText("");
@@ -508,11 +519,6 @@ public final class BrowserProfileToggle {
             }
         } catch (Exception ignored) {
         }
-    }
-
-    private static boolean isSecurePreferences(Path target) {
-        String n = target.getFileName().toString();
-        return n.equalsIgnoreCase("Secure Preferences");
     }
 
     static boolean isLocked(Path path) {

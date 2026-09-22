@@ -151,10 +151,13 @@ public class BrowserTracesCleaner implements CleanerExtension {
                 if (Files.isDirectory(profilesDir)) {
                     try (DirectoryStream<Path> ds = Files.newDirectoryStream(profilesDir)) {
                         for (Path fp : ds) {
+                            // places.sqlite holds bookmarks and history together — never delete it.
                             extraFiles.add(fp.resolve("cookies.sqlite"));
                             extraFiles.add(fp.resolve("cookies.sqlite-wal"));
-                            extraFiles.add(fp.resolve("places.sqlite"));
-                            extraFiles.add(fp.resolve("places.sqlite-wal"));
+                            extraFiles.add(fp.resolve("logins.json"));
+                            extraFiles.add(fp.resolve("key4.db"));
+                            extraFiles.add(fp.resolve("key4.db-wal"));
+                            extraFiles.add(fp.resolve("key3.db"));
                             extraFiles.add(fp.resolve("formhistory.sqlite"));
                             extraFiles.add(fp.resolve("favicons.sqlite"));
                         }
@@ -162,13 +165,13 @@ public class BrowserTracesCleaner implements CleanerExtension {
                 }
             }
         } else if (name.startsWith("Brave")) {
-            if (localAppData != null) { Path base = dirForProfile(localAppData, "BraveSoftware", "Brave-Browser", "User Data", name); if (base != null) { extraFiles.add(base.resolve("Cookies")); extraFiles.add(base.resolve("History")); } }
+            if (localAppData != null) { Path base = dirForProfile(localAppData, "BraveSoftware", "Brave-Browser", "User Data", name); if (base != null) addBrowserDbFiles(extraFiles, base, true); }
         } else if (name.startsWith("Vivaldi")) {
-            if (localAppData != null) { Path base = dirForProfile(localAppData, "Vivaldi", "User Data", name); if (base != null) { extraFiles.add(base.resolve("Cookies")); extraFiles.add(base.resolve("History")); } }
+            if (localAppData != null) { Path base = dirForProfile(localAppData, "Vivaldi", "User Data", name); if (base != null) addBrowserDbFiles(extraFiles, base, true); }
         } else if (name.equals("Opera")) {
-            if (appData != null) { Path base = Paths.get(appData, "Opera Software", "Opera Stable"); extraFiles.add(base.resolve("Cookies")); extraFiles.add(base.resolve("History")); }
+            if (appData != null) addBrowserDbFiles(extraFiles, Paths.get(appData, "Opera Software", "Opera Stable"), true);
         } else if (name.equals("Opera GX")) {
-            if (appData != null) { Path base = Paths.get(appData, "Opera Software", "Opera GX Stable"); extraFiles.add(base.resolve("Cookies")); extraFiles.add(base.resolve("History")); }
+            if (appData != null) addBrowserDbFiles(extraFiles, Paths.get(appData, "Opera Software", "Opera GX Stable"), true);
         } else if (name.startsWith("Chromium")) {
             if (localAppData != null) { Path base = dirForProfile(localAppData, "Chromium", "User Data", name); if (base != null) addBrowserDbFiles(extraFiles, base, true); }
         } else if (name.startsWith("Yandex Browser")) {
@@ -334,6 +337,8 @@ public class BrowserTracesCleaner implements CleanerExtension {
         if (hasJournals) {
             extraFiles.add(base.resolve("Cookies-journal"));
             extraFiles.add(base.resolve("History-journal"));
+            extraFiles.add(base.resolve("Login Data-journal"));
+            extraFiles.add(base.resolve("Login Data-wal"));
         }
     }
 }

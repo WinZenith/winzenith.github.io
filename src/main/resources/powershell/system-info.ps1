@@ -64,6 +64,24 @@ function Get-CimAssocDeviceId($prop) {
     if ($s -match 'DeviceID\s*=\s*"(.+?)"') { return (Unescape-WmiDeviceId $Matches[1]) }
     return ''
 }
+# Full-name match only. A 12-char prefix collides (NVIDIA GeFor, AMD Radeon R)
+# and was assigning one card's registry VRAM to another.
+function Normalize-GpuName([string]$name) {
+    if ([string]::IsNullOrWhiteSpace($name)) { return '' }
+    $n = $name.ToLowerInvariant().Trim()
+    if ($n -match ';(.+)$') { $n = $Matches[1].Trim() }
+    $n = $n -replace '\((r|tm|c)\)', ''
+    $n = $n -replace '[^a-z0-9]+', ' '
+    $n = ($n -replace '\s+', ' ').Trim()
+    $n = $n -replace ' laptop gpu$', ''
+    return $n
+}
+function Same-GpuName([string]$a, [string]$b) {
+    $na = Normalize-GpuName $a
+    $nb = Normalize-GpuName $b
+    if (-not $na -or -not $nb) { return $false }
+    return $na -eq $nb
+}
 
 # ── CPU ──────────────────────────────────────────────────────────────────────
 $__secStart = Get-Date
@@ -99,11 +117,7 @@ try {
     $result['cpu'] = $cpuSection
 } catch {
     $warnings += "CPU: $($_.Exception.Message)"
-    $result['cpu'] = [ordered]@{
-        name=''; manufacturer=''; cores=0; logicalCpus=0; baseClockMhz=0
-        currentClockMhz=0; l2CacheKb=0; l3CacheKb=0; socket=''; architecture=''
-        stepping=''; revision=''; voltage=''
-    }
+    $result['cpu'] = $null
 }
     RecordTiming 'cpu' $__secStart
 } else {
@@ -117,18 +131,24 @@ if (ShouldRun 'gpu') {
 try {
     $ErrorActionPreference = 'Stop'
     $gpus = @()
-    $nvidiaVramList = @()
+    # name + memory, matched to WMI by full GPU name (index order is not identity)
+    $nvidiaVramByName = @()
     try {
-        $nvidiaOut = & nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null
+        $nvidiaOut = & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>$null
         if ($nvidiaOut) {
             foreach ($line in $nvidiaOut) {
+                $text = [string]$line
+                $comma = $text.IndexOf(',')
+                if ($comma -le 0) { continue }
+                $nvName = $text.Substring(0, $comma).Trim().Trim('"')
                 $mbVal = 0
-                try { $mbVal = [int]($line.Trim()) } catch {}
-                if ($mbVal -gt 0) { $nvidiaVramList += [uint64]$mbVal * 1024 * 1024 }
+                try { $mbVal = [int]($text.Substring($comma + 1).Trim().Trim('"')) } catch {}
+                if ($nvName -and $mbVal -gt 0) {
+                    $nvidiaVramByName += @{ name = $nvName; bytes = [uint64]$mbVal * 1024 * 1024; used = $false }
+                }
             }
         }
     } catch {}
-    $nvidiaIdx = 0
     $gpuSearcher = New-Object System.Management.ManagementObjectSearcher('root\cimv2', 'SELECT * FROM Win32_VideoController')
     try {
     foreach ($gpuObj in $gpuSearcher.Get()) {
@@ -148,13 +168,17 @@ try {
         $gpuName = ''
         try { $gpuName = [string]$vc['Name'] } catch {}
         if ($gpuName -match 'NVIDIA') {
-            if ($nvidiaIdx -lt $nvidiaVramList.Count) {
-                $vramBytes = $nvidiaVramList[$nvidiaIdx]
-                $nvidiaIdx++
+            foreach ($nv in $nvidiaVramByName) {
+                if (-not $nv.used -and (Same-GpuName $nv.name $gpuName)) {
+                    $vramBytes = $nv.bytes
+                    $nv.used = $true
+                    break
+                }
             }
         }
 
-        # Registry fallback for AMD/Intel >4GB (AdapterRAM capped at 32-bit sentinel)
+        # Registry fallback when AdapterRAM is 0 or the 32-bit sentinel.
+        # Exact normalized name only; duplicate keys for that same name keep the max.
         if ($vramBytes -eq 0 -and $gpuName) {
             try {
                 $regVram = [uint64]0
@@ -166,14 +190,11 @@ try {
                             $desc = ''
                             if ($props.DriverDesc) { $desc = [string]$props.DriverDesc }
                             elseif ($props.DeviceDesc) { $desc = [string]$props.DeviceDesc }
-                            if ($desc -and $gpuName) {
-                                $key = $gpuName.Substring(0, [Math]::Min(12, $gpuName.Length))
-                                if ($desc -like "*$key*") {
-                                    $cand = [uint64]0
-                                    if ($props.'HardwareInformation.qwMemorySize') { $cand = [uint64]$props.'HardwareInformation.qwMemorySize' }
-                                    elseif ($props.'HardwareInformation.MemorySize') { $cand = [uint64]$props.'HardwareInformation.MemorySize' }
-                                    if ($cand -gt $regVram) { $regVram = $cand }
-                                }
+                            if ($desc -and (Same-GpuName $desc $gpuName)) {
+                                $cand = [uint64]0
+                                if ($props.'HardwareInformation.qwMemorySize') { $cand = [uint64]$props.'HardwareInformation.qwMemorySize' }
+                                elseif ($props.'HardwareInformation.MemorySize') { $cand = [uint64]$props.'HardwareInformation.MemorySize' }
+                                if ($cand -gt $regVram) { $regVram = $cand }
                             }
                         } catch {}
                     }
@@ -368,7 +389,7 @@ try {
     $result['ram'] = $ramSection
 } catch {
     $warnings += "RAM: $($_.Exception.Message)"
-    $result['ram'] = [ordered]@{ totalBytes=0; channel=''; sticks=@() }
+    $result['ram'] = $null
 }
     RecordTiming 'ram' $__secStart
 } else {
@@ -1006,12 +1027,6 @@ try {
         $warnings += "Temperatures: query failed ($($_.Exception.Message))"
     }
     $result['temperatures'] = $temps
-    if ($temps.Count -eq 0) {
-        # Only warn when caller actually wanted temperatures (avoids noise in parallel fan-out)
-        if (ShouldRun 'temperatures') {
-            $warnings += "Temperatures: No thermal zone data (requires admin or not supported on this motherboard)."
-        }
-    }
 } catch {
     $warnings += "Temperatures: $($_.Exception.Message)"
     $result['temperatures'] = @()

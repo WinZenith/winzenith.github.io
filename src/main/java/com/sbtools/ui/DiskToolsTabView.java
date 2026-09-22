@@ -3,6 +3,7 @@ package com.sbtools.ui;
 import com.sbtools.defrag.BenchmarkResult;
 import com.sbtools.defrag.BenchmarkService;
 import com.sbtools.defrag.DefragService;
+import com.sbtools.defrag.DiskOpPolicy;
 import com.sbtools.defrag.DriveInfo;
 import com.sbtools.diskhealth.DiskHealthInfo;
 import com.sbtools.diskhealth.DiskHealthService;
@@ -106,6 +107,7 @@ public class DiskToolsTabView extends BorderPane {
     private final BooleanProperty defragBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty wipeBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty secureBusy = new SimpleBooleanProperty(false);
+    private final BooleanProperty benchBusy = new SimpleBooleanProperty(false);
     private final BooleanSupplier adminCheck;
     /**
      * Shared App busy flag driving the window-close "operation in progress"
@@ -245,6 +247,37 @@ public class DiskToolsTabView extends BorderPane {
         setCenter(tabPane);
 
         loadDrives();
+        javafx.beans.value.ChangeListener<Boolean> diskOpListener =
+                (obs, oldVal, newVal) -> syncDiskActionButtons();
+        defragBusy.addListener(diskOpListener);
+        wipeBusy.addListener(diskOpListener);
+        secureBusy.addListener(diskOpListener);
+        benchBusy.addListener(diskOpListener);
+    }
+
+    private boolean diskMutationActive() {
+        return defragBusy.get() || wipeBusy.get() || secureBusy.get() || benchBusy.get() || recycleBinBusy.get();
+    }
+
+    /** One disk-mutation at a time: defrag, benchmark, free-space wipe, and secure delete. */
+    private boolean refuseDiskMutation() {
+        if (!diskMutationActive()) return false;
+        new Alert(Alert.AlertType.WARNING,
+                "Another disk operation is already running. Wait for it to finish or click Stop first.")
+                .showAndWait();
+        return true;
+    }
+
+    private void syncDiskActionButtons() {
+        updateDefragButtons();
+        updateWipeStartButton();
+        updateBenchStartButton();
+        updateDeleteButtons();
+        updateRecycleWipeButton();
+    }
+
+    private void updateRecycleWipeButton() {
+        secureWipeRecycleBinBtn.setDisable(diskMutationActive() || recycleBinEntries.isEmpty());
     }
 
     /* ===================================================================
@@ -502,7 +535,7 @@ public class DiskToolsTabView extends BorderPane {
 
     private void updateDefragButtons() {
         boolean anySelected = !selectedVisibleDrives().isEmpty();
-        boolean isBusy = defragBusy.get();
+        boolean isBusy = diskMutationActive();
         analyzeBtn.setDisable(isBusy || !anySelected);
         intelligentDefragBtn.setDisable(isBusy || !anySelected);
     }
@@ -609,7 +642,7 @@ public class DiskToolsTabView extends BorderPane {
 
     private void startAnalyze() {
         List<DriveInfo> selected = selectedVisibleDrives();
-        if (selected.isEmpty() || defragBusy.get()) return;
+        if (selected.isEmpty() || refuseDiskMutation()) return;
 
         if (currentAnalyzeThread != null && currentAnalyzeThread.isAlive()) {
             new Alert(Alert.AlertType.WARNING, "An analysis is already running. Please wait or stop it first.").showAndWait();
@@ -696,7 +729,7 @@ public class DiskToolsTabView extends BorderPane {
 
     private void startIntelligentDefrag() {
         List<DriveInfo> selected = selectedVisibleDrives();
-        if (selected.isEmpty() || defragBusy.get()) return;
+        if (selected.isEmpty() || refuseDiskMutation()) return;
 
         if (currentDefragThread != null && currentDefragThread.isAlive()) {
             new Alert(Alert.AlertType.WARNING, "A defrag operation is already running. Please wait or stop it first.").showAndWait();
@@ -723,26 +756,16 @@ public class DiskToolsTabView extends BorderPane {
         // BLOCK entries stop the operation; warnings are appended to the confirm dialog.
         List<String> blockers = new ArrayList<>();
         List<String> preWarnings = new ArrayList<>();
-        List<String> unknownLetters = new ArrayList<>();
         for (DriveInfo d : selected) {
             for (String w : DefragService.validateForDefrag(d)) {
                 if (w.startsWith("BLOCK:")) blockers.add(d.getDriveLetter() + ": " + w.substring(6).trim());
                 else preWarnings.add(d.getDriveLetter() + ": " + w);
             }
-            if (!d.isSsd() && d.isUnknownMedia()) unknownLetters.add(d.getDriveLetter());
         }
         if (!blockers.isEmpty()) {
             new Alert(Alert.AlertType.ERROR,
                     "Cannot start defrag:\n\n" + String.join("\n", blockers)).showAndWait();
             return;
-        }
-        if (!unknownLetters.isEmpty()) {
-            Alert uw = new Alert(Alert.AlertType.WARNING,
-                    "Unknown media type on " + String.join(", ", unknownLetters) + ".\n\n"
-                            + "These may be flash media (USB/SD/Storage Spaces/RAID) where "
-                            + "defrag causes wear without benefit.\n\nContinue anyway?");
-            uw.setHeaderText("Unknown drive type");
-            if (uw.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         }
 
         String mode = defragModeCombo.getSelectionModel().getSelectedItem();
@@ -751,11 +774,11 @@ public class DiskToolsTabView extends BorderPane {
 
         StringBuilder drivesInfo = new StringBuilder();
         for (DriveInfo d : selected) {
-            String action = d.isSsd() ? "Trim" : switch (defragMode) {
+            String action = d.isHdd() ? switch (defragMode) {
                 case "Quick" -> "Defrag";
                 case "Deep" -> "Deep defrag + free space";
                 default -> "Full defrag";
-            };
+            } : "Trim";
             drivesInfo.append(d.getDriveLetter()).append(" (")
                     .append(d.getSizeFormatted()).append(", ")
                     .append(d.getMediaType()).append(", ")
@@ -767,9 +790,9 @@ public class DiskToolsTabView extends BorderPane {
         }
 
         String modeDescription = switch (defragMode) {
-            case "Quick" -> "Quick (same Optimize-Volume defrag as Full; SSDs Trim)";
-            case "Deep" -> "Deep (defrag + free space; SSDs Trim)";
-            default -> "Auto (SSD=Trim, HDD=Full defrag)";
+            case "Quick" -> "Quick (defrag on confirmed HDDs; SSD and unknown Trim)";
+            case "Deep" -> "Deep (defrag + free space on confirmed HDDs; SSD and unknown Trim)";
+            default -> "Auto (confirmed HDD=Full defrag, SSD and unknown=Trim)";
         };
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
@@ -779,6 +802,7 @@ public class DiskToolsTabView extends BorderPane {
                         + "\n\nProceed?");
         confirm.setHeaderText(com.sbtools.util.UiText.label("Intelligent defrag (" + mode + ")"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        if (refuseDiskMutation()) return;
 
         defragBusy.set(true);
         defragCancelled.set(false);
@@ -791,6 +815,7 @@ public class DiskToolsTabView extends BorderPane {
 
         currentDefragThread = newDaemonThread(() -> {
             List<String> failedDrives = new ArrayList<>();
+            AtomicInteger finished = new AtomicInteger();
             try {
                 for (int i = 0; i < selected.size(); i++) {
                     DriveInfo driveCopy = selected.get(i);
@@ -802,7 +827,7 @@ public class DiskToolsTabView extends BorderPane {
                     int total = selected.size();
 
                     try {
-                        if (driveCopy.isSsd()) {
+                        if (!driveCopy.isHdd()) {
                             String statusPrefix = "Trim on " + letter;
                             Platform.runLater(() -> defragStatus.setText(statusPrefix + "... (" + current + "/" + total + ")"));
                             defragService.trim(driveCopy,
@@ -835,6 +860,7 @@ public class DiskToolsTabView extends BorderPane {
                         // Drop the analyzed flag so the schematic viz hides until re-analyze.
                         analyzedDrives.remove(letter);
                         lastAnalyzed.remove(letter);
+                        finished.incrementAndGet();
                     } catch (Exception driveEx) {
                         if (defragCancelled.get() || driveEx instanceof java.util.concurrent.CancellationException) throw driveEx;
                         AppLogger.error("Defrag failed for " + letter, driveEx);
@@ -846,6 +872,7 @@ public class DiskToolsTabView extends BorderPane {
 
                     Platform.runLater(() -> driveTable.refresh());
                 }
+                if (defragCancelled.get()) throw new java.util.concurrent.CancellationException();
                 Platform.runLater(() -> {
                     defragProgress.setProgress(1);
                     String elapsed = formatElapsed(Duration.between(startTime, Instant.now()));
@@ -860,7 +887,9 @@ public class DiskToolsTabView extends BorderPane {
                     }
                 });
             } catch (java.util.concurrent.CancellationException e) {
-                Platform.runLater(() -> defragStatus.setText("Intelligent Defrag cancelled."));
+                int done = finished.get();
+                int total = selected.size();
+                Platform.runLater(() -> defragStatus.setText(DiskOpPolicy.cancelledDefragMessage(done, total)));
             } catch (Exception e) {
                 Platform.runLater(() -> {
                     defragStatus.setText("Intelligent Defrag failed.");
@@ -1293,12 +1322,13 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void updateBenchStartButton() {
-        benchStartBtn.setDisable(benchDriveCombo.getSelectionModel().getSelectedItem() == null);
+        benchStartBtn.setDisable(diskMutationActive()
+                || benchDriveCombo.getSelectionModel().getSelectedItem() == null);
     }
 
     private void startBenchmark() {
         String selected = benchDriveCombo.getSelectionModel().getSelectedItem();
-        if (selected == null) return;
+        if (selected == null || refuseDiskMutation()) return;
 
         if (currentBenchThread != null && currentBenchThread.isAlive()) {
             new Alert(Alert.AlertType.WARNING,
@@ -1361,8 +1391,10 @@ public class DiskToolsTabView extends BorderPane {
                 return;
             }
         }
+        if (refuseDiskMutation()) return;
 
         benchCancelled.set(false);
+        benchBusy.set(true);
         final AtomicBoolean benchGlobalToken = new AtomicBoolean();
         acquireGlobalBusy(benchGlobalToken);
         benchStartBtn.setDisable(true);
@@ -1401,9 +1433,10 @@ public class DiskToolsTabView extends BorderPane {
                 });
             } finally {
                 Platform.runLater(() -> {
-                    benchStartBtn.setDisable(false);
+                    benchBusy.set(false);
                     benchStopBtn.setVisible(false);
                     benchProgress.setVisible(false);
+                    updateBenchStartButton();
                     releaseGlobalBusy(benchGlobalToken);
                 });
             }
@@ -1477,9 +1510,9 @@ public class DiskToolsTabView extends BorderPane {
             );
             File f = fc.showOpenDialog(getScene() != null ? getScene().getWindow() : null);
             if (f != null) {
-                filePathField.setText(f.getAbsolutePath());
                 filePathField.setUserData(f.isDirectory());
-                secureDeleteBtn.setDisable(false);
+                filePathField.setText(f.getAbsolutePath());
+                updateDeleteButtons();
             }
         });
         browseBtn.setTooltip(new Tooltip("Browse for a single file to securely delete"));
@@ -1490,17 +1523,17 @@ public class DiskToolsTabView extends BorderPane {
             dc.setInitialDirectory(new File("C:\\"));
             File dir = dc.showDialog(getScene() != null ? getScene().getWindow() : null);
             if (dir != null) {
-                filePathField.setText(dir.getAbsolutePath());
                 filePathField.setUserData(true);
-                secureDeleteBtn.setDisable(false);
+                filePathField.setText(dir.getAbsolutePath());
                 secureDeleteBtn.setText("Secure Delete Folder");
+                updateDeleteButtons();
             }
         });
 
         filePathField.textProperty().addListener((obs, old, val) -> {
             boolean isDir = Boolean.TRUE.equals(filePathField.getUserData());
             secureDeleteBtn.setText(isDir ? "Secure Delete Folder" : "Secure Delete");
-            secureDeleteBtn.setDisable(val == null || val.isBlank());
+            updateDeleteButtons();
         });
 
         addFilesBtn.setOnAction(e -> {
@@ -1636,9 +1669,8 @@ public class DiskToolsTabView extends BorderPane {
                 }
                 if (files.size() == 1) {
                     File f = files.get(0);
-                    filePathField.setText(f.getAbsolutePath());
                     filePathField.setUserData(f.isDirectory());
-                    secureDeleteBtn.setDisable(false);
+                    filePathField.setText(f.getAbsolutePath());
                 }
                 updateDeleteButtons();
                 success = true;
@@ -1746,7 +1778,7 @@ public class DiskToolsTabView extends BorderPane {
                                 : String.format("%.1f MB", result.totalSizeBytes() / (1024.0 * 1024));
                         recycleBinStatus.setText(result.fileCount() + " item(s) in Recycle Bin.");
                         recycleBinSummary.setText("Total size: " + sizeText);
-                        secureWipeRecycleBinBtn.setDisable(false);
+                        updateRecycleWipeButton();
                     }
                 });
             } catch (Exception e) {
@@ -1767,7 +1799,7 @@ public class DiskToolsTabView extends BorderPane {
 
     private void startSecureWipeRecycleBin() {
         List<RecycleBinEntry> entries = List.copyOf(recycleBinEntries);
-        if (entries.isEmpty()) return;
+        if (entries.isEmpty() || refuseDiskMutation()) return;
         if (recycleBinBusy.get()) return;
 
         if (!adminCheck.getAsBoolean()) {
@@ -1780,8 +1812,10 @@ public class DiskToolsTabView extends BorderPane {
                         + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
         confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm recycle bin wipe"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        if (refuseDiskMutation()) return;
 
         recycleBinBusy.set(true);
+        syncDiskActionButtons();
         recycleBinCancelled.set(false);
         final AtomicBoolean recycleGlobalToken = new AtomicBoolean();
         acquireGlobalBusy(recycleGlobalToken);
@@ -1837,7 +1871,7 @@ public class DiskToolsTabView extends BorderPane {
             } finally {
                 Platform.runLater(() -> {
                     recycleBinBusy.set(false);
-                    secureWipeRecycleBinBtn.setDisable(recycleBinEntries.isEmpty());
+                    syncDiskActionButtons();
                     refreshRecycleBinBtn.setDisable(false);
                     recycleBinProgress.setVisible(false);
                     stopRecycleBinBtn.setVisible(false);
@@ -1850,7 +1884,7 @@ public class DiskToolsTabView extends BorderPane {
 
     private void startSecureDelete() {
         String filePath = filePathField.getText();
-        if (filePath == null || filePath.isBlank()) return;
+        if (filePath == null || filePath.isBlank() || refuseDiskMutation()) return;
 
         // Strict blocking: protected OS locations can never be shredded.
         String blocked = ShredderSafety.validateFileForShred(filePath);
@@ -1887,6 +1921,7 @@ public class DiskToolsTabView extends BorderPane {
                         + "This action is irreversible. The file will be overwritten multiple times and cannot be recovered.");
         confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm secure delete"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        if (refuseDiskMutation()) return;
 
         secureBusy.set(true);
         secureDeleteBtn.setDisable(true);
@@ -1952,7 +1987,7 @@ public class DiskToolsTabView extends BorderPane {
 
     private void startSecureDeleteFolder() {
         String folderPath = filePathField.getText();
-        if (folderPath == null || folderPath.isBlank()) return;
+        if (folderPath == null || folderPath.isBlank() || refuseDiskMutation()) return;
 
         // Strict blocking: system/junction/drive-root folders can never be shredded.
         String blocked = ShredderSafety.validateFolderForShred(folderPath);
@@ -2003,6 +2038,10 @@ public class DiskToolsTabView extends BorderPane {
                         filePathField.clear();
                         filePathField.setUserData(null);
                         secureDeleteBtn.setText("Secure Delete");
+                        updateDeleteButtons();
+                        return;
+                    }
+                    if (refuseDiskMutation()) {
                         updateDeleteButtons();
                         return;
                     }
@@ -2094,7 +2133,7 @@ public class DiskToolsTabView extends BorderPane {
         List<ShredderFileEntry> pendingEntries = shredderEntries.stream()
                 .filter(e -> e.getStatusEnum() == ShredderFileEntry.Status.PENDING)
                 .toList();
-        if (pendingEntries.isEmpty()) return;
+        if (pendingEntries.isEmpty() || refuseDiskMutation()) return;
 
         // Strict blocking: drop protected paths up-front, never shred them.
         List<String> blockedPaths = pendingEntries.stream()
@@ -2128,6 +2167,7 @@ public class DiskToolsTabView extends BorderPane {
                         + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
         confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm batch secure delete"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        if (refuseDiskMutation()) return;
 
         secureBusy.set(true);
         secureCancelled.set(false);
@@ -2240,8 +2280,9 @@ public class DiskToolsTabView extends BorderPane {
     private void updateDeleteButtons() {
         boolean hasPending = shredderEntries.stream()
                 .anyMatch(e -> e.getStatusEnum() == ShredderFileEntry.Status.PENDING);
-        deleteAllBtn.setDisable(secureBusy.get() || !hasPending);
-        secureDeleteBtn.setDisable(secureBusy.get() || (filePathField.getText() == null || filePathField.getText().isBlank()));
+        boolean blocked = diskMutationActive();
+        deleteAllBtn.setDisable(blocked || !hasPending);
+        secureDeleteBtn.setDisable(blocked || (filePathField.getText() == null || filePathField.getText().isBlank()));
     }
 
     private static final Set<String> CRITICAL_SYSTEM_PATHS = Set.of(
@@ -2461,11 +2502,11 @@ public class DiskToolsTabView extends BorderPane {
     private void updateWipeStartButton() {
         boolean anySelected = wipeDrives.stream()
                 .anyMatch(d -> wipeSelected.getOrDefault(d.getDriveLetter(), new SimpleBooleanProperty(false)).get());
-        startWipeBtn.setDisable(wipeBusy.get() || !anySelected);
+        startWipeBtn.setDisable(diskMutationActive() || !anySelected);
     }
 
     private void startWipeFreeSpace() {
-        if (wipeBusy.get()) return;
+        if (refuseDiskMutation()) return;
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING, "Free space wiping requires administrator rights.").showAndWait();
             return;
@@ -2556,6 +2597,7 @@ public class DiskToolsTabView extends BorderPane {
                     .showAndWait();
             return;
         }
+        if (refuseDiskMutation()) return;
 
         final int finalPassCount = passCount;
 

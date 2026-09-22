@@ -97,7 +97,18 @@ public final class DriverPostInstallVerifier {
             }
             long sleepMs = Math.min(delay, remaining);
             if (sleeper != null && sleepMs > 0) {
-                sleeper.sleep(sleepMs);
+                try {
+                    sleeper.sleep(sleepMs);
+                } catch (InterruptedException ie) {
+                    // User Stop sets the cancel flag and interrupts the worker.
+                    // Finish pending requests below instead of dropping installs
+                    // that already succeeded.
+                    if (cancelled != null && cancelled.get()) {
+                        Thread.interrupted();
+                        break;
+                    }
+                    throw ie;
+                }
             }
         }
         for (VerifyRequest req : pending) {
@@ -108,9 +119,12 @@ public final class DriverPostInstallVerifier {
             Map<String, InstalledDriver> freshMap = scanByDeviceKey.get();
             InstalledDriver fresh = freshMap.get(key);
             DriverVersionVerifier.Verdict verdict = evaluateVerdict(req, fresh);
-            String diag = cancelled != null && cancelled.get()
-                    ? "verification cancelled"
-                    : "verification deadline elapsed after " + attempt + " read(s)";
+            String diag;
+            if (cancelled != null && cancelled.get()) {
+                diag = isResolvedSuccess(verdict) ? "" : "verification cancelled";
+            } else {
+                diag = "verification deadline elapsed after " + attempt + " read(s)";
+            }
             done.put(key, new Outcome(fresh, verdict, attempt, diag));
         }
         return done;

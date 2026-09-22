@@ -301,9 +301,9 @@ public class StartupService {
         String content;
         synchronized (ORIGINAL_FILE_LOCK) {
             if (!Files.exists(file)) {
-                synchronized (ORIGINAL_SERVICE_START_TYPES) {
-                    ORIGINAL_SERVICE_START_TYPES.clear();
-                }
+                // A missing file must not wipe originals already recorded this session.
+                // Clearing here made the next enable of a Disabled service fall back to Manual.
+                acceptOriginalStartTypesLoad(false, Map.of());
                 return;
             }
             try {
@@ -325,34 +325,40 @@ public class StartupService {
             AppLogger.warning("Failed to load original service start types: " + e.getMessage());
             return;
         }
+        acceptOriginalStartTypesLoad(true, loaded);
+    }
+
+    /** Missing file keeps the in-memory map. A present file replaces it. */
+    static void acceptOriginalStartTypesLoad(boolean filePresent, Map<String, String> loaded) {
         synchronized (ORIGINAL_SERVICE_START_TYPES) {
+            if (!filePresent) {
+                return;
+            }
             ORIGINAL_SERVICE_START_TYPES.clear();
-            ORIGINAL_SERVICE_START_TYPES.putAll(loaded);
+            if (loaded != null) {
+                ORIGINAL_SERVICE_START_TYPES.putAll(loaded);
+            }
         }
     }
 
-    private void saveOriginalStartTypes() {
+    private void saveOriginalStartTypes() throws IOException {
         Map<String, String> snapshot;
         synchronized (ORIGINAL_SERVICE_START_TYPES) {
             snapshot = new HashMap<>(ORIGINAL_SERVICE_START_TYPES);
             snapshot.entrySet().removeIf(e -> "Disabled".equalsIgnoreCase(e.getValue()));
         }
         synchronized (ORIGINAL_FILE_LOCK) {
+            Path backupsDir = StartupBackupValidation.requireRealBackupRoot(getBackupsDir());
+            Files.createDirectories(backupsDir);
+            Path file = getOriginalStartTypesFile();
+            StartupBackupValidation.refuseReparseFile(file, "Original start-types file");
+            Path tmp = file.resolveSibling("." + file.getFileName() + ".tmp");
+            StartupBackupValidation.refuseReparseFile(tmp, "Original start-types temp file");
+            JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), snapshot);
             try {
-                Path backupsDir = StartupBackupValidation.requireRealBackupRoot(getBackupsDir());
-                Files.createDirectories(backupsDir);
-                Path file = getOriginalStartTypesFile();
-                StartupBackupValidation.refuseReparseFile(file, "Original start-types file");
-                Path tmp = file.resolveSibling("." + file.getFileName() + ".tmp");
-                StartupBackupValidation.refuseReparseFile(tmp, "Original start-types temp file");
-                JsonMapper.mapper().writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), snapshot);
-                try {
-                    Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-                    Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                }
-            } catch (Exception e) {
-                AppLogger.warning("Failed to save original service start types: " + e.getMessage());
+                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
         }
     }
@@ -368,12 +374,36 @@ public class StartupService {
         return currentStartType;
     }
 
-    public void recordServiceStartType(String serviceName, String startType) {
-        if ("Disabled".equalsIgnoreCase(startType)) return;
-        String existing = ORIGINAL_SERVICE_START_TYPES.get(serviceName);
-        if (existing != null && !"Disabled".equalsIgnoreCase(existing)) return;
-        ORIGINAL_SERVICE_START_TYPES.put(serviceName, startType);
+    /**
+     * Remembers {@code startType} and writes it before a disable. Fails the disable
+     * when the original type is unknown or the file cannot be saved, so enable cannot
+     * later fall back to Manual.
+     */
+    public void recordServiceStartType(String serviceName, String startType) throws IOException {
+        if (startType != null && !startType.isBlank() && !"Disabled".equalsIgnoreCase(startType)) {
+            String existing = ORIGINAL_SERVICE_START_TYPES.get(serviceName);
+            if (existing == null || "Disabled".equalsIgnoreCase(existing)) {
+                ORIGINAL_SERVICE_START_TYPES.put(serviceName, startType);
+            }
+        }
+        String saved = ORIGINAL_SERVICE_START_TYPES.get(serviceName);
+        if (saved == null || saved.isBlank() || "Disabled".equalsIgnoreCase(saved)) {
+            throw new IOException("Cannot disable \"" + serviceName
+                    + "\": original start type is unknown, so it could not be restored later.");
+        }
         saveOriginalStartTypes();
+    }
+
+    /** Map wins over the row. Manual is only for a service we never observed enabled. */
+    static String rememberedStartType(String serviceName, String itemOriginal) {
+        String saved = serviceName == null ? null : ORIGINAL_SERVICE_START_TYPES.get(serviceName);
+        if (saved != null && !saved.isBlank() && !"Disabled".equalsIgnoreCase(saved)) {
+            return saved;
+        }
+        if (itemOriginal != null && !itemOriginal.isBlank() && !"Disabled".equalsIgnoreCase(itemOriginal)) {
+            return itemOriginal;
+        }
+        return "Manual";
     }
 
     private record RegistryPaths(HKEY hive, String keyPath, String approvedPath) {}
@@ -731,7 +761,12 @@ public class StartupService {
                             }
                         }
                     }
-                    saveOriginalStartTypes();
+                    try {
+                        saveOriginalStartTypes();
+                    } catch (IOException e) {
+                        AppLogger.warning("Failed to save original service start types: " + e.getMessage());
+                        scanErrors.add("Windows Services: failed to persist original start types: " + e.getMessage());
+                    }
                 }
             }
         } catch (InterruptedException e) {
@@ -830,18 +865,12 @@ public class StartupService {
             String scStartValue;
             String newStartType;
             if (item.isEnabled()) {
-                // Save original before disabling if not yet saved (and not Disabled)
-                if (!ORIGINAL_SERVICE_START_TYPES.containsKey(serviceName) && item.getServiceStartType() != null
-                        && !"Disabled".equalsIgnoreCase(item.getServiceStartType())) {
-                    recordServiceStartType(serviceName, item.getServiceStartType());
-                }
+                recordServiceStartType(serviceName, item.getServiceStartType());
                 scStartValue = "disabled";
                 newStartType = "Disabled";
             } else {
-                String original = item.getOriginalServiceStartType();
-                if (original == null || original.isBlank() || "Disabled".equalsIgnoreCase(original)) {
-                    original = "Manual";
-                }
+                String original = rememberedStartType(serviceName, item.getOriginalServiceStartType());
+                item.setOriginalServiceStartType(original);
                 scStartValue = startTypeToScArg(original);
                 newStartType = original;
             }
@@ -917,32 +946,46 @@ public class StartupService {
     }
 
     private void deleteStartupFolderItemRequired(StartupItem item) throws IOException {
-        Path p = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
-        Path disabled = p.resolveSibling(p.getFileName() + ".disabled");
-        boolean deleted = false;
+        Path stored = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
         try {
-            if (Files.exists(p, LinkOption.NOFOLLOW_LINKS)) {
-                if (BackupHealth.isReparseOrSymlink(p) || Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
-                    throw new IOException("Failed to delete startup folder item: path is not a regular file.");
-                }
-                Files.delete(p);
-                deleted = true;
-            } else if (Files.exists(disabled, LinkOption.NOFOLLOW_LINKS)) {
-                if (BackupHealth.isReparseOrSymlink(disabled) || Files.isDirectory(disabled, LinkOption.NOFOLLOW_LINKS)) {
-                    throw new IOException("Failed to delete startup folder item: path is not a regular file.");
-                }
-                Files.delete(disabled);
-                deleted = true;
-            }
+            deleteOnlyThisStartupFile(stored);
         } catch (IOException e) {
             throw new IOException("Failed to delete startup folder item '" + item.getName() + "': " + e.getMessage(), e);
         }
-        if (!deleted) {
-            throw new IOException("Failed to delete startup folder item: file '" + item.getName() + "' was not found.");
+    }
+
+    /** Deletes {@code target} only. A {@code .disabled} sibling is a different row. */
+    static void deleteOnlyThisStartupFile(Path target) throws IOException {
+        if (target == null || target.getFileName() == null) {
+            throw new IOException("Startup folder path is missing.");
         }
-        if (Files.exists(p, LinkOption.NOFOLLOW_LINKS) || Files.exists(disabled, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Startup folder item '" + item.getName() + "' still exists after deletion.");
+        String name = target.getFileName().toString();
+        if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Failed to delete startup folder item: file '" + name + "' was not found.");
         }
+        if (BackupHealth.isReparseOrSymlink(target) || Files.isDirectory(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Failed to delete startup folder item: path is not a regular file.");
+        }
+        Files.delete(target);
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Startup folder item '" + name + "' still exists after deletion.");
+        }
+    }
+
+    /** Enabled path for a scanned Startup-folder file. Strips one trailing {@code .disabled}. */
+    static Path startupFolderEnabledPath(Path stored) {
+        if (stored == null || stored.getFileName() == null) {
+            return stored;
+        }
+        String name = stored.getFileName().toString();
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".disabled")) {
+            return stored;
+        }
+        String enabledName = name.substring(0, name.length() - ".disabled".length());
+        if (enabledName.isBlank()) {
+            return stored;
+        }
+        return stored.resolveSibling(enabledName);
     }
 
     private void deleteRegistryStartupItem(StartupItem item, String location, RegistryPaths paths) throws IOException {
@@ -1130,7 +1173,9 @@ public class StartupService {
     }
 
     private boolean toggleStartupFolderItem(StartupItem item) throws Exception {
-        Path p = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
+        Path stored = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
+        Path enabled = startupFolderEnabledPath(stored);
+        Path p = enabled.equals(stored) ? stored : StartupBackupValidation.resolveConfinedFolderDest(enabled.toString());
         Path disabled = p.resolveSibling(p.getFileName() + ".disabled");
         String abs = p.toAbsolutePath().normalize().toString();
         HKEY hive = folderApprovedHive(item.getLocation());
@@ -1340,23 +1385,20 @@ public class StartupService {
             if (location != null && location.startsWith("Startup Folder")) {
                 entry.setType("Folder");
                 entry.setHive(location.contains("(Common)") ? "COMMON" : "USER");
-                Path live = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
-                entry.setKeyPath(live.toString());
-                entry.setValueName(item.getRegistryValueName());
-                Path src = null;
-                Path disabled = live.resolveSibling(live.getFileName() + ".disabled");
-                if (StartupBackupValidation.isSafeBackupPayloadFile(live)) {
-                    src = live;
-                } else if (StartupBackupValidation.isSafeBackupPayloadFile(disabled)) {
-                    src = disabled;
+                Path actual = StartupBackupValidation.resolveConfinedLiveStartupFile(item.getFilePath());
+                Path enabled = startupFolderEnabledPath(actual);
+                if (!enabled.equals(actual)) {
+                    enabled = StartupBackupValidation.resolveConfinedFolderDest(enabled.toString());
                 }
-                if (src == null) {
+                entry.setKeyPath(enabled.toString());
+                entry.setValueName(item.getRegistryValueName());
+                if (!StartupBackupValidation.isSafeBackupPayloadFile(actual)) {
                     throw new IOException("Cannot create backup: startup folder file is missing.");
                 }
-                Path dest = backupFolder.resolve(src.getFileName().toString());
-                Files.copy(src, dest, LinkOption.NOFOLLOW_LINKS);
-                entry.setBackupXmlName(src.getFileName().toString());
-                entry.setCommand(src.toAbsolutePath().toString());
+                Path dest = backupFolder.resolve(actual.getFileName().toString());
+                Files.copy(actual, dest, LinkOption.NOFOLLOW_LINKS);
+                entry.setBackupXmlName(actual.getFileName().toString());
+                entry.setCommand(actual.toAbsolutePath().toString());
             } else {
                 entry.setType("Registry");
                 RegistryPaths paths = resolveRegistryPaths(item);
@@ -1450,7 +1492,12 @@ public class StartupService {
         } else if ("Folder".equals(entry.getType())) {
             Path src = StartupBackupValidation.resolveConfinedFolderPayload(backupFolder, entry);
             Path dest = StartupBackupValidation.resolveConfinedFolderDest(entry.getKeyPath());
-            StartupBackupValidation.assertFolderRestoreTargetAbsent(dest);
+            if (!entry.isEnabled()) {
+                StartupBackupValidation.assertFolderRestoreTargetAbsent(dest);
+            } else if (Files.exists(dest, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Cannot restore: a file already exists at the destination. "
+                        + "Remove or rename it first. Backup kept.");
+            }
             Files.createDirectories(dest.getParent());
             Files.copy(src, dest, LinkOption.NOFOLLOW_LINKS);
             if (!entry.isEnabled()) {
@@ -1655,8 +1702,8 @@ public class StartupService {
                             displayLocation = locationLabel + " (Disabled)";
                             // Strip .disabled suffix for display name
                             effectiveFileName = fileName.substring(0, fileName.length() - ".disabled".length());
-                            // The actual file path to store as enabled path (without .disabled) for toggle handling
-                            // Keep disabled path as p, but filePath field should be enabled path
+                            // Display and StartupApproved use the name without .disabled.
+                            // filePath stays on p so delete removes this file, not the live sibling.
                             effectivePath = p.getParent().resolve(effectiveFileName);
                             // For disabled items, try to resolve target via disabled file
                             // but fallback to effective path
@@ -1696,9 +1743,9 @@ public class StartupService {
                         if (itemName.toLowerCase(Locale.ROOT).endsWith(".lnk")) {
                             itemName = itemName.substring(0, itemName.length() - 4);
                         }
-                        // For display, keep original effective name without path
-                        // filePath stored as enabled path (without .disabled) so toggle can find it
-                        String storedFilePath = effectivePath.toAbsolutePath().toString();
+                        // filePath is the file this row was scanned from, including .disabled.
+                        // Toggle and backup derive the enabled name by stripping that suffix.
+                        String storedFilePath = p.toAbsolutePath().toString();
                         items.add(new StartupItem(
                                 itemName,
                                 publisher,

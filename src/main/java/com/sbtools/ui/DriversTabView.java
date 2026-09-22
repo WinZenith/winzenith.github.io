@@ -776,6 +776,24 @@ public class DriversTabView extends BorderPane {
         setStatus("Cancelling install…");
     }
 
+    /**
+     * Verify retry wait. User Stop must return so {@code verifyAll} can record
+     * a verdict for drivers that already installed, not abort the worker.
+     */
+    private void sleepWhileInstallNotCancelled(long millis) throws InterruptedException {
+        if (installCancelFlag.get() || millis <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException ie) {
+            if (installCancelFlag.get()) {
+                return;
+            }
+            throw ie;
+        }
+    }
+
     private void startScan() {
         startScanInternal();
     }
@@ -1384,12 +1402,7 @@ public class DriversTabView extends BorderPane {
                                 }
                             },
                             installCancelFlag,
-                            ms -> {
-                                if (installCancelFlag.get()) {
-                                    throw new InterruptedException("cancelled");
-                                }
-                                Thread.sleep(ms);
-                            },
+                            this::sleepWhileInstallNotCancelled,
                             attempt -> Platform.runLater(() -> {
                                 if (attempt <= 1) {
                                     statusLabel.setText("Verifying installed version for "
@@ -1408,16 +1421,12 @@ public class DriversTabView extends BorderPane {
                                 "no scan result");
                     }
                 } catch (InterruptedException verifyInterrupt) {
-                    Thread.currentThread().interrupt();
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Install verification cancelled for " + friendlyAtInstall + ".");
-                        DriverActionCell live = installCells.remove(row);
-                        if (live != null) {
-                            live.setIdle();
-                        }
-                        updateControlStates();
-                    });
-                    return;
+                    AppLogger.info("Post-install verification cancelled for " + friendlyAtInstall);
+                    verifyOutcome = new DriverPostInstallVerifier.Outcome(
+                            null,
+                            DriverVersionVerifier.Verdict.INCONCLUSIVE,
+                            0,
+                            "verification cancelled");
                 } catch (Exception verifyEx) {
                     AppLogger.warning("Post-install verify failed for " + friendlyAtInstall + ": "
                             + verifyEx.getMessage());
@@ -2389,12 +2398,7 @@ public class DriversTabView extends BorderPane {
                                 }
                             },
                             installCancelFlag,
-                            ms -> {
-                                if (installCancelFlag.get()) {
-                                    throw new InterruptedException("cancelled");
-                                }
-                                Thread.sleep(ms);
-                            },
+                            this::sleepWhileInstallNotCancelled,
                             attempt -> Platform.runLater(() -> statusLabel.setText(
                                     attempt <= 1
                                             ? "Verifying installed versions\u2026"
@@ -2448,8 +2452,33 @@ public class DriversTabView extends BorderPane {
                         upToDateTable.refresh();
                     });
                 } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
                     AppLogger.info("Post-batch verification cancelled");
+                    unverifiedCount += pendingVerify.size();
+                    List<BatchVerifyResult> cancelledResults = new ArrayList<>();
+                    for (PendingBatchVerify pv : pendingVerify) {
+                        DriverPostInstallVerifier.Outcome outcome = new DriverPostInstallVerifier.Outcome(
+                                null,
+                                DriverVersionVerifier.Verdict.INCONCLUSIVE,
+                                0,
+                                "verification cancelled");
+                        cancelledResults.add(new BatchVerifyResult(pv, outcome));
+                        failureDetails.add(pv.row().installed().friendlyName()
+                                + ": verification cancelled");
+                        recordHistory(pv.row(), pv.candidate(), false, "post-install verify: verification cancelled");
+                    }
+                    Platform.runLater(() -> {
+                        if (disposed) {
+                            return;
+                        }
+                        for (BatchVerifyResult br : cancelledResults) {
+                            applyBatchInstallVerdict(
+                                    br.pending().row(),
+                                    br.pending().candidate(),
+                                    br.outcome());
+                        }
+                        outdatedTable.refresh();
+                        upToDateTable.refresh();
+                    });
                 } catch (Throwable e) {
                     AppLogger.debug("Post-batch verification failed: " + e);
                     unverifiedCount += pendingVerify.size();

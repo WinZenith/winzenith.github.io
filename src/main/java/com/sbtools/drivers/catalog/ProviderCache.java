@@ -84,7 +84,14 @@ public final class ProviderCache {
         return ttlSeconds;
     }
 
+    /** Cached provider payload. {@code failed} is a negative entry from a search error, not a confirmed "no offers". */
+    public record CacheHit(List<DriverUpdateCandidate> candidates, boolean failed) {}
+
     public Optional<List<DriverUpdateCandidate>> read(String providerId, List<InstalledDriver> installed) {
+        return readHit(providerId, installed).map(CacheHit::candidates);
+    }
+
+    public Optional<CacheHit> readHit(String providerId, List<InstalledDriver> installed) {
         ReentrantLock lock = lockFor(providerId);
         lock.lock();
         try {
@@ -116,19 +123,22 @@ public final class ProviderCache {
             if (isEmpty) {
                 // Negative cache: transient failures (e.g. scrape 403, WU timeout)
                 // are cached briefly to avoid hammering, but expire quickly
-                // so the next scan retries the network.
+                // so the next scan retries the network. failed=true must not be
+                // treated as "no updates".
                 long emptyTtl = Math.min(EMPTY_RESULT_TTL_SECONDS, ttlForProvider(providerId));
                 if (age > emptyTtl) {
                     try { Files.deleteIfExists(file); } catch (Exception ignored) {}
                     return Optional.empty();
                 }
-                AppLogger.debug("ProviderCache: negative-cache hit for " + providerId + " (age " + age + "s)");
-                return Optional.of(List.of());
+                AppLogger.debug("ProviderCache: negative-cache hit for " + providerId + " (age " + age + "s"
+                        + (cached.failed ? ", failed" : "") + ")");
+                return Optional.of(new CacheHit(List.of(), cached.failed));
             }
             if (age > ttlForProvider(providerId)) {
                 return Optional.empty();
             }
-            return Optional.ofNullable(cached.candidates);
+            List<DriverUpdateCandidate> rows = cached.candidates == null ? List.of() : cached.candidates;
+            return Optional.of(new CacheHit(rows, false));
         } catch (Exception e) {
             AppLogger.warning("ProviderCache read failed for " + providerId + ": " + e.getMessage());
             return Optional.empty();
@@ -138,6 +148,11 @@ public final class ProviderCache {
     }
 
     public void write(String providerId, List<InstalledDriver> installed, List<DriverUpdateCandidate> candidates) {
+        write(providerId, installed, candidates, false);
+    }
+
+    public void write(String providerId, List<InstalledDriver> installed, List<DriverUpdateCandidate> candidates,
+            boolean failed) {
         ReentrantLock lock = lockFor(providerId);
         lock.lock();
         try {
@@ -154,6 +169,7 @@ public final class ProviderCache {
             cached.fingerprint = fingerprint(installed);
             cached.savedAtEpochSecond = Instant.now().getEpochSecond();
             cached.candidates = toStore;
+            cached.failed = failed && toStore.isEmpty();
             String json = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(cached);
             Path target = pathFor(providerId);
             // Unique tmp: fixed sibling names let concurrent instances truncate
@@ -194,6 +210,40 @@ public final class ProviderCache {
             AppLogger.warning("ProviderCache: Failed to clear cache: " + e.getMessage());
         } finally {
             locks.forEach(ReentrantLock::unlock);
+            CLEAR_LOCK.unlock();
+        }
+    }
+
+    /** Drops negative entries written for a failed search. Confirmed-empty and hit caches stay. */
+    public void clearFailed() {
+        CLEAR_LOCK.lock();
+        try {
+            if (!Files.isDirectory(cacheDir)) return;
+            List<Path> files;
+            try (var walk = Files.walk(cacheDir)) {
+                files = walk.filter(Files::isRegularFile)
+                        .filter(p -> p.getFileName().toString().endsWith(".json"))
+                        .toList();
+            }
+            for (Path file : files) {
+                String name = file.getFileName().toString();
+                String providerId = name.substring(0, name.length() - ".json".length());
+                ReentrantLock lock = lockFor(providerId);
+                lock.lock();
+                try {
+                    CacheFile cached = MAPPER.readValue(file.toFile(), CacheFile.class);
+                    if (cached != null && cached.failed) {
+                        Files.deleteIfExists(file);
+                        AppLogger.debug("ProviderCache: Cleared failed entry for " + providerId);
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    lock.unlock();
+                }
+            }
+        } catch (Exception e) {
+            AppLogger.warning("ProviderCache: Failed to clear failed entries: " + e.getMessage());
+        } finally {
             CLEAR_LOCK.unlock();
         }
     }
@@ -303,5 +353,7 @@ public final class ProviderCache {
         public String fingerprint;
         public long savedAtEpochSecond;
         public List<DriverUpdateCandidate> candidates;
+        /** True when this empty entry is a failed search, not a confirmed absence of offers. */
+        public boolean failed;
     }
 }

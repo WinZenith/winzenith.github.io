@@ -30,7 +30,18 @@ public record RamInfo(
         }
     }
 
+    /** False for the WMI-failure shell (0 bytes and no sticks). */
+    public boolean reported() {
+        if (totalBytes > 0) return true;
+        if (sticks == null) return false;
+        for (RamStick stick : sticks) {
+            if (stick != null && stick.capacityBytes() > 0) return true;
+        }
+        return false;
+    }
+
     public String formatTotal() {
+        if (totalBytes <= 0) return "";
         return DataSizeFormatter.formatBytes(totalBytes);
     }
 }

@@ -57,24 +57,14 @@ public class MavenCacheCleaner implements CleanerExtension {
             java.util.regex.Pattern.compile("-\\d{8}\\.\\d{6}-\\d+\\.");
 
     /**
-     * Maven layout: version folder {@code 1.0-SNAPSHOT/} holds both
-     * {@code -SNAPSHOT.jar} and timestamped unique versions
-     * ({@code foo-1.0-20240101.120000-1.jar}).
+     * Timestamped unique snapshots only ({@code foo-1.0-20240101.120000-1.jar}).
+     * The current {@code *-SNAPSHOT} artifact from a local install is kept.
      */
     static boolean isSnapshotArtifact(Path p) {
         if (p == null) return false;
         Path fileName = p.getFileName();
         if (fileName == null) return false;
-        String lower = fileName.toString().toLowerCase();
-        if (lower.contains("-snapshot.")) return true;
-        if (TIMESTAMPED_SNAPSHOT.matcher(lower).find()) return true;
-        for (Path part : p) {
-            String s = part.toString();
-            if (s.length() >= 9 && s.regionMatches(true, s.length() - 9, "-SNAPSHOT", 0, 9)) {
-                return true;
-            }
-        }
-        return false;
+        return TIMESTAMPED_SNAPSHOT.matcher(fileName.toString().toLowerCase()).find();
     }
 
     private Path repoDir() {

@@ -80,14 +80,15 @@ public class SoftwareUpdateService {
 
         if (cancelled != null && cancelled.get()) return results;
 
-        // List mode takes NO --output/--accept-* flags. `upgrade --output json` is rejected by
-        // current winget (it prints usage text, which the text parser then misread as phantom
-        // rows) and --accept-package-agreements flips list mode into a "Multiple installed
-        // packages found" Name/Id-only table on winget >= 1.29. List bare instead.
+        // Do not pass --output json or --accept-package-agreements. JSON output is rejected
+        // and was parsed as phantom rows; package agreements flip winget >= 1.29 into a
+        // Name/Id-only table. Source agreements and --disable-interactivity are required:
+        // a first-run Y/N otherwise fails on stdout and used to look like "up to date".
         ProcessResult r;
         try {
             r = winget.runWithFallback(120, cancelled,
-                    "upgrade", "--source", "winget");
+                    "upgrade", "--source", "winget",
+                    "--accept-source-agreements", "--disable-interactivity");
         } catch (RuntimeException re) {
             if (re.getCause() instanceof java.util.concurrent.CancellationException || cancelled != null && cancelled.get()) {
                 AppLogger.info("winget scan cancelled");
@@ -104,12 +105,21 @@ public class SoftwareUpdateService {
             String detail = r.combinedOutput();
             if (detail != null && detail.length() > 300) detail = detail.substring(0, 300) + "...";
             lastWingetError = "winget list failed (exit " + r.exitCode() + "): " + (detail == null ? "" : detail.strip());
+        } else if (isWingetUpgradeScanFailure(r)) {
+            // Non-zero exit with stdout (source/network/agreement errors) used to be parsed
+            // and, when that parse was empty, reported as a clean scan. That also wiped
+            // SoftwareUpdateScanCache. A real "nothing to upgrade" exit is not a failure.
+            // Failure text is not parsed: it contains the no-upgrade sentence and would
+            // become a false empty success, or worse, phantom rows.
+            lastWingetError = wingetScanExitMessage(r);
+            String stdout = r.stdout();
+            if (stdout != null && !stdout.isBlank() && !containsWingetScanFailureText(r.combinedOutput())) {
+                results.addAll(parseTextOutput(stdout));
+            }
         } else {
             String stdout = r.stdout();
             if (stdout != null && !stdout.isBlank()) {
                 results.addAll(parseTextOutput(stdout));
-            } else if (!r.success()) {
-                lastWingetError = "winget text scan exit " + r.exitCode() + ": " + r.combinedOutput();
             }
         }
 
@@ -128,14 +138,72 @@ public class SoftwareUpdateService {
         return scanForUpdates((AtomicBoolean) null);
     }
 
+    /** winget APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND — empty list, not a failed scan. */
+    static final int WINGET_NO_APPLICATIONS_FOUND = 0x8A150014;
+    /** winget APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE — nothing to upgrade. */
+    static final int WINGET_UPDATE_NOT_APPLICABLE = 0x8A15002B;
+
+    /**
+     * True when a winget upgrade scan failed. Stdout is often non-blank on failure
+     * (source, network, or source-agreement errors). Exit
+     * {@link #WINGET_NO_APPLICATIONS_FOUND} / {@link #WINGET_UPDATE_NOT_APPLICABLE}
+     * with a no-upgrade message and no failure text is an empty success.
+     */
+    static boolean isWingetUpgradeScanFailure(ProcessResult r) {
+        if (r == null) return true;
+        String out = r.combinedOutput();
+        if (containsWingetScanFailureText(out)) return true;
+        if (r.success()) return false;
+        return !isBenignEmptyUpgradeScan(r.exitCode(), out);
+    }
+
+    static boolean isBenignEmptyUpgradeScan(int exitCode, String output) {
+        if (exitCode != WINGET_NO_APPLICATIONS_FOUND && exitCode != WINGET_UPDATE_NOT_APPLICABLE) return false;
+        return isNoUpgradeMessage(output) && !containsWingetScanFailureText(output);
+    }
+
+    static boolean isNoUpgradeMessage(String output) {
+        if (output == null || output.isBlank()) return false;
+        String lower = output.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("no applicable upgrades") || lower.contains("no installed package")
+                || lower.contains("no applicable upgrade") || lower.contains("no package found");
+    }
+
+    static boolean containsWingetScanFailureText(String output) {
+        if (output == null || output.isBlank()) return false;
+        String lower = output.toLowerCase(java.util.Locale.ROOT);
+        if (lower.contains("failed when searching source")
+                || lower.contains("failed in attempting to update the source")
+                || lower.contains("an unexpected error occurred")) {
+            return true;
+        }
+        if (!lower.contains("0x8a15")) return false;
+        // 0x8A150014 / 0x8A15002B are the empty-upgrade exits, not a failed search.
+        String withoutBenign = lower.replace("0x8a150014", "").replace("0x8a15002b", "");
+        return withoutBenign.contains("0x8a15");
+    }
+
+    private static String wingetScanExitMessage(ProcessResult r) {
+        String detail = r == null ? "" : r.combinedOutput();
+        if (detail == null) detail = "";
+        detail = detail.strip();
+        if (detail.length() > 300) detail = detail.substring(0, 300) + "...";
+        int code = r == null ? -1 : r.exitCode();
+        return "winget text scan exit " + code + ": " + detail;
+    }
+
     List<SoftwareUpdateEntry> parseTextOutput(String stdout) {
         List<SoftwareUpdateEntry> out = new ArrayList<>();
         int skippedNonWinget = 0;
         String trimmed = stdout == null ? "" : stdout.trim();
         if (trimmed.isEmpty()) return out;
         String lowerTrimmed = trimmed.toLowerCase();
-        if (lowerTrimmed.contains("no applicable upgrades") || lowerTrimmed.contains("no installed package")
-                || lowerTrimmed.contains("no applicable upgrade") || lowerTrimmed.contains("no package found")) {
+        // Source-search failures often end with "No installed package found...". That phrase
+        // is a real empty scan only when the rest of the output is not a winget error.
+        if (containsWingetScanFailureText(lowerTrimmed)) {
+            return out;
+        }
+        if (isNoUpgradeMessage(lowerTrimmed)) {
             return out;
         }
         String[] lines = stdout.split("\\r?\\n");

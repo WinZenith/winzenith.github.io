@@ -18,6 +18,7 @@ public record GpuInfo(
         @JsonProperty("status") String status
 ) {
     public String formatVram() {
+        if (vramBytes <= 0) return "";
         return DataSizeFormatter.formatBytesRounded(vramBytes);
     }
 }

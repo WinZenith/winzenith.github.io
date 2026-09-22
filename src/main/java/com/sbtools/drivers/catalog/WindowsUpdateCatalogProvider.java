@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CancellationException;
 
 public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
 
@@ -49,7 +50,9 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
             return List.of();
         }
         // One retry on script-level failure (timeout/non-zero exit). Empty but
-        // successful output means "no offers" and is NOT retried.
+        // successful output means "no offers" and is NOT retried. Failures throw
+        // so callers can tell "search failed" from "no offers" (a returned empty
+        // list used to be cached and shown as a healthy PC).
         for (int attempt = 1; attempt <= 2; attempt++) {
             try {
                 Path script = PowerShellScripts.resolve("wu-search-drivers.ps1");
@@ -59,37 +62,37 @@ public class WindowsUpdateCatalogProvider implements DriverCatalogProvider {
                 if (!result.success()) {
                     AppLogger.debug("WindowsUpdate: PowerShell script failed (attempt " + attempt + "/2): " + result.combinedOutput());
                     if (attempt == 1 && !Thread.currentThread().isInterrupted()) {
-                        try {
-                            Thread.sleep(2000);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            return List.of();
-                        }
+                        pauseBeforeRetry();
                         continue;
                     }
-                    return List.of();
+                    throw new IllegalStateException("Windows Update driver search failed");
                 }
                 AppLogger.debug("WindowsUpdate: Found " + (result.stdout() != null ? result.stdout().length() : 0) + " bytes of output");
                 return matchUpdates(installed, result.stdout());
-            } catch (IOException | InterruptedException e) {
-                if (e instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
+            } catch (CancellationException ce) {
+                throw ce;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CancellationException("Windows Update driver search interrupted");
+            } catch (IOException e) {
                 AppLogger.debug("WindowsUpdate: Exception (attempt " + attempt + "/2): " + e.getMessage());
-                if (attempt == 1 && !(e instanceof InterruptedException)
-                        && !Thread.currentThread().isInterrupted()) {
-                    try {
-                        Thread.sleep(2000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        return List.of();
-                    }
+                if (attempt == 1 && !Thread.currentThread().isInterrupted()) {
+                    pauseBeforeRetry();
                     continue;
                 }
-                return List.of();
+                throw new IllegalStateException("Windows Update driver search failed: " + e.getMessage(), e);
             }
         }
-        return List.of();
+        throw new IllegalStateException("Windows Update driver search failed");
+    }
+
+    private static void pauseBeforeRetry() {
+        try {
+            Thread.sleep(WU_INTER_ATTEMPT_PAUSE_SECONDS * 1000L);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new CancellationException("Windows Update driver search interrupted");
+        }
     }
 
     static List<DriverUpdateCandidate> matchUpdates(List<InstalledDriver> installed, String json)

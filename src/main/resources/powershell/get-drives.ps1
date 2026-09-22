@@ -1,9 +1,47 @@
-param([switch]$IncludeRemovable, [switch]$IncludeNetwork)
+param([switch]$IncludeRemovable, [switch]$IncludeNetwork, [switch]$SelfTest)
 # Default behaviour for Disk Tools: include Fixed + Removable (USB sticks / external SSDs)
 # so portable/user-expects-visible drives are not hidden. Network drives remain excluded
 # unless -IncludeNetwork is explicitly passed.
 if (-not $PSBoundParameters.ContainsKey('IncludeRemovable')) { $IncludeRemovable = $true }
 $ErrorActionPreference = 'Stop'
+
+function ConvertTo-DiskMediaType {
+    param($MediaType, $BusType, $SpindleSpeed)
+    $mt = if ($null -ne $MediaType -and "$MediaType" -ne '') { "$MediaType" } else { '' }
+    if ($mt -eq 'HDD' -or $mt -eq 'SSD') { return $mt }
+    $bus = if ($null -ne $BusType) { "$BusType" } else { '' }
+    $busNum = ''
+    if ($null -ne $BusType) {
+        try { $busNum = [string][int]$BusType } catch { $busNum = '' }
+    }
+    if ($bus -eq 'NVMe' -or $busNum -eq '17' -or $bus -eq 'SD' -or $busNum -eq '12' -or $bus -eq 'MMC' -or $busNum -eq '13' -or $bus -eq 'UFS' -or $busNum -eq '19' -or $bus -eq 'SCM' -or $busNum -eq '18') {
+        return 'SSD'
+    }
+    if ($null -ne $SpindleSpeed -and "$SpindleSpeed" -ne '') {
+        try {
+            $rpm = [int]$SpindleSpeed
+            if ($rpm -eq 0) { return 'SSD' }
+            if ($rpm -ge 1000) { return 'HDD' }
+        } catch {}
+    }
+    return 'Unknown'
+}
+
+if ($SelfTest) {
+    function Assert-Media([string]$Name, $Got, [string]$Want) {
+        if ("$Got" -ne $Want) { throw "$Name : got $Got want $Want" }
+    }
+    Assert-Media 'explicit hdd' (ConvertTo-DiskMediaType 'HDD' 'SATA' 7200) 'HDD'
+    Assert-Media 'explicit ssd' (ConvertTo-DiskMediaType 'SSD' 'SATA' 0) 'SSD'
+    Assert-Media 'nvme unspecified' (ConvertTo-DiskMediaType 'Unspecified' 'NVMe' $null) 'SSD'
+    Assert-Media 'sata spindle 0' (ConvertTo-DiskMediaType 'Unspecified' 'SATA' 0) 'SSD'
+    Assert-Media 'sata spindle 7200' (ConvertTo-DiskMediaType 'Unspecified' 'SATA' 7200) 'HDD'
+    Assert-Media 'sd bus' (ConvertTo-DiskMediaType 'Unspecified' 'SD' $null) 'SSD'
+    Assert-Media 'usb unspecified' (ConvertTo-DiskMediaType 'Unspecified' 'USB' $null) 'Unknown'
+    Assert-Media 'missing' (ConvertTo-DiskMediaType $null 'SATA' $null) 'Unknown'
+    Write-Output 'MEDIA_OK'
+    exit 0
+}
 
 $drives = @()
 $enumerationErrors = @()
@@ -28,12 +66,10 @@ function Resolve-MediaType {
         $disk = Get-Disk -Number $part.DiskNumber -ErrorAction SilentlyContinue
         if (-not $disk) { return 'Unknown' }
         $phys = Get-PhysicalDisk -DeviceNumber $disk.Number -ErrorAction SilentlyContinue
-        if (-not $phys -or -not $phys.MediaType) { return 'Unknown' }
-        $mt = $phys.MediaType.ToString()
-        if ($mt -eq 'HDD' -or $mt -eq 'SSD') { return $mt }
-        # NVMe with MediaType Unspecified -> treat as SSD via BusType check
-        if ($phys.BusType -eq 'NVMe' -or $phys.BusType -eq 17) { return 'SSD' }
-        return 'Unknown'
+        if (-not $phys) { return 'Unknown' }
+        $spindle = $null
+        if ($phys.PSObject.Properties['SpindleSpeed']) { $spindle = $phys.SpindleSpeed }
+        return ConvertTo-DiskMediaType -MediaType $phys.MediaType -BusType $phys.BusType -SpindleSpeed $spindle
     } catch { return 'Unknown' }
 }
 

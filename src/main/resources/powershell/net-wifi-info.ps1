@@ -45,8 +45,8 @@ try {
                 $key = $Matches[1].Trim().ToLower()
                 $val = $Matches[2].Trim()
                 if (-not $val) { continue }
-                # SSID - key is literally SSID in all locales (abbreviation) but also handle localized variants just in case
-                if ($key -match 'ssid' -and $val -ne "" -and $val -notmatch '^<.*>$') {
+                # Key is literally SSID. -match 'ssid' also hits BSSID and replaces the name with the AP MAC.
+                if ($key -eq 'ssid' -and $val -ne "" -and $val -notmatch '^<.*>$') {
                     $info.ssid = $val
                 }
                 elseif ($key -match 'signal|signalst.rke') {

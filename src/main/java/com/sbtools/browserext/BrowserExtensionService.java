@@ -779,75 +779,127 @@ public class BrowserExtensionService {
     }
 
     /**
-     * Restores a profile backup over its live file (atomic move). Returns true
-     * on success. Caller must ensure the browser is closed first.
+     * Backups written in one toggle share the {@code .bak.} suffix. Restoring
+     * one file restores that whole snapshot (Preferences and Secure Preferences
+     * together) so a single-file restore cannot leave {@code super_mac} stripped.
+     */
+    static List<Path> pairedBackups(Path backupFile) {
+        List<Path> out = new ArrayList<>();
+        if (backupFile == null || backupFile.getFileName() == null) return out;
+        String name = backupFile.getFileName().toString();
+        int bakIdx = name.indexOf(".bak.");
+        Path parent = backupFile.getParent();
+        if (bakIdx <= 0 || parent == null) {
+            if (Files.isRegularFile(backupFile)) out.add(backupFile);
+            return out;
+        }
+        String suffix = name.substring(bakIdx);
+        for (String liveName : List.of("Secure Preferences", "Preferences", "extensions.json")) {
+            Path sibling = parent.resolve(liveName + suffix);
+            if (Files.isRegularFile(sibling)) out.add(sibling);
+        }
+        if (out.isEmpty() && Files.isRegularFile(backupFile)) out.add(backupFile);
+        return out;
+    }
+
+    static String liveNameFromBackup(Path backupFile) {
+        if (backupFile == null || backupFile.getFileName() == null) return "";
+        String name = backupFile.getFileName().toString();
+        int bakIdx = name.indexOf(".bak.");
+        if (bakIdx <= 0) return name;
+        return name.substring(0, bakIdx);
+    }
+
+    /**
+     * Restores a profile backup snapshot over the live files (atomic move).
+     * Same-suffix Preferences / Secure Preferences / extensions.json backups
+     * are restored together. Returns true on success. Caller must ensure the
+     * browser is closed first.
      */
     public static boolean restoreProfileBackup(Path backupFile) {
-        if (backupFile == null || !Files.exists(backupFile)) return false;
+        if (backupFile == null || !Files.isRegularFile(backupFile)) return false;
         if (!BrowserProfileToggle.beginMutation()) {
             AppLogger.warning("Refusing restore: another browser-profile write is in progress");
             return false;
         }
-        Path live = null;
-        Path tmp = null;
-        Path undo = null;
+        List<Path> tmps = new ArrayList<>();
+        List<Path> undos = new ArrayList<>();
+        List<Path> lives = new ArrayList<>();
         boolean success = false;
         try {
-            String name = backupFile.getFileName().toString();
-            String liveName = name;
-            int bakIdx = name.indexOf(".bak.");
-            if (bakIdx > 0) liveName = name.substring(0, bakIdx);
-            if (!BrowserProfileToggle.isAllowedLiveName(liveName)) {
-                AppLogger.warning("Refusing restore of unexpected live file: " + liveName);
-                return false;
-            }
-            if (!BrowserProfileToggle.backupLooksValid(backupFile, liveName)) {
-                AppLogger.warning("Refusing restore of invalid/empty JSON backup: " + backupFile);
-                return false;
-            }
+            List<Path> set = pairedBackups(backupFile);
+            if (set.isEmpty()) return false;
             Path parent = backupFile.getParent();
             if (parent == null || !Files.isDirectory(parent)) return false;
-            live = parent.resolve(liveName);
-            if (Files.isRegularFile(live) && BrowserProfileToggle.isLocked(live)) {
-                AppLogger.warning("Refusing restore: live file is locked: " + live);
-                return false;
+            for (Path bak : set) {
+                String liveName = liveNameFromBackup(bak);
+                if (!BrowserProfileToggle.isAllowedLiveName(liveName)
+                        || !BrowserProfileToggle.backupLooksValid(bak, liveName)) {
+                    AppLogger.warning("Refusing restore of invalid backup: " + bak);
+                    return false;
+                }
+                Path live = parent.resolve(liveName);
+                if (Files.isRegularFile(live) && BrowserProfileToggle.isLocked(live)) {
+                    AppLogger.warning("Refusing restore: live file is locked: " + live);
+                    return false;
+                }
             }
-            if (Files.isRegularFile(live)) {
-                undo = live.resolveSibling("." + liveName + ".undo.tmp");
-                Files.copy(live, undo, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            for (Path bak : set) {
+                String liveName = liveNameFromBackup(bak);
+                Path live = parent.resolve(liveName);
+                Path undo = null;
+                if (Files.isRegularFile(live)) {
+                    undo = live.resolveSibling("." + liveName + ".undo.tmp");
+                    Files.copy(live, undo, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+                undos.add(undo);
+                lives.add(live);
+                Path tmp = live.resolveSibling("." + liveName + ".restore.tmp");
+                tmps.add(tmp);
+                Files.copy(bak, tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                try {
+                    Files.move(tmp, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+                if (!BrowserProfileToggle.backupLooksValid(live, liveName)) {
+                    AppLogger.warning("Restore verification failed for " + live);
+                    undoRestores(undos, lives);
+                    return false;
+                }
             }
-            tmp = live.resolveSibling("." + liveName + ".restore.tmp");
-            Files.copy(backupFile, tmp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            try {
-                Files.move(tmp, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-                Files.move(tmp, live, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            }
-            if (!BrowserProfileToggle.backupLooksValid(live, liveName)) {
-                AppLogger.warning("Restore verification failed for " + live);
-                restoreUndo(undo, live);
-                return false;
-            }
-            AppLogger.info("Restored browser profile backup: " + backupFile + " -> " + live);
+            AppLogger.info("Restored browser profile backup set (" + set.size() + ") from " + backupFile);
             success = true;
             return true;
         } catch (Exception e) {
             AppLogger.warning("Failed to restore profile backup: " + e.getMessage());
-            restoreUndo(undo, live);
+            undoRestores(undos, lives);
             return false;
         } finally {
-            try {
-                if (tmp != null) Files.deleteIfExists(tmp);
-            } catch (Exception ignored) {
-            }
-            if (success) {
+            for (Path tmp : tmps) {
                 try {
-                    if (undo != null) Files.deleteIfExists(undo);
+                    if (tmp != null) Files.deleteIfExists(tmp);
                 } catch (Exception ignored) {
                 }
             }
+            if (success) {
+                for (Path undo : undos) {
+                    try {
+                        if (undo != null) Files.deleteIfExists(undo);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
             BrowserProfileToggle.endMutation();
+        }
+    }
+
+    private static void undoRestores(List<Path> undos, List<Path> lives) {
+        if (undos == null) return;
+        for (int i = undos.size() - 1; i >= 0; i--) {
+            Path live = lives != null && i < lives.size() ? lives.get(i) : null;
+            restoreUndo(undos.get(i), live);
         }
     }
 

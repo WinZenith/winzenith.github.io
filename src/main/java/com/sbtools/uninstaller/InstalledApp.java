@@ -39,7 +39,7 @@ public class InstalledApp implements Comparable<InstalledApp> {
         this.name = name != null ? name.trim() : "";
         this.publisher = publisher != null ? publisher.trim() : "";
         this.version = version != null ? version.trim() : "";
-        this.installLocation = installLocation != null ? installLocation.trim() : "";
+        this.installLocation = expandInstallLocation(installLocation);
         this.uninstallString = uninstallString != null ? uninstallString.trim() : "";
         this.quietUninstallString = quietUninstallString != null ? quietUninstallString.trim() : "";
         this.registryKeyPath = registryKeyPath != null ? registryKeyPath.trim() : "";
@@ -57,6 +57,14 @@ public class InstalledApp implements Comparable<InstalledApp> {
                         String appxPackageFullName, String registryHive) {
         this(name, publisher, version, installLocation, uninstallString, registryKeyPath,
                 win32, appxPackageFullName, registryHive, "", 0, "");
+    }
+
+    /** REG_EXPAND_SZ InstallLocation is stored unexpanded by the registry API. */
+    private static String expandInstallLocation(String installLocation) {
+        String loc = installLocation != null ? installLocation.trim() : "";
+        if (loc.indexOf('%') < 0) return loc;
+        String expanded = UninstallerService.expandEnvironmentVariables(loc);
+        return expanded == null ? loc : expanded.trim();
     }
 
     public String getName() { return name; }
