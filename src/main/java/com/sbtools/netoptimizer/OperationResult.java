@@ -18,9 +18,9 @@ public record OperationResult(boolean success, String message, String details) {
         return new OperationResult(false, message, details);
     }
 
-    /** True when apply reported per-setting OK and FAILED lines (mixed TCP state). */
+    /** True when apply reported a real OK line and a FAILED line (mixed TCP state). */
     public boolean partialApply() {
-        return !success && details != null && details.contains(" — OK") && details.contains(" — FAILED");
+        return !success && NetworkOptimizerService.isPartialOptimizeApply(details);
     }
 
     /** Stack/Winsock paths put this phrase in the message when a reboot is required. */

@@ -240,8 +240,8 @@ public class NetworkOptimizerService {
         try {
             Path script = PowerShellScripts.resolve("net-optimize.ps1");
             String presetArg = preset.getScriptName();
-            ProcessResult pr = new ProcessRunner(60).run(
-                    ProcessRunner.powershellScript(script.toString(), "-Preset", presetArg));
+            ProcessResult pr = new ProcessRunner(120).run(
+                    ProcessRunner.powershellScriptNonInteractive(script.toString(), "-Preset", presetArg));
             String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             String combined = pr.combinedOutput();
             String formatted = formatOptimizeResults(stdout);
@@ -258,10 +258,10 @@ public class NetworkOptimizerService {
                         ? "PARTIAL APPLY — some settings changed before failure:\n" + details
                         : details;
                 logChange("Apply Optimization", preset.getDisplayName(), logDetails, false);
-                String failMsg = "Optimization did not fully apply (exit code " + pr.exitCode()
-                        + "). Lines marked OK succeeded in this run; the system may be in a mixed state.";
+                String failMsg = "Optimization did not fully apply (exit code " + pr.exitCode() + ").";
                 if (partialApply) {
-                    failMsg += " Use 'Reset to Defaults' on the Optimization tab to undo changes.";
+                    failMsg += " Lines marked OK succeeded in this run; the system may be in a mixed state."
+                            + " Use 'Reset to Defaults' on the Optimization tab to undo changes.";
                 }
                 return OperationResult.fail(failMsg, details);
             }
@@ -311,9 +311,16 @@ public class NetworkOptimizerService {
         return sb.length() > 0 ? sb.toString() : null;
     }
 
-    private static boolean isPartialOptimizeApply(String formatted) {
+    /** Already-absent registry deletes are OK but not a real TCP change. */
+    static boolean isPartialOptimizeApply(String formatted) {
         if (formatted == null || formatted.isBlank()) return false;
-        return formatted.contains(" — OK") && formatted.contains(" — FAILED");
+        boolean realOk = false;
+        boolean failed = false;
+        for (String line : formatted.split("\\R")) {
+            if (line.contains(" — FAILED")) failed = true;
+            if (line.contains(" — OK") && !line.contains("already absent")) realOk = true;
+        }
+        return realOk && failed;
     }
 
     private static String firstPresent(Map<String, Object> map, String... keys) {
@@ -464,6 +471,10 @@ public class NetworkOptimizerService {
             sb.append(key.isEmpty() ? "(unnamed)" : key).append(": ")
                     .append(value.isEmpty() ? "-" : value)
                     .append(ok ? " — OK" : " — FAILED");
+            String detail = m.get("Detail") != null ? m.get("Detail").toString().trim() : "";
+            if (!detail.isEmpty()) {
+                sb.append('\n').append(detail);
+            }
         }
         if (dumpPath != null) {
             if (sb.length() > 0) sb.append('\n');

@@ -10,26 +10,92 @@ function Add-Result($key, $value, $ok) {
     if (-not $ok) { $script:failed = $true }
 }
 
+function Get-FirstOutputLine {
+    param([string]$Text, [int]$Code)
+    $line = ""
+    if (-not [string]::IsNullOrWhiteSpace($Text)) {
+        foreach ($row in ($Text -split "`r?`n")) {
+            if (-not [string]::IsNullOrWhiteSpace($row)) { $line = $row.Trim(); break }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($line)) { $line = "exit $Code" }
+    if ($line.Length -gt 120) { $line = $line.Substring(0, 120) }
+    return $line
+}
+
 function Invoke-Netsh {
     # $Args is automatic and stays empty, so a parameter by that name drops the
     # netsh tokens and bare `netsh` exits 0 (false success, no TCP change).
+    # Start-Process -PassThru leaves ExitCode null, so a real success looks like a failure.
+    # One hung netsh must not consume the whole apply; the script still emits JSON.
     param([string[]]$NetshArgs)
-    $out = & netsh @NetshArgs 2>&1
-    $code = $LASTEXITCODE
-    if ($null -eq $code) { $code = 1 }
-    return $code -eq 0
+    $proc = $null
+    $outTask = $null
+    $errTask = $null
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "netsh.exe"
+        # Tokens have no spaces. ProcessStartInfo takes one argument string.
+        $psi.Arguments = ($NetshArgs -join " ")
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        [void]$proc.Start()
+        # Read before WaitForExit so a full pipe cannot stall netsh.
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit(20000)) {
+            try { $proc.Kill() } catch {}
+            try { $proc.WaitForExit(3000) | Out-Null } catch {}
+            return [PSCustomObject]@{ Ok = $false; Reason = "timed out" }
+        }
+        try { $proc.WaitForExit() | Out-Null } catch {}
+        $code = $proc.ExitCode
+        if ($null -eq $code) { $code = 1 }
+        if ($code -eq 0) {
+            return [PSCustomObject]@{ Ok = $true; Reason = "" }
+        }
+        $text = ""
+        try { $text = $outTask.Result } catch {}
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            try { $text = $errTask.Result } catch {}
+        }
+        return [PSCustomObject]@{ Ok = $false; Reason = (Get-FirstOutputLine -Text $text -Code $code) }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Reason = "netsh failed to start" }
+    } finally {
+        if ($null -ne $outTask) { try { [void]$outTask.Wait(2000) } catch {} }
+        if ($null -ne $errTask) { try { [void]$errTask.Wait(2000) } catch {} }
+        if ($null -ne $proc) { try { $proc.Dispose() } catch {} }
+    }
+}
+
+function Add-NetshResult {
+    param([string]$Key, [string]$Value, [string[]]$NetshArgs)
+    $r = Invoke-Netsh -NetshArgs $NetshArgs
+    $shown = $Value
+    if (-not $r.Ok -and $r.Reason) { $shown = "$Value ($($r.Reason))" }
+    Add-Result $Key $shown ([bool]$r.Ok)
 }
 
 function Invoke-RegistryRemove {
+    # removed = value deleted, absent = already gone, failed = delete error.
     param([string]$Path, [string]$Name)
     try {
         Remove-ItemProperty -Path $Path -Name $Name -ErrorAction Stop | Out-Null
-        return $true
+        return "removed"
     } catch {
-        if ($_.Exception.Message -like "*does not exist*" -or $_.Exception.Message -like "*Property*not found*") {
-            return $true
+        # Language-neutral. PS 5.1 reports a missing value as PSArgumentException
+        # (not PropertyNotFound). Missing key path is PathNotFound / ItemNotFound.
+        $id = [string]$_.FullyQualifiedErrorId
+        if ($id -like "PropertyNotFound*" -or $id -like "PathNotFound*" -or $id -like "ItemNotFound*" `
+                -or $id -like "System.Management.Automation.PSArgumentException*") {
+            return "absent"
         }
-        return $false
+        return "failed"
     }
 }
 
@@ -60,60 +126,57 @@ function Set-InterfaceDword {
     return $ok
 }
 
+function Merge-RemoveState {
+    param([string]$Current, [string]$Next)
+    if ($Current -eq "failed" -or $Next -eq "failed") { return "failed" }
+    if ($Current -eq "removed" -or $Next -eq "removed") { return "removed" }
+    return "absent"
+}
+
 function Remove-AckNoDelayKey {
     param([string]$Name)
-    $ok = Invoke-RegistryRemove -Path $tcpipParams -Name $Name
+    $state = Invoke-RegistryRemove -Path $tcpipParams -Name $Name
     foreach ($p in Get-TcpInterfacePaths) {
-        if (-not (Invoke-RegistryRemove -Path $p -Name $Name)) { $ok = $false }
+        $state = Merge-RemoveState $state (Invoke-RegistryRemove -Path $p -Name $Name)
     }
-    return $ok
+    return $state
+}
+
+function Add-RemoveResult {
+    param([string]$Key, [string]$State)
+    if ($State -eq "absent") {
+        Add-Result $Key "already absent" $true
+    } elseif ($State -eq "removed") {
+        Add-Result $Key "removed (registry default)" $true
+    } else {
+        Add-Result $Key "removed (registry default)" $false
+    }
 }
 
 switch ($Preset) {
     "MaxPerformance" {
-        $ok = Invoke-Netsh @("int","tcp","set","global","autotuninglevel=normal")
-        Add-Result "TCP AutoTuning" "normal" $ok
+        Add-NetshResult "TCP AutoTuning" "normal" @("int","tcp","set","global","autotuninglevel=normal")
+        Add-NetshResult "RSS" "enabled" @("int","tcp","set","global","rss=enabled")
+        Add-NetshResult "RSC" "enabled" @("int","tcp","set","global","rsc=enabled")
+        Add-NetshResult "ECN" "disabled" @("int","tcp","set","global","ecncapability=disabled")
 
-        $ok = Invoke-Netsh @("int","tcp","set","global","rss=enabled")
-        Add-Result "RSS" "enabled" $ok
-
-        $ok = Invoke-Netsh @("int","tcp","set","global","rsc=enabled")
-        Add-Result "RSC" "enabled" $ok
-
-        $ok = Invoke-Netsh @("int","tcp","set","global","ecncapability=disabled")
-        Add-Result "ECN" "disabled" $ok
-
-        $ok1 = Remove-AckNoDelayKey -Name "TcpAckFrequency"
-        $ok2 = Remove-AckNoDelayKey -Name "TCPNoDelay"
-        Add-Result "TCP Ack Frequency" "removed (registry default)" $ok1
-        Add-Result "TCP No Delay" "removed (registry default)" $ok2
+        Add-RemoveResult "TCP Ack Frequency" (Remove-AckNoDelayKey -Name "TcpAckFrequency")
+        Add-RemoveResult "TCP No Delay" (Remove-AckNoDelayKey -Name "TCPNoDelay")
         break
     }
     "MaxStability" {
-        $ok = Invoke-Netsh @("int","tcp","set","global","autotuninglevel=disabled")
-        Add-Result "TCP AutoTuning" "disabled" $ok
+        Add-NetshResult "TCP AutoTuning" "disabled" @("int","tcp","set","global","autotuninglevel=disabled")
+        Add-NetshResult "ECN" "enabled" @("int","tcp","set","global","ecncapability=enabled")
+        Add-NetshResult "RSS" "enabled" @("int","tcp","set","global","rss=enabled")
 
-        $ok = Invoke-Netsh @("int","tcp","set","global","ecncapability=enabled")
-        Add-Result "ECN" "enabled" $ok
-
-        $ok = Invoke-Netsh @("int","tcp","set","global","rss=enabled")
-        Add-Result "RSS" "enabled" $ok
-
-        $ok1 = Remove-AckNoDelayKey -Name "TcpAckFrequency"
-        $ok2 = Remove-AckNoDelayKey -Name "TCPNoDelay"
-        Add-Result "TCP Ack Frequency" "removed (registry default)" $ok1
-        Add-Result "TCP No Delay" "removed (registry default)" $ok2
+        Add-RemoveResult "TCP Ack Frequency" (Remove-AckNoDelayKey -Name "TcpAckFrequency")
+        Add-RemoveResult "TCP No Delay" (Remove-AckNoDelayKey -Name "TCPNoDelay")
         break
     }
     "Gaming" {
-        $ok = Invoke-Netsh @("int","tcp","set","global","autotuninglevel=disabled")
-        Add-Result "TCP AutoTuning" "disabled" $ok
-
-        $ok = Invoke-Netsh @("int","tcp","set","global","rss=enabled")
-        Add-Result "RSS" "enabled" $ok
-
-        $ok = Invoke-Netsh @("int","tcp","set","global","ecncapability=disabled")
-        Add-Result "ECN" "disabled" $ok
+        Add-NetshResult "TCP AutoTuning" "disabled" @("int","tcp","set","global","autotuninglevel=disabled")
+        Add-NetshResult "RSS" "enabled" @("int","tcp","set","global","rss=enabled")
+        Add-NetshResult "ECN" "disabled" @("int","tcp","set","global","ecncapability=disabled")
 
         # Drop stale global Parameters copies so snapshot/preview do not read a no-op location.
         Invoke-RegistryRemove -Path $tcpipParams -Name "TcpAckFrequency" | Out-Null
@@ -125,22 +188,13 @@ switch ($Preset) {
         break
     }
     default {
-        $ok = Invoke-Netsh @("int","tcp","set","global","autotuninglevel=normal")
-        Add-Result "TCP AutoTuning" "normal" $ok
+        Add-NetshResult "TCP AutoTuning" "normal" @("int","tcp","set","global","autotuninglevel=normal")
+        Add-NetshResult "RSS" "default" @("int","tcp","set","global","rss=default")
+        Add-NetshResult "ECN" "default" @("int","tcp","set","global","ecncapability=default")
+        Add-NetshResult "RSC" "default" @("int","tcp","set","global","rsc=default")
 
-        $ok = Invoke-Netsh @("int","tcp","set","global","rss=default")
-        Add-Result "RSS" "default" $ok
-
-        $ok = Invoke-Netsh @("int","tcp","set","global","ecncapability=default")
-        Add-Result "ECN" "default" $ok
-
-        $ok = Invoke-Netsh @("int","tcp","set","global","rsc=default")
-        Add-Result "RSC" "default" $ok
-
-        $ok1 = Remove-AckNoDelayKey -Name "TcpAckFrequency"
-        $ok2 = Remove-AckNoDelayKey -Name "TCPNoDelay"
-        Add-Result "TCP Ack Frequency" "removed (registry default)" $ok1
-        Add-Result "TCP No Delay" "removed (registry default)" $ok2
+        Add-RemoveResult "TCP Ack Frequency" (Remove-AckNoDelayKey -Name "TcpAckFrequency")
+        Add-RemoveResult "TCP No Delay" (Remove-AckNoDelayKey -Name "TCPNoDelay")
         break
     }
 }
