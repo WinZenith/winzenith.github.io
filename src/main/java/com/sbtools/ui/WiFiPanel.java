@@ -25,13 +25,13 @@ class WiFiPanel extends VBox {
     private final NetworkOptimizerService service;
     private final BooleanProperty busy;
     private final BooleanSupplier adminCheck;
-    private final Label statusLabel = new Label("Ready.");
-    private final Label ssidLabel = new Label("SSID: -");
-    private final Label stateLabel = new Label("State: -");
-    private final Label signalLabel = new Label("Signal: -");
-    private final Label radioLabel = new Label("Radio: -");
-    private final Label channelLabel = new Label("Channel: -");
-    private final Label rateLabel = new Label("Rates: -");
+    private final Label statusLabel = new TrLabel("Ready.");
+    private final Label ssidLabel = new TrLabel("SSID: -");
+    private final Label stateLabel = new TrLabel("State: -");
+    private final Label signalLabel = new TrLabel("Signal: -");
+    private final Label radioLabel = new TrLabel("Radio: -");
+    private final Label channelLabel = new TrLabel("Channel: -");
+    private final Label rateLabel = new TrLabel("Rates: -");
     private final ComboBox<String> profileCombo = new ComboBox<>();
     private volatile Future<?> currentTask;
     // Separate loading flag for profiles so it doesn't collide with currentInfo busy
@@ -42,7 +42,7 @@ class WiFiPanel extends VBox {
     private volatile Future<?> scanTask;
     private final javafx.scene.chart.XYChart.Series<Number, Number> signalSeries = new javafx.scene.chart.XYChart.Series<>();
     private int signalIndex = 0;
-    private final Label scanStatus = new Label("Not scanned yet.");
+    private final Label scanStatus = new TrLabel("Not scanned yet.");
 
     WiFiPanel(NetworkOptimizerService service, BooleanProperty busy, BooleanSupplier adminCheck) {
         this.service = service;
@@ -75,10 +75,10 @@ class WiFiPanel extends VBox {
     private VBox buildContent() {
         VBox content = new VBox(12);
 
-        Label header = new Label("Wi-Fi");
+        Label header = new TrLabel("Wi-Fi");
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
-        Label sub = new Label("Survey is read-only (netsh scan). Forget/disable still require Admin.");
+        Label sub = new TrLabel("Survey is read-only (netsh scan). Forget/disable still require Admin.");
         sub.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
         content.getChildren().add(sub);
 
@@ -94,7 +94,7 @@ class WiFiPanel extends VBox {
     private VBox buildSignalHistorySection() {
         VBox section = new VBox(4);
         section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
-        Label h = new Label("Signal history (%, sampled on each refresh)");
+        Label h = new TrLabel("Signal history (%, sampled on each refresh)");
         h.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
         section.getChildren().add(h);
         javafx.scene.chart.NumberAxis x = new javafx.scene.chart.NumberAxis();
@@ -116,7 +116,7 @@ class WiFiPanel extends VBox {
     private VBox buildSurveySection() {
         VBox section = new VBox(4);
         section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
-        Label h = new Label("Nearby networks (read-only survey)");
+        Label h = new TrLabel("Nearby networks (read-only survey)");
         h.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
         section.getChildren().add(h);
 
@@ -180,7 +180,7 @@ class WiFiPanel extends VBox {
         VBox section = new VBox(4);
         section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
 
-        Label sectionHeader = new Label("Current connection");
+        Label sectionHeader = new TrLabel("Current connection");
         sectionHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
         section.getChildren().add(sectionHeader);
 
@@ -202,7 +202,7 @@ class WiFiPanel extends VBox {
         VBox section = new VBox(4);
         section.setStyle("-fx-border-color: #44475a; -fx-border-width: 1; -fx-padding: 10; -fx-background-color: #282a36;");
 
-        Label sectionHeader = new Label("Saved profiles");
+        Label sectionHeader = new TrLabel("Saved profiles");
         sectionHeader.setStyle("-fx-font-weight: bold; -fx-text-fill: #bd93f9; -fx-font-size: 13px;");
         section.getChildren().add(sectionHeader);
 
@@ -313,7 +313,7 @@ class WiFiPanel extends VBox {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Disconnect from the current Wi-Fi network?\n\nYou will lose wireless connectivity until you reconnect.",
                 ButtonType.YES, ButtonType.NO);
-        confirm.setTitle(com.sbtools.util.UiText.label("Confirm disconnect"));
+        confirm.setTitle(I18n.ui("Confirm disconnect"));
         confirm.setHeaderText(null);
         if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
         busy.set(true);
@@ -346,7 +346,7 @@ class WiFiPanel extends VBox {
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Forget Wi-Fi profile '" + profile + "'?", ButtonType.YES, ButtonType.NO);
-        confirm.setTitle(com.sbtools.util.UiText.label("Forget profile"));
+        confirm.setTitle(I18n.ui("Forget profile"));
         confirm.setHeaderText(null);
         if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
 
@@ -387,7 +387,7 @@ class WiFiPanel extends VBox {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Disable the Wi-Fi adapter?\n\nYou will lose wireless connectivity until it is re-enabled.",
                     ButtonType.YES, ButtonType.NO);
-            confirm.setTitle(com.sbtools.util.UiText.label("Confirm disable"));
+            confirm.setTitle(I18n.ui("Confirm disable"));
             confirm.setHeaderText(null);
             if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
         }

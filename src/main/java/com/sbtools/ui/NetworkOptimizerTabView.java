@@ -31,9 +31,9 @@ public class NetworkOptimizerTabView extends BorderPane {
     private final WiFiPanel wiFiPanel;
     private final ConnectionOverviewPanel connectionOverviewPanel;
     private final ChangeLogPanel changeLogPanel;
-    private final Label adminWarningLabel = new Label("Not running as Administrator — network changes (optimize, DNS server apply/reset, adapter enable/disable, stack reset, Wi-Fi forget) will fail. DNS cache flush works without elevation. Right-click WinZenith.exe → Run as administrator.");
-    private final Label rebootLabel = new Label();
-    private final javafx.scene.control.Button rebootClearBtn = new javafx.scene.control.Button("Hide");
+    private final Label adminWarningLabel = new TrLabel("Not running as Administrator — network changes (optimize, DNS server apply/reset, adapter enable/disable, stack reset, Wi-Fi forget) will fail. DNS cache flush works without elevation. Right-click WinZenith.exe → Run as administrator.");
+    private final Label rebootLabel = new TrLabel();
+    private final javafx.scene.control.Button rebootClearBtn = new TrButton("Hide");
     // Session-only snooze: hiding the banner must NOT clear the persistent
     // reboot flag (network-state.json) — the system still needs a reboot and
     // the banner must return on next launch. A new reason re-arms the banner.
@@ -53,7 +53,7 @@ public class NetworkOptimizerTabView extends BorderPane {
                                    SettingsStore settingsStore, AppSettings currentSettings,
                                    java.util.function.Consumer<AppSettings> onSettingsSaved) {
         this.adminCheck = adminCheck != null ? adminCheck : () -> false;
-        Label statusLabel = new Label("Ready.");
+        Label statusLabel = new TrLabel("Ready.");
         statusLabel.setWrapText(true);
         statusLabel.setMaxWidth(Double.MAX_VALUE);
         statusLabel.setStyle("-fx-padding: 4 16; -fx-text-fill: #6272a4; -fx-font-size: 11px;");
@@ -134,7 +134,7 @@ public class NetworkOptimizerTabView extends BorderPane {
         initialLoadingSpinner.setMaxSize(24, 24);
         initialLoadingSpinner.setPrefSize(24, 24);
         initialLoadingSpinner.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
-        Label loadingLabel = new Label("Loading network information\u2026");
+        Label loadingLabel = new TrLabel("Loading network information\u2026");
         loadingLabel.setStyle("-fx-text-fill: #f8f8f2; -fx-font-size: 13px;");
         HBox loadingRow = new HBox(12, initialLoadingSpinner, loadingLabel);
         loadingRow.setAlignment(Pos.CENTER);

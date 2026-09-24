@@ -1,7 +1,7 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="App" type="Application" factoryName="Application">
     <option name="MAIN_CLASS_NAME" value="com.sbtools.App" />
-    <module name="win-zenith" />
+    <module name="basic-s-driver-update" />
     <option name="VM_PARAMETERS" value="--enable-native-access=javafx.graphics" />
     <method v="2">
       <option name="Make" enabled="true" />

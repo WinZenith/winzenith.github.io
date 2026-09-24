@@ -63,21 +63,21 @@ public class UninstallerTabView extends BorderPane {
     /** Store/winget uninstall is our process — Cancel must abort it, not only skip leftovers. */
     private volatile boolean abortVendorProcessOnCancel;
 
-    private final Label statusLabel = new Label("Scan system to list installed software.");
-    private final Label countLabel = new Label("");
+    private final Label statusLabel = new TrLabel("Scan system to list installed software.");
+    private final Label countLabel = new TrLabel("");
     private final ProgressIndicator progress = new ProgressIndicator();
     private final ProgressBar queueProgress = new ProgressBar(0);
-    private final Button scanButton = new Button("Scan");
-    private final Button cancelButton = new Button("Cancel");
-    private final Button uninstallButton = new Button("Uninstall");
-    private final Button uninstallSelectedButton = new Button("Uninstall Selected");
-    private final Button forceUninstallButton = new Button("Force Uninstall");
-    private final Button historyButton = new Button("History");
-    private final Button exportButton = new Button("Export...");
+    private final Button scanButton = new TrButton("Scan");
+    private final Button cancelButton = new TrButton("Cancel");
+    private final Button uninstallButton = new TrButton("Uninstall");
+    private final Button uninstallSelectedButton = new TrButton("Uninstall Selected");
+    private final Button forceUninstallButton = new TrButton("Force Uninstall");
+    private final Button historyButton = new TrButton("History");
+    private final Button exportButton = new TrButton("Export...");
     private final TextField searchField = new TextField();
-    private final Label detailsLabel = new Label("Select an app to see details.");
-    private final Button openFolderButton = new Button("Open Folder");
-    private final Button copyDetailsButton = new Button("Copy");
+    private final Label detailsLabel = new TrLabel("Select an app to see details.");
+    private final Button openFolderButton = new TrButton("Open Folder");
+    private final Button copyDetailsButton = new TrButton("Copy");
 
     private final ToggleGroup modeGroup = new ToggleGroup();
     private final ToggleButton win32Toggle = new ToggleButton("Desktop Apps");
@@ -119,7 +119,7 @@ public class UninstallerTabView extends BorderPane {
         cancelButton.setOnAction(e -> cancelCurrentOperation());
 
         scanButton.setOnAction(e -> scan());
-        scanButton.setTooltip(new Tooltip("Scan for installed applications"));
+        scanButton.setTooltip(I18n.tooltip("Scan for installed applications"));
 
         uninstallButton.setOnAction(e -> {
             InstalledApp selected = table.getSelectionModel().getSelectedItem();
@@ -141,16 +141,16 @@ public class UninstallerTabView extends BorderPane {
         });
         forceUninstallButton.setDisable(true);
         forceUninstallButton.getStyleClass().add("danger");
-        forceUninstallButton.setTooltip(new Tooltip("Force-remove without vendor uninstaller (last resort)"));
+        forceUninstallButton.setTooltip(I18n.tooltip("Force-remove without vendor uninstaller (last resort)"));
 
         historyButton.setOnAction(e -> UninstallerHistoryDialog.show());
-        historyButton.setTooltip(new Tooltip("View past uninstall history"));
+        historyButton.setTooltip(I18n.tooltip("View past uninstall history"));
         exportButton.setOnAction(e -> exportAppList());
-        exportButton.setTooltip(new Tooltip("Export the current app list to CSV"));
+        exportButton.setTooltip(I18n.tooltip("Export the current app list to CSV"));
         openFolderButton.setOnAction(e -> openSelectedInstallFolder());
         copyDetailsButton.setOnAction(e -> copySelectedDetails());
 
-        searchField.setPromptText("Search apps...");
+        I18n.prompt(searchField, "Search apps...");
         searchField.setPrefWidth(220);
         searchDebounce = new PauseTransition(Duration.millis(250));
         searchDebounce.setOnFinished(ev -> applyFilter());
@@ -203,7 +203,7 @@ public class UninstallerTabView extends BorderPane {
         );
 
         table.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
-        table.setPlaceholder(new Label("No apps found. Click Scan to list installed software."));
+        table.setPlaceholder(new TrLabel("No apps found. Click Scan to list installed software."));
 
         HBox detailsBar = new HBox(10, detailsLabel, openFolderButton, copyDetailsButton);
         detailsBar.setAlignment(Pos.CENTER_LEFT);
@@ -439,24 +439,24 @@ public class UninstallerTabView extends BorderPane {
             row.setMinHeight(28);
             row.setPrefHeight(28);
 
-            MenuItem uninstallItem = new MenuItem("Uninstall");
+            MenuItem uninstallItem = new TrMenuItem("Uninstall");
             uninstallItem.disableProperty().bind(Bindings.createBooleanBinding(
                     () -> busy.get() || row.getItem() == null,
                     busy, row.itemProperty()));
             uninstallItem.setOnAction(e -> uninstallSingleApp(row.getItem()));
 
-            MenuItem forceUninstallItem = new MenuItem("Force Uninstall");
+            MenuItem forceUninstallItem = new TrMenuItem("Force Uninstall");
             forceUninstallItem.disableProperty().bind(busy);
             forceUninstallItem.getStyleClass().add("danger-menu-item");
             forceUninstallItem.setOnAction(e -> triggerForceUninstallForApp(row.getItem()));
 
-            MenuItem openFolderItem = new MenuItem("Open Install Location");
+            MenuItem openFolderItem = new TrMenuItem("Open Install Location");
             openFolderItem.setOnAction(e -> {
                 InstalledApp a = row.getItem();
                 if (a != null) openInstallFolder(a);
             });
 
-            MenuItem copyItem = new MenuItem("Copy Details");
+            MenuItem copyItem = new TrMenuItem("Copy Details");
             copyItem.setOnAction(e -> {
                 InstalledApp a = row.getItem();
                 if (a != null) copyAppDetails(a);
@@ -679,7 +679,7 @@ public class UninstallerTabView extends BorderPane {
                 return;
             }
             FileChooser chooser = new FileChooser();
-            chooser.setTitle("Export installed apps");
+            chooser.setTitle(I18n.t("Export installed apps"));
             chooser.setInitialFileName("installed-apps.csv");
             chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV", "*.csv"));
             java.io.File target = chooser.showSaveDialog(
@@ -868,7 +868,7 @@ public class UninstallerTabView extends BorderPane {
         // app still gets its own confirm / mode / restore-point / leftover dialogs.
         // We chain via Platform.runLater recursion driven by completion callbacks.
         Alert info = new Alert(Alert.AlertType.CONFIRMATION);
-        info.setTitle(com.sbtools.util.UiText.label("Batch uninstall"));
+        info.setTitle(I18n.ui("Batch uninstall"));
         info.setHeaderText("Uninstall " + sel.size() + " apps one-by-one?");
         info.setContentText("Each app will ask for confirmation, uninstall mode, and restore point separately.\n"
                 + "You can stop the queue after any app.");
@@ -911,7 +911,7 @@ public class UninstallerTabView extends BorderPane {
                 return;
             }
             Alert next = new Alert(Alert.AlertType.CONFIRMATION);
-            next.setTitle("Queue progress");
+            next.setTitle(I18n.t("Queue progress"));
             next.setHeaderText("Continue to next app? (" + (index + 1) + "/" + total + " done)");
             next.setContentText("Next: " + (index + 1 < queue.size() ? queue.get(index + 1).getName() : "(done)"));
             next.initModality(Modality.APPLICATION_MODAL);
@@ -966,8 +966,8 @@ public class UninstallerTabView extends BorderPane {
 
         if (!adminCheck.getAsBoolean()) {
             Alert adminWarn = new Alert(Alert.AlertType.WARNING);
-            adminWarn.setTitle(com.sbtools.util.UiText.label("Administrator privileges required"));
-            adminWarn.setHeaderText("Not running as administrator");
+            adminWarn.setTitle(I18n.ui("Administrator privileges required"));
+            adminWarn.setHeaderText(I18n.t("Not running as administrator"));
             adminWarn.setContentText("Some uninstall operations may fail without administrator privileges.\n\n" +
                     "Consider restarting the application as administrator.\n\nContinue anyway?");
             adminWarn.initModality(Modality.APPLICATION_MODAL);
@@ -983,7 +983,7 @@ public class UninstallerTabView extends BorderPane {
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle(com.sbtools.util.UiText.label("Confirm uninstallation"));
+        confirm.setTitle(I18n.ui("Confirm uninstallation"));
         confirm.setHeaderText("Uninstall " + selected.getName());
         confirm.setContentText("Are you sure you want to run the default uninstaller for " + selected.getName() + "?");
         confirm.initModality(Modality.APPLICATION_MODAL);
@@ -998,8 +998,8 @@ public class UninstallerTabView extends BorderPane {
         boolean preferQuiet = false;
         if (selected.isWin32() && selected.isQuietOnlyUninstall()) {
             Alert quietWarn = new Alert(Alert.AlertType.WARNING);
-            quietWarn.setTitle(com.sbtools.util.UiText.label("Silent uninstall"));
-            quietWarn.setHeaderText("This app only provides a silent uninstaller");
+            quietWarn.setTitle(I18n.ui("Silent uninstall"));
+            quietWarn.setHeaderText(I18n.t("This app only provides a silent uninstaller"));
             quietWarn.setContentText("Continuing will run the uninstaller without vendor prompts "
                     + "(user data may be removed without asking).\n\nContinue with silent uninstall?");
             quietWarn.initModality(Modality.APPLICATION_MODAL);
@@ -1014,7 +1014,7 @@ public class UninstallerTabView extends BorderPane {
         } else if (selected.isWin32() && selected.hasQuietUninstallString() && selected.hasInteractiveUninstallString()
                     && !selected.getQuietUninstallString().equals(selected.getUninstallString())) {
                 Alert modeDialog = new Alert(Alert.AlertType.CONFIRMATION);
-                modeDialog.setTitle(com.sbtools.util.UiText.label("Uninstall mode"));
+                modeDialog.setTitle(I18n.ui("Uninstall mode"));
                 modeDialog.setHeaderText("Choose uninstall mode for " + selected.getName());
                 modeDialog.setContentText("Interactive shows the vendor's uninstall wizard (recommended).\n"
                         + "Silent runs without prompts and may remove user data without asking.");
@@ -1036,8 +1036,8 @@ public class UninstallerTabView extends BorderPane {
 
     private void offerRestoreThenRun(InstalledApp app, boolean preferQuiet, Runnable continuation) {
             Alert restorePointDialog = new Alert(Alert.AlertType.CONFIRMATION);
-            restorePointDialog.setTitle(com.sbtools.util.UiText.label("System restore point"));
-            restorePointDialog.setHeaderText("Create a restore point?");
+            restorePointDialog.setTitle(I18n.ui("System restore point"));
+            restorePointDialog.setHeaderText(I18n.t("Create a restore point?"));
             restorePointDialog.setContentText("Would you like to create a System Restore point before uninstalling " + app.getName() + "?");
             restorePointDialog.initModality(Modality.APPLICATION_MODAL);
 
@@ -1057,7 +1057,7 @@ public class UninstallerTabView extends BorderPane {
 
     private void runForceUninstallAfterRestorePrompt(InstalledApp selected) {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle(com.sbtools.util.UiText.label("Confirm force uninstall"));
+        confirm.setTitle(I18n.ui("Confirm force uninstall"));
         confirm.setHeaderText("Force remove " + selected.getName() + "?");
         if (selected.isWin32()) {
             String loc = selected.getInstallLocation();
@@ -1090,7 +1090,7 @@ public class UninstallerTabView extends BorderPane {
 
     private void offerWingetFallback(InstalledApp app) {
         Alert warn = new Alert(Alert.AlertType.WARNING);
-        warn.setTitle(com.sbtools.util.UiText.label("No uninstaller available"));
+        warn.setTitle(I18n.ui("No uninstaller available"));
         warn.setHeaderText("No uninstaller is available for " + app.getName());
         warn.setContentText("This entry has no UninstallString.\n\n"
                 + "You can try removing it via winget (Windows Package Manager), "
@@ -1103,7 +1103,7 @@ public class UninstallerTabView extends BorderPane {
         ButtonType choice = warn.showAndWait().orElse(cancelBtn);
         if (choice == wingetBtn) {
             Alert modeDialog = new Alert(Alert.AlertType.CONFIRMATION);
-            modeDialog.setTitle(com.sbtools.util.UiText.label("Uninstall mode"));
+            modeDialog.setTitle(I18n.ui("Uninstall mode"));
             modeDialog.setHeaderText("Choose winget mode for " + app.getName());
             modeDialog.setContentText("Interactive lets winget show vendor prompts (recommended).\n"
                     + "Silent adds --silent and may remove user data without asking.\n\n"
@@ -1156,7 +1156,7 @@ public class UninstallerTabView extends BorderPane {
                         progress.setVisible(false);
                         statusLabel.setText("winget uninstall failed.");
                         Alert err = new Alert(Alert.AlertType.ERROR);
-                        err.setTitle("winget Uninstall Failed");
+                        err.setTitle(I18n.t("winget Uninstall Failed"));
                         err.setHeaderText("Could not remove " + app.getName() + " via winget");
                         err.setContentText(truncate(out, 800));
                         err.initModality(Modality.APPLICATION_MODAL);
@@ -1242,7 +1242,7 @@ public class UninstallerTabView extends BorderPane {
                         progress.setVisible(false);
                         operationGate.end(UninstallerOperationGate.Phase.RESTORE_POINT);
                         Alert errorAlert = new Alert(Alert.AlertType.WARNING);
-                        errorAlert.setTitle(com.sbtools.util.UiText.label("Restore point failed"));
+                        errorAlert.setTitle(I18n.ui("Restore point failed"));
                         errorAlert.setHeaderText(presentation.headerText());
                         errorAlert.setContentText("Failed to create a System Restore point:\n" + msg
                                 + presentation.tipSuffix()
@@ -1355,7 +1355,7 @@ public class UninstallerTabView extends BorderPane {
                         // Keep busy=true to prevent re-entry while dialog is open; just hide progress spinner
                         progress.setVisible(false);
                         Alert warn = new Alert(Alert.AlertType.WARNING);
-                        warn.setTitle(com.sbtools.util.UiText.label("Uninstall failed"));
+                        warn.setTitle(I18n.ui("Uninstall failed"));
                         warn.setHeaderText("The uninstaller returned an error for: " + app.getName());
                         String out = result.combinedOutput();
                         if (out == null || out.isBlank()) out = "(no output captured)";
@@ -1535,7 +1535,7 @@ public class UninstallerTabView extends BorderPane {
                             : "uninstalled; no leftovers");
             if (pathWarnings.isEmpty()) {
                 Alert done = new Alert(Alert.AlertType.INFORMATION);
-                done.setTitle(com.sbtools.util.UiText.label("No leftovers found"));
+                done.setTitle(I18n.ui("No leftovers found"));
                 done.setHeaderText(app.getName() + " uninstalled"
                         + (rebootRequired ? " — reboot required" : ""));
                 done.setContentText("No leftovers were detected in the filesystem or registry."
@@ -1544,7 +1544,7 @@ public class UninstallerTabView extends BorderPane {
                 done.showAndWait();
             } else {
                 Alert warn = new Alert(Alert.AlertType.INFORMATION);
-                warn.setTitle(com.sbtools.util.UiText.label("No deletable leftovers"));
+                warn.setTitle(I18n.ui("No deletable leftovers"));
                 warn.setHeaderText(app.getName() + " uninstalled — PATH warnings detected");
                 StringBuilder sb = new StringBuilder("No deletable files/registry leftovers found.\n\n");
                 sb.append("PATH entries still reference the app (remove manually from Environment Variables):\n");
@@ -1563,7 +1563,7 @@ public class UninstallerTabView extends BorderPane {
         }
 
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle(com.sbtools.util.UiText.label("Leftover remnants detected"));
+        dialog.setTitle(I18n.ui("Leftover remnants detected"));
         dialog.setHeaderText("Review leftovers for: " + app.getName());
         dialog.initModality(Modality.APPLICATION_MODAL);
 
@@ -1614,7 +1614,7 @@ public class UninstallerTabView extends BorderPane {
                 }
             });
             Tab pathTab = UiTab.tab("PATH warnings (" + pathWarnings.size() + ") — read-only", pathList);
-            Label hint = new Label("These PATH entries reference the app. Remove manually via System → Environment Variables.");
+            Label hint = new TrLabel("These PATH entries reference the app. Remove manually via System → Environment Variables.");
             hint.setWrapText(true);
             hint.setStyle("-fx-text-fill: #f1c40f; -fx-font-size: 11px;");
             VBox pathBox = new VBox(6, pathList, hint);
@@ -1623,11 +1623,11 @@ public class UninstallerTabView extends BorderPane {
             tabPane.getTabs().add(pathTab);
         }
 
-        Button selectAllBtn = new Button("Select All");
-        Button highConfBtn = new Button("High-confidence only");
-        highConfBtn.setTooltip(new Tooltip("Select only exact matches (safest)"));
-        Button deselectAllBtn = new Button("Deselect All");
-        Button exportLeftoversBtn = new Button("Export List...");
+        Button selectAllBtn = new TrButton("Select All");
+        Button highConfBtn = new TrButton("High-confidence only");
+        highConfBtn.setTooltip(I18n.tooltip("Select only exact matches (safest)"));
+        Button deselectAllBtn = new TrButton("Deselect All");
+        Button exportLeftoversBtn = new TrButton("Export List...");
         HBox selectionControls = new HBox(8, selectAllBtn, highConfBtn, deselectAllBtn, exportLeftoversBtn);
         selectionControls.setPadding(new Insets(0, 10, 10, 10));
         selectionControls.setAlignment(Pos.CENTER_RIGHT);
@@ -1652,7 +1652,7 @@ public class UninstallerTabView extends BorderPane {
         exportLeftoversBtn.setOnAction(e -> {
             try {
                 FileChooser ch = new FileChooser();
-                ch.setTitle("Export leftover list");
+                ch.setTitle(I18n.t("Export leftover list"));
                 ch.setInitialFileName("leftovers-" + sanitizeFileName(app.getName()) + ".csv");
                 ch.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV", "*.csv"));
                 java.io.File target = ch.showSaveDialog(dialog.getDialogPane().getScene().getWindow());
@@ -1672,8 +1672,8 @@ public class UninstallerTabView extends BorderPane {
         });
 
         // Recycle Bin preference for files (recoverable) + registry .reg backup
-        RadioButton recycleBtn = new RadioButton("Move files to Recycle Bin (Recommended)");
-        RadioButton permanentBtn = new RadioButton("Delete files permanently");
+        RadioButton recycleBtn = new TrRadioButton("Move files to Recycle Bin (Recommended)");
+        RadioButton permanentBtn = new TrRadioButton("Delete files permanently");
         ToggleGroup delGroup = new ToggleGroup();
         recycleBtn.setToggleGroup(delGroup);
         permanentBtn.setToggleGroup(delGroup);
@@ -1684,14 +1684,14 @@ public class UninstallerTabView extends BorderPane {
         deleteModeBox.setPadding(new Insets(0, 10, 0, 10));
         deleteModeBox.setAlignment(Pos.CENTER_LEFT);
 
-        CheckBox backupRegCheck = new CheckBox("Back up selected registry keys (.reg) before deleting");
+        CheckBox backupRegCheck = new TrCheckBox("Back up selected registry keys (.reg) before deleting");
         backupRegCheck.setSelected(true);
         backupRegCheck.setStyle("-fx-text-fill: #f8f8f2;");
         backupRegCheck.setPadding(new Insets(0, 10, 0, 10));
 
         VBox contentBox = new VBox(8, tabPane, selectionControls, deleteModeBox, backupRegCheck);
         contentBox.setPrefSize(680, 440);
-        Label safetyHint = new Label("Only exact matches are pre-selected. Heuristic matches are left unchecked — "
+        Label safetyHint = new TrLabel("Only exact matches are pre-selected. Heuristic matches are left unchecked — "
                 + "select them only if you are sure they belong solely to " + app.getName() + "."
                 + (rebootRequired ? " Note: uninstaller requested a reboot (exit " + exitCode + ")." : ""));
         safetyHint.setWrapText(true);
@@ -1812,7 +1812,7 @@ public class UninstallerTabView extends BorderPane {
                             }
                             if (sb.length() > 1500) sb.setLength(1500);
                             Alert failedAlert = new Alert(Alert.AlertType.WARNING);
-                            failedAlert.setTitle(com.sbtools.util.UiText.label("Partial cleanup"));
+                            failedAlert.setTitle(I18n.ui("Partial cleanup"));
                             failedAlert.setHeaderText("Some items could not be deleted"
                                     + (recycledFinal.isEmpty() ? "" : " (" + recycledFinal.size() + " recycled)"));
                             String backupNote = backupDirFinal != null && backedUpFinal > 0
@@ -1825,8 +1825,8 @@ public class UninstallerTabView extends BorderPane {
                             failedAlert.showAndWait();
                         } else {
                             Alert successAlert = new Alert(Alert.AlertType.INFORMATION);
-                            successAlert.setTitle(com.sbtools.util.UiText.label("Leftovers deleted"));
-                            successAlert.setHeaderText(com.sbtools.util.UiText.label("Cleanup successful"));
+                            successAlert.setTitle(I18n.ui("Leftovers deleted"));
+                            successAlert.setHeaderText(I18n.ui("Cleanup successful"));
                             successAlert.setContentText("Removed " + deletedCountFinal + " item(s)"
                                     + (recycledFinal.isEmpty() ? "." : (" (" + recycledFinal.size() + " moved to Recycle Bin)."))
                                     + (backedUpFinal > 0 ? "\nRegistry backup (" + backedUpFinal + " keys):\n" + backupDirFinal : "")
@@ -1857,8 +1857,8 @@ public class UninstallerTabView extends BorderPane {
     private ListView<LeftoverItem> buildLeftoverListView(ObservableList<LeftoverItem> items, InstalledApp app) {
         ListView<LeftoverItem> listView = new ListView<>(items);
         listView.setCellFactory(lv -> new ListCell<>() {
-            private final CheckBox checkBox = new CheckBox();
-            private final Label badge = new Label();
+            private final CheckBox checkBox = new TrCheckBox();
+            private final Label badge = new TrLabel();
             private final HBox box = new HBox(6, checkBox, badge);
             private LeftoverItem currentItem;
             {
@@ -2020,7 +2020,7 @@ public class UninstallerTabView extends BorderPane {
         boolean cancelled = result.errors().stream()
                 .anyMatch(e -> e != null && e.toLowerCase().contains("cancelled"));
         Alert alert = new Alert(result.errors().isEmpty() ? Alert.AlertType.INFORMATION : Alert.AlertType.WARNING);
-        alert.setTitle(com.sbtools.util.UiText.label("Force uninstall summary"));
+        alert.setTitle(I18n.ui("Force uninstall summary"));
         alert.setHeaderText(cancelled ? "Force uninstall cancelled."
                 : (result.errors().isEmpty() ? "Force uninstall completed." : "Force uninstall finished with errors."));
         alert.setContentText(content.toString());

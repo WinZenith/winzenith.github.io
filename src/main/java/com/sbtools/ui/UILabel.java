@@ -1,6 +1,5 @@
 package com.sbtools.ui;
 
-import com.sbtools.util.UiText;
 import javafx.scene.control.Label;
 
 public class UILabel extends Label {
@@ -21,9 +20,11 @@ public class UILabel extends Label {
     }
 
     public UILabel(String text, LabelStyle style) {
-        super(UiText.label(text));
+        super();
+        I18n.install(this, true);
         getStyleClass().add("label");
         applyStyle(style);
+        setText(text);
     }
 
     private void applyStyle(LabelStyle style) {

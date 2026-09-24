@@ -35,16 +35,16 @@ public class SoftwareUpdatesTabView extends BorderPane {
 
     private final ProgressIndicator progress = new ProgressIndicator();
     private final ProgressBar batchProgressBar = new ProgressBar(0);
-    private final Label batchProgressLabel = new Label();
-    private final Button scanButton = new Button("Scan");
-    private final Button stopScanButton = new Button("Stop scan");
-    private final Button updateSelectedButton = new Button("Update Selected");
-    private final Button selectAllButton = new Button("Select All");
-    private final Button deselectAllButton = new Button("Deselect All");
-    private final Button retryFailedButton = new Button("Retry Failed");
-    private final Button ignoredListButton = new Button("Ignored List");
-    private final Button historyButton = new Button("History");
-    private final Label statusLabel = new Label();
+    private final Label batchProgressLabel = new TrLabel();
+    private final Button scanButton = new TrButton("Scan");
+    private final Button stopScanButton = new TrButton("Stop scan");
+    private final Button updateSelectedButton = new TrButton("Update Selected");
+    private final Button selectAllButton = new TrButton("Select All");
+    private final Button deselectAllButton = new TrButton("Deselect All");
+    private final Button retryFailedButton = new TrButton("Retry Failed");
+    private final Button ignoredListButton = new TrButton("Ignored List");
+    private final Button historyButton = new TrButton("History");
+    private final Label statusLabel = new TrLabel();
 
     // For leak-free dispose
     private javafx.collections.ListChangeListener<SoftwareUpdateEntry> rowsListener;
@@ -59,8 +59,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
     // In-memory (session-only) filters — deliberately not persisted to AppSettings
     private final TextField searchField = new TextField();
     private final ComboBox<String> sourceFilter = new ComboBox<>();
-    private final CheckBox failedOnlyCheck = new CheckBox("Failed only");
-    private final Label filterCountLabel = new Label();
+    private final CheckBox failedOnlyCheck = new TrCheckBox("Failed only");
+    private final Label filterCountLabel = new TrLabel();
     private FilteredList<SoftwareUpdateEntry> filteredRows;
     private SortedList<SoftwareUpdateEntry> sortedRows;
     private javafx.collections.ListChangeListener<SoftwareUpdateEntry> filterCountListener;
@@ -89,14 +89,15 @@ public class SoftwareUpdatesTabView extends BorderPane {
         top.getStyleClass().add("toolbar");
 
         // Session-only filter bar (search + source + failed-only). Not persisted.
-        searchField.setPromptText("Filter by name or ID...");
+        I18n.prompt(searchField, "Filter by name or ID...");
         searchField.setPrefWidth(220);
         sourceFilter.getItems().setAll("All sources", "winget", "WindowsUpdate");
         sourceFilter.setValue("All sources");
         sourceFilter.setPrefWidth(130);
+        I18n.combo(sourceFilter);
         filterCountLabel.setStyle("-fx-opacity: 0.75;");
-        HBox filterBar = new HBox(10, new Label("Search:"), searchField,
-                new Label("Source:"), sourceFilter, failedOnlyCheck, filterCountLabel);
+        HBox filterBar = new HBox(10, new TrLabel("Search:"), searchField,
+                new TrLabel("Source:"), sourceFilter, failedOnlyCheck, filterCountLabel);
         filterBar.setAlignment(Pos.CENTER_LEFT);
         filterBar.setPadding(new Insets(0, 16, 8, 16));
         VBox topBox = new VBox(top, filterBar);
@@ -250,7 +251,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         // keep their default read-only cells, so only the Install column becomes editable.
         table.setEditable(true);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-        table.setPlaceholder(new Label("No winget / Windows updates to show. Press Scan. (Microsoft Store apps are not checked here.)"));
+        table.setPlaceholder(new TrLabel("No winget / Windows updates to show. Press Scan. (Microsoft Store apps are not checked here.)"));
 
         TableColumn<SoftwareUpdateEntry, Boolean> selCol = UiColumn.of("Install");
         selCol.setCellValueFactory(c -> c.getValue().selectedProperty());
@@ -320,8 +321,8 @@ public class SoftwareUpdatesTabView extends BorderPane {
             private final UIButton updateBtn = UIButton.small("Update");
             private final UIButton ignoreBtn = UIButton.small("Ignore");
             private final ProgressBar downloadProgress = new ProgressBar(ProgressBar.INDETERMINATE_PROGRESS);
-            private final Label sizeLabel = new Label("Installing...");
-            private final Label installingLabel = new Label("Installing update. Please wait...");
+            private final Label sizeLabel = new TrLabel("Installing...");
+            private final Label installingLabel = new TrLabel("Installing update. Please wait...");
             private final ProgressIndicator spinner = new ProgressIndicator();
             private SoftwareUpdateEntry boundEntry = null;
             private javafx.beans.value.ChangeListener<String> statusListener = null;
@@ -459,9 +460,9 @@ public class SoftwareUpdatesTabView extends BorderPane {
                             + (newItem.sizeBytes() > 0 ? "\nSize: " + formatBytes(newItem.sizeBytes())
                                     : "\nSize: unknown until download");
                     row.setTooltip(new Tooltip(tip));
-                    MenuItem copyId = new MenuItem("Copy ID");
+                    MenuItem copyId = new TrMenuItem("Copy ID");
                     copyId.setOnAction(e -> copyToClipboard(newItem.id()));
-                    MenuItem showError = new MenuItem("Show error details...");
+                    MenuItem showError = new TrMenuItem("Show error details...");
                     showError.setOnAction(e -> showErrorDetailsDialog(newItem));
                     row.setContextMenu(new ContextMenu(copyId, showError));
                 }
@@ -539,12 +540,12 @@ public class SoftwareUpdatesTabView extends BorderPane {
         ta.setWrapText(true);
         ta.setPrefRowCount(10);
         ta.setPrefColumnCount(70);
-        Button copyBtn = new Button("Copy");
+        Button copyBtn = new TrButton("Copy");
         copyBtn.setOnAction(e -> copyToClipboard(ta.getText()));
         HBox btnBox = new HBox(8, copyBtn);
         btnBox.setAlignment(Pos.CENTER_RIGHT);
         VBox content = new VBox(8,
-                new Label("Details for " + entry.getName() + " (" + entry.id() + "):"), ta, btnBox);
+                new TrLabel("Details for " + entry.getName() + " (" + entry.id() + "):"), ta, btnBox);
         Alert a = new Alert(Alert.AlertType.INFORMATION);
         a.setTitle(AppInfo.DISPLAY_NAME);
         a.setHeaderText("Update details — " + entry.getName());
@@ -600,7 +601,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
                     "You are about to update " + selectedVisible.size() + " visible item(s).\n"
                             + hiddenSelected + " other selected item(s) are hidden by the current filter and will NOT be updated.\n\n"
                             + "Continue with the visible selection?");
-            confirm.setHeaderText("Filtered selection");
+            confirm.setHeaderText(I18n.t("Filtered selection"));
             if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
                 return;
             }
@@ -617,7 +618,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         ta.setPrefRowCount(12);
         ta.setPrefColumnCount(80);
 
-        Button storeBtn = new Button("Open App Installer in Microsoft Store");
+        Button storeBtn = new TrButton("Open App Installer in Microsoft Store");
         storeBtn.setOnAction(evt -> {
             try {
                 java.awt.Desktop.getDesktop().browse(new java.net.URI("ms-windows-store://pdp/?productid=9NBLGGH4NNS1"));
@@ -630,7 +631,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
             }
         });
 
-        Button aliasBtn = new Button("Open App execution aliases settings");
+        Button aliasBtn = new TrButton("Open App execution aliases settings");
         aliasBtn.setOnAction(evt -> {
             try {
                 java.awt.Desktop.getDesktop().browse(new java.net.URI("ms-settings:appsfeatures"));
@@ -644,7 +645,7 @@ public class SoftwareUpdatesTabView extends BorderPane {
         });
 
         HBox btnBox = new HBox(8, storeBtn, aliasBtn);
-        VBox content = new VBox(new Label("winget is not available on this system. Diagnostic output:"), ta, btnBox);
+        VBox content = new VBox(new TrLabel("winget is not available on this system. Diagnostic output:"), ta, btnBox);
         content.setSpacing(8);
         Alert a = new Alert(Alert.AlertType.ERROR);
         a.setTitle(AppInfo.DISPLAY_NAME);

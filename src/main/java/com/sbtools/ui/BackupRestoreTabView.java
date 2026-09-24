@@ -91,29 +91,29 @@ public class BackupRestoreTabView extends BorderPane {
     private Tab buildRollbackTab() {
         rollbackBackupService = new DriverBackupService();
         rollbackRows = FXCollections.observableArrayList();
-        rollbackStatusLabel = new Label("Driver backups appear here. Backups are created automatically before driver updates.");
-        rollbackWarningLabel = new Label();
+        rollbackStatusLabel = new TrLabel("Driver backups appear here. Backups are created automatically before driver updates.");
+        rollbackWarningLabel = new TrLabel();
         rollbackWarningLabel.setStyle("-fx-text-fill: #f0ad4e;");
         rollbackWarningLabel.setVisible(false);
         rollbackWarningLabel.setWrapText(true);
-        Button refreshButton = new Button("Refresh");
+        Button refreshButton = new TrButton("Refresh");
         Button deleteAllButton = UIButton.danger("Delete All");
-        rollbackDetailsButton = new Button("Details");
-        rollbackOpenFolderButton = new Button("Open Folder");
-        rollbackVerifyButton = new Button("Verify");
+        rollbackDetailsButton = new TrButton("Details");
+        rollbackOpenFolderButton = new TrButton("Open Folder");
+        rollbackVerifyButton = new TrButton("Verify");
         rollbackRepairButton = UIButton.secondary("Repair");
         TextField searchField = new TextField();
-        searchField.setPromptText("Search backups...");
+        I18n.prompt(searchField, "Search backups...");
         rollbackSpinner = new ProgressIndicator();
         rollbackSpinner.setVisible(false);
         rollbackSpinner.setMaxSize(20, 20);
 
-        Tooltip.install(refreshButton, new Tooltip("Reload the backup list from disk"));
-        Tooltip.install(deleteAllButton, new Tooltip("Remove all driver backups permanently (two-step confirmation)"));
-        Tooltip.install(rollbackDetailsButton, new Tooltip("Show details for the selected backup"));
-        Tooltip.install(rollbackOpenFolderButton, new Tooltip("Open the backup folder in Explorer"));
-        Tooltip.install(rollbackVerifyButton, new Tooltip("Re-check health of all backups on disk"));
-        Tooltip.install(rollbackRepairButton, new Tooltip("List backups missing on disk and remove their stale index entries"));
+        Tooltip.install(refreshButton, I18n.tooltip("Reload the backup list from disk"));
+        Tooltip.install(deleteAllButton, I18n.tooltip("Remove all driver backups permanently (two-step confirmation)"));
+        Tooltip.install(rollbackDetailsButton, I18n.tooltip("Show details for the selected backup"));
+        Tooltip.install(rollbackOpenFolderButton, I18n.tooltip("Open the backup folder in Explorer"));
+        Tooltip.install(rollbackVerifyButton, I18n.tooltip("Re-check health of all backups on disk"));
+        Tooltip.install(rollbackRepairButton, I18n.tooltip("List backups missing on disk and remove their stale index entries"));
 
         refreshButton.setOnAction(e -> refreshRollback());
         deleteAllButton.setOnAction(e -> deleteAllBackups());
@@ -238,8 +238,8 @@ public class BackupRestoreTabView extends BorderPane {
             private final HBox box = new HBox(4, revertBtn, deleteBtn);
 
             {
-                Tooltip.install(revertBtn, new Tooltip("Restore the backed-up version of this driver. A restart may be required."));
-                Tooltip.install(deleteBtn, new Tooltip("Permanently remove this backup"));
+                Tooltip.install(revertBtn, I18n.tooltip("Restore the backed-up version of this driver. A restart may be required."));
+                Tooltip.install(deleteBtn, I18n.tooltip("Permanently remove this backup"));
                 revertBtn.setOnAction(e -> {
                     int idx = getIndex();
                     if (idx >= 0 && idx < getTableView().getItems().size()) {
@@ -451,7 +451,7 @@ public class BackupRestoreTabView extends BorderPane {
                         + "\nHealth: " + row.statusProperty().get() + " (" + row.getInfCount() + " INF file(s))"
                         + "\n\nThis stages the backed-up INF and attempts a non-destructive device restart."
                         + " Windows may still keep the newer driver active until reboot/manual Have-Disk install.");
-        confirm.setHeaderText("Revert driver?");
+        confirm.setHeaderText(I18n.t("Revert driver?"));
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
             return;
         }
@@ -541,7 +541,7 @@ public class BackupRestoreTabView extends BorderPane {
             dirInfo = AppPaths.backupsRoot().toString();
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle("Delete all backups?");
+        confirm.setTitle(I18n.t("Delete all backups?"));
         confirm.setHeaderText("Delete all " + count + " driver backup(s)?");
         confirm.setContentText("This will permanently remove all backup data.\n\nLocation:\n" + dirInfo
                 + "\n\nAfter this, driver rollback will NOT be possible.\nNothing will be deleted automatically — this is your explicit choice.");
@@ -550,8 +550,8 @@ public class BackupRestoreTabView extends BorderPane {
         }
         // Two-step hardening for a destructive, irreversible action.
         Alert finalConfirm = new Alert(Alert.AlertType.CONFIRMATION);
-        finalConfirm.setTitle("Final confirmation");
-        finalConfirm.setHeaderText("Final confirmation — delete everything?");
+        finalConfirm.setTitle(I18n.t("Final confirmation"));
+        finalConfirm.setHeaderText(I18n.t("Final confirmation — delete everything?"));
         finalConfirm.setContentText("Click OK to permanently delete all " + count + " backup(s). This cannot be undone.");
         if (finalConfirm.showAndWait().orElse(null) != ButtonType.OK) {
             return;
@@ -593,7 +593,7 @@ public class BackupRestoreTabView extends BorderPane {
                         + "\nVersion: " + row.entry().version()
                         + "\nBacked up: " + row.backedUpAtProperty().get()
                         + "\nHealth: " + row.statusProperty().get());
-        confirm.setHeaderText("Delete backup?");
+        confirm.setHeaderText(I18n.t("Delete backup?"));
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
             return;
         }
@@ -642,7 +642,7 @@ public class BackupRestoreTabView extends BorderPane {
                 + "\nHealth: " + row.statusProperty().get()
                 + "\nFiles: " + row.getFileCount() + " (" + row.getInfCount() + " INF)";
         Alert info = new Alert(Alert.AlertType.INFORMATION, details);
-        info.setTitle("Backup details");
+        info.setTitle(I18n.t("Backup details"));
         info.setHeaderText(row.deviceNameProperty().get());
         info.showAndWait();
     }
@@ -769,7 +769,7 @@ public class BackupRestoreTabView extends BorderPane {
                 handoff.set(true);
                 Platform.runLater(() -> {
                     Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-                    confirm.setTitle("Repair stale backups");
+                    confirm.setTitle(I18n.t("Repair stale backups"));
                     confirm.setHeaderText(count + " stale index entr" + (count == 1 ? "y" : "ies") + " found");
                     confirm.setContentText("These backups are missing, empty or unreadable on disk:\n\n" + list
                             + "\nRemove their index entries? Folders (if any) are left untouched.\nNothing else will be deleted.");
@@ -820,16 +820,16 @@ public class BackupRestoreTabView extends BorderPane {
         SystemRestoreService service = new SystemRestoreService();
         BooleanProperty localBusy = new SimpleBooleanProperty(false);
         ObservableList<SystemRestoreRow> rows = FXCollections.observableArrayList();
-        Label statusLabel = new Label("Click Scan to list system restore points.");
+        Label statusLabel = new TrLabel("Click Scan to list system restore points.");
         ProgressIndicator spinner = new ProgressIndicator();
-        Button scanButton = new Button("Scan");
-        Button createButton = new Button("Create new restore point");
-        Button launchButton = new Button("Launch restore point");
+        Button scanButton = new TrButton("Scan");
+        Button createButton = new TrButton("Create new restore point");
+        Button launchButton = new TrButton("Launch restore point");
         TableView<SystemRestoreRow> table = new TableView<>(rows);
 
-        Tooltip.install(scanButton, new Tooltip("Query Windows for available system restore points"));
-        Tooltip.install(createButton, new Tooltip("Create a manual system restore point"));
-        Tooltip.install(launchButton, new Tooltip("Open the Windows System Restore wizard"));
+        Tooltip.install(scanButton, I18n.tooltip("Query Windows for available system restore points"));
+        Tooltip.install(createButton, I18n.tooltip("Create a manual system restore point"));
+        Tooltip.install(launchButton, I18n.tooltip("Open the Windows System Restore wizard"));
 
         spinner.setVisible(false);
         spinner.setMaxSize(20, 20);
@@ -972,9 +972,9 @@ public class BackupRestoreTabView extends BorderPane {
         }
 
         TextInputDialog dialog = new TextInputDialog("Manual Restore Point");
-        dialog.setTitle(com.sbtools.util.UiText.label("Create restore point"));
-        dialog.setHeaderText("Enter a description for the new restore point:");
-        dialog.setContentText("Description:");
+        dialog.setTitle(I18n.ui("Create restore point"));
+        dialog.setHeaderText(I18n.t("Enter a description for the new restore point:"));
+        dialog.setContentText(I18n.t("Description:"));
         String description = dialog.showAndWait().orElse(null);
         if (description == null || description.isBlank()) return;
 
@@ -1041,8 +1041,8 @@ public class BackupRestoreTabView extends BorderPane {
 
     private void launchSystemRestore(SystemRestoreService service, Label statusLabel) {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle(com.sbtools.util.UiText.label("Launch system restore"));
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Start Windows system restore?"));
+        confirm.setTitle(I18n.ui("Launch system restore"));
+        confirm.setHeaderText(I18n.ui("Start Windows system restore?"));
         confirm.setContentText("This will launch the System Restore wizard and may reboot your computer.\n\n"
                 + "Ensure all work is saved before proceeding.");
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
@@ -1067,7 +1067,7 @@ public class BackupRestoreTabView extends BorderPane {
 
     private Tab buildRegistryBackupTab() {
         ObservableList<RegistryBackupRow> rows = FXCollections.observableArrayList();
-        Label statusLabel = new Label("No registry backups found.");
+        Label statusLabel = new TrLabel("No registry backups found.");
         ProgressIndicator spinner = new ProgressIndicator();
         spinner.setVisible(false);
         spinner.setMaxSize(20, 20);
@@ -1079,12 +1079,12 @@ public class BackupRestoreTabView extends BorderPane {
         UIButton restoreBtn = UIButton.secondary("Restore selected");
         UIButton deleteBtn = UIButton.danger("Delete backup");
         TextField searchField = new TextField();
-        searchField.setPromptText("Search sessions...");
+        I18n.prompt(searchField, "Search sessions...");
 
-        Tooltip.install(backupNowBtn, new Tooltip("Export selected registry areas to a backup session"));
-        Tooltip.install(restoreBtn, new Tooltip("Import the selected registry backup session (.reg files only)"));
-        Tooltip.install(deleteBtn, new Tooltip("Remove the selected registry backup session"));
-        Tooltip.install(searchField, new Tooltip("Filter sessions by name"));
+        Tooltip.install(backupNowBtn, I18n.tooltip("Export selected registry areas to a backup session"));
+        Tooltip.install(restoreBtn, I18n.tooltip("Import the selected registry backup session (.reg files only)"));
+        Tooltip.install(deleteBtn, I18n.tooltip("Remove the selected registry backup session"));
+        Tooltip.install(searchField, I18n.tooltip("Filter sessions by name"));
 
         restoreBtn.setDisable(true);
         deleteBtn.setDisable(true);
@@ -1255,39 +1255,39 @@ public class BackupRestoreTabView extends BorderPane {
         }
 
         Dialog<List<String>> dialog = new Dialog<>();
-        dialog.setTitle(com.sbtools.util.UiText.label("Registry backup"));
-        dialog.setHeaderText("Select registry areas to back up:");
+        dialog.setTitle(I18n.ui("Registry backup"));
+        dialog.setHeaderText(I18n.t("Select registry areas to back up:"));
         dialog.initModality(Modality.APPLICATION_MODAL);
         try {
             dialog.getDialogPane().getStylesheets().add(getClass().getResource("/custom.css").toExternalForm());
         } catch (Exception ignored) {}
 
-        CheckBox hkcuRun = new CheckBox("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        CheckBox hkcuRun = new TrCheckBox("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
         hkcuRun.setSelected(true);
-        CheckBox hklmRun = new CheckBox("HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        CheckBox hklmRun = new TrCheckBox("HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
         hklmRun.setSelected(true);
-        CheckBox hklmRunOnce = new CheckBox("HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
-        CheckBox hkcuRunOnce = new CheckBox("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
-        CheckBox hklmWowRun = new CheckBox("HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run");
-        CheckBox hkcuRunServices = new CheckBox("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServices");
-        hkcuRunServices.setTooltip(new Tooltip("Legacy autostart area — often absent on Windows 10/11 (skipped if missing)"));
+        CheckBox hklmRunOnce = new TrCheckBox("HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
+        CheckBox hkcuRunOnce = new TrCheckBox("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce");
+        CheckBox hklmWowRun = new TrCheckBox("HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run");
+        CheckBox hkcuRunServices = new TrCheckBox("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServices");
+        hkcuRunServices.setTooltip(I18n.tooltip("Legacy autostart area — often absent on Windows 10/11 (skipped if missing)"));
 
-        Label coreLabel = new Label("Core autostart areas (recommended):");
+        Label coreLabel = new TrLabel("Core autostart areas (recommended):");
         coreLabel.setStyle("-fx-font-weight: bold;");
-        Label extLabel = new Label("Extended areas (optional, larger):");
+        Label extLabel = new TrLabel("Extended areas (optional, larger):");
         extLabel.setStyle("-fx-font-weight: bold;");
         List<CheckBox> extBoxes = new ArrayList<>();
         for (String key : com.sbtools.backup.RegistryBackupSafety.EXTENDED_REGISTRY_KEYS) {
-            CheckBox cb = new CheckBox(key);
+            CheckBox cb = new TrCheckBox(key);
             cb.setSelected(false);
-            cb.setTooltip(new Tooltip("Optional extended area — export is larger/slower"));
+            cb.setTooltip(I18n.tooltip("Optional extended area — export is larger/slower"));
             extBoxes.add(cb);
         }
-        CheckBox fullHiveBox = new CheckBox("Full hive export via 'reg save' (advanced, large .hiv files)");
+        CheckBox fullHiveBox = new TrCheckBox("Full hive export via 'reg save' (advanced, large .hiv files)");
         fullHiveBox.setSelected(false);
         fullHiveBox.setTooltip(new Tooltip("Saves HKLM\\SYSTEM, HKLM\\SOFTWARE and HKCU as binary .hiv files. "
                 + "Restore of .hiv files is manual (reg restore) — .reg import does not cover them."));
-        Label hint = new Label("Windows merges .reg on restore. Extended + hive options increase coverage but not removal.");
+        Label hint = new TrLabel("Windows merges .reg on restore. Extended + hive options increase coverage but not removal.");
         hint.setWrapText(true);
 
         VBox checks = new VBox(6);
@@ -1463,7 +1463,7 @@ public class BackupRestoreTabView extends BorderPane {
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle(com.sbtools.util.UiText.label("Restore registry backup"));
+        confirm.setTitle(I18n.ui("Restore registry backup"));
         confirm.setHeaderText("Import registry session: " + selected.getFilename());
         confirm.setContentText("Windows MERGES .reg files: values added after the backup will NOT be removed.\n\n"
                 + "Existing registry keys targeted by this session will be exported first into a safety session. "
@@ -1544,8 +1544,8 @@ public class BackupRestoreTabView extends BorderPane {
                     CompletableFuture<Boolean> proceed = new CompletableFuture<>();
                     Platform.runLater(() -> {
                         Alert extra = new Alert(Alert.AlertType.WARNING);
-                        extra.setTitle(com.sbtools.util.UiText.label("Limited rollback coverage"));
-                        extra.setHeaderText("No pre-restore keys could be exported");
+                        extra.setTitle(I18n.ui("Limited rollback coverage"));
+                        extra.setHeaderText(I18n.t("No pre-restore keys could be exported"));
                         extra.setContentText(warn);
                         extra.getButtonTypes().setAll(ButtonType.OK, ButtonType.CANCEL);
                         proceed.complete(extra.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK);
@@ -1598,9 +1598,9 @@ public class BackupRestoreTabView extends BorderPane {
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle(com.sbtools.util.UiText.label("Delete registry backup"));
+        confirm.setTitle(I18n.ui("Delete registry backup"));
         confirm.setHeaderText("Delete backup session: " + selected.getFilename());
-        confirm.setContentText("This will permanently delete all registry backup files in this session.");
+        confirm.setContentText(I18n.t("This will permanently delete all registry backup files in this session."));
         if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
 
         beginRegistryMutation();

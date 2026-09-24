@@ -61,4 +61,5 @@ module com.winzenith {
     exports com.sbtools.license;
     exports com.sbtools.update;
     exports com.sbtools.util;
+    exports com.sbtools.i18n;
 }

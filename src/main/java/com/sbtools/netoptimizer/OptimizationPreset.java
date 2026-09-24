@@ -1,6 +1,6 @@
 package com.sbtools.netoptimizer;
 
-import com.sbtools.util.UiText;
+import com.sbtools.i18n.Messages;
 
 public enum OptimizationPreset {
 
@@ -19,7 +19,9 @@ public enum OptimizationPreset {
         this.scriptName = scriptName;
     }
 
-    public String getDisplayName() { return UiText.label(displayName); }
-    public String getDescription() { return description; }
+    public String englishName() { return displayName; }
+    public String englishDescription() { return description; }
+    public String getDisplayName() { return Messages.get(displayName); }
+    public String getDescription() { return Messages.get(description); }
     public String getScriptName() { return scriptName; }
 }

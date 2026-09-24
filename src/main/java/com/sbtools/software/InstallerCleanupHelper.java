@@ -1,5 +1,6 @@
 package com.sbtools.software;
 
+import com.sbtools.ui.I18n;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
@@ -83,7 +84,7 @@ public final class InstallerCleanupHelper {
                     Alert del = new Alert(Alert.AlertType.CONFIRMATION,
                             "The following file(s) (" + totalFiles + ") were detected in the winget download cache:\n\n"
                                     + sb + "Delete these files?\n\n(Auto-declines after 90 seconds.)");
-                    del.setHeaderText("Clean winget download cache");
+                    del.setHeaderText(I18n.t("Clean winget download cache"));
                     runCleanupDialog(del, result, () -> {
                         for (List<Path> files : allCandidates.values()) {
                             service.deleteInstallerFiles(files);

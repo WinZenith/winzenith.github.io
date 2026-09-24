@@ -37,7 +37,7 @@ public class IgnoredListDialog {
                 new javafx.collections.transformation.FilteredList<>(observable, s -> true);
 
         TextField searchField = new TextField();
-        searchField.setPromptText("Filter ignored items...");
+        I18n.prompt(searchField, "Filter ignored items...");
         searchField.textProperty().addListener((obs, o, n) -> {
             String q = n == null ? "" : n.trim().toLowerCase();
             filtered.setPredicate(s -> {
@@ -65,7 +65,7 @@ public class IgnoredListDialog {
         listView.setItems(filtered);
         listView.setPrefHeight(300);
 
-        Button removeBtn = new Button("Remove Selected");
+        Button removeBtn = new TrButton("Remove Selected");
         removeBtn.setOnAction(e -> {
             String selected = listView.getSelectionModel().getSelectedItem();
             if (selected != null) {
@@ -76,7 +76,7 @@ public class IgnoredListDialog {
             }
         });
 
-        VBox layout = new VBox(10, new Label("Skipped items:"), searchField, listView, removeBtn);
+        VBox layout = new VBox(10, new TrLabel("Skipped items:"), searchField, listView, removeBtn);
         layout.setPadding(new Insets(10));
         layout.setPrefWidth(500);
 

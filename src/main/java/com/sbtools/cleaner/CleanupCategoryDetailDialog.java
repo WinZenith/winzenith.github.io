@@ -1,5 +1,6 @@
 package com.sbtools.cleaner;
 
+import com.sbtools.ui.TrLabel;
 import com.sbtools.util.AppInfo;
 import javafx.geometry.Insets;
 import javafx.scene.control.ButtonType;
@@ -34,11 +35,11 @@ public class CleanupCategoryDetailDialog extends Dialog<ButtonType> {
             }
         } catch (Exception ignored) {}
 
-        Label riskLabel = new Label("Risk: " + cat.getRiskLevel().getDisplayName()
+        Label riskLabel = new TrLabel("Risk: " + cat.getRiskLevel().getDisplayName()
                 + " — " + cat.getRiskLevel().getDescription());
         riskLabel.setWrapText(true);
 
-        Label descLabel = new Label("What it cleans: " + cat.getDescription());
+        Label descLabel = new TrLabel("What it cleans: " + cat.getDescription());
         descLabel.setWrapText(true);
 
         StringBuilder scanInfo = new StringBuilder();
@@ -53,13 +54,13 @@ public class CleanupCategoryDetailDialog extends Dialog<ButtonType> {
         if (row.getErrorMessage() != null && !row.getErrorMessage().isBlank()) {
             scanInfo.append("\nNote: ").append(row.getErrorMessage());
         }
-        Label scanLabel = new Label(scanInfo.toString());
+        Label scanLabel = new TrLabel(scanInfo.toString());
         scanLabel.setWrapText(true);
 
         box.getChildren().addAll(riskLabel, descLabel, scanLabel);
 
         if (targets != null && !targets.isEmpty()) {
-            Label targetsHeader = new Label("Target locations (preview only, nothing is deleted from this dialog):");
+            Label targetsHeader = new TrLabel("Target locations (preview only, nothing is deleted from this dialog):");
             targetsHeader.setWrapText(true);
             TextArea targetsArea = new TextArea(String.join("\n", targets));
             targetsArea.setEditable(false);
@@ -67,7 +68,7 @@ public class CleanupCategoryDetailDialog extends Dialog<ButtonType> {
             targetsArea.setWrapText(true);
             box.getChildren().addAll(targetsHeader, targetsArea);
         } else {
-            Label hint = new Label("Tip: run Scan, then use Clean Selected to remove files. "
+            Label hint = new TrLabel("Tip: run Scan, then use Clean Selected to remove files. "
                     + "HIGH-risk categories ask for extra confirmation.");
             hint.setWrapText(true);
             box.getChildren().add(hint);

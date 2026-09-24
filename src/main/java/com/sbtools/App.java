@@ -1,5 +1,7 @@
 package com.sbtools;
 
+import com.sbtools.i18n.AppLanguage;
+import com.sbtools.i18n.Messages;
 import com.sbtools.license.EulaDialog;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
@@ -14,6 +16,7 @@ import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.Separator;
 import javafx.scene.image.Image;
@@ -108,6 +111,7 @@ public class App extends Application {
         logoImage = new Image(getClass().getResourceAsStream("/logo-ico.png"));
 
         appSettings = settings;
+        Messages.setLanguage(AppLanguage.fromCode(settings.language()));
         tabViews = new Node[TAB_NAMES.length];
 
         root = new BorderPane();
@@ -125,7 +129,7 @@ public class App extends Application {
 
         if (!AppPaths.isWindows()) {
             new Alert(Alert.AlertType.WARNING,
-                    AppInfo.DISPLAY_NAME + " is designed for Windows only.").showAndWait();
+                    I18n.f("{0} is designed for Windows only.", AppInfo.DISPLAY_NAME)).showAndWait();
         }
 
         Scene scene = new Scene(root, 960, 600);
@@ -166,10 +170,10 @@ public class App extends Application {
             return;
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                "A new version v" + result.latestVersion() + " is available.\nDo you want to download it?",
+                I18n.f("A new version v{0} is available.\nDo you want to download it?", result.latestVersion()),
                 ButtonType.YES, ButtonType.NO);
-        confirm.setTitle("Update available");
-        confirm.setHeaderText("Update available");
+        confirm.setTitle(I18n.t("Update available"));
+        confirm.setHeaderText(I18n.t("Update available"));
         if (primaryStage != null) {
             confirm.initOwner(primaryStage);
         }
@@ -206,7 +210,7 @@ public class App extends Application {
             });
         }
 
-        helpBtn = UIButton.secondary("\u2753 Help");
+        helpBtn = UIButton.secondary("Help");
         helpBtn.setOnAction(e -> {
             selectTab(helpBtn);
             root.setCenter(helpTab);
@@ -219,7 +223,7 @@ public class App extends Application {
         Label versionLabel = new Label("v" + AppInfo.getVersion());
         versionLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #6272a4; -fx-padding: 4 0 0 0;");
 
-        updateBtn = UIButton.secondary("\u2B50 Check for Updates");
+        updateBtn = UIButton.secondary("Check for updates");
         updateBtn.setOnAction(e -> {
             if (checkingForUpdate) return;
             checkingForUpdate = true;
@@ -232,34 +236,57 @@ public class App extends Application {
                         promptForUpdate(result);
                     } else if (result.isUnknown()) {
                         Alert warn = new Alert(Alert.AlertType.WARNING,
-                                "Could not check for updates.\nPlease check your internet connection and try again.");
-                        warn.setTitle("Update Check Failed");
+                                I18n.t("Could not check for updates.\nPlease check your internet connection and try again."));
+                        warn.setTitle(I18n.t("Update Check Failed"));
                         warn.setHeaderText(null);
                         warn.showAndWait();
                     } else {
                         Alert info = new Alert(Alert.AlertType.INFORMATION,
-                                "Your version is up to date.");
-                        info.setTitle("No Updates");
+                                I18n.t("Your version is up to date."));
+                        info.setTitle(I18n.t("No Updates"));
                         info.setHeaderText(null);
                         info.showAndWait();
                     }
                 } finally {
                     checkingForUpdate = false;
                     updateBtn.setDisable(false);
-                    updateBtn.setText("\u2B50 Check for Updates");
+                    updateBtn.setText("Check for updates");
                 }
             });
         });
+
+        Label languageCaption = new Label();
+        I18n.assign(languageCaption, "Language");
+        ComboBox<AppLanguage> languageBox = new ComboBox<>();
+        languageBox.getItems().addAll(AppLanguage.values());
+        languageBox.setMaxWidth(Double.MAX_VALUE);
+        languageBox.setValue(Messages.language());
+        languageBox.setOnAction(e -> applyLanguage(languageBox.getValue()));
 
         sidebar.getChildren().addAll(
                 new Separator(),
                 helpBtn,
                 updateBtn,
+                languageCaption,
+                languageBox,
                 versionLabel
         );
 
         if (tabButtons.length > 0) {
             selectTab(tabButtons[selectedTab]);
+        }
+    }
+
+    private void applyLanguage(AppLanguage selected) {
+        if (selected == null || selected == Messages.language()) {
+            return;
+        }
+        Messages.setLanguage(selected);
+        try {
+            settingsStore.update(s -> s.toBuilder().language(selected.code()).build());
+            appSettings = settingsStore.load();
+        } catch (IOException ex) {
+            AppLogger.error("Failed to save language", ex);
         }
     }
 
@@ -336,10 +363,10 @@ public class App extends Application {
         }
         if (isBusy()) {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                    "An operation is still running.\nExiting now will cancel it.\n\nDo you want to exit anyway?",
+                    I18n.t("An operation is still running.\nExiting now will cancel it.\n\nDo you want to exit anyway?"),
                     ButtonType.YES, ButtonType.NO);
-            confirm.setTitle("Operation in progress");
-            confirm.setHeaderText("Operation in progress");
+            confirm.setTitle(I18n.t("Operation in progress"));
+            confirm.setHeaderText(I18n.t("Operation in progress"));
             if (primaryStage != null) {
                 confirm.initOwner(primaryStage);
             }

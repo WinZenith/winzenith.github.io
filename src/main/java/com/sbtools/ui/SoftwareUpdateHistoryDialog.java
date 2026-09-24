@@ -38,17 +38,17 @@ public class SoftwareUpdateHistoryDialog {
     public static void show() {
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle(AppInfo.DISPLAY_NAME + " - Update History");
-        dialog.setHeaderText(com.sbtools.util.UiText.label("Software update history"));
+        dialog.setHeaderText(I18n.ui("Software update history"));
 
         SoftwareUpdateHistoryStore store = new SoftwareUpdateHistoryStore();
         List<SoftwareUpdateHistoryEntry> entries = store.listAll();
 
         TextField searchField = new TextField();
-        searchField.setPromptText("Filter by program or ID...");
+        I18n.prompt(searchField, "Filter by program or ID...");
         searchField.setPrefWidth(260);
-        Label countLabel = new Label(entries.size() + " entr(ies)");
+        Label countLabel = new TrLabel(entries.size() + " entr(ies)");
         countLabel.setStyle("-fx-opacity: 0.75;");
-        HBox filterBar = new HBox(10, new Label("Search:"), searchField, countLabel);
+        HBox filterBar = new HBox(10, new TrLabel("Search:"), searchField, countLabel);
         filterBar.setAlignment(Pos.CENTER_LEFT);
 
         FilteredList<SoftwareUpdateHistoryEntry> filtered =
@@ -68,7 +68,7 @@ public class SoftwareUpdateHistoryDialog {
         });
 
         TableView<SoftwareUpdateHistoryEntry> table = new TableView<>(filtered);
-        table.setPlaceholder(new Label("No history yet. Successful and failed installs will appear here."));
+        table.setPlaceholder(new TrLabel("No history yet. Successful and failed installs will appear here."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
         TableColumn<SoftwareUpdateHistoryEntry, String> dateCol = UiColumn.of("Date");
@@ -123,7 +123,7 @@ public class SoftwareUpdateHistoryDialog {
         table.getColumns().addAll(dateCol, nameCol, oldVerCol, newVerCol, sourceCol, statusCol, errorCol);
         VBox.setVgrow(table, Priority.ALWAYS);
 
-        Button clearBtn = new Button("Clear History");
+        Button clearBtn = new TrButton("Clear History");
         clearBtn.setOnAction(e -> {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Clear all update history?");
             confirm.setHeaderText(AppInfo.DISPLAY_NAME);
@@ -134,7 +134,7 @@ public class SoftwareUpdateHistoryDialog {
             }
         });
 
-        Button exportBtn = new Button("Export CSV");
+        Button exportBtn = new TrButton("Export CSV");
         exportBtn.setOnAction(e -> exportCsv(filtered));
 
         HBox bottom = new HBox(8, clearBtn, exportBtn);
@@ -153,7 +153,7 @@ public class SoftwareUpdateHistoryDialog {
     private static void exportCsv(List<SoftwareUpdateHistoryEntry> entries) {
         try {
             FileChooser chooser = new FileChooser();
-            chooser.setTitle("Export update history");
+            chooser.setTitle(I18n.t("Export update history"));
             chooser.setInitialFileName("software-update-history.csv");
             chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV", "*.csv"));
             java.io.File target = chooser.showSaveDialog(null);

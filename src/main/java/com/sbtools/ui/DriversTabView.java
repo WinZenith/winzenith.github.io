@@ -105,16 +105,16 @@ public class DriversTabView extends BorderPane {
     private final Map<DriverRow, DriverActionCell> installCells = new java.util.concurrent.ConcurrentHashMap<>();
     // Retain identity semantics fallback via wrapper if needed – use synchronized view instead:
     // (ConcurrentHashMap does not support null keys, which we never store)
-    private final Label statusLabel = new Label("Click Scan to check for outdated drivers.");
+    private final Label statusLabel = new TrLabel("Click Scan to check for outdated drivers.");
     private final ProgressBar progressBar = new ProgressBar(0);
-    private final Label progressLabel = new Label("0%");
-    private final Button scanButton = new Button("Scan");
-    private final Button stopScanButton = new Button("Stop");
-    private final Button updateAllButton = new Button("Update All");
-    private final Button updateSelectedButton = new Button("Update Selected");
-    private final Button backupButton = new Button("Backup");
-    private final Button stopBackupButton = new Button("Stop Backup");
-    private final Button stopInstallButton = new Button("Stop Install");
+    private final Label progressLabel = new TrLabel("0%");
+    private final Button scanButton = new TrButton("Scan");
+    private final Button stopScanButton = new TrButton("Stop");
+    private final Button updateAllButton = new TrButton("Update All");
+    private final Button updateSelectedButton = new TrButton("Update Selected");
+    private final Button backupButton = new TrButton("Backup");
+    private final Button stopBackupButton = new TrButton("Stop Backup");
+    private final Button stopInstallButton = new TrButton("Stop Install");
     private final TextField searchField = new TextField();
     private TableView<DriverRow> outdatedTable;
     private TableView<DriverRow> upToDateTable;
@@ -245,7 +245,7 @@ public class DriversTabView extends BorderPane {
         stopInstallButton.setManaged(false);
         stopInstallButton.setDisable(true);
 
-        searchField.setPromptText("Search...");
+        I18n.prompt(searchField, "Search...");
         searchField.setPrefWidth(160);
         searchField.textProperty().addListener((obs, oldVal, newVal) -> filterTables());
 
@@ -261,11 +261,11 @@ public class DriversTabView extends BorderPane {
         stopBackupButton.setOnAction(e -> stopBackup());
         stopInstallButton.setOnAction(e -> stopInstall());
 
-        Button ignoredListButton = new Button("Ignored");
+        Button ignoredListButton = new TrButton("Ignored");
         ignoredListButton.setOnAction(e -> showIgnoredListDialog());
-        Button historyButton = new Button("History");
+        Button historyButton = new TrButton("History");
         historyButton.setOnAction(e -> showUpdateHistory());
-        Button detailsButton = new Button("Details");
+        Button detailsButton = new TrButton("Details");
         detailsButton.setOnAction(e -> {
             DriverRow row = getSelectedRow();
             if (row != null) {
@@ -274,16 +274,16 @@ public class DriversTabView extends BorderPane {
                 new Alert(Alert.AlertType.INFORMATION, "Select a driver row first.").showAndWait();
             }
         });
-        scanButton.setTooltip(new Tooltip("Scan for outdated drivers"));
-        stopScanButton.setTooltip(new Tooltip("Stop the current scan"));
-        updateAllButton.setTooltip(new Tooltip("Install all available driver updates"));
-        updateSelectedButton.setTooltip(new Tooltip("Install updates for checked drivers only"));
-        backupButton.setTooltip(new Tooltip("Back up all installed drivers"));
-        stopBackupButton.setTooltip(new Tooltip("Cancel the backup operation"));
-        stopInstallButton.setTooltip(new Tooltip("Cancel the running install / batch update"));
-        ignoredListButton.setTooltip(new Tooltip("Manage ignored/excluded drivers"));
-        historyButton.setTooltip(new Tooltip("View past driver update history"));
-        detailsButton.setTooltip(new Tooltip("View details of the selected driver"));
+        scanButton.setTooltip(I18n.tooltip("Scan for outdated drivers"));
+        stopScanButton.setTooltip(I18n.tooltip("Stop the current scan"));
+        updateAllButton.setTooltip(I18n.tooltip("Install all available driver updates"));
+        updateSelectedButton.setTooltip(I18n.tooltip("Install updates for checked drivers only"));
+        backupButton.setTooltip(I18n.tooltip("Back up all installed drivers"));
+        stopBackupButton.setTooltip(I18n.tooltip("Cancel the backup operation"));
+        stopInstallButton.setTooltip(I18n.tooltip("Cancel the running install / batch update"));
+        ignoredListButton.setTooltip(I18n.tooltip("Manage ignored/excluded drivers"));
+        historyButton.setTooltip(I18n.tooltip("View past driver update history"));
+        detailsButton.setTooltip(I18n.tooltip("View details of the selected driver"));
 
         HBox row1 = new HBox(8, scanButton, stopScanButton, updateAllButton, updateSelectedButton,
                 stopInstallButton, backupButton, stopBackupButton, ignoredListButton, historyButton, detailsButton);
@@ -376,7 +376,7 @@ public class DriversTabView extends BorderPane {
         TableColumn<DriverRow, Boolean> selectCol = UiColumn.of("Select");
         selectCol.setCellValueFactory(c -> c.getValue().selectedProperty());
         selectCol.setCellFactory(col -> new TableCell<DriverRow, Boolean>() {
-            private final CheckBox cb = new CheckBox();
+            private final CheckBox cb = new TrCheckBox();
             {
                 cb.setOnAction(e -> {
                     DriverRow row = getTableRow() != null ? getTableRow().getItem() : null;
@@ -437,19 +437,19 @@ public class DriversTabView extends BorderPane {
                 }
                 DriverRow row = getTableRow() != null ? getTableRow().getItem() : null;
                 if (row != null && row.isRebootPending()) {
-                    Label badge = new Label("REBOOT");
+                    Label badge = new TrLabel("REBOOT");
                     badge.setStyle("-fx-background-color: #bd93f9; -fx-text-fill: white; -fx-padding: 2 6; -fx-background-radius: 4; -fx-font-weight: bold;");
-                    badge.setTooltip(new Tooltip("Driver installed — restart required to complete"));
+                    badge.setTooltip(I18n.tooltip("Driver installed — restart required to complete"));
                     setGraphic(badge);
                     return;
                 }
                 if (row != null && row.isProblematic()) {
-                    Label badge = new Label("ISSUE");
+                    Label badge = new TrLabel("ISSUE");
                     badge.setStyle("-fx-background-color: #ff5555; -fx-text-fill: white; -fx-padding: 2 6; -fx-background-radius: 4; -fx-font-weight: bold;");
                     badge.setTooltip(new Tooltip("Device status: " + row.installed().status()));
                     setGraphic(badge);
                 } else if (item != null) {
-                    Label badge = new Label(item.name());
+                    Label badge = new TrLabel(item.name());
                     badge.setStyle(switch (item) {
                         case CRITICAL -> "-fx-background-color: #ff5555; -fx-text-fill: white; -fx-padding: 2 6; -fx-background-radius: 4; -fx-font-weight: bold;";
                         case IMPORTANT -> "-fx-background-color: #ffb86c; -fx-text-fill: #282a36; -fx-padding: 2 6; -fx-background-radius: 4; -fx-font-weight: bold;";
@@ -478,7 +478,7 @@ public class DriversTabView extends BorderPane {
                 if (empty || item == null) {
                     setGraphic(null);
                 } else {
-                    Label label = new Label(item.getLabel());
+                    Label label = new TrLabel(item.getLabel());
                     label.setStyle(item.getColorStyle());
                     label.setTooltip(new Tooltip(item.details()));
                     setGraphic(label);
@@ -490,7 +490,7 @@ public class DriversTabView extends BorderPane {
         actionCol.setPrefWidth(280);
         actionCol.setCellFactory(col -> new DriverActionCell());
 
-        table.setPlaceholder(new Label("No outdated drivers \u2014 run a scan to check for updates."));
+        table.setPlaceholder(new TrLabel("No outdated drivers \u2014 run a scan to check for updates."));
         table.getColumns().addAll(selectCol, deviceCol, currentCol, availableCol, severityCol, sourceCol, healthCol, actionCol);
         table.setEditable(true);
         selectedListener = (javafx.collections.ListChangeListener<DriverRow>) c -> updateButtonStates();
@@ -513,7 +513,7 @@ public class DriversTabView extends BorderPane {
         private final UIButton stopBtn = UIButton.small("Stop");
         private final ProgressBar downloadProgress = new ProgressBar(0);
         private final UILabel sizeLabel = new UILabel("");
-        private final Label installingLabel = new Label("Installing driver. Please wait…");
+        private final Label installingLabel = new TrLabel("Installing driver. Please wait…");
         private final ProgressIndicator spinner = new ProgressIndicator();
         private final HBox container;
         private State state = State.IDLE;
@@ -687,7 +687,7 @@ public class DriversTabView extends BorderPane {
                 if (empty || item == null) {
                     setGraphic(null);
                 } else {
-                    Label label = new Label(item.getLabel());
+                    Label label = new TrLabel(item.getLabel());
                     label.setStyle(item.getColorStyle());
                     label.setTooltip(new Tooltip(item.details()));
                     setGraphic(label);
@@ -735,7 +735,7 @@ public class DriversTabView extends BorderPane {
             }
         });
 
-        table.setPlaceholder(new Label("No up-to-date drivers detected yet \u2014 run a scan to populate this list."));
+        table.setPlaceholder(new TrLabel("No up-to-date drivers detected yet \u2014 run a scan to populate this list."));
         table.getColumns().addAll(deviceCol, currentCol, healthCol, actionCol);
         return table;
     }
@@ -1169,8 +1169,8 @@ public class DriversTabView extends BorderPane {
 
     private void showIgnoredListDialog() {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle(com.sbtools.util.UiText.label("Ignored drivers"));
-        dialog.setHeaderText(com.sbtools.util.UiText.label("Ignored drivers"));
+        dialog.setTitle(I18n.ui("Ignored drivers"));
+        dialog.setHeaderText(I18n.ui("Ignored drivers"));
 
         AppSettings current = settingsStore.load();
         ObservableList<String> excludedIds = FXCollections.observableArrayList(current.excludedDriverIds());
@@ -1192,7 +1192,7 @@ public class DriversTabView extends BorderPane {
         listView.setItems(excludedIds);
         listView.setPrefHeight(300);
 
-        Button removeBtn = new Button("Remove Selected");
+        Button removeBtn = new TrButton("Remove Selected");
         removeBtn.setOnAction(e -> {
             String selected = listView.getSelectionModel().getSelectedItem();
             if (selected != null) {
@@ -1217,7 +1217,7 @@ public class DriversTabView extends BorderPane {
             }
         });
 
-        VBox layout = new VBox(10, new Label("Excluded drivers:"), listView, removeBtn);
+        VBox layout = new VBox(10, new TrLabel("Excluded drivers:"), listView, removeBtn);
         layout.setPadding(new Insets(10));
         layout.setPrefWidth(500);
 
@@ -1377,8 +1377,8 @@ public class DriversTabView extends BorderPane {
                                 "Driver installed but a restart is required to complete the installation.\n\n"
                                 + "The driver will stay in Outdated Drivers with a REBOOT badge until you restart.\n"
                                 + "Dashboard will also show it as outdated until reboot.");
-                        rebootAlert.setTitle(com.sbtools.util.UiText.label("Restart required"));
-                        rebootAlert.setHeaderText("Restart required");
+                        rebootAlert.setTitle(I18n.ui("Restart required"));
+                        rebootAlert.setHeaderText(I18n.t("Restart required"));
                         rebootAlert.showAndWait();
                     });
                     return;
@@ -1566,8 +1566,8 @@ public class DriversTabView extends BorderPane {
         String body = "Pre-install checks for " + deviceName + ":\n\n• " + String.join("\n• ", warnings)
                 + "\n\nProceed anyway?";
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, body, ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle("Pre-install Warnings");
-        confirm.setHeaderText("Proceed with driver update?");
+        confirm.setTitle(I18n.t("Pre-install Warnings"));
+        confirm.setHeaderText(I18n.t("Proceed with driver update?"));
         return confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
     }
 
@@ -1615,8 +1615,8 @@ public class DriversTabView extends BorderPane {
         body.append("\nProceed with batch update anyway?");
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, body.toString(),
                 ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle("Pre-install Warnings");
-        confirm.setHeaderText("Proceed with batch driver updates?");
+        confirm.setTitle(I18n.t("Pre-install Warnings"));
+        confirm.setHeaderText(I18n.t("Proceed with batch driver updates?"));
         confirm.getDialogPane().setPrefWidth(560);
         return confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
     }
@@ -1632,8 +1632,8 @@ public class DriversTabView extends BorderPane {
         if (vendorPageUrl != null && !vendorPageUrl.isBlank()) {
             Alert alert = new Alert(Alert.AlertType.ERROR, safe + "\n\nYou can try downloading manually from the vendor website.",
                     ButtonType.OK, ButtonType.CANCEL);
-            alert.setTitle(com.sbtools.util.UiText.label("Driver install failed"));
-            alert.setHeaderText("Install failed — manual download available");
+            alert.setTitle(I18n.ui("Driver install failed"));
+            alert.setHeaderText(I18n.t("Install failed — manual download available"));
 
             Button openWebsiteBtn = (Button) alert.getDialogPane().lookupButton(ButtonType.CANCEL);
             openWebsiteBtn.setText("Open Website");
@@ -1667,7 +1667,7 @@ public class DriversTabView extends BorderPane {
                         + "Please use the button below to go to the " + source
                         + " website, download the driver, and install it manually.",
                 ButtonType.OK, ButtonType.CANCEL);
-        alert.setTitle(com.sbtools.util.UiText.label("Manual download required"));
+        alert.setTitle(I18n.ui("Manual download required"));
         alert.setHeaderText(source + " driver update");
 
         Button openWebsiteBtn = (Button) alert.getDialogPane().lookupButton(ButtonType.CANCEL);
@@ -1767,8 +1767,8 @@ public class DriversTabView extends BorderPane {
 
     private void showUpdateHistory() {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle(com.sbtools.util.UiText.label("Update history"));
-        dialog.setHeaderText(com.sbtools.util.UiText.label("Driver update history"));
+        dialog.setTitle(I18n.ui("Update history"));
+        dialog.setHeaderText(I18n.ui("Driver update history"));
 
         ListView<UpdateHistoryStore.UpdateEntry> listView = new ListView<>();
         listView.setCellFactory(lv -> new ListCell<>() {
@@ -1803,7 +1803,7 @@ public class DriversTabView extends BorderPane {
         listView.setPrefHeight(400);
         listView.setPrefWidth(600);
 
-        VBox layout = new VBox(10, new Label("Recent updates:"), listView);
+        VBox layout = new VBox(10, new TrLabel("Recent updates:"), listView);
         layout.setPadding(new Insets(10));
         layout.setPrefWidth(620);
 
@@ -1814,7 +1814,7 @@ public class DriversTabView extends BorderPane {
 
     private void showDriverDetails(DriverRow row) {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle(com.sbtools.util.UiText.label("Driver details"));
+        dialog.setTitle(I18n.ui("Driver details"));
         dialog.setHeaderText(row.installed().friendlyName());
 
         GridPane grid = new GridPane();
@@ -1830,23 +1830,23 @@ public class DriversTabView extends BorderPane {
         addDetailRow(grid, r++, "Driver Key:", row.installed().driverKey());
         // Problem-device highlight: non-OK status (e.g. Code 28) shown in red with guidance.
         if (row.isProblematic()) {
-            Label statusVal = new Label((row.installed().status() == null ? "Unknown" : row.installed().status())
+            Label statusVal = new TrLabel((row.installed().status() == null ? "Unknown" : row.installed().status())
                     + " — device reports a problem (check Device Manager). An update may help, but hardware issues can persist.");
             statusVal.setWrapText(true);
             statusVal.setMaxWidth(400);
             statusVal.setStyle("-fx-text-fill: #ff5555; -fx-font-weight: bold;");
-            grid.add(new Label("Status:"), 0, r);
+            grid.add(new TrLabel("Status:"), 0, r);
             grid.add(statusVal, 1, r);
             r++;
         } else {
             addDetailRow(grid, r++, "Status:", row.installed().status());
         }
         if (row.isRebootPending()) {
-            Label rebootVal = new Label("Yes — restart Windows to complete the installed update.");
+            Label rebootVal = new TrLabel("Yes — restart Windows to complete the installed update.");
             rebootVal.setStyle("-fx-text-fill: #bd93f9; -fx-font-weight: bold;");
             rebootVal.setWrapText(true);
             rebootVal.setMaxWidth(400);
-            grid.add(new Label("Reboot Pending:"), 0, r);
+            grid.add(new TrLabel("Reboot Pending:"), 0, r);
             grid.add(rebootVal, 1, r);
             r++;
         }
@@ -1876,15 +1876,15 @@ public class DriversTabView extends BorderPane {
                 addDetailRow(grid, r++, "Title:", c.title());
             }
             if (c.description() != null && !c.description().isBlank()) {
-                Label descLabel = new Label(c.description());
+                Label descLabel = new TrLabel(c.description());
                 descLabel.setWrapText(true);
                 descLabel.setMaxWidth(400);
-                grid.add(new Label("Description:"), 0, r);
+                grid.add(new TrLabel("Description:"), 0, r);
                 grid.add(descLabel, 1, r);
                 r++;
             }
             if (c.downloadUrl() != null && !c.downloadUrl().isBlank()) {
-                grid.add(new Label("Download:"), 0, r);
+                grid.add(new TrLabel("Download:"), 0, r);
                 Hyperlink dlLink = new Hyperlink(c.downloadUrl());
                 dlLink.setOnAction(e -> {
                     try { java.awt.Desktop.getDesktop().browse(new java.net.URI(c.downloadUrl())); }
@@ -1894,7 +1894,7 @@ public class DriversTabView extends BorderPane {
                 r++;
             }
             if (c.vendorPageUrl() != null && !c.vendorPageUrl().isBlank()) {
-                grid.add(new Label("Vendor Page:"), 0, r);
+                grid.add(new TrLabel("Vendor Page:"), 0, r);
                 Hyperlink vpLink = new Hyperlink(c.vendorPageUrl());
                 vpLink.setOnAction(e -> {
                     try { java.awt.Desktop.getDesktop().browse(new java.net.URI(c.vendorPageUrl())); }
@@ -1907,15 +1907,15 @@ public class DriversTabView extends BorderPane {
 
         DriverHealthService.DriverHealthScore hs = row.getHealthScore();
         if (hs != null) {
-            Label scoreLabel = new Label(hs.score() + "/100 (" + hs.getLabel() + ")");
+            Label scoreLabel = new TrLabel(hs.score() + "/100 (" + hs.getLabel() + ")");
             scoreLabel.setStyle(hs.getColorStyle());
-            grid.add(new Label("Health Score:"), 0, r);
+            grid.add(new TrLabel("Health Score:"), 0, r);
             grid.add(scoreLabel, 1, r);
             r++;
             if (hs.details() != null && !hs.details().isBlank()) {
-                Label detailsLabel = new Label(hs.details());
+                Label detailsLabel = new TrLabel(hs.details());
                 detailsLabel.setStyle("-fx-font-family: monospace; -fx-font-size: 11;");
-                grid.add(new Label("Breakdown:"), 0, r);
+                grid.add(new TrLabel("Breakdown:"), 0, r);
                 grid.add(detailsLabel, 1, r);
                 r++;
             }
@@ -1937,9 +1937,9 @@ public class DriversTabView extends BorderPane {
                     }
                     sb.append("\n");
                 }
-                Label histLabel = new Label(sb.toString().trim());
+                Label histLabel = new TrLabel(sb.toString().trim());
                 histLabel.setStyle("-fx-font-family: monospace; -fx-font-size: 11;");
-                grid.add(new Label("Update History:"), 0, r);
+                grid.add(new TrLabel("Update History:"), 0, r);
                 grid.add(histLabel, 1, r);
             }
         } catch (Exception e) {
@@ -1953,8 +1953,8 @@ public class DriversTabView extends BorderPane {
     }
 
     private static void addDetailRow(GridPane grid, int row, String label, String value) {
-        grid.add(new Label(label), 0, row);
-        Label val = new Label(value != null ? value : "\u2014");
+        grid.add(new TrLabel(label), 0, row);
+        Label val = new TrLabel(value != null ? value : "\u2014");
         val.setWrapText(true);
         val.setMaxWidth(400);
         grid.add(val, 1, row);
@@ -1965,7 +1965,7 @@ public class DriversTabView extends BorderPane {
         if (c == null) return;
 
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle(com.sbtools.util.UiText.label("Driver comparison"));
+        dialog.setTitle(I18n.ui("Driver comparison"));
         dialog.setHeaderText(row.installed().friendlyName());
 
         GridPane grid = new GridPane();
@@ -1973,9 +1973,9 @@ public class DriversTabView extends BorderPane {
         grid.setVgap(8);
         grid.setPadding(new Insets(16));
 
-        Label currentHeader = new Label("Current");
+        Label currentHeader = new TrLabel("Current");
         currentHeader.setStyle("-fx-font-weight: bold; -fx-font-size: 14;");
-        Label availableHeader = new Label("Available");
+        Label availableHeader = new TrLabel("Available");
         availableHeader.setStyle("-fx-font-weight: bold; -fx-font-size: 14; -fx-text-fill: #50fa7b;");
         grid.add(currentHeader, 0, 0);
         grid.add(availableHeader, 1, 0);
@@ -1991,7 +1991,7 @@ public class DriversTabView extends BorderPane {
 
         int r = 4;
         if (c.severity() != null) {
-            Label sevLabel = new Label(c.severity().name());
+            Label sevLabel = new TrLabel(c.severity().name());
             sevLabel.setStyle(switch (c.severity()) {
                 case CRITICAL -> "-fx-text-fill: #ff5555; -fx-font-weight: bold;";
                 case IMPORTANT -> "-fx-text-fill: #ffb86c; -fx-font-weight: bold;";
@@ -1999,31 +1999,31 @@ public class DriversTabView extends BorderPane {
                 case OPTIONAL -> "-fx-text-fill: #6272a4;";
                 default -> "";
             });
-            grid.add(new Label("Severity:"), 0, r);
+            grid.add(new TrLabel("Severity:"), 0, r);
             grid.add(sevLabel, 1, r);
             r++;
         }
 
         if (c.description() != null && !c.description().isBlank()) {
-            Label descLabel = new Label(c.description());
+            Label descLabel = new TrLabel(c.description());
             descLabel.setWrapText(true);
             descLabel.setMaxWidth(400);
-            grid.add(new Label("Description:"), 0, r);
+            grid.add(new TrLabel("Description:"), 0, r);
             grid.add(descLabel, 1, r);
             r++;
         }
 
         DriverHealthService.DriverHealthScore hs = row.getHealthScore();
         if (hs != null) {
-            Label scoreLabel = new Label(hs.score() + "/100 \u2014 " + hs.getLabel());
+            Label scoreLabel = new TrLabel(hs.score() + "/100 \u2014 " + hs.getLabel());
             scoreLabel.setStyle(hs.getColorStyle());
-            grid.add(new Label("Health Score:"), 0, r);
+            grid.add(new TrLabel("Health Score:"), 0, r);
             grid.add(scoreLabel, 1, r);
             r++;
         }
 
         if (c.downloadUrl() != null && !c.downloadUrl().isBlank()) {
-            grid.add(new Label("Download:"), 0, r);
+            grid.add(new TrLabel("Download:"), 0, r);
             Hyperlink dlLink = new Hyperlink(c.downloadUrl());
             dlLink.setOnAction(e -> {
                 try { java.awt.Desktop.getDesktop().browse(new java.net.URI(c.downloadUrl())); }
@@ -2034,7 +2034,7 @@ public class DriversTabView extends BorderPane {
         }
 
         if (c.vendorPageUrl() != null && !c.vendorPageUrl().isBlank()) {
-            grid.add(new Label("Vendor Page:"), 0, r);
+            grid.add(new TrLabel("Vendor Page:"), 0, r);
             Hyperlink vpLink = new Hyperlink(c.vendorPageUrl());
             vpLink.setOnAction(e -> {
                 try { java.awt.Desktop.getDesktop().browse(new java.net.URI(c.vendorPageUrl())); }
@@ -2050,17 +2050,17 @@ public class DriversTabView extends BorderPane {
     }
 
     private static void addComparisonRow(GridPane grid, int row, String label, String current, String available) {
-        Label curLabel = new Label(current != null ? current : "\u2014");
+        Label curLabel = new TrLabel(current != null ? current : "\u2014");
         curLabel.setWrapText(true);
         curLabel.setMaxWidth(200);
-        Label arrowLabel = new Label("\u2192");
-        Label availLabel = new Label(available != null ? available : "\u2014");
+        Label arrowLabel = new TrLabel("\u2192");
+        Label availLabel = new TrLabel(available != null ? available : "\u2014");
         availLabel.setWrapText(true);
         availLabel.setMaxWidth(200);
         availLabel.setStyle("-fx-text-fill: #50fa7b;");
         HBox rowBox = new HBox(12, curLabel, arrowLabel, availLabel);
         rowBox.setAlignment(Pos.CENTER_LEFT);
-        grid.add(new Label(label), 0, row);
+        grid.add(new TrLabel(label), 0, row);
         grid.add(rowBox, 1, row);
     }
 
@@ -2079,8 +2079,8 @@ public class DriversTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Update all " + count + " outdated driver(s)? This may take several minutes.",
                 ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle(com.sbtools.util.UiText.label("Batch update"));
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Update all drivers"));
+        confirm.setTitle(I18n.ui("Batch update"));
+        confirm.setHeaderText(I18n.ui("Update all drivers"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             return;
         }
@@ -2101,8 +2101,8 @@ public class DriversTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Update " + selected.size() + " selected driver(s)? This may take several minutes.",
                 ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle(com.sbtools.util.UiText.label("Batch update"));
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Update selected drivers"));
+        confirm.setTitle(I18n.ui("Batch update"));
+        confirm.setHeaderText(I18n.ui("Update selected drivers"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             return;
         }
@@ -2519,22 +2519,22 @@ public class DriversTabView extends BorderPane {
                 try { catalog.clearWindowsUpdateCache(); } catch (Exception ex) { AppLogger.warning("Cache clear failed: " + ex.getMessage()); }
                 // Detailed dialog with per-driver failures
                 Dialog<ButtonType> dlg = new Dialog<>();
-                dlg.setTitle(com.sbtools.util.UiText.label("Batch update result"));
-                dlg.setHeaderText("Batch update complete");
+                dlg.setTitle(I18n.ui("Batch update result"));
+                dlg.setHeaderText(I18n.t("Batch update complete"));
                 VBox box = new VBox(8);
                 box.setPadding(new Insets(12));
-                Label summaryLabel = new Label(s + " verified, " + u + " not verified, " + f + " failed, " + k + " skipped"
+                Label summaryLabel = new TrLabel(s + " verified, " + u + " not verified, " + f + " failed, " + k + " skipped"
                         + (r > 0 ? ", " + r + " reboot pending" : ""));
                 summaryLabel.setWrapText(true);
                 box.getChildren().add(summaryLabel);
                 if (r > 0) {
-                    Label rebootLabel = new Label("⚠ " + r + " driver(s) require a restart to complete. Dashboard will continue to show them as outdated until you reboot. Windows applet may already show them as done.");
+                    Label rebootLabel = new TrLabel("⚠ " + r + " driver(s) require a restart to complete. Dashboard will continue to show them as outdated until you reboot. Windows applet may already show them as done.");
                     rebootLabel.setWrapText(true);
                     rebootLabel.setStyle("-fx-text-fill: #ffb86c; -fx-font-weight: bold;");
                     box.getChildren().add(rebootLabel);
                 }
                 if (!failures.isEmpty()) {
-                    Label failHeader = new Label("Failures / skipped:");
+                    Label failHeader = new TrLabel("Failures / skipped:");
                     failHeader.setStyle("-fx-font-weight: bold;");
                     box.getChildren().add(failHeader);
                     // Cap per-row text: uncapped installer/pnputil/WU output can
@@ -2546,7 +2546,7 @@ public class DriversTabView extends BorderPane {
                     lv.setPrefHeight(Math.min(200, failures.size() * 24 + 10));
                     box.getChildren().add(lv);
                 }
-                Label hint = new Label("Tip: Dashboard next scan will refresh from Windows Update (cache cleared).");
+                Label hint = new TrLabel("Tip: Dashboard next scan will refresh from Windows Update (cache cleared).");
                 hint.setWrapText(true);
                 hint.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11;");
                 box.getChildren().add(hint);
@@ -2564,8 +2564,8 @@ public class DriversTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Back up all currently installed drivers? This may take a few minutes.",
                 ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle(com.sbtools.util.UiText.label("Driver backup"));
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Backup all drivers"));
+        confirm.setTitle(I18n.ui("Driver backup"));
+        confirm.setHeaderText(I18n.ui("Backup all drivers"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             return;
         }

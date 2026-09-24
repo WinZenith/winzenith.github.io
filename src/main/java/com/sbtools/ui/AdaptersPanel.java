@@ -34,7 +34,7 @@ class AdaptersPanel extends VBox {
     private final javafx.collections.transformation.FilteredList<NetworkAdapterRow> filteredRows =
             new javafx.collections.transformation.FilteredList<>(adapterRows, r -> true);
     private final TableView<NetworkAdapterRow> adapterTable = new TableView<>(filteredRows);
-    private final Label statusLabel = new Label("Ready.");
+    private final Label statusLabel = new TrLabel("Ready.");
     private final javafx.scene.control.TextField filterField = new javafx.scene.control.TextField();
     private volatile Future<?> currentTask;
     private final java.util.concurrent.atomic.AtomicBoolean isLoading = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -154,7 +154,7 @@ class AdaptersPanel extends VBox {
         disableBtn.setDisable(true);
         renewIpBtn.setDisable(true);
 
-        filterField.setPromptText("Filter adapters…");
+        I18n.prompt(filterField, "Filter adapters…");
         filterField.setPrefWidth(160);
         filterField.textProperty().addListener((obs, o, n) -> applyFilter());
 
@@ -263,7 +263,7 @@ class AdaptersPanel extends VBox {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Disable adapter '" + selected.getName() + "'?\n\nYou may lose network connectivity until it is re-enabled.",
                     javafx.scene.control.ButtonType.YES, javafx.scene.control.ButtonType.NO);
-            confirm.setTitle(com.sbtools.util.UiText.label("Confirm disable"));
+            confirm.setTitle(I18n.ui("Confirm disable"));
             confirm.setHeaderText(null);
             if (confirm.showAndWait().orElse(javafx.scene.control.ButtonType.NO) != javafx.scene.control.ButtonType.YES) return;
         }
@@ -347,7 +347,7 @@ class AdaptersPanel extends VBox {
                 "Renew DHCP lease for '" + selected.getName() + "'?\n\n"
                         + "The current address is kept until a new lease is obtained.",
                 ButtonType.YES, ButtonType.NO);
-        confirm.setTitle(com.sbtools.util.UiText.label("Confirm renew"));
+        confirm.setTitle(I18n.ui("Confirm renew"));
         confirm.setHeaderText(null);
         if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
 

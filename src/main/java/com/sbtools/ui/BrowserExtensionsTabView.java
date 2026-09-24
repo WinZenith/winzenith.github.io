@@ -113,11 +113,11 @@ public class BrowserExtensionsTabView extends BorderPane {
             FXCollections.observableArrayList(FILTER_STATUS));
     private final ComboBox<String> profileFilter = new ComboBox<>(
             FXCollections.observableArrayList(List.of("All")));
-    private final CheckBox autoScanCheck = new CheckBox("Auto-scan on open");
+    private final CheckBox autoScanCheck = new TrCheckBox("Auto-scan on open");
     private final TextField searchField = new TextField();
     private final ProgressBar progressBar = new ProgressBar(0);
-    private final Label statusLabel = new Label("Click Scan to list browser extensions.");
-    private final Label selectionLabel = new Label("");
+    private final Label statusLabel = new TrLabel("Click Scan to list browser extensions.");
+    private final Label selectionLabel = new TrLabel("");
 
     public BrowserExtensionsTabView(BooleanSupplier adminCheck) {
         this(null, adminCheck, new SettingsStore());
@@ -131,6 +131,10 @@ public class BrowserExtensionsTabView extends BorderPane {
         this.globalBusy = globalBusy;
         this.adminCheck = adminCheck;
         this.settingsStore = settingsStore;
+
+        I18n.combo(browserFilter);
+        I18n.combo(statusFilter);
+        I18n.combo(profileFilter);
 
         progressBar.setVisible(false);
         progressBar.setPrefWidth(200);
@@ -151,19 +155,19 @@ public class BrowserExtensionsTabView extends BorderPane {
         exportButton.getStyleClass().add("button-outlined");
         restoreBackupButton.getStyleClass().add("button-outlined");
 
-        searchField.setPromptText("Search name, description, ID, permissions...");
+        I18n.prompt(searchField, "Search name, description, ID, permissions...");
         searchField.setPrefWidth(220);
         searchField.getStyleClass().add("sysinfo-search");
         searchField.textProperty().addListener((obs, oldVal, newVal) -> applyFilters());
 
-        Tooltip.install(scanButton, new Tooltip("Scan all known browsers (parallel, cancellable)"));
-        Tooltip.install(rescanButton, new Tooltip("Re-scan only the browser selected in the Filter dropdown"));
-        Tooltip.install(cancelButton, new Tooltip("Cancel the running scan or toggle operation"));
-        Tooltip.install(exportButton, new Tooltip("Export the current (filtered) list to CSV or JSON"));
-        Tooltip.install(restoreBackupButton, new Tooltip("Restore a Preferences/extensions.json backup created during a toggle"));
-        Tooltip.install(statusFilter, new Tooltip("Filter by enabled / disabled / ignored state"));
-        Tooltip.install(profileFilter, new Tooltip("Filter by browser profile (e.g. Default, Profile 1)"));
-        Tooltip.install(autoScanCheck, new Tooltip("Automatically scan when this tab is opened"));
+        Tooltip.install(scanButton, I18n.tooltip("Scan all known browsers (parallel, cancellable)"));
+        Tooltip.install(rescanButton, I18n.tooltip("Re-scan only the browser selected in the Filter dropdown"));
+        Tooltip.install(cancelButton, I18n.tooltip("Cancel the running scan or toggle operation"));
+        Tooltip.install(exportButton, I18n.tooltip("Export the current (filtered) list to CSV or JSON"));
+        Tooltip.install(restoreBackupButton, I18n.tooltip("Restore a Preferences/extensions.json backup created during a toggle"));
+        Tooltip.install(statusFilter, I18n.tooltip("Filter by enabled / disabled / ignored state"));
+        Tooltip.install(profileFilter, I18n.tooltip("Filter by browser profile (e.g. Default, Profile 1)"));
+        Tooltip.install(autoScanCheck, I18n.tooltip("Automatically scan when this tab is opened"));
 
         restoreInitialFilters();
 
@@ -186,9 +190,9 @@ public class BrowserExtensionsTabView extends BorderPane {
         HBox buttonRow = new HBox(12, scanButton, rescanButton, cancelButton, enableSelectedBtn, disableSelectedBtn, selectAllBtn, deselectAllBtn, manageIgnoredBtn, exportButton, restoreBackupButton);
         buttonRow.setAlignment(Pos.CENTER_LEFT);
 
-        HBox filterRow = new HBox(12, new Label("Browser:"), browserFilter,
-                new Label("Status:"), statusFilter,
-                new Label("Profile:"), profileFilter,
+        HBox filterRow = new HBox(12, new TrLabel("Browser:"), browserFilter,
+                new TrLabel("Status:"), statusFilter,
+                new TrLabel("Profile:"), profileFilter,
                 searchField, autoScanCheck);
         filterRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -458,7 +462,7 @@ public class BrowserExtensionsTabView extends BorderPane {
         checkCol.setSortable(false);
         checkCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue()));
         checkCol.setCellFactory(col -> new TableCell<>() {
-            private final CheckBox checkBox = new CheckBox();
+            private final CheckBox checkBox = new TrCheckBox();
             private BrowserExtensionRow previousItem;
             {
                 checkBox.setStyle("-fx-text-fill: #f8f8f2;");
@@ -573,7 +577,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                     } else if (row != null && row.isOrphaned()) {
                         setText("Orphaned");
                         setStyle("-fx-text-fill: #6272a4; -fx-font-weight: bold;");
-                        setTooltip(new Tooltip("Not present in Preferences — leftover folder, cannot be toggled."));
+                        setTooltip(I18n.tooltip("Not present in Preferences — leftover folder, cannot be toggled."));
                     } else if (row != null && row.isManaged()) {
                         boolean isEnabled = "true".equals(item);
                         setText(isEnabled ? "Managed (On)" : "Managed (Off)");
@@ -584,7 +588,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                                         : src.equals("system") ? "the browser (system add-on)"
                                         : src.equals("blocked") ? "the browser (blocklist or incompatibility)"
                                         : "default installation") + " — cannot be toggled here.")
-                                : new Tooltip("Managed by the browser or policy — cannot be toggled here."));
+                                : I18n.tooltip("Managed by the browser or policy — cannot be toggled here."));
                     } else {
                         boolean isEnabled = "true".equals(item);
                         setText(isEnabled ? "Enabled" : "Disabled");
@@ -684,19 +688,19 @@ public class BrowserExtensionsTabView extends BorderPane {
 
             ContextMenu ctxMenu = new ContextMenu();
 
-            MenuItem openFolderItem = new MenuItem("Open Extension Folder");
+            MenuItem openFolderItem = new TrMenuItem("Open Extension Folder");
             openFolderItem.setOnAction(e -> {
                 BrowserExtensionRow r = row.getItem();
                 if (r != null) openContainingFolder(r);
             });
 
-            MenuItem copyIdItem = new MenuItem("Copy Extension ID");
+            MenuItem copyIdItem = new TrMenuItem("Copy Extension ID");
             copyIdItem.setOnAction(e -> {
                 BrowserExtensionRow r = row.getItem();
                 if (r != null) copyToClipboard(r.getExtensionId());
             });
 
-            MenuItem copyPathItem = new MenuItem("Copy Profile Path");
+            MenuItem copyPathItem = new TrMenuItem("Copy Profile Path");
             copyPathItem.setOnAction(e -> {
                 BrowserExtensionRow r = row.getItem();
                 if (r != null) {
@@ -709,7 +713,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                 }
             });
 
-            MenuItem toggleIgnoreItem = new MenuItem();
+            MenuItem toggleIgnoreItem = new TrMenuItem();
             toggleIgnoreItem.textProperty().bind(
                     Bindings.when(row.emptyProperty().or(
                             javafx.beans.binding.Bindings.selectBoolean(row.itemProperty(), "ignored")))
@@ -730,13 +734,13 @@ public class BrowserExtensionsTabView extends BorderPane {
                 }
             });
 
-            MenuItem detailsItem = new MenuItem("View Details");
+            MenuItem detailsItem = new TrMenuItem("View Details");
             detailsItem.setOnAction(e -> {
                 BrowserExtensionRow r = row.getItem();
                 if (r != null) showDetailsDialog(r);
             });
 
-            MenuItem copyStoreItem = new MenuItem("Copy Store URL");
+            MenuItem copyStoreItem = new TrMenuItem("Copy Store URL");
             copyStoreItem.setOnAction(e -> {
                 BrowserExtensionRow r = row.getItem();
                 if (r != null) {
@@ -750,7 +754,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                 }
             });
 
-            MenuItem openStoreItem = new MenuItem("Open Store Page");
+            MenuItem openStoreItem = new TrMenuItem("Open Store Page");
             openStoreItem.setOnAction(e -> {
                 BrowserExtensionRow r = row.getItem();
                 if (r != null) openStorePage(r);
@@ -940,7 +944,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             return;
         }
         FileChooser fc = new FileChooser();
-        fc.setTitle(com.sbtools.util.UiText.label("Export browser extensions"));
+        fc.setTitle(I18n.ui("Export browser extensions"));
         fc.setInitialFileName("browser-extensions");
         FileChooser.ExtensionFilter csv = new FileChooser.ExtensionFilter("CSV (*.csv)", "*.csv");
         FileChooser.ExtensionFilter json = new FileChooser.ExtensionFilter("JSON (*.json)", "*.json");
@@ -1047,7 +1051,7 @@ public class BrowserExtensionsTabView extends BorderPane {
         if (store != null && !store.isBlank()) {
             row = addDetailRow(grid, row, "Store URL:", store);
         }
-        Label descTitle = new Label("Description:");
+        Label descTitle = new TrLabel("Description:");
         descTitle.setStyle("-fx-font-weight: bold;");
         TextArea desc = new TextArea(nvl(r.getDescription()));
         desc.setEditable(false);
@@ -1056,7 +1060,7 @@ public class BrowserExtensionsTabView extends BorderPane {
         grid.add(descTitle, 0, row);
         grid.add(desc, 1, row);
         row++;
-        Label permTitle = new Label("Permissions:");
+        Label permTitle = new TrLabel("Permissions:");
         permTitle.setStyle("-fx-font-weight: bold;");
         TextArea perms = new TextArea(nvl(r.getPermissions()));
         perms.setEditable(false);
@@ -1070,9 +1074,9 @@ public class BrowserExtensionsTabView extends BorderPane {
     }
 
     private static int addDetailRow(GridPane grid, int row, String label, String value) {
-        Label k = new Label(label);
+        Label k = new TrLabel(label);
         k.setStyle("-fx-font-weight: bold;");
-        Label v = new Label(value != null && !value.isBlank() ? value : "—");
+        Label v = new TrLabel(value != null && !value.isBlank() ? value : "—");
         v.setWrapText(true);
         v.setMaxWidth(440);
         grid.add(k, 0, row);
@@ -1139,7 +1143,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                 new javafx.scene.control.ChoiceDialog<>(backups.get(0), backups);
         choice.setTitle(AppInfo.DISPLAY_NAME);
         choice.setHeaderText("Restore profile backup (" + backups.size() + " found)");
-        choice.setContentText("Close all browsers first. Files from the same snapshot are restored together:");
+        choice.setContentText(I18n.t("Close all browsers first. Files from the same snapshot are restored together:"));
         java.util.Optional<java.nio.file.Path> picked = choice.showAndWait();
         if (picked.isEmpty()) {
             setBusy(false);
@@ -1195,7 +1199,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                                 + "\n\nClose ALL browsers now, then click OK to restore, or Cancel to abort.");
                         Alert unreliable = new Alert(Alert.AlertType.WARNING);
                         unreliable.setTitle(AppInfo.DISPLAY_NAME);
-                        unreliable.setHeaderText("Could not verify browsers are closed");
+                        unreliable.setHeaderText(I18n.t("Could not verify browsers are closed"));
                         unreliable.setContentText(why.toString());
                         unreliable.getButtonTypes().setAll(ButtonType.OK, ButtonType.CANCEL);
                         if (unreliable.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
@@ -1241,7 +1245,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                     "Restore\n" + sel.getFileName()
                             + "\nand any Preferences / Secure Preferences file saved with it?\n\nClose all browsers first. This overwrites those live files.",
                     ButtonType.OK, ButtonType.CANCEL);
-            confirm.setHeaderText(com.sbtools.util.UiText.label("Restore backup"));
+            confirm.setHeaderText(I18n.ui("Restore backup"));
             if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
                 setBusy(false);
                 return;
@@ -1431,7 +1435,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                     appendRunningProbeWarnings(why, probeOkSnapshot, unknownSnapshot, unverifiedSnapshot);
                     Alert unreliable = new Alert(Alert.AlertType.WARNING);
                     unreliable.setTitle(AppInfo.DISPLAY_NAME);
-                    unreliable.setHeaderText("Could not verify browsers are closed");
+                    unreliable.setHeaderText(I18n.t("Could not verify browsers are closed"));
                     unreliable.setContentText(why
                             + "\nToggling while a browser runs is silently reverted on browser exit."
                             + "\n\nClose ALL browsers now, then click OK to continue, or Cancel to abort.");
@@ -1819,7 +1823,7 @@ public class BrowserExtensionsTabView extends BorderPane {
         Alert dialog = new Alert(Alert.AlertType.CONFIRMATION);
         dialog.setTitle(AppInfo.DISPLAY_NAME);
         int total = ignoredRows.size() + unmatched.size();
-        dialog.setHeaderText(com.sbtools.util.UiText.label("Ignored extensions (" + total + ")"));
+        dialog.setHeaderText(I18n.ui("Ignored extensions (" + total + ")"));
 
         StringBuilder msg = new StringBuilder();
         for (BrowserExtensionRow r : ignoredRows) {

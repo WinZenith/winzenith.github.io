@@ -39,6 +39,10 @@
     -fx-font-size: 13px;
 }
 
+.sidebar > .combo-box {
+    -fx-max-width: Infinity;
+}
+
 /* Active sidebar button - neon green glow */
 .sidebar > .button.accent {
     -fx-background-color: #50fa7b;

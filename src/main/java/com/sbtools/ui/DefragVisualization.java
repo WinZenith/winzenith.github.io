@@ -232,13 +232,13 @@ public class DefragVisualization {
     }
 
     public static HBox createLegendItem(Color color, String label) {
-        Label colorBox = new Label("  ");
+        Label colorBox = new TrLabel("  ");
         colorBox.setStyle(String.format("-fx-background-color: #%02x%02x%02x; "
                 + "-fx-min-width: 12px; -fx-min-height: 12px; "
                 + "-fx-max-width: 12px; -fx-max-height: 12px; "
                 + "-fx-border-color: #6272a4; -fx-border-width: 1;",
                 (int)(color.getRed()*255), (int)(color.getGreen()*255), (int)(color.getBlue()*255)));
-        Label text = new Label(label);
+        Label text = new TrLabel(label);
         text.setStyle("-fx-text-fill: #f8f8f2; -fx-font-size: 11px;");
         HBox item = new HBox(4, colorBox, text);
         item.setAlignment(Pos.CENTER);

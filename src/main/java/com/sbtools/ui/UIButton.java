@@ -1,6 +1,5 @@
 package com.sbtools.ui;
 
-import com.sbtools.util.UiText;
 import javafx.scene.control.Button;
 
 public class UIButton extends Button {
@@ -18,9 +17,11 @@ public class UIButton extends Button {
     }
 
     public UIButton(String text, ButtonStyle style) {
-        super(UiText.label(text));
+        super();
+        I18n.install(this, true);
         getStyleClass().add("button");
         applyStyle(style);
+        setText(text);
     }
 
     private void applyStyle(ButtonStyle style) {

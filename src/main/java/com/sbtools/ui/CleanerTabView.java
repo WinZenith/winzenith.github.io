@@ -6,6 +6,7 @@ import com.sbtools.cleaner.CleanupRow;
 import com.sbtools.cleaner.CleanupService;
 import com.sbtools.cleaner.CleanerHistoryStore;
 import com.sbtools.cleaner.CleanerPresets;
+import com.sbtools.i18n.Messages;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
 import com.sbtools.util.AppLogger;
@@ -74,27 +75,38 @@ import java.util.concurrent.atomic.AtomicInteger;
         this.adminCheck = adminCheck;
         this.settingsStore = settingsStore;
         setCenter(buildSystemCleanupContent());
+        Messages.addListener(this::applyLanguage);
+    }
+
+    private void applyLanguage() {
+        for (CleanupRow row : sessionRows) {
+            row.applyLanguage();
+        }
+        if (table != null) {
+            table.refresh();
+        }
     }
 
     private VBox buildSystemCleanupContent() {
-        statusLabel = new Label("Click Scan to analyze cleanup opportunities.");
+        statusLabel = new TrLabel("Click Scan to analyze cleanup opportunities.");
         progressBar = new ProgressBar(0);
-        scanButton = new Button("Scan");
-        selectAllButton = new Button("Select all");
-        deselectAllButton = new Button("Deselect all");
-        presetButton = new Button("Presets...");
-        cleanButton = new Button("Clean selected");
-        historyButton = new Button("History");
-        ignoredButton = new Button("Ignored...");
-        cancelButton = new Button("Cancel");
-        exportButton = new Button("Export...");
-        refreshButton = new Button("Refresh selected");
+        scanButton = new TrButton("Scan");
+        selectAllButton = new TrButton("Select all");
+        deselectAllButton = new TrButton("Deselect all");
+        presetButton = new TrButton("Presets...");
+        cleanButton = new TrButton("Clean selected");
+        historyButton = new TrButton("History");
+        ignoredButton = new TrButton("Ignored...");
+        cancelButton = new TrButton("Cancel");
+        exportButton = new TrButton("Export...");
+        refreshButton = new TrButton("Refresh selected");
         searchField = new javafx.scene.control.TextField();
-        searchField.setPromptText("Filter categories...");
+        I18n.prompt(searchField, "Filter categories...");
         searchField.setPrefWidth(160);
         riskFilter = new javafx.scene.control.ComboBox<>();
         riskFilter.getItems().addAll("All risks", "Low", "Medium", "High");
         riskFilter.setValue("All risks");
+        I18n.combo(riskFilter);
         riskFilter.setPrefWidth(110);
         table = new TableView<>();
         filteredRows = new javafx.collections.transformation.FilteredList<>(sessionRows, r -> true);
@@ -102,7 +114,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         searchField.textProperty().addListener((obs, o, n) -> applyTableFilter());
         riskFilter.valueProperty().addListener((obs, o, n) -> applyTableFilter());
 
-        summaryLabel = new Label();
+        summaryLabel = new TrLabel();
         summaryLabel.setStyle("-fx-text-fill: #50fa7b; -fx-font-size: 13px; -fx-padding: 4 0 0 0;");
         summaryLabel.setVisible(false);
 
@@ -148,7 +160,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         top.setPadding(new Insets(12, 16, 12, 16));
         top.getStyleClass().add("toolbar");
 
-        HBox filterRow = new HBox(8, new Label("Search:"), searchField, new Label("Risk:"), riskFilter);
+        HBox filterRow = new HBox(8, new TrLabel("Search:"), searchField, new TrLabel("Risk:"), riskFilter);
         filterRow.setAlignment(Pos.CENTER_LEFT);
         filterRow.setPadding(new Insets(0, 16, 0, 16));
 
@@ -210,8 +222,14 @@ import java.util.concurrent.atomic.AtomicInteger;
     private static boolean rowMatchesFilter(CleanupRow row, String q, String risk) {
         if (row == null) return false;
         if (!"All risks".equals(risk)) {
-            String rowRisk = row.getCategory().getRiskLevel().getDisplayName();
-            if (!risk.equalsIgnoreCase(rowRisk)) return false;
+            CleanupCategory.RiskLevel level = row.getCategory().getRiskLevel();
+            boolean match = switch (risk) {
+                case "Low" -> level == CleanupCategory.RiskLevel.LOW;
+                case "Medium" -> level == CleanupCategory.RiskLevel.MEDIUM;
+                case "High" -> level == CleanupCategory.RiskLevel.HIGH;
+                default -> true;
+            };
+            if (!match) return false;
         }
         if (!q.isEmpty()) {
             String hay = (row.getCategory().getDisplayName() + " "
@@ -229,7 +247,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     private void exportScanCsv() {
         if (sessionRows.isEmpty()) return;
         javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
-        chooser.setTitle("Export cleanup scan");
+        chooser.setTitle(I18n.t("Export cleanup scan"));
         chooser.setInitialFileName("cleanup-scan.csv");
         chooser.getExtensionFilters().add(new javafx.stage.FileChooser.ExtensionFilter("CSV", "*.csv"));
         java.io.File file = chooser.showSaveDialog(table.getScene() != null ? table.getScene().getWindow() : null);
@@ -259,7 +277,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
     /** Long category lists must scroll so dialog buttons stay on screen. */
     private static void applyScrollableAlertBody(Alert alert, String message) {
-        Label msgLabel = new Label(message);
+        Label msgLabel = new TrLabel(message);
         msgLabel.setWrapText(true);
         msgLabel.setMaxWidth(380);
         ScrollPane scrollPane = new ScrollPane(msgLabel);
@@ -278,7 +296,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
     private void saveCleanReport(String reportText) {
         javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
-        chooser.setTitle("Save cleanup report");
+        chooser.setTitle(I18n.t("Save cleanup report"));
         chooser.setInitialFileName("cleanup-report.txt");
         chooser.getExtensionFilters().addAll(
                 new javafx.stage.FileChooser.ExtensionFilter("Text", "*.txt"),
@@ -360,7 +378,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         }
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle(com.sbtools.util.AppInfo.DISPLAY_NAME);
-        dialog.setHeaderText("Ignored categories — excluded from Scan until restored.");
+        dialog.setHeaderText(I18n.t("Ignored categories — excluded from Scan until restored."));
         ListView<String> list = new ListView<>(javafx.collections.FXCollections.observableArrayList(ignored));
         list.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
         list.setPrefHeight(220);
@@ -449,7 +467,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         checkCol.setSortable(false);
         checkCol.setCellValueFactory(c -> new javafx.beans.property.SimpleObjectProperty<>(c.getValue()));
         checkCol.setCellFactory(col -> new TableCell<>() {
-            private final CheckBox checkBox = new CheckBox();
+            private final CheckBox checkBox = new TrCheckBox();
             private CleanupRow previousItem;
             private javafx.beans.value.ChangeListener<Boolean> selectionListener;
             {
@@ -534,13 +552,14 @@ import java.util.concurrent.atomic.AtomicInteger;
                     setStyle("");
                     setTooltip(null);
                 } else {
-                    setText(item);
                     CleanupRow row = getTableRow() != null ? (CleanupRow) getTableRow().getItem() : null;
-                    String tip = row != null ? row.getCategory().getRiskLevel().getDescription() : item;
+                    CleanupCategory.RiskLevel risk = row != null ? row.getCategory().getRiskLevel() : null;
+                    setText(risk == null ? item : risk.getDisplayName());
+                    String tip = risk != null ? risk.getDescription() : item;
                     setTooltip(new Tooltip(tip));
-                    if ("High".equals(item)) {
+                    if (risk == CleanupCategory.RiskLevel.HIGH) {
                         setStyle("-fx-text-fill: #ff5555; -fx-font-weight: bold;");
-                    } else if ("Medium".equals(item)) {
+                    } else if (risk == CleanupCategory.RiskLevel.MEDIUM) {
                         setStyle("-fx-text-fill: #f1fa8c;");
                     } else {
                         setStyle("-fx-text-fill: #50fa7b;");
@@ -577,17 +596,17 @@ import java.util.concurrent.atomic.AtomicInteger;
                 }
             });
             ContextMenu ctx = new ContextMenu();
-            MenuItem detailsItem = new MenuItem("View details...");
+            MenuItem detailsItem = new TrMenuItem("View details...");
             detailsItem.setOnAction(e -> {
                 if (!row.isEmpty()) {
                     new com.sbtools.cleaner.CleanupCategoryDetailDialog(row.getItem()).showAndWait();
                 }
             });
-            MenuItem ignoreItem = new MenuItem("Ignore category in future scans");
+            MenuItem ignoreItem = new TrMenuItem("Ignore category in future scans");
             ignoreItem.setOnAction(e -> {
                 if (!row.isEmpty()) ignoreCategory(row.getItem());
             });
-            MenuItem copyItem = new MenuItem("Copy row");
+            MenuItem copyItem = new TrMenuItem("Copy row");
             copyItem.setOnAction(e -> {
                 if (!row.isEmpty()) {
                     CleanupRow r = row.getItem();
@@ -610,7 +629,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     private void showPresetMenu() {
         ContextMenu menu = new ContextMenu();
         for (CleanerPresets preset : CleanerPresets.values()) {
-            MenuItem item = new MenuItem(preset.getDisplayName() + " — " + preset.getDescription());
+            MenuItem item = new TrMenuItem(preset.getDisplayName() + " — " + preset.getDescription());
             item.setStyle("-fx-font-size: 12px;");
             item.setOnAction(e -> {
                 if (busy.get()) return;
@@ -629,7 +648,7 @@ import java.util.concurrent.atomic.AtomicInteger;
         }
         javafx.scene.control.SeparatorMenuItem sep = new javafx.scene.control.SeparatorMenuItem();
         menu.getItems().add(sep);
-        MenuItem invertItem = new MenuItem("Invert selection");
+        MenuItem invertItem = new TrMenuItem("Invert selection");
         invertItem.setStyle("-fx-font-size: 12px;");
         invertItem.setOnAction(e -> {
             if (busy.get()) return;
@@ -865,7 +884,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                                 + adminBlocked.stream().map(r -> "  - " + r.getCategory().getDisplayName())
                                 .collect(java.util.stream.Collectors.joining("\n"))
                                 + "\n\nPlease run as administrator to clean these categories.");
-                a.setHeaderText(com.sbtools.util.UiText.label("Administrator rights required"));
+                a.setHeaderText(I18n.ui("Administrator rights required"));
                 a.showAndWait();
             }
             return;
@@ -877,7 +896,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                             + "The following categories require administrator rights and will be skipped:\n"
                             + adminBlocked.stream().map(r -> "  - " + r.getCategory().getDisplayName())
                             .collect(java.util.stream.Collectors.joining("\n")));
-            a.setHeaderText(com.sbtools.util.UiText.label("Some categories skipped"));
+            a.setHeaderText(I18n.ui("Some categories skipped"));
             a.showAndWait();
         }
 
@@ -915,7 +934,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
         Alert confirmAlert = new Alert(Alert.AlertType.CONFIRMATION, null,
                 ButtonType.OK, ButtonType.CANCEL);
-        confirmAlert.setHeaderText(com.sbtools.util.UiText.label("Confirm cleanup"));
+        confirmAlert.setHeaderText(I18n.ui("Confirm cleanup"));
         applyScrollableAlertBody(confirmAlert, dialogMsg.toString());
         if (confirmAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
             return;
@@ -944,7 +963,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                     + "Office Document Cache holds local copies of unsynced Office/OneDrive documents.\n\n"
                     + "Type-understanding: click OK only if you have independent backups.";
             Alert destructiveAlert = new Alert(Alert.AlertType.WARNING, null, ButtonType.OK, ButtonType.CANCEL);
-            destructiveAlert.setHeaderText("Irreversible Deletion — Confirm Again");
+            destructiveAlert.setHeaderText(I18n.t("Irreversible Deletion — Confirm Again"));
             applyScrollableAlertBody(destructiveAlert, destructiveBody);
             if (destructiveAlert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.CANCEL) {
                 return;
@@ -956,8 +975,8 @@ import java.util.concurrent.atomic.AtomicInteger;
         // RegistryCleaner). There is intentionally no "delete without backup".
         if (registrySelected) {
             Alert backupPrompt = new Alert(Alert.AlertType.CONFIRMATION);
-            backupPrompt.setTitle(com.sbtools.util.UiText.label("Registry backup"));
-            backupPrompt.setHeaderText("Registry backup will be created automatically");
+            backupPrompt.setTitle(I18n.ui("Registry backup"));
+            backupPrompt.setHeaderText(I18n.t("Registry backup will be created automatically"));
             backupPrompt.setContentText("Registry keys will be exported to a .reg file before deletion.\n\n"
                     + "If the backup cannot be created, registry deletion is skipped for safety.\n\n"
                     + "Continue with automatic backup?");
@@ -1055,7 +1074,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                             cancelButton.setDisable(true);
                             updateSummary();
                             Alert resultAlert = new Alert(Alert.AlertType.WARNING);
-                            resultAlert.setHeaderText("Cleanup Canceled");
+                            resultAlert.setHeaderText(I18n.t("Cleanup Canceled"));
                             applyScrollableAlertBody(resultAlert, sb.toString());
                             ButtonType saveReportBtn = new ButtonType("Save report...");
                             resultAlert.getButtonTypes().add(saveReportBtn);
@@ -1233,7 +1252,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                                 + "You can enable System Protection in System Properties > System Protection.\n\n"
                                 + "Do you want to continue WITHOUT a restore point?",
                         ButtonType.OK, ButtonType.CANCEL);
-                alert.setHeaderText(com.sbtools.util.UiText.label("Restore point unavailable"));
+                alert.setHeaderText(I18n.ui("Restore point unavailable"));
                 if (alert.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
                     statusLabel.setText("Cleanup canceled (no restore point).");
                     progressBar.setVisible(false);

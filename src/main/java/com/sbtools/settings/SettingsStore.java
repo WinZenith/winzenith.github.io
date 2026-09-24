@@ -51,7 +51,9 @@ public class SettingsStore {
                 || s.ignoredBrowserExtensionIds() == null || s.ignoredCleanupCategories() == null
                 || s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank()
                 || s.browserExtLastFilter() == null || s.browserExtLastFilter().isBlank()
-                || s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank();
+                || s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank()
+                || s.language() == null || s.language().isBlank()
+                || !s.language().equals(com.sbtools.i18n.AppLanguage.canonical(s.language()));
         if (needsFix) {
             base = s.toBuilder()
                     .excludedDriverIds(s.excludedDriverIds() == null ? java.util.Collections.emptyList() : s.excludedDriverIds())
@@ -61,6 +63,7 @@ public class SettingsStore {
                     .networkOptimizationPreset(s.networkOptimizationPreset() == null || s.networkOptimizationPreset().isBlank() ? "DEFAULT" : s.networkOptimizationPreset())
                     .browserExtLastFilter(s.browserExtLastFilter() == null || s.browserExtLastFilter().isBlank() ? "All" : s.browserExtLastFilter())
                     .browserExtLastStatusFilter(s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank() ? "All" : s.browserExtLastStatusFilter())
+                    .language(com.sbtools.i18n.AppLanguage.canonical(s.language()))
                     .build();
         }
         // Sanitize backupDirectory - reject dangerous roots like C:\ or Windows

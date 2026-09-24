@@ -86,14 +86,14 @@ public class SystemInfoTabView extends BorderPane {
     private final java.util.concurrent.atomic.AtomicBoolean exportInProgress =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    private final Label statusLabel = new Label("Click Load to query system information.");
-    private final Label adminWarningLabel = new Label("Not running as admin. Some data (temperatures, NVMe) may be unavailable.");
-    private final Button loadButton = new Button("Load system info");
-    private final Button refreshButton = new Button("Refresh");
-    private final Button cancelButton = new Button("Cancel");
-    private final Button exportButton = new Button("Export...");
-    private final Button copyButton = new Button("Copy all");
-    private final Button copyTabButton = new Button("Copy tab");
+    private final Label statusLabel = new TrLabel("Click Load to query system information.");
+    private final Label adminWarningLabel = new TrLabel("Not running as admin. Some data (temperatures, NVMe) may be unavailable.");
+    private final Button loadButton = new TrButton("Load system info");
+    private final Button refreshButton = new TrButton("Refresh");
+    private final Button cancelButton = new TrButton("Cancel");
+    private final Button exportButton = new TrButton("Export...");
+    private final Button copyButton = new TrButton("Copy all");
+    private final Button copyTabButton = new TrButton("Copy tab");
     private final ProgressIndicator spinner = new ProgressIndicator();
     private final ProgressBar progressBar = new ProgressBar(0);
     private final TabPane tabPane = new TabPane();
@@ -125,7 +125,7 @@ public class SystemInfoTabView extends BorderPane {
         copyButton.setDisable(true);
         copyButton.setOnAction(e -> copyToClipboard());
         copyTabButton.setDisable(true);
-        copyTabButton.setTooltip(new javafx.scene.control.Tooltip("Copy the currently visible tab as plain text"));
+        copyTabButton.setTooltip(I18n.tooltip("Copy the currently visible tab as plain text"));
         copyTabButton.setOnAction(e -> copyVisibleTab());
 
         HBox top = new HBox(12, loadButton, refreshButton, cancelButton, exportButton, copyButton, copyTabButton, spinner, progressBar, statusLabel);
@@ -468,7 +468,7 @@ public class SystemInfoTabView extends BorderPane {
         VBox box = new VBox(12);
         box.setPadding(new Insets(24));
         box.setAlignment(Pos.CENTER_LEFT);
-        Label title = new Label("No system information available");
+        Label title = new TrLabel("No system information available");
         title.getStyleClass().addAll("label", "large");
         title.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
         StringBuilder msgText = new StringBuilder(
@@ -495,7 +495,7 @@ public class SystemInfoTabView extends BorderPane {
                 box.getChildren().add(wl);
             }
         }
-        Button retry = new Button("Retry refresh");
+        Button retry = new TrButton("Retry refresh");
         retry.setOnAction(e -> { service.invalidateCache(); loadInfo(true); });
         box.getChildren().add(retry);
         ScrollableContainer scroll = new ScrollableContainer(box);
@@ -756,7 +756,7 @@ public class SystemInfoTabView extends BorderPane {
         FilteredList<String> filteredCategories = new FilteredList<>(categories);
 
         TextField searchField = new TextField();
-        searchField.setPromptText("Search devices\u2026");
+        I18n.prompt(searchField, "Search devices\u2026");
         searchField.getStyleClass().add("sysinfo-search");
         searchField.textProperty().addListener((obs, oldVal, newVal) -> {
             String lower = newVal == null ? "" : newVal.toLowerCase();
@@ -794,7 +794,7 @@ public class SystemInfoTabView extends BorderPane {
 
         VBox leftPanel = new VBox(8);
         leftPanel.setPadding(new Insets(0, 0, 0, 0));
-        Label selectLabel = new Label("Select a category:");
+        Label selectLabel = new TrLabel("Select a category:");
         selectLabel.getStyleClass().addAll("label", "text-muted");
         leftPanel.getChildren().add(selectLabel);
         leftPanel.getChildren().add(categoryList);
@@ -1002,7 +1002,7 @@ public class SystemInfoTabView extends BorderPane {
 
     private Tab buildNetworkTab(List<NetworkAdapterInfo> adapters) {
         TextField search = new TextField();
-        search.setPromptText("Search adapters\u2026");
+        I18n.prompt(search, "Search adapters\u2026");
         search.getStyleClass().add("sysinfo-search");
 
         ObservableList<NetworkAdapterInfo> base = FXCollections.observableArrayList(adapters);
@@ -1064,7 +1064,7 @@ public class SystemInfoTabView extends BorderPane {
 
     private Tab buildAudioTab(List<AudioDeviceInfo> devices) {
         TextField search = new TextField();
-        search.setPromptText("Search audio devices\u2026");
+        I18n.prompt(search, "Search audio devices\u2026");
         search.getStyleClass().add("sysinfo-search");
 
         ObservableList<AudioDeviceInfo> base = FXCollections.observableArrayList(devices);
@@ -1118,7 +1118,7 @@ public class SystemInfoTabView extends BorderPane {
 
     private Tab buildUsbTab(List<UsbDeviceInfo> devices) {
         TextField search = new TextField();
-        search.setPromptText("Search USB devices\u2026");
+        I18n.prompt(search, "Search USB devices\u2026");
         search.getStyleClass().add("sysinfo-search");
 
         ObservableList<UsbDeviceInfo> base = FXCollections.observableArrayList(devices);
@@ -1173,7 +1173,7 @@ public class SystemInfoTabView extends BorderPane {
 
     private Tab buildMonitorTab(List<MonitorInfo> monitors) {
         TextField search = new TextField();
-        search.setPromptText("Search monitors\u2026");
+        I18n.prompt(search, "Search monitors\u2026");
         search.getStyleClass().add("sysinfo-search");
 
         ObservableList<MonitorInfo> base = FXCollections.observableArrayList(monitors);
@@ -1230,7 +1230,7 @@ public class SystemInfoTabView extends BorderPane {
 
     private Tab buildPrinterTab(List<PrinterInfo> printers) {
         TextField search = new TextField();
-        search.setPromptText("Search printers\u2026");
+        I18n.prompt(search, "Search printers\u2026");
         search.getStyleClass().add("sysinfo-search");
 
         ObservableList<PrinterInfo> base = FXCollections.observableArrayList(printers);
@@ -1535,7 +1535,7 @@ public class SystemInfoTabView extends BorderPane {
     }
 
     private static VBox placeholderCard(String message) {
-        Label label = new Label(message);
+        Label label = new TrLabel(message);
         label.getStyleClass().addAll("label", "text-muted");
         label.setWrapText(true);
         label.setStyle("-fx-padding: 12; -fx-font-style: italic;");
@@ -1611,7 +1611,7 @@ public class SystemInfoTabView extends BorderPane {
         }
 
         FileChooser fileChooser = new FileChooser();
-        fileChooser.setTitle(com.sbtools.util.UiText.label("Export system information"));
+        fileChooser.setTitle(I18n.t("Export system information"));
         fileChooser.setInitialFileName("system-info");
 
         FileChooser.ExtensionFilter txtFilter = new FileChooser.ExtensionFilter("Plain Text (*.txt)", "*.txt");

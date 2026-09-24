@@ -76,18 +76,18 @@ public class StartupTabView extends BorderPane {
     private final SortedList<StartupItem> sortedTasks = new SortedList<>(filteredTasks);
     private final SortedList<StartupItem> sortedServices = new SortedList<>(filteredServices);
 
-    private final Label statusLabel = new Label("Scan system to list startup items.");
-    private final Label bootDelayLabel = new Label("");
-    private final Label bootBreakdownLabel = new Label("");
-    private final Label lastBootLabel = new Label("");
+    private final Label statusLabel = new TrLabel("Scan system to list startup items.");
+    private final Label bootDelayLabel = new TrLabel("");
+    private final Label bootBreakdownLabel = new TrLabel("");
+    private final Label lastBootLabel = new TrLabel("");
     private final ProgressIndicator progress = new ProgressIndicator();
 
-    private final Button scanButton = new Button("Scan");
-    private final Button stopButton = new Button("Stop");
-    private final Button toggleButton = new Button("Enable/Disable");
-    private final Button deleteButton = new Button("Delete");
-    private final Button backupsButton = new Button("Backups & Restore");
-    private final Button exportButton = new Button("Export CSV");
+    private final Button scanButton = new TrButton("Scan");
+    private final Button stopButton = new TrButton("Stop");
+    private final Button toggleButton = new TrButton("Enable/Disable");
+    private final Button deleteButton = new TrButton("Delete");
+    private final Button backupsButton = new TrButton("Backups & Restore");
+    private final Button exportButton = new TrButton("Export CSV");
 
     private final ComboBox<String> statusFilter = new ComboBox<>();
     private final ComboBox<String> impactFilter = new ComboBox<>();
@@ -127,29 +127,31 @@ public class StartupTabView extends BorderPane {
         backupsButton.getStyleClass().add("button-outlined");
         exportButton.setOnAction(e -> exportVisibleToCsv());
         exportButton.getStyleClass().add("button-outlined");
-        exportButton.setTooltip(new Tooltip("Export the currently visible tab to CSV"));
+        exportButton.setTooltip(I18n.tooltip("Export the currently visible tab to CSV"));
 
         statusFilter.setItems(FXCollections.observableArrayList("All statuses", "Enabled", "Disabled"));
         statusFilter.getSelectionModel().selectFirst();
         statusFilter.setPrefWidth(120);
-        statusFilter.setTooltip(new Tooltip("Filter by enabled/disabled status"));
+        statusFilter.setTooltip(I18n.tooltip("Filter by enabled/disabled status"));
         statusFilter.valueProperty().addListener((obs, o, n) -> applyAllFilters());
+        I18n.combo(statusFilter);
 
         impactFilter.setItems(FXCollections.observableArrayList("All impacts", "High", "Medium", "Low"));
         impactFilter.getSelectionModel().selectFirst();
         impactFilter.setPrefWidth(110);
-        impactFilter.setTooltip(new Tooltip("Filter by estimated boot impact"));
+        impactFilter.setTooltip(I18n.tooltip("Filter by estimated boot impact"));
         impactFilter.valueProperty().addListener((obs, o, n) -> applyAllFilters());
+        I18n.combo(impactFilter);
 
-        registrySearch.setPromptText("Search startup apps...");
+        I18n.prompt(registrySearch, "Search startup apps...");
         registrySearch.setPrefWidth(200);
         registrySearch.textProperty().addListener((obs, oldVal, newVal) -> debounce(registrySearch, this::applyRegistryFilter));
 
-        taskSearch.setPromptText("Search scheduled tasks...");
+        I18n.prompt(taskSearch, "Search scheduled tasks...");
         taskSearch.setPrefWidth(200);
         taskSearch.textProperty().addListener((obs, oldVal, newVal) -> debounce(taskSearch, this::applyTaskFilter));
 
-        serviceSearch.setPromptText("Search services...");
+        I18n.prompt(serviceSearch, "Search services...");
         serviceSearch.setPrefWidth(200);
         serviceSearch.textProperty().addListener((obs, oldVal, newVal) -> debounce(serviceSearch, this::applyServiceFilter));
 
@@ -180,8 +182,8 @@ public class StartupTabView extends BorderPane {
 
         bootBreakdownLabel.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
         lastBootLabel.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
-        bootBreakdownLabel.setTooltip(new Tooltip("Sum of estimated delays per category (enabled items only)"));
-        lastBootLabel.setTooltip(new Tooltip("Actual last boot time from Windows (informational)"));
+        bootBreakdownLabel.setTooltip(I18n.tooltip("Sum of estimated delays per category (enabled items only)"));
+        lastBootLabel.setTooltip(I18n.tooltip("Actual last boot time from Windows (informational)"));
 
         HBox top = new HBox(12,
                 scanButton, stopButton, toggleButton, deleteButton, backupsButton, exportButton,
@@ -193,8 +195,8 @@ public class StartupTabView extends BorderPane {
         top.getStyleClass().add("toolbar");
 
         HBox filterBar = new HBox(8,
-                new Label("Status:"), statusFilter,
-                new Label("Impact:"), impactFilter,
+                new TrLabel("Status:"), statusFilter,
+                new TrLabel("Impact:"), impactFilter,
                 new Separator(Orientation.VERTICAL),
                 bootDelayLabel, bootBreakdownLabel, lastBootLabel);
         filterBar.setAlignment(Pos.CENTER_LEFT);
@@ -266,12 +268,12 @@ public class StartupTabView extends BorderPane {
 
     private Tab createTab(String title, TableView<StartupItem> table, TextField searchField) {
         Tab tab = UiTab.tab(title);
-        Button selectHigh = new Button("Select high-impact");
-        selectHigh.setTooltip(new Tooltip("Select all visible high-impact enabled items"));
+        Button selectHigh = new TrButton("Select high-impact");
+        selectHigh.setTooltip(I18n.tooltip("Select all visible high-impact enabled items"));
         selectHigh.getStyleClass().add("button-outlined");
         selectHigh.setOnAction(e -> selectHighImpact(table));
-        Button clearSel = new Button("Clear");
-        clearSel.setTooltip(new Tooltip("Clear selection in this tab"));
+        Button clearSel = new TrButton("Clear");
+        clearSel.setTooltip(I18n.tooltip("Clear selection in this tab"));
         clearSel.getStyleClass().add("button-outlined");
         clearSel.setOnAction(e -> table.getSelectionModel().clearSelection());
         HBox searchBar = new HBox(8, selectHigh, clearSel, searchField);
@@ -402,10 +404,10 @@ public class StartupTabView extends BorderPane {
 
             // Context menu for quick actions
             ContextMenu ctx = new ContextMenu();
-            MenuItem openLoc = new MenuItem("Open file location");
-            MenuItem copyCmd = new MenuItem("Copy command");
-            MenuItem details = new MenuItem("Show details");
-            MenuItem searchOnline = new MenuItem("Search online");
+            MenuItem openLoc = new TrMenuItem("Open file location");
+            MenuItem copyCmd = new TrMenuItem("Copy command");
+            MenuItem details = new TrMenuItem("Show details");
+            MenuItem searchOnline = new TrMenuItem("Search online");
             ctx.getItems().addAll(openLoc, copyCmd, details, searchOnline);
 
             openLoc.setOnAction(evt -> {
@@ -731,7 +733,7 @@ public class StartupTabView extends BorderPane {
             }
             String csv = StartupExport.toCsv(visible);
             FileChooser chooser = new FileChooser();
-            chooser.setTitle("Export startup items to CSV");
+            chooser.setTitle(I18n.t("Export startup items to CSV"));
             chooser.setInitialFileName("startup-export.csv");
             chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV files", "*.csv"));
             java.io.File target = chooser.showSaveDialog(getScene() != null ? getScene().getWindow() : null);
@@ -753,8 +755,8 @@ public class StartupTabView extends BorderPane {
         if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
             if (adminNeeded.size() == selected.size()) {
                 Alert alert = new Alert(Alert.AlertType.WARNING);
-                alert.setTitle(com.sbtools.util.UiText.label("Administrator required"));
-                alert.setHeaderText("Modification requires elevation");
+                alert.setTitle(I18n.ui("Administrator required"));
+                alert.setHeaderText(I18n.t("Modification requires elevation"));
                 alert.setContentText("Modifying HKLM / Common Startup items, Windows services, or system scheduled tasks "
                         + "requires administrator privileges.\nPlease run the application as administrator.");
                 alert.initModality(Modality.APPLICATION_MODAL);
@@ -762,8 +764,8 @@ public class StartupTabView extends BorderPane {
                 return;
             }
             Alert alert = new Alert(Alert.AlertType.WARNING);
-            alert.setTitle(com.sbtools.util.UiText.label("Administrator required"));
-            alert.setHeaderText("Some items require elevation");
+            alert.setTitle(I18n.ui("Administrator required"));
+            alert.setHeaderText(I18n.t("Some items require elevation"));
             alert.setContentText(adminNeeded.size() + " item(s) require administrator privileges and will be skipped.\n"
                     + "Only non-privileged items will be toggled. Run as administrator to modify all.");
             alert.initModality(Modality.APPLICATION_MODAL);
@@ -787,8 +789,8 @@ public class StartupTabView extends BorderPane {
         if (!runOnceItems.isEmpty()) {
             if (runOnceItems.size() == selected.size()) {
                 Alert info = new Alert(Alert.AlertType.INFORMATION);
-                info.setTitle("RunOnce cannot be disabled");
-                info.setHeaderText("RunOnce entries run once then auto-delete");
+                info.setTitle(I18n.t("RunOnce cannot be disabled"));
+                info.setHeaderText(I18n.t("RunOnce entries run once then auto-delete"));
                 info.setContentText("Windows ignores disable flags for RunOnce. "
                         + "Use Delete (a backup is created) to prevent "
                         + (selected.size() == 1 ? "\"" + selected.get(0).getName() + "\" from running."
@@ -798,8 +800,8 @@ public class StartupTabView extends BorderPane {
                 return;
             } else {
                 Alert info = new Alert(Alert.AlertType.INFORMATION);
-                info.setTitle("RunOnce skipped");
-                info.setHeaderText("Some RunOnce entries were skipped");
+                info.setTitle(I18n.t("RunOnce skipped"));
+                info.setHeaderText(I18n.t("Some RunOnce entries were skipped"));
                 info.setContentText(runOnceItems.size() + " RunOnce item(s) cannot be disabled (Windows ignores the flag) "
                         + "and will be skipped. Only the remaining " + (selected.size() - runOnceItems.size())
                         + " item(s) will be toggled. Use Delete to remove RunOnce entries.");
@@ -817,7 +819,7 @@ public class StartupTabView extends BorderPane {
             // Guard critical system services even for single toggle (central policy)
             if (StartupSafety.isCriticalDisable(item)) {
                 Alert critical = new Alert(Alert.AlertType.CONFIRMATION);
-                critical.setTitle(com.sbtools.util.UiText.label("Critical system service"));
+                critical.setTitle(I18n.ui("Critical system service"));
                 critical.setHeaderText("Disabling critical service: " + item.getName());
                 critical.setContentText("This service is required for Windows stability/boot.\n"
                         + "Disabling it may render the system unbootable or unstable.\n\n"
@@ -843,8 +845,8 @@ public class StartupTabView extends BorderPane {
             } else {
                 String action = item.isEnabled() ? "disable" : "enable";
                 Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-                confirm.setTitle(com.sbtools.util.UiText.label("Confirm toggle"));
-                confirm.setHeaderText("Change startup item status");
+                confirm.setTitle(I18n.ui("Confirm toggle"));
+                confirm.setHeaderText(I18n.t("Change startup item status"));
                 confirm.setContentText("Are you sure you want to " + action + " \"" + item.getName() + "\"?");
                 confirm.initModality(Modality.APPLICATION_MODAL);
                 if (confirm.showAndWait().orElse(null) != ButtonType.OK) {
@@ -857,7 +859,7 @@ public class StartupTabView extends BorderPane {
                     .filter(StartupSafety::isCriticalDisable)
                     .toList();
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-            confirm.setTitle(com.sbtools.util.UiText.label("Confirm bulk toggle"));
+            confirm.setTitle(I18n.ui("Confirm bulk toggle"));
             confirm.setHeaderText("Toggle " + selected.size() + " startup item(s)?");
             StringBuilder msg = new StringBuilder("Are you sure you want to toggle the status of ")
                     .append(selected.size()).append(" item(s)?\n");
@@ -960,8 +962,8 @@ public class StartupTabView extends BorderPane {
         if (!adminNeeded.isEmpty() && !adminCheck.getAsBoolean()) {
             if (adminNeeded.size() == selected.size()) {
                 Alert alert = new Alert(Alert.AlertType.WARNING);
-                alert.setTitle(com.sbtools.util.UiText.label("Administrator required"));
-                alert.setHeaderText("Deletion requires elevation");
+                alert.setTitle(I18n.ui("Administrator required"));
+                alert.setHeaderText(I18n.t("Deletion requires elevation"));
                 alert.setContentText("Deleting HKLM / Common Startup items or system scheduled tasks "
                         + "requires administrator privileges.\nPlease run the application as administrator.");
                 alert.initModality(Modality.APPLICATION_MODAL);
@@ -969,8 +971,8 @@ public class StartupTabView extends BorderPane {
                 return;
             }
             Alert warn = new Alert(Alert.AlertType.WARNING);
-            warn.setTitle(com.sbtools.util.UiText.label("Administrator required"));
-            warn.setHeaderText("Some items require elevation");
+            warn.setTitle(I18n.ui("Administrator required"));
+            warn.setHeaderText(I18n.t("Some items require elevation"));
             warn.setContentText(adminNeeded.size() + " item(s) require administrator privileges and will be skipped.\n"
                     + "Only non-privileged items will be deleted. Run as administrator to delete all.");
             warn.initModality(Modality.APPLICATION_MODAL);
@@ -988,8 +990,8 @@ public class StartupTabView extends BorderPane {
         List<StartupItem> systemTasks = selected.stream().filter(StartupSafety::isSystemTask).toList();
         if (!systemTasks.isEmpty()) {
             Alert sysWarn = new Alert(Alert.AlertType.CONFIRMATION);
-            sysWarn.setTitle(com.sbtools.util.UiText.label("System scheduled task"));
-            sysWarn.setHeaderText("Delete system task(s)?");
+            sysWarn.setTitle(I18n.ui("System scheduled task"));
+            sysWarn.setHeaderText(I18n.t("Delete system task(s)?"));
             sysWarn.setContentText(systemTasks.size() + " selected item(s) are under \\Microsoft\\ or \\Windows\\.\n"
                     + "Deleting system tasks can affect Windows behavior. Continue?");
             sysWarn.initModality(Modality.APPLICATION_MODAL);
@@ -999,7 +1001,7 @@ public class StartupTabView extends BorderPane {
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-        confirm.setTitle(com.sbtools.util.UiText.label("Confirm deletion"));
+        confirm.setTitle(I18n.ui("Confirm deletion"));
         if (selected.size() == 1) {
             confirm.setHeaderText("Delete Startup Item: " + selected.get(0).getName());
         } else {
@@ -1058,7 +1060,7 @@ public class StartupTabView extends BorderPane {
     private void showDetailsDialog(StartupItem item) {
         if (item == null) return;
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle("Startup item details");
+        dialog.setTitle(I18n.t("Startup item details"));
         dialog.initModality(Modality.APPLICATION_MODAL);
         try {
             var cssUrl = getClass().getResource("/custom.css");
@@ -1094,18 +1096,18 @@ public class StartupTabView extends BorderPane {
         cmd.setWrapText(true);
         cmd.setPrefRowCount(4);
 
-        content.getChildren().addAll(new Label("Summary (selectable):"), summary,
-                new Label("Command / Path:"), cmd);
+        content.getChildren().addAll(new TrLabel("Summary (selectable):"), summary,
+                new TrLabel("Command / Path:"), cmd);
 
         if (item.getType() == StartupItemType.SERVICE && item.getDependencies() != null && !item.getDependencies().isEmpty()) {
             TextArea deps = new TextArea(String.join(", ", item.getDependencies()));
             deps.setEditable(false);
             deps.setWrapText(true);
             deps.setPrefRowCount(2);
-            content.getChildren().addAll(new Label("Dependencies:"), deps);
+            content.getChildren().addAll(new TrLabel("Dependencies:"), deps);
         }
 
-        Button copyAll = new Button("Copy all");
+        Button copyAll = new TrButton("Copy all");
         copyAll.setOnAction(e -> {
             Clipboard cb = Clipboard.getSystemClipboard();
             ClipboardContent cc = new ClipboardContent();
@@ -1125,8 +1127,8 @@ public class StartupTabView extends BorderPane {
 
     private void showBackupsDialog() {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.setTitle(com.sbtools.util.UiText.label("Startup backups & restore"));
-        dialog.setHeaderText("Restore previously deleted startup items.");
+        dialog.setTitle(I18n.ui("Startup backups & restore"));
+        dialog.setHeaderText(I18n.t("Restore previously deleted startup items."));
         dialog.initModality(Modality.APPLICATION_MODAL);
 
         try {
@@ -1178,9 +1180,9 @@ public class StartupTabView extends BorderPane {
         backupTable.getSortOrder().add(dateCol);
         backupTable.sort();
 
-        Button restoreBtn = new Button("Restore selected");
-        Button deleteBackupBtn = new Button("Delete backup");
-        Button exportBackupsBtn = new Button("Export CSV");
+        Button restoreBtn = new TrButton("Restore selected");
+        Button deleteBackupBtn = new TrButton("Delete backup");
+        Button exportBackupsBtn = new TrButton("Export CSV");
 
         restoreBtn.setDisable(true);
         deleteBackupBtn.setDisable(true);
@@ -1197,8 +1199,8 @@ public class StartupTabView extends BorderPane {
             if (selected == null || busy.get()) return;
             if (StartupSafety.requiresAdminForBackup(selected) && !adminCheck.getAsBoolean()) {
                 Alert warn = new Alert(Alert.AlertType.WARNING);
-                warn.setTitle(com.sbtools.util.UiText.label("Administrator required"));
-                warn.setHeaderText("Restore requires elevation");
+                warn.setTitle(I18n.ui("Administrator required"));
+                warn.setHeaderText(I18n.t("Restore requires elevation"));
                 warn.setContentText("This backup targets HKLM, Common Startup, or a system scheduled task.\n"
                         + "Please run the application as administrator to restore it.");
                 warn.initModality(Modality.APPLICATION_MODAL);
@@ -1206,8 +1208,8 @@ public class StartupTabView extends BorderPane {
                 return;
             }
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-            confirm.setTitle(com.sbtools.util.UiText.label("Confirm restore"));
-            confirm.setHeaderText("Restore startup item?");
+            confirm.setTitle(I18n.ui("Confirm restore"));
+            confirm.setHeaderText(I18n.t("Restore startup item?"));
             confirm.setContentText("Restore \"" + selected.getName() + "\" to its original location?\n"
                     + "The backup will be removed after a successful restore.");
             confirm.initModality(Modality.APPLICATION_MODAL);
@@ -1258,9 +1260,9 @@ public class StartupTabView extends BorderPane {
             StartupBackupEntry selected = backupTable.getSelectionModel().getSelectedItem();
             if (selected == null) return;
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
-            confirm.setTitle(com.sbtools.util.UiText.label("Confirm deletion"));
-            confirm.setHeaderText(com.sbtools.util.UiText.label("Delete backup entry"));
-            confirm.setContentText("Are you sure you want to permanently delete this backup? You will no longer be able to restore it.");
+            confirm.setTitle(I18n.ui("Confirm deletion"));
+            confirm.setHeaderText(I18n.ui("Delete backup entry"));
+            confirm.setContentText(I18n.t("Are you sure you want to permanently delete this backup? You will no longer be able to restore it."));
             if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
                 try {
                     service.removeBackup(selected);
@@ -1280,7 +1282,7 @@ public class StartupTabView extends BorderPane {
             try {
                 String csv = StartupExport.toCsvBackups(new ArrayList<>(backups));
                 FileChooser chooser = new FileChooser();
-                chooser.setTitle("Export startup backups to CSV");
+                chooser.setTitle(I18n.t("Export startup backups to CSV"));
                 chooser.setInitialFileName("startup-backups.csv");
                 chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV files", "*.csv"));
                 java.io.File target = chooser.showSaveDialog(dialog.getDialogPane().getScene().getWindow());

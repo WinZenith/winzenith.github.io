@@ -109,10 +109,10 @@ public class DashboardTabView extends BorderPane {
             String snapshotNote) {}
 
     private final ObservableList<IssueCategory> issues = FXCollections.observableArrayList();
-    private final Label statusLabel = new Label("Check your PC health by pressing the Scan for issues button.");
+    private final Label statusLabel = new TrLabel("Check your PC health by pressing the Scan for issues button.");
     private final ProgressBar progressBar = new ProgressBar(0);
-    private final Button scanButton = new Button("Scan for issues");
-    private final Button stopButton = new Button("Stop");
+    private final Button scanButton = new TrButton("Scan for issues");
+    private final Button stopButton = new TrButton("Stop");
     private TableView<IssueCategory> table;
     private Label detailsLabel;
     private volatile Future<?> scanFuture;
@@ -382,20 +382,20 @@ public class DashboardTabView extends BorderPane {
                 logoView.setPreserveRatio(true);
                 logoNode = logoView;
             } else {
-                Label fallback = new Label("\u2699");
+                Label fallback = new TrLabel("\u2699");
                 fallback.setStyle("-fx-font-size: 48px;");
                 logoNode = fallback;
             }
         } catch (java.io.IOException e) {
-            Label fallback = new Label("\u2699");
+            Label fallback = new TrLabel("\u2699");
             fallback.setStyle("-fx-font-size: 48px;");
             logoNode = fallback;
         }
 
-        Label title = new Label("WinZenith Dashboard");
+        Label title = new TrLabel("WinZenith Dashboard");
         title.getStyleClass().add("dashboard-welcome-title");
 
-        Label desc = new Label("Get a quick overview of your system health.\nPress \"Scan for issues\" to check drivers, software updates, and cleanup opportunities.");
+        Label desc = new TrLabel("Get a quick overview of your system health.\nPress \"Scan for issues\" to check drivers, software updates, and cleanup opportunities.");
         desc.getStyleClass().add("dashboard-welcome-desc");
         desc.setWrapText(true);
 
@@ -418,13 +418,13 @@ public class DashboardTabView extends BorderPane {
     }
 
     private VBox createInfoCard(String icon, String title, String description, int tabIndex) {
-        Label iconLabel = new Label(icon);
+        Label iconLabel = new TrLabel(icon);
         iconLabel.getStyleClass().add("dashboard-info-card-icon");
 
-        Label titleLabel = new Label(title);
+        Label titleLabel = new TrLabel(title);
         titleLabel.getStyleClass().add("dashboard-info-card-title");
 
-        Label descLabel = new Label(description);
+        Label descLabel = new TrLabel(description);
         descLabel.getStyleClass().add("dashboard-info-card-desc");
         descLabel.setWrapText(true);
 
@@ -460,20 +460,20 @@ public class DashboardTabView extends BorderPane {
         table = buildTable();
         VBox.setVgrow(table, Priority.ALWAYS);
 
-        detailsLabel = new Label();
+        detailsLabel = new TrLabel();
         detailsLabel.getStyleClass().add("dashboard-details");
         detailsLabel.setWrapText(true);
         detailsLabel.setVisible(false);
         detailsLabel.setManaged(false);
 
-        summaryLabel = new Label();
+        summaryLabel = new TrLabel();
         summaryLabel.setStyle("-fx-text-fill: #2AE061; -fx-font-size: 13px; -fx-padding: 12 0 12 0;");
         summaryLabel.setVisible(false);
 
         healthyBox = new VBox(12,
-                new Label("\u2714"),
-                new Label("Your system looks healthy!"),
-                new Label("No issues found across drivers, software, or cleanup.")
+                new TrLabel("\u2714"),
+                new TrLabel("Your system looks healthy!"),
+                new TrLabel("No issues found across drivers, software, or cleanup.")
         );
         healthyBox.getStyleClass().add("dashboard-healthy");
         healthyBox.setAlignment(Pos.CENTER);
@@ -491,23 +491,23 @@ public class DashboardTabView extends BorderPane {
     // ── Summary Cards ─────────────────────────────────────────────────────
 
     private HBox buildSummaryCards() {
-        issuesValueLabel = new Label("\u2014");
+        issuesValueLabel = new TrLabel("\u2014");
         issuesValueLabel.getStyleClass().add("dashboard-summary-value");
-        issuesDescLabel = new Label("Outdated Drivers/Software");
+        issuesDescLabel = new TrLabel("Outdated Drivers/Software");
         issuesDescLabel.getStyleClass().add("dashboard-summary-label");
         VBox issuesCard = new VBox(4, issuesValueLabel, issuesDescLabel);
         issuesCard.getStyleClass().add("dashboard-summary-card");
 
-        spaceValueLabel = new Label("\u2014");
+        spaceValueLabel = new TrLabel("\u2014");
         spaceValueLabel.getStyleClass().add("dashboard-summary-value");
-        spaceDescLabel = new Label("Reclaimable Space");
+        spaceDescLabel = new TrLabel("Reclaimable Space");
         spaceDescLabel.getStyleClass().add("dashboard-summary-label");
         VBox spaceCard = new VBox(4, spaceValueLabel, spaceDescLabel);
         spaceCard.getStyleClass().add("dashboard-summary-card");
 
-        categoriesValueLabel = new Label("\u2014");
+        categoriesValueLabel = new TrLabel("\u2014");
         categoriesValueLabel.getStyleClass().add("dashboard-summary-value");
-        categoriesDescLabel = new Label("Cleanup Categories");
+        categoriesDescLabel = new TrLabel("Cleanup Categories");
         categoriesDescLabel.getStyleClass().add("dashboard-summary-label");
         VBox categoriesCard = new VBox(4, categoriesValueLabel, categoriesDescLabel);
         categoriesCard.getStyleClass().add("dashboard-summary-card");
@@ -573,17 +573,17 @@ public class DashboardTabView extends BorderPane {
     }
 
     private ProgressItem createProgressItem(String label, int categoryIndex) {
-        Label nameLabel = new Label(label);
+        Label nameLabel = new TrLabel(label);
         nameLabel.getStyleClass().add("dashboard-progress-label");
 
         ProgressBar pbar = new ProgressBar(0);
         pbar.setPrefWidth(100);
         pbar.setPrefHeight(6);
 
-        Label statusLbl = new Label("Pending");
+        Label statusLbl = new TrLabel("Pending");
         statusLbl.getStyleClass().add("dashboard-progress-status");
 
-        Button retry = new Button("Retry");
+        Button retry = new TrButton("Retry");
         retry.getStyleClass().addAll("button-outlined", "small", "dashboard-retry");
         retry.setVisible(false);
         retry.setManaged(false);
@@ -743,10 +743,10 @@ public class DashboardTabView extends BorderPane {
     // ── Status Bar + timestamp ticker ─────────────────────────────────────
 
     private HBox createStatusBar() {
-        snapshotLabel = new Label();
+        snapshotLabel = new TrLabel();
         snapshotLabel.getStyleClass().add("dashboard-snapshot");
 
-        timestampLabel = new Label();
+        timestampLabel = new TrLabel();
         timestampLabel.getStyleClass().add("dashboard-timestamp");
 
         Region spacer = new Region();
@@ -909,7 +909,7 @@ public class DashboardTabView extends BorderPane {
         statusCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().severity()));
         statusCol.setPrefWidth(130);
         statusCol.setCellFactory(col -> new TableCell<>() {
-            private final Label pill = new Label();
+            private final Label pill = new TrLabel();
             {
                 pill.getStyleClass().add("severity-pill");
                 setGraphic(pill);
@@ -965,7 +965,7 @@ public class DashboardTabView extends BorderPane {
                     }
                     row.setTooltip(new Tooltip(tip));
                 } else if (newV != null && !newV.isError() && tabSwitchRequest != null) {
-                    row.setTooltip(new Tooltip("Click to open details →"));
+                    row.setTooltip(I18n.tooltip("Click to open details →"));
                 } else {
                     row.setTooltip(null);
                 }

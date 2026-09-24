@@ -1,6 +1,6 @@
 package com.sbtools.cleaner;
 
-import com.sbtools.util.UiText;
+import com.sbtools.i18n.Messages;
 
 public enum CleanupCategory {
     REGISTRY("Registry", "Invalid or unused registry entries", RiskLevel.MEDIUM),
@@ -57,8 +57,8 @@ public enum CleanupCategory {
             this.description = description;
         }
 
-        public String getDisplayName() { return displayName; }
-        public String getDescription() { return description; }
+        public String getDisplayName() { return Messages.get(displayName); }
+        public String getDescription() { return Messages.get(description); }
     }
 
     private final String displayName;
@@ -72,11 +72,11 @@ public enum CleanupCategory {
     }
 
     public String getDisplayName() {
-        return UiText.label(displayName);
+        return Messages.get(displayName);
     }
 
     public String getDescription() {
-        return description;
+        return Messages.get(description);
     }
 
     public RiskLevel getRiskLevel() {

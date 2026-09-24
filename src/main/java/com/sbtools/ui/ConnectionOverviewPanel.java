@@ -80,11 +80,11 @@ class ConnectionOverviewPanel extends VBox {
         content.setPadding(new Insets(12, 16, 12, 16));
         VBox.setVgrow(content, Priority.ALWAYS);
 
-        Label header = new Label(com.sbtools.util.UiText.label("Connection overview"));
+        Label header = new TrLabel(I18n.ui("Connection overview"));
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
 
-        Label sub = new Label("Read-only views. Nothing here changes system settings.");
+        Label sub = new TrLabel("Read-only views. Nothing here changes system settings.");
         sub.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
         content.getChildren().add(sub);
 
@@ -99,6 +99,7 @@ class ConnectionOverviewPanel extends VBox {
                 "Connections (netstat -ano)");
         sectionCombo.getSelectionModel().selectFirst();
         sectionCombo.setOnAction(e -> loadSection());
+        I18n.combo(sectionCombo);
 
         Button refreshBtn = UIButton.primary("Refresh");
         refreshBtn.setOnAction(e -> loadSection());

@@ -36,7 +36,7 @@ class DnsCachePanel extends VBox {
     private final ComboBox<String> adapterCombo = new ComboBox<>();
     private final TextField primaryDnsField = new TextField();
     private final TextField secondaryDnsField = new TextField();
-    private final Label currentDnsLabel = new Label("Current DNS: -");
+    private final Label currentDnsLabel = new TrLabel("Current DNS: -");
     private final TextField pingHostField = new TextField();
     private final TextField pingCountField = new TextField("4");
     private final TextArea diagnosticOutput = new TextArea();
@@ -150,7 +150,7 @@ class DnsCachePanel extends VBox {
 
     private VBox buildPingHistorySection() {
         VBox box = new VBox(6);
-        Label h = new Label("Ping History (avg ms per run, last 50)");
+        Label h = new TrLabel("Ping History (avg ms per run, last 50)");
         h.getStyleClass().addAll("label", "large");
         box.getChildren().add(h);
         javafx.scene.chart.NumberAxis x = new javafx.scene.chart.NumberAxis();
@@ -183,11 +183,11 @@ class DnsCachePanel extends VBox {
 
     private VBox buildBenchmarkSection() {
         VBox box = new VBox(6);
-        Label h = new Label("DNS Benchmark (opt-in internet: resolves google.com via each provider)");
+        Label h = new TrLabel("DNS Benchmark (opt-in internet: resolves google.com via each provider)");
         h.getStyleClass().addAll("label", "large");
         h.setPadding(new Insets(12, 0, 0, 0));
         box.getChildren().add(h);
-        Label hint = new Label("Runs only when you click Benchmark. No background traffic.");
+        Label hint = new TrLabel("Runs only when you click Benchmark. No background traffic.");
         hint.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
         box.getChildren().add(hint);
 
@@ -217,7 +217,7 @@ class DnsCachePanel extends VBox {
         box.getChildren().add(table);
 
         Button benchBtn = UIButton.secondary("Benchmark DNS Now");
-        Label benchStatus = new Label("Not run yet.");
+        Label benchStatus = new TrLabel("Not run yet.");
         benchStatus.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
         benchBtn.setOnAction(e -> {
             if (!benchRunning.compareAndSet(false, true)) {
@@ -253,12 +253,12 @@ class DnsCachePanel extends VBox {
 
     private VBox buildMtuSection() {
         VBox box = new VBox(6);
-        Label h = new Label("MTU Discovery (read-only ping -f sweep, suggestion only)");
+        Label h = new TrLabel("MTU Discovery (read-only ping -f sweep, suggestion only)");
         h.getStyleClass().addAll("label", "large");
         h.setPadding(new Insets(12, 0, 0, 0));
         box.getChildren().add(h);
         TextField targetField = new TextField("8.8.8.8");
-        targetField.setPromptText("Target (gateway IP or 1.1.1.1)");
+        I18n.prompt(targetField, "Target (gateway IP or 1.1.1.1)");
         targetField.setPrefWidth(180);
         Button mtuBtn = UIButton.secondary("Probe MTU");
         Button mtuCancel = UIButton.secondary("Cancel");
@@ -267,7 +267,7 @@ class DnsCachePanel extends VBox {
         mtuOut.setEditable(false);
         mtuOut.setPrefRowCount(6);
         mtuOut.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 11px;");
-        mtuOut.setPromptText("MTU probe output (no changes applied)...");
+        I18n.prompt(mtuOut, "MTU probe output (no changes applied)...");
         mtuBtn.setOnAction(e -> {
             String target = targetField.getText() != null ? targetField.getText().trim() : "";
             if (!NetworkOptimizerService.isValidHost(target)) {
@@ -308,7 +308,7 @@ class DnsCachePanel extends VBox {
                 if (m != null) m.cancel(true);
             });
         });
-        HBox r = new HBox(8, new Label("Target:"), targetField, mtuBtn, mtuCancel);
+        HBox r = new HBox(8, new TrLabel("Target:"), targetField, mtuBtn, mtuCancel);
         r.setAlignment(Pos.CENTER_LEFT);
         box.getChildren().addAll(r, mtuOut);
         return box;
@@ -316,11 +316,11 @@ class DnsCachePanel extends VBox {
 
     private VBox buildSpeedSection() {
         VBox box = new VBox(6);
-        Label h = new Label("Download Speed Test (opt-in internet, stdlib HttpClient)");
+        Label h = new TrLabel("Download Speed Test (opt-in internet, stdlib HttpClient)");
         h.getStyleClass().addAll("label", "large");
         h.setPadding(new Insets(12, 0, 0, 0));
         box.getChildren().add(h);
-        Label hint = new Label("Downloads ~10 MB from the URL below. Runs only on click.");
+        Label hint = new TrLabel("Downloads ~10 MB from the URL below. Runs only on click.");
         hint.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
         box.getChildren().add(hint);
         TextField urlField = new TextField("https://speed.cloudflare.com/__down?bytes=10000000");
@@ -328,7 +328,7 @@ class DnsCachePanel extends VBox {
         javafx.scene.control.ProgressBar bar = new javafx.scene.control.ProgressBar(0);
         bar.setPrefWidth(220);
         bar.setVisible(false);
-        Label out = new Label("Not run yet.");
+        Label out = new TrLabel("Not run yet.");
         out.setStyle("-fx-text-fill: #8be9fd;");
         Button go = UIButton.primary("Run Speed Test");
         Button cancel = UIButton.secondary("Cancel");
@@ -380,7 +380,7 @@ class DnsCachePanel extends VBox {
         VBox content = new VBox(12);
         content.setPadding(new Insets(12, 16, 12, 16));
 
-        Label header = new Label("DNS & Network Utilities");
+        Label header = new TrLabel("DNS & Network Utilities");
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
 
@@ -394,7 +394,7 @@ class DnsCachePanel extends VBox {
 
         content.getChildren().addAll(flushDnsBtn, resetStackBtn, resetWinsockBtn);
 
-        Label dnsHeader = new Label("DNS Server Configuration");
+        Label dnsHeader = new TrLabel("DNS Server Configuration");
         dnsHeader.getStyleClass().addAll("label", "large");
         dnsHeader.setPadding(new Insets(12, 0, 0, 0));
         content.getChildren().add(dnsHeader);
@@ -405,14 +405,14 @@ class DnsCachePanel extends VBox {
         Button refreshAdaptersBtn = UIButton.secondary("Refresh");
         refreshAdaptersBtn.setOnAction(e -> refreshAdapters());
 
-        HBox adapterRow = new HBox(8, new Label("Adapter:"), adapterCombo, refreshAdaptersBtn);
+        HBox adapterRow = new HBox(8, new TrLabel("Adapter:"), adapterCombo, refreshAdaptersBtn);
         adapterRow.setAlignment(Pos.CENTER_LEFT);
         content.getChildren().add(adapterRow);
 
         currentDnsLabel.setStyle("-fx-text-fill: #8be9fd;");
         content.getChildren().add(currentDnsLabel);
 
-        Label dnsPresetsLabel = new Label("DNS Provider Presets:");
+        Label dnsPresetsLabel = new TrLabel("DNS Provider Presets:");
         content.getChildren().add(dnsPresetsLabel);
 
         HBox presetRow = new HBox(8);
@@ -434,7 +434,7 @@ class DnsCachePanel extends VBox {
 
         HBox presetRowV6 = new HBox(8);
         presetRowV6.setAlignment(Pos.CENTER_LEFT);
-        Label v6Label = new Label("IPv6:");
+        Label v6Label = new TrLabel("IPv6:");
         v6Label.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
         presetRowV6.getChildren().add(v6Label);
         for (String[] preset : new String[][]{
@@ -451,9 +451,9 @@ class DnsCachePanel extends VBox {
         }
         content.getChildren().add(presetRowV6);
 
-        primaryDnsField.setPromptText("Primary DNS (e.g. 8.8.8.8)");
+        I18n.prompt(primaryDnsField, "Primary DNS (e.g. 8.8.8.8)");
         primaryDnsField.setPrefWidth(200);
-        secondaryDnsField.setPromptText("Secondary DNS (e.g. 8.8.4.4)");
+        I18n.prompt(secondaryDnsField, "Secondary DNS (e.g. 8.8.4.4)");
         secondaryDnsField.setPrefWidth(200);
 
         HBox dnsRow = new HBox(8, primaryDnsField, secondaryDnsField);
@@ -470,12 +470,12 @@ class DnsCachePanel extends VBox {
         dnsBtnRow.setAlignment(Pos.CENTER_LEFT);
         content.getChildren().add(dnsBtnRow);
 
-        Label diagHeader = new Label("Diagnostics");
+        Label diagHeader = new TrLabel("Diagnostics");
         diagHeader.getStyleClass().addAll("label", "large");
         diagHeader.setPadding(new Insets(12, 0, 0, 0));
         content.getChildren().add(diagHeader);
 
-        pingHostField.setPromptText("Host (e.g. 8.8.8.8 or google.com)");
+        I18n.prompt(pingHostField, "Host (e.g. 8.8.8.8 or google.com)");
         pingHostField.setPrefWidth(250);
         pingCountField.setPrefWidth(60);
 
@@ -494,14 +494,14 @@ class DnsCachePanel extends VBox {
             if (g != null) g.cancel(true);
         });
 
-        HBox pingRow = new HBox(8, new Label("Host:"), pingHostField, new Label("Count:"), pingCountField, pingBtn, tracerouteBtn, cancelDiagBtn);
+        HBox pingRow = new HBox(8, new TrLabel("Host:"), pingHostField, new TrLabel("Count:"), pingCountField, pingBtn, tracerouteBtn, cancelDiagBtn);
         pingRow.setAlignment(Pos.CENTER_LEFT);
         content.getChildren().add(pingRow);
 
         diagnosticOutput.setEditable(false);
         diagnosticOutput.setPrefRowCount(10);
         diagnosticOutput.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 11px; -fx-control-inner-background: #1e1f29;");
-        diagnosticOutput.setPromptText("Ping/Traceroute results will appear here...");
+        I18n.prompt(diagnosticOutput, "Ping/Traceroute results will appear here...");
         VBox.setVgrow(diagnosticOutput, Priority.ALWAYS);
         content.getChildren().add(diagnosticOutput);
 
@@ -550,8 +550,8 @@ class DnsCachePanel extends VBox {
                         + "Static IP addresses, custom DNS, routes, and IPsec settings can be lost. "
                         + "A system restore point is created first, and an ipconfig dump is saved for reference. "
                         + "A reboot is required afterwards.\n\nContinue?");
-        warn.setTitle(com.sbtools.util.UiText.label("Confirm reset"));
-        warn.setHeaderText(com.sbtools.util.UiText.label("Reset network stack"));
+        warn.setTitle(I18n.ui("Confirm reset"));
+        warn.setHeaderText(I18n.ui("Reset network stack"));
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             statusLabel.setText("Ready.");
             return;
@@ -645,8 +645,8 @@ class DnsCachePanel extends VBox {
                         + "VPN clients and security software that install layered service providers "
                         + "may stop working until reinstalled. A system restore point is created first. "
                         + "A reboot is required afterwards.\n\nContinue?");
-        warn.setTitle(com.sbtools.util.UiText.label("Confirm reset"));
-        warn.setHeaderText("Reset Winsock");
+        warn.setTitle(I18n.ui("Confirm reset"));
+        warn.setHeaderText(I18n.t("Reset Winsock"));
         if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
             statusLabel.setText("Ready.");
             return;
@@ -809,8 +809,8 @@ class DnsCachePanel extends VBox {
                         + primary + (secondary.isEmpty() ? "" : ", " + secondary)
                         + "\n\nThis replaces the current DNS configuration.",
                 ButtonType.YES, ButtonType.NO);
-        confirm.setTitle(com.sbtools.util.UiText.label("Confirm DNS"));
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Apply DNS servers"));
+        confirm.setTitle(I18n.ui("Confirm DNS"));
+        confirm.setHeaderText(I18n.ui("Apply DNS servers"));
         if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
 
         busy.set(true);
@@ -850,8 +850,8 @@ class DnsCachePanel extends VBox {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Reset DNS on '" + adapter + "' to automatic (DHCP)?\n\nCustom DNS servers will be removed.",
                 ButtonType.YES, ButtonType.NO);
-        confirm.setTitle(com.sbtools.util.UiText.label("Confirm DNS"));
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Reset DNS to DHCP"));
+        confirm.setTitle(I18n.ui("Confirm DNS"));
+        confirm.setHeaderText(I18n.ui("Reset DNS to DHCP"));
         if (confirm.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
         busy.set(true);
         statusLabel.setText("Resetting DNS to DHCP...");

@@ -29,7 +29,8 @@ public record AppSettings(
         boolean autoCreateRestoreBeforeCleanup,
         String browserExtLastFilter,
         String browserExtLastStatusFilter,
-        boolean browserExtAutoScan
+        boolean browserExtAutoScan,
+        String language
 ) {
     public static AppSettings defaults() {
         return new AppSettings(true, true, false,
@@ -38,7 +39,7 @@ public record AppSettings(
                 false, false, false, true,
                 "", "powershell", 960, 600, true, true,
                 Collections.emptyList(), Collections.emptyList(), true,
-                "All", "All", false);
+                "All", "All", false, "en");
     }
 
     /**
@@ -77,6 +78,7 @@ public record AppSettings(
         private String browserExtLastFilter;
         private String browserExtLastStatusFilter;
         private boolean browserExtAutoScan;
+        private String language;
 
         private Builder(AppSettings s) {
             this.autoBackupDrivers = s.autoBackupDrivers;
@@ -102,6 +104,7 @@ public record AppSettings(
             this.browserExtLastFilter = s.browserExtLastFilter;
             this.browserExtLastStatusFilter = s.browserExtLastStatusFilter;
             this.browserExtAutoScan = s.browserExtAutoScan;
+            this.language = s.language;
         }
 
         public Builder autoBackupDrivers(boolean v) { this.autoBackupDrivers = v; return this; }
@@ -127,6 +130,7 @@ public record AppSettings(
         public Builder browserExtLastFilter(String v) { this.browserExtLastFilter = v; return this; }
         public Builder browserExtLastStatusFilter(String v) { this.browserExtLastStatusFilter = v; return this; }
         public Builder browserExtAutoScan(boolean v) { this.browserExtAutoScan = v; return this; }
+        public Builder language(String v) { this.language = v; return this; }
 
         public AppSettings build() {
             return new AppSettings(
@@ -152,7 +156,8 @@ public record AppSettings(
                     autoCreateRestoreBeforeCleanup,
                     browserExtLastFilter,
                     browserExtLastStatusFilter,
-                    browserExtAutoScan);
+                    browserExtAutoScan,
+                    language);
         }
     }
 }

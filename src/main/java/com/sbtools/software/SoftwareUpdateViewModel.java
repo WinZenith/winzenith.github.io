@@ -1,5 +1,8 @@
 package com.sbtools.software;
 
+import com.sbtools.ui.I18n;
+import com.sbtools.ui.TrLabel;
+import com.sbtools.ui.TrButton;
 import com.sbtools.backup.SystemRestoreService;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
@@ -415,7 +418,7 @@ public class SoftwareUpdateViewModel {
             if (disposed) return;
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Cancel remaining updates?\n\n(Auto-declines after 2 minutes.)");
-            confirm.setHeaderText("Cancel Install");
+            confirm.setHeaderText(I18n.t("Cancel Install"));
             if (showBoundedAlert(confirm) == ButtonType.OK) {
                 installCancelled.set(true);
                 statusText.set("Cancelling updates...");
@@ -1346,9 +1349,9 @@ public class SoftwareUpdateViewModel {
         for (int i = 0; i < failure.recoverySteps().size(); i++) {
             steps.append(i + 1).append(". ").append(failure.recoverySteps().get(i)).append("\n");
         }
-        Label explain = new Label(failure.explanation());
+        Label explain = new TrLabel(failure.explanation());
         explain.setWrapText(true);
-        Label stepsLbl = new Label(steps.toString().trim());
+        Label stepsLbl = new TrLabel(steps.toString().trim());
         stepsLbl.setWrapText(true);
         TextArea details = new TextArea(failure.rawOutput() != null ? failure.rawOutput() : "");
         details.setEditable(false);
@@ -1361,26 +1364,26 @@ public class SoftwareUpdateViewModel {
         actions.setPrefWrapLength(dialogWidth);
         actions.setColumnHalignment(HPos.LEFT);
         actions.setAlignment(Pos.CENTER_LEFT);
-        Button copyBtn = new Button("Copy details");
+        Button copyBtn = new TrButton("Copy details");
         copyBtn.setOnAction(e -> copyInstallFailureDetails(failure));
         actions.getChildren().add(copyBtn);
         if (failure.trustedLogPath() != null) {
-            Button logBtn = new Button("Open installer log");
+            Button logBtn = new TrButton("Open installer log");
             logBtn.setOnAction(e -> openTrustedInstallerLog(failure.trustedLogPath()));
             actions.getChildren().add(logBtn);
         }
         if (failure.showInstalledAppsSettings()) {
-            Button appsBtn = new Button("Open Installed apps");
+            Button appsBtn = new TrButton("Open Installed apps");
             appsBtn.setOnAction(e -> openInstalledAppsSettings());
             actions.getChildren().add(appsBtn);
         }
         if (failure.showTroubleshooter()) {
-            Button troubleBtn = new Button("Open Microsoft troubleshooter");
+            Button troubleBtn = new TrButton("Open Microsoft troubleshooter");
             troubleBtn.setOnAction(e -> openSupportUrl(SoftwareInstallFailure.MICROSOFT_INSTALL_TROUBLESHOOTER_URL));
             actions.getChildren().add(troubleBtn);
         }
 
-        VBox content = new VBox(10, explain, new Label("Suggested steps:"), stepsLbl, detailsPane, actions);
+        VBox content = new VBox(10, explain, new TrLabel("Suggested steps:"), stepsLbl, detailsPane, actions);
         content.setPrefWidth(dialogWidth);
         content.setMinWidth(dialogWidth);
 
@@ -1417,8 +1420,8 @@ public class SoftwareUpdateViewModel {
         }
         ChoiceDialog<String> picker = new ChoiceDialog<>(choices.get(0), choices);
         picker.setTitle(AppInfo.DISPLAY_NAME);
-        picker.setHeaderText("Select a program to view repair steps");
-        picker.setContentText("Program:");
+        picker.setHeaderText(I18n.t("Select a program to view repair steps"));
+        picker.setContentText(I18n.t("Program:"));
         picker.showAndWait().ifPresent(selected -> {
             for (RepairFailureRecord r : records) {
                 SoftwareUpdateEntry e = r.entry();
@@ -1521,7 +1524,7 @@ public class SoftwareUpdateViewModel {
                             "System Restore Point creation failed or was skipped.\n\n"
                                     + "Continue installing updates without a restore point?\n\n"
                                     + "(Auto-cancels after 2 minutes. You can press Stop to cancel.)");
-                    confirm.setHeaderText("Restore point unavailable");
+                    confirm.setHeaderText(I18n.t("Restore point unavailable"));
                     // Same bounded walk-away as the restore prompt: unanswered, this
                     // dialog used to hold installRunning + globalBusy forever.
                     armModalAutoClose(confirm, proceed);
@@ -1655,7 +1658,7 @@ public class SoftwareUpdateViewModel {
 
     private void showWuServicingInfoDialog() {
         Alert a = new Alert(Alert.AlertType.WARNING, WU_SERVICING_WARNING);
-        a.setHeaderText("Windows Update may still be applying");
+        a.setHeaderText(I18n.t("Windows Update may still be applying"));
         showBoundedAlert(a);
     }
 
@@ -1672,7 +1675,7 @@ public class SoftwareUpdateViewModel {
         }
         Alert a = new Alert(Alert.AlertType.WARNING,
                 WU_SERVICING_WARNING + "\n\nContinue only if you already rebooted or the update has finished.");
-        a.setHeaderText("Windows Update may still be applying");
+        a.setHeaderText(I18n.t("Windows Update may still be applying"));
         ButtonType continueBtn = new ButtonType("Continue anyway", ButtonBar.ButtonData.OK_DONE);
         a.getButtonTypes().setAll(continueBtn, ButtonType.CANCEL);
         ButtonType result = showBoundedAlert(a);
@@ -1856,7 +1859,7 @@ public class SoftwareUpdateViewModel {
 
         Alert a = new Alert(Alert.AlertType.WARNING);
         a.setTitle(AppInfo.DISPLAY_NAME);
-        a.setHeaderText("Update results");
+        a.setHeaderText(I18n.t("Update results"));
         a.setContentText(msg.toString());
 
         List<ButtonType> buttons = new ArrayList<>();

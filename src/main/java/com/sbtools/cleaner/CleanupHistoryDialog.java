@@ -1,5 +1,8 @@
 package com.sbtools.cleaner;
 
+import com.sbtools.ui.I18n;
+import com.sbtools.ui.TrLabel;
+import com.sbtools.ui.TrButton;
 import com.sbtools.util.AppInfo;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -39,7 +42,7 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
 
         long totalAllTime = entries.stream().mapToLong(CleanerHistoryStore.HistoryEntry::totalBytesFreed).sum();
 
-        Label totalLabel = new Label("Total freed since install: " + CleanupService.formatBytes(totalAllTime));
+        Label totalLabel = new TrLabel("Total freed since install: " + CleanupService.formatBytes(totalAllTime));
         totalLabel.setStyle("-fx-text-fill: #50fa7b; -fx-font-size: 13px; -fx-padding: 0 0 8 0;");
 
         TableView<CleanerHistoryStore.HistoryEntry> table = new TableView<>();
@@ -114,10 +117,10 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
             detailArea.setText(sb.toString());
         });
 
-        Button exportBtn = new Button("Export CSV...");
+        Button exportBtn = new TrButton("Export CSV...");
         exportBtn.setOnAction(e -> {
             javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
-            chooser.setTitle("Export cleanup history");
+            chooser.setTitle(I18n.t("Export cleanup history"));
             chooser.setInitialFileName("cleanup-history.csv");
             chooser.getExtensionFilters().add(new javafx.stage.FileChooser.ExtensionFilter("CSV", "*.csv"));
             java.io.File file = chooser.showSaveDialog(getDialogPane().getScene() != null
@@ -144,12 +147,12 @@ public class CleanupHistoryDialog extends Dialog<ButtonType> {
             }
         });
 
-        Button clearBtn = new Button("Clear history");
+        Button clearBtn = new TrButton("Clear history");
         clearBtn.setOnAction(e -> {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Delete all past cleanup sessions? This cannot be undone.",
                     ButtonType.OK, ButtonType.CANCEL);
-            confirm.setHeaderText("Clear History");
+            confirm.setHeaderText(I18n.t("Clear History"));
             if (confirm.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
                 try {
                     store.clear();

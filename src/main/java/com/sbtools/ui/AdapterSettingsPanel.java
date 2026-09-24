@@ -34,7 +34,7 @@ class AdapterSettingsPanel extends VBox {
     private final ComboBox<String> adapterCombo = new ComboBox<>();
     private final ObservableList<Map.Entry<String, String>> propertyRows = FXCollections.observableArrayList();
     private final TableView<Map.Entry<String, String>> propTable = new TableView<>(propertyRows);
-    private final Label statusLabel = new Label("Ready.");
+    private final Label statusLabel = new TrLabel("Ready.");
     private volatile Future<?> currentTask;
     // Coalesce concurrent refreshes (tab selects + Refresh buttons) and track them
     // separately from loadProperties so neither handle clobbers the other.
@@ -85,11 +85,11 @@ class AdapterSettingsPanel extends VBox {
     private VBox buildContent() {
         VBox content = new VBox(8);
 
-        Label header = new Label("Adapter Settings");
+        Label header = new TrLabel("Adapter Settings");
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
 
-        Label sub = new Label("Read-only view of advanced adapter properties.");
+        Label sub = new TrLabel("Read-only view of advanced adapter properties.");
         sub.setStyle("-fx-text-fill: #6272a4;");
         content.getChildren().add(sub);
 
@@ -109,11 +109,11 @@ class AdapterSettingsPanel extends VBox {
         refreshPropsBtn.setDisable(busy.get());
 
         javafx.scene.control.TextField filterField = new javafx.scene.control.TextField();
-        filterField.setPromptText("Filter properties…");
+        I18n.prompt(filterField, "Filter properties…");
         filterField.setPrefWidth(180);
         filterField.textProperty().addListener((obs, o, n) -> applyFilter(n));
 
-        HBox adapterRow = new HBox(8, new Label("Adapter:"), adapterCombo, refreshAdaptersBtn, refreshPropsBtn,
+        HBox adapterRow = new HBox(8, new TrLabel("Adapter:"), adapterCombo, refreshAdaptersBtn, refreshPropsBtn,
                 exportBtn, filterField, statusLabel);
         adapterRow.setAlignment(Pos.CENTER_LEFT);
         adapterRow.setPadding(new Insets(0, 0, 8, 0));

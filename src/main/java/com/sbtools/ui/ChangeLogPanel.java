@@ -92,11 +92,11 @@ class ChangeLogPanel extends VBox {
     private VBox buildContent() {
         VBox content = new VBox(8);
 
-        Label header = new Label("Change history");
+        Label header = new TrLabel("Change history");
         header.getStyleClass().addAll("label", "large");
         content.getChildren().add(header);
 
-        Label sub = new Label("Shows the last " + DISPLAY_LIMIT
+        Label sub = new TrLabel("Shows the last " + DISPLAY_LIMIT
                 + " network operations. Snapshots are stored separately (Optimization → Snapshots…).");
         sub.setStyle("-fx-text-fill: #6272a4;");
         sub.setWrapText(true);
@@ -111,12 +111,13 @@ class ChangeLogPanel extends VBox {
             }
         });
 
-        filterField.setPromptText("Filter operation / target / details…");
+        I18n.prompt(filterField, "Filter operation / target / details…");
         filterField.setPrefWidth(220);
         filterField.textProperty().addListener((obs, o, n) -> applyFilter());
         resultFilter.getItems().addAll("All results", "OK only", "Failed only");
         resultFilter.getSelectionModel().selectFirst();
         resultFilter.setOnAction(e -> applyFilter());
+        I18n.combo(resultFilter);
 
         Button refreshBtn = UIButton.primary("Refresh");
         refreshBtn.setOnAction(e -> loadEntries());
@@ -125,7 +126,7 @@ class ChangeLogPanel extends VBox {
         clearBtn.setOnAction(e -> {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                     "Clear all change history?", ButtonType.YES, ButtonType.NO);
-            confirm.setTitle("Clear history");
+            confirm.setTitle(I18n.t("Clear history"));
             confirm.setHeaderText(null);
             if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
                 AppExecutors.ioPool().submit(() -> {
@@ -148,9 +149,9 @@ class ChangeLogPanel extends VBox {
         detailsArea.setEditable(false);
         detailsArea.setPrefRowCount(4);
         detailsArea.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 11px;");
-        detailsArea.setPromptText("Select a row to see full details...");
+        I18n.prompt(detailsArea, "Select a row to see full details...");
 
-        content.getChildren().addAll(btnBox, table, new Label("Details:"), detailsArea);
+        content.getChildren().addAll(btnBox, table, new TrLabel("Details:"), detailsArea);
         return content;
     }
 
@@ -203,7 +204,7 @@ class ChangeLogPanel extends VBox {
                     var info = service.describeRestore(snaps.get(0));
                     if (info.details() != null) sb.append("\n--- Newest ---\n").append(info.details());
                     Alert a = new Alert(Alert.AlertType.INFORMATION);
-                    a.setTitle(com.sbtools.util.UiText.label("Network snapshots"));
+                    a.setTitle(I18n.ui("Network snapshots"));
                     a.setHeaderText(snaps.size() + " snapshot(s)");
                     TextArea area = new TextArea(sb.toString());
                     area.setEditable(false);

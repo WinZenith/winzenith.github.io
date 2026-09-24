@@ -1,6 +1,6 @@
 package com.sbtools.cleaner;
 
-import com.sbtools.util.UiText;
+import com.sbtools.i18n.Messages;
 
 import java.util.EnumSet;
 import java.util.Set;
@@ -57,8 +57,8 @@ public enum CleanerPresets {
         return set;
     }
 
-    public String getDisplayName() { return UiText.label(displayName); }
-    public String getDescription() { return description; }
+    public String getDisplayName() { return Messages.get(displayName); }
+    public String getDescription() { return Messages.get(description); }
     public Set<CleanupCategory> getCategories() { return categories; }
 
     @Override

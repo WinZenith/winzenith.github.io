@@ -76,14 +76,14 @@ class OptimizationPanel extends VBox {
         VBox box = new VBox(8);
         box.setPadding(new Insets(12, 16, 12, 16));
 
-        Label header = new Label("Select optimization preset:");
+        Label header = new TrLabel("Select optimization preset:");
         header.getStyleClass().addAll("label", "large");
         box.getChildren().add(header);
 
         ToggleGroup group = new ToggleGroup();
         this.presetGroup = group;
 
-        this.descLabel = new Label("Choose a preset and click Apply.");
+        this.descLabel = new TrLabel("Choose a preset and click Apply.");
         descLabel.setWrapText(true);
         descLabel.setPrefWidth(500);
         Label descLabel = this.descLabel;
@@ -96,26 +96,26 @@ class OptimizationPanel extends VBox {
         }
 
         for (OptimizationPreset preset : OptimizationPreset.values()) {
-            RadioButton rb = new RadioButton(preset.getDisplayName());
+            RadioButton rb = new TrRadioButton(preset.englishName());
             rb.setToggleGroup(group);
             rb.setUserData(preset);
             if (preset == savedPreset) {
                 rb.setSelected(true);
-                descLabel.setText(preset.getDescription());
+                descLabel.setText(preset.englishDescription());
             }
-            rb.setOnAction(e -> descLabel.setText(preset.getDescription()));
+            rb.setOnAction(e -> descLabel.setText(preset.englishDescription()));
             box.getChildren().add(rb);
         }
 
         box.getChildren().add(descLabel);
 
         boolean restoreDefault = currentSettings != null && currentSettings.createSystemRestorePoint();
-        restorePointCheck = new javafx.scene.control.CheckBox("Create system restore point before applying");
+        restorePointCheck = new TrCheckBox("Create system restore point before applying");
         restorePointCheck.setSelected(restoreDefault);
         restorePointCheck.setWrapText(true);
         box.getChildren().add(restorePointCheck);
 
-        snapshotLabel = new Label("No snapshot yet — one is captured automatically before each Apply.");
+        snapshotLabel = new TrLabel("No snapshot yet — one is captured automatically before each Apply.");
         snapshotLabel.setWrapText(true);
         snapshotLabel.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11px;");
         snapshotLabel.setPrefWidth(520);
@@ -180,8 +180,8 @@ class OptimizationPanel extends VBox {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Apply " + preset.getDisplayName() + "?\n\n" + preset.getDescription()
                         + "\n\nA snapshot of current TCP settings is captured first for guided restore.");
-        confirm.setTitle(com.sbtools.util.UiText.label("Confirm optimization"));
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Apply optimization preset"));
+        confirm.setTitle(I18n.ui("Confirm optimization"));
+        confirm.setHeaderText(I18n.ui("Apply optimization preset"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         boolean wantRestorePoint = restorePointCheck != null && restorePointCheck.isSelected();
@@ -292,7 +292,7 @@ class OptimizationPanel extends VBox {
                         for (javafx.scene.control.Toggle t : presetGroup.getToggles()) {
                             if (t instanceof RadioButton rb && rb.getUserData() == preset) {
                                 rb.setSelected(true);
-                                if (descLabel != null) descLabel.setText(preset.getDescription());
+                                if (descLabel != null) descLabel.setText(preset.englishDescription());
                                 break;
                             }
                         }
@@ -343,7 +343,7 @@ class OptimizationPanel extends VBox {
         for (javafx.scene.control.Toggle toggle : presetGroup.getToggles()) {
             if (toggle instanceof RadioButton rb && rb.getUserData() instanceof OptimizationPreset p && p == savedPreset) {
                 rb.setSelected(true);
-                if (descLabel != null) descLabel.setText(p.getDescription());
+                if (descLabel != null) descLabel.setText(p.englishDescription());
                 break;
             }
         }
@@ -365,8 +365,8 @@ class OptimizationPanel extends VBox {
                         settings.settings().forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
                     }
                     Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                    alert.setTitle(com.sbtools.util.UiText.label("Current TCP/IP settings"));
-                    alert.setHeaderText(com.sbtools.util.UiText.label("Active TCP global settings"));
+                    alert.setTitle(I18n.ui("Current TCP/IP settings"));
+                    alert.setHeaderText(I18n.ui("Active TCP global settings"));
                     javafx.scene.control.TextArea area = new javafx.scene.control.TextArea(sb.toString());
                     area.setEditable(false);
                     area.setStyle("-fx-font-family: 'Consolas', monospace; -fx-font-size: 12px;");
@@ -473,7 +473,7 @@ class OptimizationPanel extends VBox {
                         var info = service.describeRestore(first);
                         if (info.details() != null) sb.append("\n--- Newest snapshot detail ---\n").append(info.details());
                         Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                        alert.setTitle(com.sbtools.util.UiText.label("Network snapshots"));
+                        alert.setTitle(I18n.ui("Network snapshots"));
                         alert.setHeaderText(snaps.size() + " snapshot(s) stored (portable .winzenith/network-snapshots.json)");
                         javafx.scene.control.TextArea area = new javafx.scene.control.TextArea(sb.toString());
                         area.setEditable(false);

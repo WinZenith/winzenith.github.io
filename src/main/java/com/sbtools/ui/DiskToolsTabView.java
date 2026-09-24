@@ -131,23 +131,23 @@ public class DiskToolsTabView extends BorderPane {
     private final FilteredList<DriveInfo> filteredDrives = new FilteredList<>(allDrives, d -> true);
     private final ComboBox<String> filterCombo = new ComboBox<>(
             FXCollections.observableArrayList("All", "HDD", "SSD"));
-    private final CheckBox selectAllCheck = new CheckBox();
+    private final CheckBox selectAllCheck = new TrCheckBox();
     private final Map<String, BooleanProperty> driveSelected = new HashMap<>();
-    private final Button analyzeBtn = new Button("Analyze Selected");
-    private final Button intelligentDefragBtn = new Button("Intelligent Defrag");
+    private final Button analyzeBtn = new TrButton("Analyze Selected");
+    private final Button intelligentDefragBtn = new TrButton("Intelligent Defrag");
     private final ComboBox<String> defragModeCombo = new ComboBox<>(
             FXCollections.observableArrayList("Auto", "Quick", "Deep"));
-    private final Button stopBtn = new Button("Stop");
+    private final Button stopBtn = new TrButton("Stop");
     private final ProgressBar defragProgress = new ProgressBar(0);
-    private final Label defragStatus = new Label("Select drives and click Analyze Selected.");
-    private final Button refreshDrivesBtn = new Button("Refresh");
-    private final Label emptyDrivesLabel = new Label("No drives detected. Click Refresh to retry.");
+    private final Label defragStatus = new TrLabel("Select drives and click Analyze Selected.");
+    private final Button refreshDrivesBtn = new TrButton("Refresh");
+    private final Label emptyDrivesLabel = new TrLabel("No drives detected. Click Refresh to retry.");
     private Thread currentDefragThread;
     private Thread currentAnalyzeThread;
     private final Canvas blockCanvas = new Canvas(400, 200);
-    private final Label driveAnalysisLabel = new Label();
-    private final Label fragCountLabel = new Label();
-    private final Label fragPercentLabel = new Label();
+    private final Label driveAnalysisLabel = new TrLabel();
+    private final Label fragCountLabel = new TrLabel();
+    private final Label fragPercentLabel = new TrLabel();
     private final HBox legendBox = new HBox(8);
     private final VBox visualizationPanel = new VBox(8);
     private final Set<String> analyzedDrives = new CopyOnWriteArraySet<>();
@@ -158,35 +158,35 @@ public class DiskToolsTabView extends BorderPane {
     private final TableView<ShredderFileEntry> shredderTable = new TableView<>();
     private final ObservableList<ShredderFileEntry> shredderEntries = FXCollections.observableArrayList();
     private final TextField filePathField = new TextField();
-    private final Button browseBtn = new Button("Browse...");
-    private final Button addFilesBtn = new Button("Add Files");
-    private final Button secureDeleteBtn = new Button("Secure Delete");
-    private final Button deleteAllBtn = new Button("Delete All");
-    private final Button stopSecureBtn = new Button("Stop");
+    private final Button browseBtn = new TrButton("Browse...");
+    private final Button addFilesBtn = new TrButton("Add Files");
+    private final Button secureDeleteBtn = new TrButton("Secure Delete");
+    private final Button deleteAllBtn = new TrButton("Delete All");
+    private final Button stopSecureBtn = new TrButton("Stop");
     private final AtomicBoolean secureCancelled = new AtomicBoolean(false);
     private final ProgressBar secureDeleteProgress = new ProgressBar(0);
-    private final Label secureDeleteStatus = new Label();
+    private final Label secureDeleteStatus = new TrLabel();
     private final ComboBox<String> overwritePresetCombo = new ComboBox<>(
             FXCollections.observableArrayList("Quick (1 pass)", "Standard (3 passes)", "Deep (7 passes)"));
 
     private final TableView<DriveInfo> wipeDriveTable = new TableView<>();
     private final ObservableList<DriveInfo> wipeDrives = FXCollections.observableArrayList();
-    private final Button startWipeBtn = new Button("Start");
-    private final Button stopWipeBtn = new Button("Stop");
+    private final Button startWipeBtn = new TrButton("Start");
+    private final Button stopWipeBtn = new TrButton("Stop");
     private final ProgressBar wipeProgress = new ProgressBar(0);
-    private final Label wipeStatus = new Label("Select drives and click Start.");
-    private final CheckBox selectAllWipeCheck = new CheckBox("Select All");
+    private final Label wipeStatus = new TrLabel("Select drives and click Start.");
+    private final CheckBox selectAllWipeCheck = new TrCheckBox("Select All");
     private final Map<String, BooleanProperty> wipeSelected = new HashMap<>();
 
     /* ───── Recycle Bin tab components ───── */
     private final TableView<RecycleBinEntry> recycleBinTable = new TableView<>();
     private final ObservableList<RecycleBinEntry> recycleBinEntries = FXCollections.observableArrayList();
-    private final Button refreshRecycleBinBtn = new Button("Refresh");
-    private final Button secureWipeRecycleBinBtn = new Button("Secure Wipe Recycle Bin");
-    private final Button stopRecycleBinBtn = new Button("Stop");
+    private final Button refreshRecycleBinBtn = new TrButton("Refresh");
+    private final Button secureWipeRecycleBinBtn = new TrButton("Secure Wipe Recycle Bin");
+    private final Button stopRecycleBinBtn = new TrButton("Stop");
     private final ProgressBar recycleBinProgress = new ProgressBar(0);
-    private final Label recycleBinStatus = new Label("Click Refresh to list Recycle Bin contents.");
-    private final Label recycleBinSummary = new Label();
+    private final Label recycleBinStatus = new TrLabel("Click Refresh to list Recycle Bin contents.");
+    private final Label recycleBinSummary = new TrLabel();
     private final AtomicBoolean recycleBinBusy = new AtomicBoolean(false);
     private final AtomicBoolean recycleBinCancelled = new AtomicBoolean(false);
 
@@ -201,11 +201,11 @@ public class DiskToolsTabView extends BorderPane {
     private final ComboBox<String> healthDriveCombo = new ComboBox<>();
     private final ObservableList<DiskHealthInfo> healthDrives = FXCollections.observableArrayList();
     private final Map<String, DiskHealthInfo> healthDriveMap = new HashMap<>();
-    private final Button refreshHealthBtn = new Button("Refresh");
+    private final Button refreshHealthBtn = new TrButton("Refresh");
     private final ProgressBar healthProgress = new ProgressBar(0);
-    private final Label healthStatus = new Label("Click Refresh to load disk health data.");
+    private final Label healthStatus = new TrLabel("Click Refresh to load disk health data.");
     private final GridPane smartGrid = new GridPane();
-    private final Label overallHealthLabel = new Label();
+    private final Label overallHealthLabel = new TrLabel();
     private boolean smartctlAvailable = false;
 
     /* ───── Benchmark tab components ───── */
@@ -213,17 +213,17 @@ public class DiskToolsTabView extends BorderPane {
     private final Map<String, DriveInfo> benchDriveMap = new HashMap<>();
     private final ComboBox<String> benchSizeCombo = new ComboBox<>(
             FXCollections.observableArrayList("32 MB", "64 MB", "128 MB", "256 MB"));
-    private final Button benchStartBtn = new Button("Start Benchmark");
-    private final Button benchStopBtn = new Button("Stop");
+    private final Button benchStartBtn = new TrButton("Start Benchmark");
+    private final Button benchStopBtn = new TrButton("Stop");
     private final ProgressBar benchProgress = new ProgressBar(0);
-    private final Label benchStatus = new Label("Select a drive and click Start Benchmark.");
+    private final Label benchStatus = new TrLabel("Select a drive and click Start Benchmark.");
     private final AtomicBoolean benchCancelled = new AtomicBoolean(false);
     private Thread currentBenchThread;
-    private final Label benchSeqWriteLabel = new Label("-");
-    private final Label benchSeqReadLabel = new Label("-");
-    private final Label benchRandomReadLabel = new Label("-");
-    private final Label benchRandom4KLabel = new Label("-");
-    private final Label benchLatencyLabel = new Label("-");
+    private final Label benchSeqWriteLabel = new TrLabel("-");
+    private final Label benchSeqReadLabel = new TrLabel("-");
+    private final Label benchRandomReadLabel = new TrLabel("-");
+    private final Label benchRandom4KLabel = new TrLabel("-");
+    private final Label benchLatencyLabel = new TrLabel("-");
 
     public DiskToolsTabView(BooleanSupplier adminCheck) {
         this(adminCheck, null);
@@ -232,6 +232,12 @@ public class DiskToolsTabView extends BorderPane {
     public DiskToolsTabView(BooleanSupplier adminCheck, BooleanProperty globalBusy) {
         this.adminCheck = adminCheck;
         this.globalBusy = globalBusy;
+
+        I18n.combo(filterCombo);
+        I18n.combo(defragModeCombo);
+        I18n.combo(overwritePresetCombo);
+        I18n.combo(wipePresetCombo);
+        I18n.combo(benchSizeCombo);
 
         ShredderService.sweepOrphanedTempFiles();
 
@@ -292,7 +298,7 @@ public class DiskToolsTabView extends BorderPane {
         filterCombo.getSelectionModel().select(0);
         filterCombo.setOnAction(e -> applyFilter());
 
-        selectAllCheck.setTooltip(new Tooltip("Select/Deselect all visible drives"));
+        selectAllCheck.setTooltip(I18n.tooltip("Select/Deselect all visible drives"));
         selectAllCheck.setOnAction(e -> {
             boolean sel = selectAllCheck.isSelected();
             for (DriveInfo d : filteredDrives) {
@@ -305,7 +311,7 @@ public class DiskToolsTabView extends BorderPane {
 
         analyzeBtn.setDisable(true);
         intelligentDefragBtn.setDisable(true);
-        intelligentDefragBtn.setTooltip(new Tooltip("Full defrag for HDD, ReTrim for SSD"));
+        intelligentDefragBtn.setTooltip(I18n.tooltip("Full defrag for HDD, ReTrim for SSD"));
 
         defragModeCombo.getSelectionModel().select(0);
         defragModeCombo.setTooltip(new Tooltip(
@@ -318,7 +324,7 @@ public class DiskToolsTabView extends BorderPane {
         stopBtn.setOnAction(e -> stopDefragOperation());
 
         refreshDrivesBtn.getStyleClass().add("accent");
-        refreshDrivesBtn.setTooltip(new Tooltip("Refresh drive list"));
+        refreshDrivesBtn.setTooltip(I18n.tooltip("Refresh drive list"));
         refreshDrivesBtn.setOnAction(e -> loadDrives());
 
         analyzeBtn.setOnAction(e -> startAnalyze());
@@ -332,7 +338,7 @@ public class DiskToolsTabView extends BorderPane {
         emptyDrivesLabel.setStyle("-fx-font-size: 12px;");
 
         HBox defragToolbar = new HBox(8,
-                refreshDrivesBtn, selectAllCheck, new Label("Filter:"), filterCombo,
+                refreshDrivesBtn, selectAllCheck, new TrLabel("Filter:"), filterCombo,
                 analyzeBtn, intelligentDefragBtn, defragModeCombo,
                 stopBtn, defragProgress, defragStatus);
         defragToolbar.setAlignment(Pos.CENTER_LEFT);
@@ -393,7 +399,7 @@ public class DiskToolsTabView extends BorderPane {
         checkCol.setSortable(false);
         checkCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue()));
         checkCol.setCellFactory(col -> new TableCell<>() {
-            private final CheckBox cb = new CheckBox();
+            private final CheckBox cb = new TrCheckBox();
             private BooleanProperty prevProp;
             @Override
             protected void updateItem(DriveInfo item, boolean empty) {
@@ -743,7 +749,7 @@ public class DiskToolsTabView extends BorderPane {
                     "Some selected drives have not been analyzed yet.\n"
                             + "It is recommended to analyze drives first for accurate results.\n\n"
                             + "Continue anyway?");
-            warn.setHeaderText("Drives not analyzed");
+            warn.setHeaderText(I18n.t("Drives not analyzed"));
             if (warn.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         }
 
@@ -800,7 +806,7 @@ public class DiskToolsTabView extends BorderPane {
                         + "\nMode: " + modeDescription
                         + (preWarnings.isEmpty() ? "" : "\n\nWarnings:\n" + String.join("\n", preWarnings))
                         + "\n\nProceed?");
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Intelligent defrag (" + mode + ")"));
+        confirm.setHeaderText(I18n.ui("Intelligent defrag (" + mode + ")"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         if (refuseDiskMutation()) return;
 
@@ -964,14 +970,14 @@ public class DiskToolsTabView extends BorderPane {
     private VBox buildDiskHealthContent() {
         refreshHealthBtn.getStyleClass().add("accent");
         refreshHealthBtn.setOnAction(e -> loadDiskHealth());
-        refreshHealthBtn.setTooltip(new Tooltip("Refresh disk health (SMART) data"));
+        refreshHealthBtn.setTooltip(I18n.tooltip("Refresh disk health (SMART) data"));
 
         healthProgress.setVisible(false);
         healthProgress.setPrefWidth(200);
         healthStatus.getStyleClass().add("text-muted");
 
         healthDriveCombo.setPrefWidth(250);
-        healthDriveCombo.setTooltip(new Tooltip("Select a drive to view detailed SMART data"));
+        healthDriveCombo.setTooltip(I18n.tooltip("Select a drive to view detailed SMART data"));
         healthDriveCombo.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) ->
                 refreshHealthDetailForSelection(sel));
 
@@ -1096,7 +1102,7 @@ public class DiskToolsTabView extends BorderPane {
         addSmartSeparator(row++);
 
         String healthStatus = info.getHealthStatus();
-        Label healthValueLabel = new Label(healthStatus);
+        Label healthValueLabel = new TrLabel(healthStatus);
         if (info.isHealthOk()) {
             healthValueLabel.getStyleClass().addAll("label", "success");
         } else if (info.isHealthCaution()) {
@@ -1108,7 +1114,7 @@ public class DiskToolsTabView extends BorderPane {
         }
         addSmartGridRow(row++, "Health Status", healthValueLabel);
 
-        Label opLabel = new Label(info.getOperationalStatus());
+        Label opLabel = new TrLabel(info.getOperationalStatus());
         if ("OK".equalsIgnoreCase(info.getOperationalStatus())) {
             opLabel.getStyleClass().addAll("label", "success");
         } else {
@@ -1198,11 +1204,11 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void addSmartRow(int row, String label, String value) {
-        Label labelNode = new Label(label);
+        Label labelNode = new TrLabel(label);
         labelNode.getStyleClass().addAll("label", "sysinfo-label");
         labelNode.setMinWidth(160);
 
-        Label valueNode = new Label(value);
+        Label valueNode = new TrLabel(value);
         valueNode.getStyleClass().addAll("label", "sysinfo-value");
 
         smartGrid.add(labelNode, 0, row);
@@ -1210,7 +1216,7 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void addSmartGridRow(int row, String label, Label valueLabel) {
-        Label labelNode = new Label(label);
+        Label labelNode = new TrLabel(label);
         labelNode.getStyleClass().addAll("label", "sysinfo-label");
         labelNode.setMinWidth(160);
 
@@ -1221,13 +1227,13 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void addSmartSeparator(int row) {
-        Label sep = new Label("");
+        Label sep = new TrLabel("");
         sep.setMinHeight(8);
         smartGrid.add(sep, 0, row);
     }
 
     private Label createColoredValueLabel(long value) {
-        Label l = new Label(String.valueOf(value));
+        Label l = new TrLabel(String.valueOf(value));
         if (value == 0) {
             l.getStyleClass().addAll("label", "success");
         } else if (value < 10) {
@@ -1243,22 +1249,22 @@ public class DiskToolsTabView extends BorderPane {
        =================================================================== */
 
     private VBox buildBenchmarkContent() {
-        Label desc = new Label("Test sequential read/write speed, 1MB random IOPS and 4K random read of a drive. "
+        Label desc = new TrLabel("Test sequential read/write speed, 1MB random IOPS and 4K random read of a drive. "
                 + "Larger sizes are more accurate but slower; results may be cache-influenced on repeated runs.");
         desc.getStyleClass().add("text-muted");
         desc.setWrapText(true);
 
         benchDriveCombo.setPrefWidth(250);
-        benchDriveCombo.setTooltip(new Tooltip("Select a drive to benchmark"));
+        benchDriveCombo.setTooltip(I18n.tooltip("Select a drive to benchmark"));
         benchDriveCombo.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> updateBenchStartButton());
 
         benchSizeCombo.getSelectionModel().select(1);
-        benchSizeCombo.setTooltip(new Tooltip("Test file size (larger = more accurate but slower)"));
+        benchSizeCombo.setTooltip(I18n.tooltip("Test file size (larger = more accurate but slower)"));
 
         benchStartBtn.getStyleClass().add("accent");
         benchStartBtn.setDisable(true);
         benchStartBtn.setOnAction(e -> startBenchmark());
-        benchStartBtn.setTooltip(new Tooltip("Run sequential read/write and random read benchmark"));
+        benchStartBtn.setTooltip(I18n.tooltip("Run sequential read/write and random read benchmark"));
 
         benchStopBtn.getStyleClass().add("danger");
         benchStopBtn.setVisible(false);
@@ -1267,13 +1273,13 @@ public class DiskToolsTabView extends BorderPane {
             benchStopBtn.setDisable(true);
             benchStatus.setText("Stopping...");
         });
-        benchStopBtn.setTooltip(new Tooltip("Stop the benchmark"));
+        benchStopBtn.setTooltip(I18n.tooltip("Stop the benchmark"));
 
         benchProgress.setVisible(false);
         benchProgress.setPrefWidth(200);
         benchStatus.getStyleClass().add("text-muted");
 
-        HBox toolbar = new HBox(8, benchDriveCombo, new Label("Size:"), benchSizeCombo,
+        HBox toolbar = new HBox(8, benchDriveCombo, new TrLabel("Size:"), benchSizeCombo,
                 benchStartBtn, benchStopBtn, benchProgress, benchStatus);
         toolbar.setAlignment(Pos.CENTER_LEFT);
         toolbar.setPadding(new Insets(12, 16, 12, 16));
@@ -1285,15 +1291,15 @@ public class DiskToolsTabView extends BorderPane {
         benchRandom4KLabel.getStyleClass().addAll("label", "large", "accent");
         benchLatencyLabel.getStyleClass().addAll("label", "large", "accent");
 
-        Label seqWriteTitle = new Label("Sequential Write:");
+        Label seqWriteTitle = new TrLabel("Sequential Write:");
         seqWriteTitle.getStyleClass().addAll("label", "text-muted");
-        Label seqReadTitle = new Label("Sequential Read:");
+        Label seqReadTitle = new TrLabel("Sequential Read:");
         seqReadTitle.getStyleClass().addAll("label", "text-muted");
-        Label randomReadTitle = new Label("Random Read IOPS (1MB):");
+        Label randomReadTitle = new TrLabel("Random Read IOPS (1MB):");
         randomReadTitle.getStyleClass().addAll("label", "text-muted");
-        Label random4KTitle = new Label("Random Read IOPS (4K):");
+        Label random4KTitle = new TrLabel("Random Read IOPS (4K):");
         random4KTitle.getStyleClass().addAll("label", "text-muted");
-        Label latencyTitle = new Label("Avg 4K Latency:");
+        Label latencyTitle = new TrLabel("Avg 4K Latency:");
         latencyTitle.getStyleClass().addAll("label", "text-muted");
 
         GridPane resultsGrid = new GridPane();
@@ -1449,7 +1455,7 @@ public class DiskToolsTabView extends BorderPane {
        =================================================================== */
 
     private VBox buildSecureEraseContent() {
-        Label warning = new Label("WARNING: Once a file is securely deleted or free space is wiped, "
+        Label warning = new TrLabel("WARNING: Once a file is securely deleted or free space is wiped, "
                 + "recovery is completely impossible. Proceed with caution.");
         warning.getStyleClass().addAll("label", "danger");
         warning.setWrapText(true);
@@ -1458,7 +1464,7 @@ public class DiskToolsTabView extends BorderPane {
                 + "-fx-border-color: #ff5555; -fx-border-width: 1; -fx-background-radius: 4; -fx-border-radius: 4;");
 
         if (!AppPaths.isWindows()) {
-            Label notAvailable = new Label("Secure Erase is only available on Windows.");
+            Label notAvailable = new TrLabel("Secure Erase is only available on Windows.");
             notAvailable.getStyleClass().addAll("label", "text-muted");
             notAvailable.setWrapText(true);
             notAvailable.setPadding(new Insets(20));
@@ -1484,23 +1490,23 @@ public class DiskToolsTabView extends BorderPane {
 
     @SuppressWarnings("unchecked")
     private VBox buildFileDeletionSection() {
-        Label header = new Label("Secure File / Folder Deletion");
+        Label header = new TrLabel("Secure File / Folder Deletion");
         header.getStyleClass().addAll("label", "large", "accent");
 
-        Label dropHint = new Label("Drag files or folders here, or use the buttons below to browse.");
+        Label dropHint = new TrLabel("Drag files or folders here, or use the buttons below to browse.");
         dropHint.getStyleClass().addAll("label", "text-muted");
         dropHint.setWrapText(true);
 
-        filePathField.setPromptText("Select a file or folder to securely delete...");
+        I18n.prompt(filePathField, "Select a file or folder to securely delete...");
         filePathField.setPrefWidth(400);
         filePathField.setEditable(false);
 
-        Button browseFolderBtn = new Button("Browse Folder...");
-        browseFolderBtn.setTooltip(new Tooltip("Browse for a folder to securely delete recursively"));
+        Button browseFolderBtn = new TrButton("Browse Folder...");
+        browseFolderBtn.setTooltip(I18n.tooltip("Browse for a folder to securely delete recursively"));
 
         browseBtn.setOnAction(e -> {
             FileChooser fc = new FileChooser();
-            fc.setTitle("Select file to securely delete");
+            fc.setTitle(I18n.t("Select file to securely delete"));
             fc.getExtensionFilters().addAll(
                     new FileChooser.ExtensionFilter("All Files", "*.*"),
                     new FileChooser.ExtensionFilter("Documents", "*.pdf", "*.doc", "*.docx", "*.txt", "*.rtf", "*.odt"),
@@ -1515,11 +1521,11 @@ public class DiskToolsTabView extends BorderPane {
                 updateDeleteButtons();
             }
         });
-        browseBtn.setTooltip(new Tooltip("Browse for a single file to securely delete"));
+        browseBtn.setTooltip(I18n.tooltip("Browse for a single file to securely delete"));
 
         browseFolderBtn.setOnAction(e -> {
             DirectoryChooser dc = new DirectoryChooser();
-            dc.setTitle("Select folder to securely delete");
+            dc.setTitle(I18n.t("Select folder to securely delete"));
             dc.setInitialDirectory(new File("C:\\"));
             File dir = dc.showDialog(getScene() != null ? getScene().getWindow() : null);
             if (dir != null) {
@@ -1538,7 +1544,7 @@ public class DiskToolsTabView extends BorderPane {
 
         addFilesBtn.setOnAction(e -> {
             FileChooser fc = new FileChooser();
-            fc.setTitle("Select files to securely delete");
+            fc.setTitle(I18n.t("Select files to securely delete"));
             fc.getExtensionFilters().addAll(
                     new FileChooser.ExtensionFilter("All Files", "*.*"),
                     new FileChooser.ExtensionFilter("Documents", "*.pdf", "*.doc", "*.docx", "*.txt", "*.rtf", "*.odt"),
@@ -1560,7 +1566,7 @@ public class DiskToolsTabView extends BorderPane {
                 updateDeleteButtons();
             }
         });
-        addFilesBtn.setTooltip(new Tooltip("Add multiple files for batch secure deletion"));
+        addFilesBtn.setTooltip(I18n.tooltip("Add multiple files for batch secure deletion"));
 
         secureDeleteBtn.setDisable(true);
         secureDeleteBtn.getStyleClass().add("danger");
@@ -1572,12 +1578,12 @@ public class DiskToolsTabView extends BorderPane {
                 startSecureDelete();
             }
         });
-        secureDeleteBtn.setTooltip(new Tooltip("Securely delete the selected file or folder with multiple overwrite passes"));
+        secureDeleteBtn.setTooltip(I18n.tooltip("Securely delete the selected file or folder with multiple overwrite passes"));
 
         deleteAllBtn.setDisable(true);
         deleteAllBtn.getStyleClass().add("danger");
         deleteAllBtn.setOnAction(e -> startBatchDelete());
-        deleteAllBtn.setTooltip(new Tooltip("Securely delete all pending files in the list"));
+        deleteAllBtn.setTooltip(I18n.tooltip("Securely delete all pending files in the list"));
 
         stopSecureBtn.getStyleClass().add("danger");
         stopSecureBtn.setVisible(false);
@@ -1586,14 +1592,14 @@ public class DiskToolsTabView extends BorderPane {
             stopSecureBtn.setDisable(true);
             secureDeleteStatus.setText("Stopping...");
         });
-        stopSecureBtn.setTooltip(new Tooltip("Stop the running secure-delete operation"));
+        stopSecureBtn.setTooltip(I18n.tooltip("Stop the running secure-delete operation"));
 
         secureDeleteProgress.setVisible(false);
         secureDeleteProgress.setPrefWidth(150);
         secureDeleteStatus.getStyleClass().add("text-muted");
 
         overwritePresetCombo.getSelectionModel().select(1);
-        overwritePresetCombo.setTooltip(new Tooltip("Select overwrite intensity: Quick (1 pass), Standard (3 passes DoD), or Deep (7 passes)"));
+        overwritePresetCombo.setTooltip(I18n.tooltip("Select overwrite intensity: Quick (1 pass), Standard (3 passes DoD), or Deep (7 passes)"));
 
         HBox row = new HBox(8, filePathField, browseBtn, browseFolderBtn, addFilesBtn);
         row.setAlignment(Pos.CENTER_LEFT);
@@ -1601,7 +1607,7 @@ public class DiskToolsTabView extends BorderPane {
         HBox actionRow = new HBox(8, secureDeleteBtn, deleteAllBtn, stopSecureBtn);
         actionRow.setAlignment(Pos.CENTER_LEFT);
 
-        HBox presetRow = new HBox(8, new Label("Overwrite:"), overwritePresetCombo);
+        HBox presetRow = new HBox(8, new TrLabel("Overwrite:"), overwritePresetCombo);
         presetRow.setAlignment(Pos.CENTER_LEFT);
 
         HBox progressRow = new HBox(8, secureDeleteProgress, secureDeleteStatus);
@@ -1686,10 +1692,10 @@ public class DiskToolsTabView extends BorderPane {
 
     @SuppressWarnings("unchecked")
     private VBox buildRecycleBinSection() {
-        Label header = new Label("Recycle Bin Cleanup");
+        Label header = new TrLabel("Recycle Bin Cleanup");
         header.getStyleClass().addAll("label", "large", "accent");
 
-        Label desc = new Label("Securely wipe all files currently in the Recycle Bin to prevent recovery.");
+        Label desc = new TrLabel("Securely wipe all files currently in the Recycle Bin to prevent recovery.");
         desc.getStyleClass().add("text-muted");
         desc.setWrapText(true);
 
@@ -1700,12 +1706,12 @@ public class DiskToolsTabView extends BorderPane {
 
         refreshRecycleBinBtn.getStyleClass().add("accent");
         refreshRecycleBinBtn.setOnAction(e -> loadRecycleBin());
-        refreshRecycleBinBtn.setTooltip(new Tooltip("List all files in the Recycle Bin"));
+        refreshRecycleBinBtn.setTooltip(I18n.tooltip("List all files in the Recycle Bin"));
 
         secureWipeRecycleBinBtn.getStyleClass().add("danger");
         secureWipeRecycleBinBtn.setDisable(true);
         secureWipeRecycleBinBtn.setOnAction(e -> startSecureWipeRecycleBin());
-        secureWipeRecycleBinBtn.setTooltip(new Tooltip("Securely overwrite all Recycle Bin contents (requires admin)"));
+        secureWipeRecycleBinBtn.setTooltip(I18n.tooltip("Securely overwrite all Recycle Bin contents (requires admin)"));
 
         stopRecycleBinBtn.getStyleClass().add("danger");
         stopRecycleBinBtn.setVisible(false);
@@ -1714,7 +1720,7 @@ public class DiskToolsTabView extends BorderPane {
             stopRecycleBinBtn.setDisable(true);
             recycleBinStatus.setText("Stopping...");
         });
-        stopRecycleBinBtn.setTooltip(new Tooltip("Stop the running Recycle Bin wipe"));
+        stopRecycleBinBtn.setTooltip(I18n.tooltip("Stop the running Recycle Bin wipe"));
 
         HBox toolbar = new HBox(8, refreshRecycleBinBtn, secureWipeRecycleBinBtn, stopRecycleBinBtn,
                 recycleBinProgress, recycleBinStatus, recycleBinSummary);
@@ -1810,7 +1816,7 @@ public class DiskToolsTabView extends BorderPane {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Are you sure you want to securely wipe all " + entries.size() + " item(s) from the Recycle Bin?\n\n"
                         + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm recycle bin wipe"));
+        confirm.setHeaderText(I18n.ui("Confirm recycle bin wipe"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         if (refuseDiskMutation()) return;
 
@@ -1911,7 +1917,7 @@ public class DiskToolsTabView extends BorderPane {
                             + filePath + "\n\n"
                             + "Deleting this file may cause system instability or prevent Windows from starting.\n"
                             + "Are you absolutely sure you want to proceed?");
-            warning.setHeaderText(com.sbtools.util.UiText.label("Critical system file detected"));
+            warning.setHeaderText(I18n.ui("Critical system file detected"));
             if (warning.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         }
 
@@ -1919,7 +1925,7 @@ public class DiskToolsTabView extends BorderPane {
                 "Are you sure you want to securely delete this file?\n\n"
                         + filePath + "\n\n"
                         + "This action is irreversible. The file will be overwritten multiple times and cannot be recovered.");
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm secure delete"));
+        confirm.setHeaderText(I18n.ui("Confirm secure delete"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         if (refuseDiskMutation()) return;
 
@@ -2033,7 +2039,7 @@ public class DiskToolsTabView extends BorderPane {
                                     + "Contains approximately " + countedFiles + " file(s).\n"
                                     + "All files will be overwritten multiple times and cannot be recovered.\n"
                                     + "This action is irreversible.");
-                    confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm secure folder delete"));
+                    confirm.setHeaderText(I18n.ui("Confirm secure folder delete"));
                     if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
                         filePathField.clear();
                         filePathField.setUserData(null);
@@ -2158,14 +2164,14 @@ public class DiskToolsTabView extends BorderPane {
                             + String.join("\n", criticalFiles) + "\n\n"
                             + "Deleting these files may cause system instability or prevent Windows from starting.\n"
                             + "Are you absolutely sure you want to proceed?");
-            warning.setHeaderText(com.sbtools.util.UiText.label("Critical system files detected"));
+            warning.setHeaderText(I18n.ui("Critical system files detected"));
             if (warning.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         }
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Are you sure you want to securely delete " + pendingEntries.size() + " file(s)?\n\n"
                         + "This action is irreversible. All files will be overwritten multiple times and cannot be recovered.");
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm batch secure delete"));
+        confirm.setHeaderText(I18n.ui("Confirm batch secure delete"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         if (refuseDiskMutation()) return;
 
@@ -2385,13 +2391,13 @@ public class DiskToolsTabView extends BorderPane {
 
     @SuppressWarnings("unchecked")
     private VBox buildFreeSpaceWipeSection() {
-        Label header = new Label("Free Space Wiping");
+        Label header = new TrLabel("Free Space Wiping");
         header.getStyleClass().addAll("label", "large", "accent");
 
-        Label desc = new Label("Overwrite free space to remove remnants of deleted files.");
+        Label desc = new TrLabel("Overwrite free space to remove remnants of deleted files.");
         desc.getStyleClass().add("text-muted");
 
-        Label capWarning = new Label("Note: Free space wiping will overwrite all free space (minus ~1 GB reserve) to securely remove remnants. "
+        Label capWarning = new TrLabel("Note: Free space wiping will overwrite all free space (minus ~1 GB reserve) to securely remove remnants. "
                 + "This may take a long time and cause significant disk writes. Use Quick (1 pass) for fastest operation. "
                 + "SSD / Unknown-type drives are BLOCKED (wear + no erasure guarantee — use the vendor's Secure Erase instead). "
                 + "System-drive wipe needs double confirmation and ample free space.");
@@ -2400,7 +2406,7 @@ public class DiskToolsTabView extends BorderPane {
         capWarning.setStyle("-fx-font-size: 11px;");
 
         wipePresetCombo.getSelectionModel().select(1);
-        wipePresetCombo.setTooltip(new Tooltip("Select overwrite intensity: Quick (1 pass), Standard (3 passes DoD), or Deep (7 passes)"));
+        wipePresetCombo.setTooltip(I18n.tooltip("Select overwrite intensity: Quick (1 pass), Standard (3 passes DoD), or Deep (7 passes)"));
 
         wipeProgress.setVisible(false);
         wipeProgress.setPrefWidth(200);
@@ -2410,13 +2416,13 @@ public class DiskToolsTabView extends BorderPane {
         stopWipeBtn.setDisable(true);
 
         startWipeBtn.setOnAction(e -> startWipeFreeSpace());
-        startWipeBtn.setTooltip(new Tooltip("Start wiping free space on selected drives (requires admin rights)"));
+        startWipeBtn.setTooltip(I18n.tooltip("Start wiping free space on selected drives (requires admin rights)"));
         stopWipeBtn.setOnAction(e -> {
             wipeCancelled.set(true);
             stopWipeBtn.setDisable(true);
             wipeStatus.setText("Stopping...");
         });
-        stopWipeBtn.setTooltip(new Tooltip("Stop the free space wipe operation"));
+        stopWipeBtn.setTooltip(I18n.tooltip("Stop the free space wipe operation"));
 
         selectAllWipeCheck.setOnAction(e -> {
             boolean sel = selectAllWipeCheck.isSelected();
@@ -2428,7 +2434,7 @@ public class DiskToolsTabView extends BorderPane {
             updateWipeStartButton();
         });
 
-        HBox presetRow = new HBox(8, new Label("Overwrite:"), wipePresetCombo);
+        HBox presetRow = new HBox(8, new TrLabel("Overwrite:"), wipePresetCombo);
         presetRow.setAlignment(Pos.CENTER_LEFT);
 
         HBox controls = new HBox(8,
@@ -2446,7 +2452,7 @@ public class DiskToolsTabView extends BorderPane {
         checkCol.setSortable(false);
         checkCol.setCellValueFactory(c -> new SimpleObjectProperty<>(c.getValue()));
         checkCol.setCellFactory(col -> new TableCell<>() {
-            private final CheckBox cb = new CheckBox();
+            private final CheckBox cb = new TrCheckBox();
             private BooleanProperty prevProp;
             @Override
             protected void updateItem(DriveInfo item, boolean empty) {
@@ -2576,7 +2582,7 @@ public class DiskToolsTabView extends BorderPane {
                     + "break updates/pagefile, and cause app crashes. Proceed only with ample free space.");
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, confirmText.toString());
-        confirm.setHeaderText(com.sbtools.util.UiText.label("Confirm free space wipe"));
+        confirm.setHeaderText(I18n.ui("Confirm free space wipe"));
         if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
 
         // Strict: system-drive wipe needs a second explicit confirmation.
@@ -2587,7 +2593,7 @@ public class DiskToolsTabView extends BorderPane {
                             + "Wiping free space on the running OS drive can cause instability, "
                             + "failed updates, and app crashes if free space runs low.\n\n"
                             + "Proceed with system-drive wipe?");
-            second.setHeaderText("Second confirmation — system drive");
+            second.setHeaderText(I18n.t("Second confirmation — system drive"));
             if (second.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
         }
 

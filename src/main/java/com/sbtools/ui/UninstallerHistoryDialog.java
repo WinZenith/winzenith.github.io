@@ -48,17 +48,17 @@ public class UninstallerHistoryDialog {
     public static void show() {
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle(AppInfo.DISPLAY_NAME + " - Uninstall History");
-        dialog.setHeaderText(com.sbtools.util.UiText.label("Uninstall history"));
+        dialog.setHeaderText(I18n.ui("Uninstall history"));
 
         UninstallHistoryStore store = new UninstallHistoryStore();
         List<UninstallHistoryEntry> entries = store.listAll();
 
         TextField searchField = new TextField();
-        searchField.setPromptText("Filter by app name...");
+        I18n.prompt(searchField, "Filter by app name...");
         searchField.setPrefWidth(260);
-        Label countLabel = new Label(entries.size() + " entr(ies)");
+        Label countLabel = new TrLabel(entries.size() + " entr(ies)");
         countLabel.setStyle("-fx-opacity: 0.75;");
-        HBox filterBar = new HBox(10, new Label("Search:"), searchField, countLabel);
+        HBox filterBar = new HBox(10, new TrLabel("Search:"), searchField, countLabel);
         filterBar.setAlignment(Pos.CENTER_LEFT);
 
         FilteredList<UninstallHistoryEntry> filtered =
@@ -75,7 +75,7 @@ public class UninstallerHistoryDialog {
         });
 
         TableView<UninstallHistoryEntry> table = new TableView<>(filtered);
-        table.setPlaceholder(new Label("No uninstalls recorded yet."));
+        table.setPlaceholder(new TrLabel("No uninstalls recorded yet."));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
         TableColumn<UninstallHistoryEntry, String> dateCol = UiColumn.of("Date");
@@ -120,7 +120,7 @@ public class UninstallerHistoryDialog {
         table.getColumns().addAll(dateCol, nameCol, modeCol, statusCol, detailCol);
         VBox.setVgrow(table, Priority.ALWAYS);
 
-        Button clearBtn = new Button("Clear History");
+        Button clearBtn = new TrButton("Clear History");
         clearBtn.setOnAction(e -> {
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Clear all uninstall history?");
             confirm.setHeaderText(AppInfo.DISPLAY_NAME);
@@ -131,7 +131,7 @@ public class UninstallerHistoryDialog {
             }
         });
 
-        Button exportBtn = new Button("Export CSV");
+        Button exportBtn = new TrButton("Export CSV");
         exportBtn.setOnAction(e -> exportCsv(filtered));
 
         HBox bottom = new HBox(8, clearBtn, exportBtn);
@@ -150,7 +150,7 @@ public class UninstallerHistoryDialog {
     private static void exportCsv(List<UninstallHistoryEntry> entries) {
         try {
             FileChooser chooser = new FileChooser();
-            chooser.setTitle("Export uninstall history");
+            chooser.setTitle(I18n.t("Export uninstall history"));
             chooser.setInitialFileName("uninstall-history.csv");
             chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV", "*.csv"));
             java.io.File target = chooser.showSaveDialog(null);

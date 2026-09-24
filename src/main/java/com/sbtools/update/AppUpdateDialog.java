@@ -1,5 +1,7 @@
 package com.sbtools.update;
 
+import com.sbtools.ui.I18n;
+import com.sbtools.ui.TrLabel;
 import com.sbtools.util.AppLogger;
 import javafx.application.Platform;
 import javafx.event.ActionEvent;
@@ -64,7 +66,7 @@ public final class AppUpdateDialog {
         Path targetDir = resolveTargetDir(configuredDownloadDir);
 
         Dialog<Void> dialog = new Dialog<>();
-        dialog.setTitle("Downloading Update");
+        dialog.setTitle(I18n.t("Downloading Update"));
         dialog.setHeaderText("Downloading v" + (version != null ? version : "") + "...");
         dialog.getDialogPane().getButtonTypes().add(ButtonType.CANCEL);
         dialog.setResultConverter(bt -> null);
@@ -77,7 +79,7 @@ public final class AppUpdateDialog {
         progressBar.setPrefWidth(360);
         progressBar.setMaxWidth(Double.MAX_VALUE);
 
-        Label statusLabel = new Label("Connecting...");
+        Label statusLabel = new TrLabel("Connecting...");
         statusLabel.setWrapText(true);
         statusLabel.setMaxWidth(360);
 

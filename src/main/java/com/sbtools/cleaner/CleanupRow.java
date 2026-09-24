@@ -1,5 +1,6 @@
 package com.sbtools.cleaner;
 
+import com.sbtools.i18n.Messages;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.LongProperty;
@@ -20,7 +21,7 @@ public class CleanupRow {
 
         private final String displayText;
         ScanStatus(String displayText) { this.displayText = displayText; }
-        public String getDisplayText() { return displayText; }
+        public String getDisplayText() { return Messages.get(displayText); }
     }
 
     private final CleanupCategory category;
@@ -37,9 +38,7 @@ public class CleanupRow {
 
     public CleanupRow(CleanupCategory category) {
         this.category = category;
-        this.categoryName.set(category.getDisplayName());
-        this.description.set(category.getDescription());
-        this.statusText.set(ScanStatus.PENDING.getDisplayText());
+        applyLanguage();
     }
 
     public CleanupCategory getCategory() {
@@ -56,6 +55,18 @@ public class CleanupRow {
 
     public void setSelected(boolean selected) {
         this.selected.set(selected);
+    }
+
+    /** Rewrites app-authored captions after a language change. Sizes stay as scanned. */
+    public void applyLanguage() {
+        categoryName.set(category.getDisplayName());
+        description.set(category.getDescription());
+        if (errorMessage == null || errorMessage.isBlank()) {
+            statusText.set(scanStatus.getDisplayText());
+        }
+        if ("Pending...".equals(sizeOrCountText.get())) {
+            sizeOrCountText.set(Messages.get("Pending..."));
+        }
     }
 
     public StringProperty categoryNameProperty() {

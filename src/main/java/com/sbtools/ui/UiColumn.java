@@ -9,6 +9,8 @@ public final class UiColumn {
     }
 
     public static <S, T> TableColumn<S, T> of(String title) {
-        return new TableColumn<>(UiText.label(title));
+        TableColumn<S, T> column = new TableColumn<>();
+        I18n.column(column, UiText.label(title));
+        return column;
     }
 }
