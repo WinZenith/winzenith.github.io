@@ -446,6 +446,24 @@ code {
     font-weight: 600;
 }
 
+.stat-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-top: 2px;
+}
+
+.stat-phrase {
+    font-size: 17px;
+    font-weight: 800;
+    line-height: 1.25;
+    background: var(--gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    padding-top: 8px;
+}
+
 /* --- Section --- */
 .section {
     padding: 72px 0;

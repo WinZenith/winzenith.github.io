@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$jar = Join-Path $root "target\win-zenith-1.3.3-shaded.jar"
+$jar = Join-Path $root "target\win-zenith-1.3.4-shaded.jar"
 if (-not (Test-Path $jar)) {
     Write-Error "Shaded JAR not found. Run: mvn package"
     exit 1

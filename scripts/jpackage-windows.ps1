@@ -13,7 +13,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$version = "1.3.3"
+$version = "1.3.4"
 $jarName = "win-zenith-$version-shaded.jar"
 $jar = Join-Path $root "target\$jarName"
 if (-not (Test-Path $jar)) {
@@ -140,6 +140,11 @@ java-options=--add-modules=javafx.controls
     foreach ($junkFile in @("win-zenith-$version.jar", "WinZenith.exe")) {
         $junkPath = Join-Path $appDir $junkFile
         if (Test-Path $junkPath) { Remove-Item -Force $junkPath -ErrorAction SilentlyContinue }
+    }
+    foreach ($oldJar in Get-ChildItem $appDir -Filter "win-zenith-*.jar" -ErrorAction SilentlyContinue) {
+        if ($oldJar.Name -ne "win-zenith-$version-shaded.jar") {
+            Remove-Item -Force $oldJar.FullName -ErrorAction SilentlyContinue
+        }
     }
     Write-Host "Cleaned app directory of build artifacts"
 }
