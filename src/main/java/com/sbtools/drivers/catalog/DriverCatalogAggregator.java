@@ -61,7 +61,7 @@ public class DriverCatalogAggregator {
         List<DriverCatalogProvider> providers = new ArrayList<>();
         providers.add(new OemNvidiaCatalogProvider(catalog));
         providers.add(new OemIntelCatalogProvider(catalog));
-        if (catalog.hasFreshEntriesForProvider("AMD", now)) {
+        if (catalog.hasEntriesForProvider("AMD")) {
             providers.add(new OemAmdCatalogProvider(catalog));
         }
         if (catalog.hasFreshEntriesForProvider("Realtek", now)) {
@@ -72,6 +72,9 @@ public class DriverCatalogAggregator {
         }
         if (catalog.hasFreshEntriesForProvider("Synaptics", now)) {
             providers.add(new OemSynapticsCatalogProvider(catalog));
+        }
+        if (catalog.hasFreshEntriesForProvider("Qualcomm", now)) {
+            providers.add(new OemQualcommCatalogProvider(catalog));
         }
         providers.add(new WindowsUpdateCatalogProvider());
         AppLogger.info("CatalogAggregator: active providers: " + providers.size()
@@ -458,20 +461,31 @@ public class DriverCatalogAggregator {
             return false;
         }
 
+        if (!candidateHasDownload && !existingHasDownload) {
+            boolean candWu = "WindowsUpdate".equals(candidate.source());
+            boolean existWu = "WindowsUpdate".equals(existing.source());
+            if (candWu && !existWu) {
+                return true;
+            }
+            if (existWu && !candWu) {
+                return false;
+            }
+        }
+
         if ("WindowsUpdate".equals(candidate.source()) && !"WindowsUpdate".equals(existing.source())) {
-            return false;
+            return candidateHasDownload;
         }
         return true;
     }
 
     private static boolean hasWorkingDownload(DriverUpdateCandidate candidate) {
-        if (candidate.downloadUrl() != null && !candidate.downloadUrl().isBlank()) {
+        if (candidate == null) {
+            return false;
+        }
+        if (AbstractOemCatalogProvider.hasDirectFile(candidate.downloadUrl())) {
             return true;
         }
-        if ("WindowsUpdate".equals(candidate.source())
-                && candidate.packageId() != null && !candidate.packageId().isBlank()) {
-            return true;
-        }
-        return false;
+        return "WindowsUpdate".equals(candidate.source())
+                && candidate.packageId() != null && !candidate.packageId().isBlank();
     }
 }

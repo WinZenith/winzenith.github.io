@@ -553,7 +553,7 @@ public class DriverInstallService {
             } else if (pageUrl.contains("intel.com")) {
                 builder.header("Referer", "https://www.intel.com/");
             } else if (pageUrl.contains("realtek.com")) {
-                builder.header("Referer", "https://www.realtek.com/en/downloads");
+                builder.header("Referer", "https://www.realtek.com/");
             } else if (pageUrl.contains("broadcom.com")) {
                 builder.header("Referer", "https://www.broadcom.com/support/download-search");
             } else if (pageUrl.contains("synaptics.com")) {
@@ -587,6 +587,9 @@ public class DriverInstallService {
                         || lower.contains("asus.com") || lower.contains("asusnet.net")) {
                     found.add(url);
                 }
+            }
+            if (pageUrl.contains("realtek.com")) {
+                com.sbtools.drivers.catalog.OemRealtekCatalogProvider.collectDownloadLinksFromHtml(html, found);
             }
             InstalledDriver installed = candidate == null ? null : candidate.installed();
             return DriverInstallTrust.pickBestDownloadUrl(found, installed);
@@ -699,7 +702,7 @@ public class DriverInstallService {
         } else if (url.contains("intel.com")) {
             reqBuilder.header("Referer", "https://www.intel.com/");
         } else if (url.contains("realtek.com")) {
-            reqBuilder.header("Referer", "https://www.realtek.com/en/downloads");
+            reqBuilder.header("Referer", "https://www.realtek.com/");
         } else if (url.contains("broadcom.com")) {
             reqBuilder.header("Referer", "https://www.broadcom.com/support/download-search");
         } else if (url.contains("synaptics.com")) {

@@ -26,9 +26,19 @@ public class OemBroadcomCatalogProvider extends AbstractOemCatalogProvider {
         return null;
     }
 
+    private static final String WIRELESS_SUPPORT = "https://www.broadcom.com/support/wireless-networking";
+    private static final String DOWNLOAD_SEARCH = "https://www.broadcom.com/support/download-search";
+
     @Override
     protected String getVendorPageUrl(InstalledDriver driver) {
-        return "https://www.broadcom.com/support/download-search";
+        if (driver != null && driver.friendlyName() != null) {
+            String name = driver.friendlyName().toLowerCase(java.util.Locale.ROOT);
+            if (name.contains("wifi") || name.contains("wireless") || name.contains("wlan")
+                    || name.contains("bcm43") || name.contains("broadcom")) {
+                return WIRELESS_SUPPORT;
+            }
+        }
+        return DOWNLOAD_SEARCH;
     }
 
     @Override

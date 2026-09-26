@@ -17,7 +17,16 @@ public final class DriversCriticalFixCheck {
     public static void main(String[] args) throws Exception {
         checkHardwareIds();
         checkCancelledVerificationKeepsVerdict();
+        checkBundledCatalogVendorUrls();
         System.out.println("DriversCriticalFixCheck ok");
+    }
+
+    private static void checkBundledCatalogVendorUrls() {
+        DriverCatalogDatabase db = DriverCatalogDatabase.load();
+        java.util.List<String> errors = CatalogVendorUrlValidator.validateEntries(db.entries());
+        if (!errors.isEmpty()) {
+            throw new AssertionError("Catalog vendor URL issues:\n" + String.join("\n", errors));
+        }
     }
 
     private static void checkHardwareIds() {

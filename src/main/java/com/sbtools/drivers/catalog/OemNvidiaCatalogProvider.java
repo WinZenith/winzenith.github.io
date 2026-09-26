@@ -14,6 +14,8 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
 
     private static final String PROCESS_FIND_URL = "https://www.nvidia.com/Download/processFind.aspx";
     private static final String LOOKUP_URL = "https://www.nvidia.com/Download/API/lookupValueSearch.aspx";
+    /** NVIDIA Advanced Search: 64-bit Windows 10/11 (still osid=57 on Win11). */
+    private static final int NVIDIA_OS_ID_WIN64 = 57;
 
     private static final Pattern GPU_MODEL_PATTERN = Pattern.compile(
             "(GeForce\\s+(?:RTX|GTX|GT)\\s*\\d+(?:\\s+\\d+)*(?:\\s+(?:Ti|SUPER))?)", Pattern.CASE_INSENSITIVE);
@@ -159,7 +161,7 @@ public class OemNvidiaCatalogProvider extends AbstractOemCatalogProvider {
         String searchUrl = PROCESS_FIND_URL
                 + "?psid=" + psid
                 + "&pfid=" + pfid
-                + "&osid=57"
+                + "&osid=" + NVIDIA_OS_ID_WIN64
                 + "&lid=1"
                 + "&whql=1"
                 + "&lang=en-us"

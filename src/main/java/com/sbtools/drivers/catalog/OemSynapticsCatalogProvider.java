@@ -7,6 +7,8 @@ import java.util.regex.Pattern;
 
 public class OemSynapticsCatalogProvider extends AbstractOemCatalogProvider {
 
+    private static final String TOUCHPAD_DRIVERS_PAGE = "https://www.synaptics.com/products/touchpad-drivers";
+
     private static final Pattern VERSION_PATTERN = Pattern.compile(
             "(?:Synaptics|Touchpad|Pointing|PS/2)[^0-9]*([0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
             Pattern.CASE_INSENSITIVE);
@@ -28,7 +30,7 @@ public class OemSynapticsCatalogProvider extends AbstractOemCatalogProvider {
     protected String fetchLatestVersion(InstalledDriver driver) {
         AppLogger.debug("Synaptics: Fetching latest version for " + driver.friendlyName());
 
-        String body = httpGet("https://www.synaptics.com/support");
+        String body = httpGet(TOUCHPAD_DRIVERS_PAGE);
         if (body != null) {
             String v = extractVersion(body, VERSION_PATTERN);
             if (v != null) {
@@ -46,7 +48,7 @@ public class OemSynapticsCatalogProvider extends AbstractOemCatalogProvider {
 
     @Override
     protected String getVendorPageUrl(InstalledDriver driver) {
-        return "https://www.synaptics.com/support";
+        return TOUCHPAD_DRIVERS_PAGE;
     }
 
     @Override

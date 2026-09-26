@@ -62,7 +62,7 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             DriverUpdateCandidate liveCandidate = liveCandidate(driver);
             DriverUpdateCandidate chosen = preferCandidate(catalogCandidate, liveCandidate);
             if (chosen != null) {
-                out.add(chosen);
+                out.add(enrichChosenCandidate(driver, chosen));
             }
             } catch (Exception ex) {
                 AppLogger.warning(vendor.label() + ": Skipping driver due to error: " + ex.getMessage());
@@ -176,6 +176,56 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
                 candidate.severity(),
                 downloadUrl == null ? "" : downloadUrl,
                 candidate.vendorPageUrl());
+    }
+
+    static DriverUpdateCandidate withVendorPageUrl(DriverUpdateCandidate candidate, String vendorPageUrl) {
+        return new DriverUpdateCandidate(
+                candidate.installed(),
+                candidate.availableVersion(),
+                candidate.source(),
+                candidate.packageId(),
+                candidate.title(),
+                candidate.description(),
+                candidate.severity(),
+                candidate.downloadUrl(),
+                vendorPageUrl == null ? "" : vendorPageUrl);
+    }
+
+    private DriverUpdateCandidate enrichChosenCandidate(InstalledDriver driver, DriverUpdateCandidate chosen) {
+        if (shouldReplaceVendorPageUrl(chosen.vendorPageUrl())) {
+            String providerVendorPage = getVendorPageUrl(driver);
+            if (providerVendorPage != null && !providerVendorPage.isBlank()) {
+                chosen = withVendorPageUrl(chosen, providerVendorPage);
+            }
+        }
+        if (resolveDownloadOnEnrich(driver) && !hasWorkingDownload(chosen)) {
+            String resolved = resolveDirectDownloadUrl(driver, chosen.vendorPageUrl());
+            if (resolved != null && hasDirectFile(resolved)) {
+                chosen = withDownloadUrl(chosen, resolved);
+            }
+        }
+        return chosen;
+    }
+
+    /**
+     * When false, keep catalog-curated vendor pages (device-specific Intel/Synaptics/Broadcom URLs).
+     */
+    protected boolean shouldReplaceVendorPageUrl(String currentUrl) {
+        return currentUrl == null || currentUrl.isBlank() || isKnownDeadVendorUrl(currentUrl);
+    }
+
+    /** Legacy vendor paths that 404 after site redesigns. */
+    static boolean isKnownDeadVendorUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+        String lower = url.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("realtek.com/en/downloads");
+    }
+
+    /** When false, skip network resolve during enrich (Intel/NVIDIA/Broadcom scans stay fast). */
+    protected boolean resolveDownloadOnEnrich(InstalledDriver driver) {
+        return false;
     }
 
     protected abstract String fetchLatestVersion(InstalledDriver driver);
@@ -316,9 +366,9 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
             case INTEL -> "https://downloadcenter.intel.com";
             case NVIDIA -> "https://www.nvidia.com/Download/index.aspx";
             case AMD -> "https://www.amd.com/en/support";
-            case REALTEK -> "https://www.realtek.com/en/downloads";
+            case REALTEK -> OemRealtekCatalogProvider.REALTEK_DOWNLOAD_HUB;
             case BROADCOM -> "https://www.broadcom.com/support/download-search";
-            case QUALCOMM -> "https://www.qualcomm.com/support";
+            case QUALCOMM -> OemQualcommCatalogProvider.QUALCOMM_WIFI_SUPPORT;
             default -> "https://www." + vendor.label().toLowerCase() + ".com/support";
         };
     }
@@ -398,11 +448,16 @@ abstract class AbstractOemCatalogProvider implements DriverCatalogProvider {
 
     /**
      * True when the URL points directly at an installer/archive file.
-     * Catalog landing pages (e.g. realtek.com/en/downloads) have no file
-     * extension and must go through provider resolution or manual flow.
+     * Catalog landing pages have no file extension and must go through
+     * provider resolution or manual flow. Realtek ToDownload endpoints
+     * serve the installer after agree/direct redirect.
      */
     static boolean hasDirectFile(String url) {
         if (url == null || url.isBlank()) return false;
+        String lower = url.toLowerCase(java.util.Locale.ROOT);
+        if (lower.contains("realtek.com") && lower.contains("/download/todownload") && lower.contains("downloadid=")) {
+            return true;
+        }
         String path = url.split("[?#]", 2)[0];
         return path.matches("(?i).*\\.(exe|zip|msi|inf|cab)$");
     }

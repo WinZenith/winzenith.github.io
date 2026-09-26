@@ -79,6 +79,26 @@ public final class DriverCatalogDatabase {
         return entries.size();
     }
 
+    public List<CatalogEntry> entries() {
+        return entries;
+    }
+
+    public boolean hasEntriesForProvider(String providerId) {
+        if (providerId == null || providerId.isBlank()) {
+            return false;
+        }
+        List<CatalogEntry> list = byProvider.get(providerId);
+        if (list == null) {
+            return false;
+        }
+        for (CatalogEntry e : list) {
+            if (e != null && !e.testOnly()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static boolean isFresh(CatalogEntry entry, java.time.Instant now) {
         if (entry == null || now == null) {
             return false;
