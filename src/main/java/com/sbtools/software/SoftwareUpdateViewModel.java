@@ -421,7 +421,7 @@ public class SoftwareUpdateViewModel {
             confirm.setHeaderText(I18n.t("Cancel Install"));
             if (showBoundedAlert(confirm) == ButtonType.OK) {
                 installCancelled.set(true);
-                statusText.set("Cancelling updates...");
+                statusText.set("Canceling updates...");
             }
         });
     }
@@ -456,7 +456,7 @@ public class SoftwareUpdateViewModel {
         if (blockIfPendingServicingUnacked()) {
             if (isRetry) {
                 restoreRetryState(selected,
-                        "Retry postponed \u2013 Windows Update may still be applying. Press \"Retry Failed\" after reboot.");
+                        "Retry postponed \u2013 Windows Update may still be applying updates. Press \"Retry Failed\" after reboot.");
             }
             return;
         }
@@ -611,7 +611,7 @@ public class SoftwareUpdateViewModel {
                         if (disposed) return;
                         if (installCancelled.get()) {
                             if (wuServicingUnacked.get()) {
-                                statusText.set("Update cancelled. Windows Update may still be applying — reboot before installing more.");
+                                statusText.set("Update cancelled. Windows Update may still be applying updates — reboot before installing more.");
                                 showWuServicingInfoDialog();
                             } else {
                                 statusText.set("Update cancelled. " + finalCompleted + " of " + total + " completed.");
@@ -640,7 +640,7 @@ public class SoftwareUpdateViewModel {
                                 showBoundedAlert(new Alert(Alert.AlertType.INFORMATION, "A restart is required to finish installation. Remaining updates were skipped – please reboot first."));
                             }
                         } else if (wuServicingUnacked.get()) {
-                            statusText.set("Windows Update may still be applying — remaining updates skipped. Reboot before installing more.");
+                            statusText.set("Windows Update may still be applying updates — remaining updates skipped. Reboot before installing more.");
                             showWuServicingInfoDialog();
                             if (!finalFailed.isEmpty() || !finalManualRepair.isEmpty()) {
                                 refreshFailedRows(finalFailed, finalManualRepair);
@@ -887,7 +887,7 @@ public class SoftwareUpdateViewModel {
                     entry.setStatus(SoftwareUpdateEntry.STATUS_FAILED);
                     entry.setProgress(0.0);
                     if (wuServicingUnacked.get()) {
-                        statusText.set("Update timed out. Windows Update may still be applying — reboot before installing more.");
+                        statusText.set("Update timed out. Windows Update may still be applying updates — reboot before installing more.");
                         showWuServicingInfoDialog();
                     } else {
                         showBoundedAlert(new Alert(Alert.AlertType.ERROR, "Install failed:\n" + msg));
@@ -1633,7 +1633,7 @@ public class SoftwareUpdateViewModel {
         Platform.runLater(() -> {
             if (disposed) return;
             if (wuServicingUnacked.get()) {
-                statusText.set("Update cancelled. Windows Update may still be applying — reboot before installing more.");
+                statusText.set("Update cancelled. Windows Update may still be applying updates — reboot before installing more.");
                 showWuServicingInfoDialog();
             } else if (entry != null) {
                 statusText.set("Update cancelled for " + entry.getName() + ".");
@@ -1658,7 +1658,7 @@ public class SoftwareUpdateViewModel {
 
     private void showWuServicingInfoDialog() {
         Alert a = new Alert(Alert.AlertType.WARNING, WU_SERVICING_WARNING);
-        a.setHeaderText(I18n.t("Windows Update may still be applying"));
+        a.setHeaderText(I18n.t("Windows Update may still be applying updates"));
         showBoundedAlert(a);
     }
 
@@ -1675,7 +1675,7 @@ public class SoftwareUpdateViewModel {
         }
         Alert a = new Alert(Alert.AlertType.WARNING,
                 WU_SERVICING_WARNING + "\n\nContinue only if you already rebooted or the update has finished.");
-        a.setHeaderText(I18n.t("Windows Update may still be applying"));
+        a.setHeaderText(I18n.t("Windows Update may still be applying updates"));
         ButtonType continueBtn = new ButtonType("Continue anyway", ButtonBar.ButtonData.OK_DONE);
         a.getButtonTypes().setAll(continueBtn, ButtonType.CANCEL);
         ButtonType result = showBoundedAlert(a);

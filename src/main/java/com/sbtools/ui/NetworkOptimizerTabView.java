@@ -135,7 +135,8 @@ public class NetworkOptimizerTabView extends BorderPane {
         initialLoadingSpinner.setPrefSize(24, 24);
         initialLoadingSpinner.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
         Label loadingLabel = new TrLabel("Loading network information\u2026");
-        loadingLabel.setStyle("-fx-text-fill: #f8f8f2; -fx-font-size: 13px;");
+        loadingLabel.getStyleClass().add("theme-body-text");
+        loadingLabel.setStyle("-fx-font-size: 13px;");
         HBox loadingRow = new HBox(12, initialLoadingSpinner, loadingLabel);
         loadingRow.setAlignment(Pos.CENTER);
         initialLoadingOverlay.setStyle("-fx-background-color: rgba(30, 31, 41, 0.92);");

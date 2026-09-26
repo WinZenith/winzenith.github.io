@@ -53,7 +53,9 @@ public class SettingsStore {
                 || s.browserExtLastFilter() == null || s.browserExtLastFilter().isBlank()
                 || s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank()
                 || s.language() == null || s.language().isBlank()
-                || !s.language().equals(com.sbtools.i18n.AppLanguage.canonical(s.language()));
+                || !s.language().equals(com.sbtools.i18n.AppLanguage.canonical(s.language()))
+                || s.theme() == null || s.theme().isBlank()
+                || !s.theme().equals(com.sbtools.ui.AppTheme.canonical(s.theme()));
         if (needsFix) {
             base = s.toBuilder()
                     .excludedDriverIds(s.excludedDriverIds() == null ? java.util.Collections.emptyList() : s.excludedDriverIds())
@@ -64,6 +66,7 @@ public class SettingsStore {
                     .browserExtLastFilter(s.browserExtLastFilter() == null || s.browserExtLastFilter().isBlank() ? "All" : s.browserExtLastFilter())
                     .browserExtLastStatusFilter(s.browserExtLastStatusFilter() == null || s.browserExtLastStatusFilter().isBlank() ? "All" : s.browserExtLastStatusFilter())
                     .language(com.sbtools.i18n.AppLanguage.canonical(s.language()))
+                    .theme(com.sbtools.ui.AppTheme.canonical(s.theme()))
                     .build();
         }
         // Sanitize backupDirectory - reject dangerous roots like C:\ or Windows

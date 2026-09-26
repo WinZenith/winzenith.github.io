@@ -773,7 +773,7 @@ public class DriversTabView extends BorderPane {
         installService.cancel();
         if (installFuture != null) installFuture.cancel(true);
         stopInstallButton.setDisable(true);
-        setStatus("Cancelling install…");
+        setStatus("Canceling install…");
     }
 
     /**
@@ -2546,7 +2546,7 @@ public class DriversTabView extends BorderPane {
                     lv.setPrefHeight(Math.min(200, failures.size() * 24 + 10));
                     box.getChildren().add(lv);
                 }
-                Label hint = new TrLabel("Tip: Dashboard next scan will refresh from Windows Update (cache cleared).");
+                Label hint = new TrLabel("Tip: The next Dashboard scan will refresh from Windows Update (cache cleared).");
                 hint.setWrapText(true);
                 hint.setStyle("-fx-text-fill: #6272a4; -fx-font-size: 11;");
                 box.getChildren().add(hint);
@@ -2706,7 +2706,7 @@ public class DriversTabView extends BorderPane {
         backupCancelFlag.set(true);
         try { if (backupFuture != null) backupFuture.cancel(true); } catch (Exception ignored) {}
         stopBackupButton.setDisable(true);
-        setStatus("Cancelling backup\u2026");
+        setStatus("Canceling backup\u2026");
     }
 
     private void applyBatchInstallVerdict(DriverRow row,

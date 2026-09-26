@@ -25,7 +25,8 @@ public class EulaDialog extends Dialog<ButtonType> {
 
         TextFlow textFlow = new TextFlow();
         Text text = new Text(eulaText);
-        text.setStyle("-fx-font-size: 12px; -fx-fill: #f8f8f2;");
+        text.getStyleClass().add("theme-body-fill");
+        text.setStyle("-fx-font-size: 12px;");
         textFlow.getChildren().add(text);
         textFlow.setStyle("-fx-padding: 10;");
 
@@ -33,7 +34,8 @@ public class EulaDialog extends Dialog<ButtonType> {
         scrollPane.setFitToWidth(true);
         scrollPane.setPrefHeight(400);
         scrollPane.setPrefWidth(550);
-        scrollPane.setStyle("-fx-background-color: #282a36; -fx-border-color: #44475a;");
+        scrollPane.getStyleClass().add("theme-surface");
+        scrollPane.setStyle("-fx-background-radius: 6; -fx-border-radius: 6;");
 
         Label consentLabel = new Label("By clicking 'I Accept', you agree to the terms of this Agreement.");
         consentLabel.setStyle("-fx-font-size: 12px; -fx-text-fill: #6272a4; -fx-padding: 8 0 0 0;");

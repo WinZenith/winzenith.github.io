@@ -555,7 +555,7 @@ public class UninstallerTabView extends BorderPane {
             return;
         }
         if (abortNow) {
-            statusLabel.setText("Cancelling...");
+            statusLabel.setText("Canceling...");
         } else {
             statusLabel.setText("Will skip leftover review after the uninstaller finishes.");
         }
@@ -829,7 +829,7 @@ public class UninstallerTabView extends BorderPane {
                         progress.setVisible(false);
                         cancelButton.setDisable(true);
                         if (ct.isCancelled() || scanCancel.get()) {
-                            statusLabel.setText("Cancelled.");
+                            statusLabel.setText("Canceled.");
                         }
                         if (onComplete != null) {
                             onComplete.run();
@@ -1181,7 +1181,7 @@ public class UninstallerTabView extends BorderPane {
                 Platform.runLater(() -> {
                     busy.set(false);
                     progress.setVisible(false);
-                    statusLabel.setText("Cancelled.");
+                    statusLabel.setText("Canceled.");
                     finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
                 });
             } catch (Exception e) {
@@ -1277,7 +1277,7 @@ public class UninstallerTabView extends BorderPane {
                     operationGate.end(UninstallerOperationGate.Phase.RESTORE_POINT);
                     busy.set(false);
                     progress.setVisible(false);
-                    statusLabel.setText("Cancelled.");
+                    statusLabel.setText("Canceled.");
                     finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
                 });
             } catch (Exception e) {
@@ -1422,7 +1422,7 @@ public class UninstallerTabView extends BorderPane {
                     operationGate.end(UninstallerOperationGate.Phase.VENDOR_UNINSTALL);
                     busy.set(false);
                     progress.setVisible(false);
-                    statusLabel.setText("Cancelled.");
+                    statusLabel.setText("Canceled.");
                     finishWorkflow(UninstallerOperationGate.WorkflowOutcome.CANCELLED);
                 });
             } catch (Exception e) {
@@ -1610,7 +1610,7 @@ public class UninstallerTabView extends BorderPane {
                 protected void updateItem(String item, boolean empty) {
                     super.updateItem(item, empty);
                     setText(empty || item == null ? null : item);
-                    setStyle("-fx-text-fill: #f8f8f2;");
+                    getStyleClass().setAll("theme-body-text");
                 }
             });
             Tab pathTab = UiTab.tab("PATH warnings (" + pathWarnings.size() + ") — read-only", pathList);
@@ -1678,15 +1678,15 @@ public class UninstallerTabView extends BorderPane {
         recycleBtn.setToggleGroup(delGroup);
         permanentBtn.setToggleGroup(delGroup);
         recycleBtn.setSelected(true);
-        recycleBtn.setStyle("-fx-text-fill: #f8f8f2;");
-        permanentBtn.setStyle("-fx-text-fill: #f8f8f2;");
+        recycleBtn.getStyleClass().add("theme-body-text");
+        permanentBtn.getStyleClass().add("theme-body-text");
         HBox deleteModeBox = new HBox(16, recycleBtn, permanentBtn);
         deleteModeBox.setPadding(new Insets(0, 10, 0, 10));
         deleteModeBox.setAlignment(Pos.CENTER_LEFT);
 
         CheckBox backupRegCheck = new TrCheckBox("Back up selected registry keys (.reg) before deleting");
         backupRegCheck.setSelected(true);
-        backupRegCheck.setStyle("-fx-text-fill: #f8f8f2;");
+        backupRegCheck.getStyleClass().add("theme-body-text");
         backupRegCheck.setPadding(new Insets(0, 10, 0, 10));
 
         VBox contentBox = new VBox(8, tabPane, selectionControls, deleteModeBox, backupRegCheck);
@@ -1710,7 +1710,7 @@ public class UninstallerTabView extends BorderPane {
                     exitCode, 0, "uninstalled; leftover deletion cancelled by user");
             busy.set(false);
             progress.setVisible(false);
-            statusLabel.setText("Cancelled — refreshing list...");
+            statusLabel.setText("Canceled — refreshing list...");
             refreshAfterUninstallWorkflow();
             return;
         }
@@ -1862,7 +1862,8 @@ public class UninstallerTabView extends BorderPane {
             private final HBox box = new HBox(6, checkBox, badge);
             private LeftoverItem currentItem;
             {
-                checkBox.setStyle("-fx-text-fill: #f8f8f2; -fx-padding: 2 0 2 0;");
+                checkBox.getStyleClass().add("theme-body-text");
+                checkBox.setStyle("-fx-padding: 2 0 2 0;");
                 checkBox.setMaxWidth(Double.MAX_VALUE);
                 HBox.setHgrow(checkBox, Priority.ALWAYS);
                 badge.setStyle("-fx-font-size: 10px; -fx-padding: 1 6 1 6; -fx-background-radius: 8;");

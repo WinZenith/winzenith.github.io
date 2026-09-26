@@ -1,6 +1,7 @@
 package com.sbtools.settings;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.Collections;
 import java.util.List;
@@ -30,7 +31,8 @@ public record AppSettings(
         String browserExtLastFilter,
         String browserExtLastStatusFilter,
         boolean browserExtAutoScan,
-        String language
+        String language,
+        @JsonProperty(defaultValue = "dracula") String theme
 ) {
     public static AppSettings defaults() {
         return new AppSettings(true, true, false,
@@ -39,7 +41,7 @@ public record AppSettings(
                 false, false, false, true,
                 "", "powershell", 960, 600, true, true,
                 Collections.emptyList(), Collections.emptyList(), true,
-                "All", "All", false, "en");
+                "All", "All", false, "en", "dracula");
     }
 
     /**
@@ -79,6 +81,7 @@ public record AppSettings(
         private String browserExtLastStatusFilter;
         private boolean browserExtAutoScan;
         private String language;
+        private String theme;
 
         private Builder(AppSettings s) {
             this.autoBackupDrivers = s.autoBackupDrivers;
@@ -105,6 +108,7 @@ public record AppSettings(
             this.browserExtLastStatusFilter = s.browserExtLastStatusFilter;
             this.browserExtAutoScan = s.browserExtAutoScan;
             this.language = s.language;
+            this.theme = s.theme;
         }
 
         public Builder autoBackupDrivers(boolean v) { this.autoBackupDrivers = v; return this; }
@@ -131,6 +135,7 @@ public record AppSettings(
         public Builder browserExtLastStatusFilter(String v) { this.browserExtLastStatusFilter = v; return this; }
         public Builder browserExtAutoScan(boolean v) { this.browserExtAutoScan = v; return this; }
         public Builder language(String v) { this.language = v; return this; }
+        public Builder theme(String v) { this.theme = v; return this; }
 
         public AppSettings build() {
             return new AppSettings(
@@ -157,7 +162,8 @@ public record AppSettings(
                     browserExtLastFilter,
                     browserExtLastStatusFilter,
                     browserExtAutoScan,
-                    language);
+                    language,
+                    theme);
         }
     }
 }

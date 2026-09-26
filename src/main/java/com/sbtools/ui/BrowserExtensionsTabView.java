@@ -465,7 +465,7 @@ public class BrowserExtensionsTabView extends BorderPane {
             private final CheckBox checkBox = new TrCheckBox();
             private BrowserExtensionRow previousItem;
             {
-                checkBox.setStyle("-fx-text-fill: #f8f8f2;");
+                checkBox.getStyleClass().add("theme-body-text");
             }
             @Override
             protected void updateItem(BrowserExtensionRow item, boolean empty) {
@@ -526,7 +526,7 @@ public class BrowserExtensionsTabView extends BorderPane {
                         case "Opera" -> "-fx-text-fill: #ff5555; -fx-font-weight: bold;";
                         case "Opera GX" -> "-fx-text-fill: #ff5555; -fx-font-weight: bold; -fx-font-style: italic;";
                         case "Vivaldi" -> "-fx-text-fill: #bd93f9; -fx-font-weight: bold;";
-                        default -> "-fx-text-fill: #f8f8f2;";
+                        default -> "";
                     });
                 }
             }
@@ -929,7 +929,7 @@ public class BrowserExtensionsTabView extends BorderPane {
     private void cancelRunning() {
         scanCancelled.set(true);
         toggleCancelled.set(true);
-        statusLabel.setText("Cancelling " + scanTargetLabel + "...");
+        statusLabel.setText("Canceling " + scanTargetLabel + "...");
         Thread st = scanThread;
         if (st != null) st.interrupt();
         Thread tt = toggleThread;

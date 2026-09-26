@@ -38,7 +38,8 @@ public class HelpTabView extends VBox {
 
         Label header = new TrLabel();
         I18n.assign(header, "Help & FAQ");
-        header.setStyle("-fx-font-size: 22px; -fx-font-weight: bold; -fx-text-fill: #f8f8f2;");
+        header.getStyleClass().addAll("label", "large", "theme-body-text");
+        header.setStyle("-fx-font-size: 22px; -fx-font-weight: bold;");
         getChildren().add(header);
 
         Label intro = new TrLabel();
@@ -56,7 +57,8 @@ public class HelpTabView extends VBox {
         contactTitle.setStyle("-fx-font-size: 15px; -fx-font-weight: bold; -fx-text-fill: #8be9fd; -fx-padding: 0 0 6 0;");
         Label contactBody = new TrLabel();
         I18n.assign(contactBody, "help.contact");
-        contactBody.setStyle("-fx-font-size: 13px; -fx-text-fill: #f8f8f2;");
+        contactBody.getStyleClass().add("theme-body-text");
+        contactBody.setStyle("-fx-font-size: 13px;");
         contactBody.setWrapText(true);
         Hyperlink emailLink = new Hyperlink("winzenith_tools@yahoo.com");
         emailLink.setStyle("-fx-font-size: 13px; -fx-text-fill: #50fa7b;");
@@ -72,7 +74,8 @@ public class HelpTabView extends VBox {
         });
         VBox contactBox = new VBox(4, contactTitle, contactBody, emailLink);
         contactBox.setPadding(new Insets(12));
-        contactBox.setStyle("-fx-background-color: #282a36; -fx-background-radius: 6; -fx-border-color: #44475a; -fx-border-radius: 6;");
+        contactBox.getStyleClass().add("theme-surface");
+        contactBox.setStyle("-fx-background-radius: 6; -fx-border-radius: 6;");
         getChildren().add(contactBox);
 
         Region spacer = new Region();
@@ -83,12 +86,13 @@ public class HelpTabView extends VBox {
     private TitledPane createFaqSection(String titleKey, String bodyKey) {
         Label body = new TrLabel();
         I18n.assign(body, bodyKey);
-        body.setStyle("-fx-font-size: 13px; -fx-text-fill: #f8f8f2; -fx-padding: 8 0 0 0;");
+        body.getStyleClass().add("theme-body-text");
+        body.setStyle("-fx-font-size: 13px; -fx-padding: 8 0 0 0;");
         body.setWrapText(true);
         body.setMaxWidth(Double.MAX_VALUE);
 
         VBox container = new VBox(body);
-        container.setStyle("-fx-background-color: #21222c;");
+        container.getStyleClass().add("theme-surface-deep");
         container.setPadding(new Insets(4, 8, 8, 8));
 
         TitledPane pane = new TitledPane();
@@ -97,9 +101,9 @@ public class HelpTabView extends VBox {
         pane.setAnimated(true);
         pane.setExpanded(false);
         pane.setCollapsible(true);
+        pane.getStyleClass().add("theme-surface");
         pane.setStyle(
-                "-fx-background-color: #282a36; -fx-background-radius: 6; " +
-                "-fx-border-color: #44475a; -fx-border-radius: 6; " +
+                "-fx-background-radius: 6; -fx-border-radius: 6; " +
                 "-fx-text-fill: #8be9fd; -fx-font-size: 14px; -fx-font-weight: bold;");
         return pane;
     }

@@ -9,7 +9,6 @@ import com.sbtools.ui.*;
 import com.sbtools.update.AppUpdateDialog;
 import com.sbtools.update.UpdateChecker;
 
-import atlantafx.base.theme.Dracula;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Node;
@@ -56,6 +55,7 @@ public class App extends Application {
     private Image logoImage;
     private int selectedTab = 0;
     private AppSettings appSettings;
+    private AppTheme currentTheme;
     private volatile boolean checkingForUpdate = false;
     private Stage primaryStage;
     /**
@@ -82,11 +82,11 @@ public class App extends Application {
             } catch (Exception ignored) {
             }
         }));
-        Application.setUserAgentStylesheet(new Dracula().getUserAgentStylesheet());
-
         AppLogger.init();
         DataMigration.migrateIfNeeded();
         AppSettings settings = settingsStore.load();
+        currentTheme = AppTheme.fromCode(settings.theme());
+        ThemeSupport.apply(currentTheme, null);
 
         if (!settings.eulaAccepted()) {
             if (!showEula(settings)) {
@@ -115,6 +115,7 @@ public class App extends Application {
         tabViews = new Node[TAB_NAMES.length];
 
         root = new BorderPane();
+        ThemeSupport.apply(currentTheme, root);
         sidebar = new VBox(6);
         sidebar.setPadding(new Insets(16));
         sidebar.getStyleClass().add("sidebar");
@@ -221,7 +222,8 @@ public class App extends Application {
         );
         sidebar.getChildren().addAll(tabButtons);
         Label versionLabel = new Label("v" + AppInfo.getVersion());
-        versionLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #6272a4; -fx-padding: 4 0 0 0;");
+        versionLabel.getStyleClass().addAll("label", "text-muted");
+        versionLabel.setStyle("-fx-font-size: 11px; -fx-padding: 4 0 0 0;");
 
         updateBtn = UIButton.secondary("Check for updates");
         updateBtn.setOnAction(e -> {
@@ -263,12 +265,22 @@ public class App extends Application {
         languageBox.setValue(Messages.language());
         languageBox.setOnAction(e -> applyLanguage(languageBox.getValue()));
 
+        Label appearanceCaption = new Label();
+        I18n.assign(appearanceCaption, "Appearance");
+        ComboBox<AppTheme> themeBox = new ComboBox<>();
+        themeBox.getItems().addAll(AppTheme.values());
+        themeBox.setMaxWidth(Double.MAX_VALUE);
+        themeBox.setValue(currentTheme);
+        themeBox.setOnAction(e -> applyTheme(themeBox.getValue()));
+
         sidebar.getChildren().addAll(
                 new Separator(),
                 helpBtn,
                 updateBtn,
                 languageCaption,
                 languageBox,
+                appearanceCaption,
+                themeBox,
                 versionLabel
         );
 
@@ -287,6 +299,20 @@ public class App extends Application {
             appSettings = settingsStore.load();
         } catch (IOException ex) {
             AppLogger.error("Failed to save language", ex);
+        }
+    }
+
+    private void applyTheme(AppTheme selected) {
+        if (selected == null || selected == currentTheme) {
+            return;
+        }
+        currentTheme = selected;
+        ThemeSupport.apply(selected, root);
+        try {
+            settingsStore.update(s -> s.toBuilder().theme(selected.code()).build());
+            appSettings = settingsStore.load();
+        } catch (IOException ex) {
+            AppLogger.error("Failed to save theme", ex);
         }
     }
 

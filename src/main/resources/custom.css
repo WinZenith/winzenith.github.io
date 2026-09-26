@@ -771,3 +771,163 @@
     -fx-padding: 4 10 4 10;
     -fx-font-size: 11px;
 }
+
+/* Theme-aware helpers (inline styles replaced by these classes) */
+.theme-body-text {
+    -fx-text-fill: #f8f8f2;
+}
+.theme-body-fill {
+    -fx-fill: #f8f8f2;
+}
+.theme-surface {
+    -fx-background-color: #282a36;
+    -fx-border-color: #44475a;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+}
+.theme-surface-deep {
+    -fx-background-color: #21222c;
+}
+
+/* Light theme overrides (AtlantaFX Nord Light base) */
+.theme-light .label {
+    -fx-text-fill: #1e1f29;
+}
+.theme-light .label.text-muted {
+    -fx-text-fill: #57606a;
+}
+.theme-light .label.large {
+    -fx-text-fill: #1e1f29;
+}
+.theme-light .theme-body-text {
+    -fx-text-fill: #1e1f29;
+}
+.theme-light .theme-body-fill {
+    -fx-fill: #1e1f29;
+}
+.theme-light .theme-surface {
+    -fx-background-color: #f6f8fa;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .theme-surface-deep {
+    -fx-background-color: #eaeef2;
+}
+.theme-light .sidebar {
+    -fx-background-color: #f6f8fa;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .sidebar > .separator > .line {
+    -fx-border-color: #d0d7de;
+}
+.theme-light .sidebar > .button.button-outlined {
+    -fx-text-fill: #1e1f29;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .sidebar > .button.button-outlined:hover {
+    -fx-background-color: #eaeef2;
+    -fx-border-color: #57606a;
+}
+.theme-light .toolbar {
+    -fx-background-color: #f6f8fa;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .button.button-outlined {
+    -fx-text-fill: #1e1f29;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .button.button-outlined:hover {
+    -fx-background-color: #eaeef2;
+}
+.theme-light .table-view {
+    -fx-background-color: #ffffff;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .table-view .column-header-background,
+.theme-light .table-view .column-header {
+    -fx-background-color: #f6f8fa;
+    -fx-text-fill: #0969da;
+}
+.theme-light .table-view .table-cell,
+.theme-light .table-view .table-cell.icon-cell {
+    -fx-text-fill: #1e1f29;
+}
+.theme-light .table-view .table-row-cell {
+    -fx-background-color: #ffffff;
+}
+.theme-light .table-view .table-row-cell:odd {
+    -fx-background-color: #f6f8fa;
+}
+.theme-light .table-view .table-row-cell:hover,
+.theme-light .table-view .table-row-cell:selected {
+    -fx-background-color: #ddf4ff;
+}
+.theme-light .table-view .table-row-cell:selected .table-cell {
+    -fx-text-fill: #0550ae;
+}
+.theme-light .text-field,
+.theme-light .text-area,
+.theme-light .sysinfo-search {
+    -fx-background-color: #ffffff;
+    -fx-text-fill: #1e1f29;
+    -fx-border-color: #d0d7de;
+    -fx-prompt-text-fill: #57606a;
+}
+.theme-light .check-box {
+    -fx-text-fill: #1e1f29;
+}
+.theme-light .check-box .box {
+    -fx-background-color: #ffffff;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .tooltip {
+    -fx-background-color: #24292f;
+    -fx-text-fill: #f6f8fa;
+}
+.theme-light .context-menu {
+    -fx-background-color: #ffffff;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .context-menu .menu-item .label {
+    -fx-text-fill: #1e1f29;
+}
+.theme-light .context-menu .menu-item:hover {
+    -fx-background-color: #eaeef2;
+}
+.theme-light .sysinfo-card {
+    -fx-background-color: #ffffff;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .sysinfo-value {
+    -fx-text-fill: #1e1f29;
+}
+.theme-light .sysinfo-row-even {
+    -fx-background-color: #f6f8fa;
+}
+.theme-light .sysinfo-overview-card {
+    -fx-background-color: #f6f8fa;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .dashboard-welcome-title,
+.theme-light .dashboard-info-card-title,
+.theme-light .dashboard-summary-value,
+.theme-light .dashboard-progress-label {
+    -fx-text-fill: #1e1f29;
+}
+.theme-light .dashboard-info-card,
+.theme-light .dashboard-summary-card,
+.theme-light .dashboard-progress-item {
+    -fx-background-color: #f6f8fa;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .dashboard-status-bar {
+    -fx-background-color: #f6f8fa;
+    -fx-border-color: #d0d7de;
+}
+.theme-light .alert,
+.theme-light .alert .dialog-pane,
+.theme-light .alert .header-panel {
+    -fx-background-color: #ffffff;
+}
+.theme-light .separator > .line {
+    -fx-border-color: #d0d7de;
+}

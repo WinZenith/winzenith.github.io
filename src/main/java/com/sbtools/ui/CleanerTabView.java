@@ -471,7 +471,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             private CleanupRow previousItem;
             private javafx.beans.value.ChangeListener<Boolean> selectionListener;
             {
-                checkBox.setStyle("-fx-text-fill: #f8f8f2;");
+                checkBox.getStyleClass().add("theme-body-text");
                 checkBox.setOnAction(e -> updateCleanButtonState());
             }
             @Override

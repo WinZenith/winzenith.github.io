@@ -185,7 +185,7 @@ class WiFiPanel extends VBox {
         section.getChildren().add(sectionHeader);
 
         for (Label lbl : new Label[]{ssidLabel, stateLabel, signalLabel, radioLabel, channelLabel, rateLabel}) {
-            lbl.setStyle("-fx-text-fill: #f8f8f2;");
+            lbl.getStyleClass().add("theme-body-text");
             section.getChildren().add(lbl);
         }
 

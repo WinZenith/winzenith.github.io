@@ -45,7 +45,7 @@ public enum CleanupCategory {
     DOTNET_TEMP_CACHE("Temporary ASP.NET Files", ".NET temporary compilation cache (regenerated on demand)", RiskLevel.LOW);
 
     public enum RiskLevel {
-        LOW("Low", "Safe to clean, files are regenerated as needed"),
+        LOW("Low", "Safe to clean; files are regenerated as needed"),
         MEDIUM("Medium", "May affect some app state or require system restart, review recommended"),
         HIGH("High", "WARNING: Can break Windows functionality or prevent rollback of updates. Review carefully before cleaning");
 

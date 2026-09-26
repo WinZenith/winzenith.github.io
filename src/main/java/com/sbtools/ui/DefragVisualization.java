@@ -239,7 +239,8 @@ public class DefragVisualization {
                 + "-fx-border-color: #6272a4; -fx-border-width: 1;",
                 (int)(color.getRed()*255), (int)(color.getGreen()*255), (int)(color.getBlue()*255)));
         Label text = new TrLabel(label);
-        text.setStyle("-fx-text-fill: #f8f8f2; -fx-font-size: 11px;");
+        text.getStyleClass().add("theme-body-text");
+        text.setStyle("-fx-font-size: 11px;");
         HBox item = new HBox(4, colorBox, text);
         item.setAlignment(Pos.CENTER);
         return item;

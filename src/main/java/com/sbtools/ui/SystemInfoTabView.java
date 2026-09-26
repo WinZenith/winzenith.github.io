@@ -263,12 +263,12 @@ public class SystemInfoTabView extends BorderPane {
                 } catch (InterruptedException ce) {
                     Thread.currentThread().interrupt();
                     Platform.runLater(() -> {
-                        if (!loadGate.isStale(generation)) statusLabel.setText("Cancelled.");
+                        if (!loadGate.isStale(generation)) statusLabel.setText("Canceled.");
                     });
                 } catch (Exception ex) {
                     if (cancellationToken.get()) {
                         Platform.runLater(() -> {
-                            if (!loadGate.isStale(generation)) statusLabel.setText("Cancelled.");
+                            if (!loadGate.isStale(generation)) statusLabel.setText("Canceled.");
                         });
                     } else {
                         AppLogger.error("Failed to load system info", ex);
@@ -293,7 +293,7 @@ public class SystemInfoTabView extends BorderPane {
         cancellationToken.set(true);
         java.util.concurrent.Future<?> task = currentTask;
         if (task != null) task.cancel(true);
-        statusLabel.setText("Cancelling\u2026");
+        statusLabel.setText("Canceling\u2026");
         cancelButton.setDisable(true);
     }
 
