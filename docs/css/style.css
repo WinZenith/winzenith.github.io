@@ -420,7 +420,7 @@ code {
 
 .stats-grid {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 16px;
     text-align: center;
 }
@@ -444,6 +444,14 @@ code {
     font-size: 13.5px;
     color: var(--text-muted);
     font-weight: 600;
+}
+
+.stat-label-full {
+    font-size: 15px;
+    background: var(--gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
 }
 
 /* --- Section --- */
