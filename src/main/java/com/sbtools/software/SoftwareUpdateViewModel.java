@@ -32,6 +32,9 @@ import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.VBox;
+import javafx.stage.Modality;
+import javafx.stage.Stage;
+import javafx.stage.Window;
 
 import java.awt.Desktop;
 import java.net.URI;
@@ -1514,7 +1517,7 @@ public class SoftwareUpdateViewModel {
         }
         CompletableFuture<Boolean> proceed = new CompletableFuture<>();
         try {
-            Platform.runLater(() -> {
+            runOnFx(() -> {
                 try {
                     if (disposed || installCancelled.get()) {
                         proceed.complete(false);
@@ -1523,13 +1526,17 @@ public class SoftwareUpdateViewModel {
                     Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                             "System Restore Point creation failed or was skipped.\n\n"
                                     + "Continue installing updates without a restore point?\n\n"
-                                    + "(Auto-cancels after 2 minutes. You can press Stop to cancel.)");
+                                    + "(Auto-cancels after 2 minutes. You can press Stop to cancel.)",
+                            ButtonType.YES, ButtonType.NO);
+                    confirm.setTitle(I18n.ui("System restore point"));
                     confirm.setHeaderText(I18n.t("Restore point unavailable"));
+                    initAlertOwner(confirm);
+                    confirm.initModality(Modality.APPLICATION_MODAL);
                     // Same bounded walk-away as the restore prompt: unanswered, this
                     // dialog used to hold installRunning + globalBusy forever.
                     armModalAutoClose(confirm, proceed);
                     confirm.showAndWait().ifPresentOrElse(
-                            result -> proceed.complete(result == ButtonType.OK),
+                            result -> proceed.complete(result == ButtonType.YES),
                             () -> proceed.complete(false));
                     if (!proceed.isDone()) {
                         proceed.complete(false);
@@ -1605,10 +1612,31 @@ public class SoftwareUpdateViewModel {
     private static void hideAlertIfPending(Alert alert, CompletableFuture<?> done) {
         try {
             if (done != null && !done.isDone() && alert != null) {
-                alert.setResult(ButtonType.CANCEL);
+                ButtonType decline = alert.getButtonTypes().contains(ButtonType.YES)
+                        ? ButtonType.NO
+                        : ButtonType.CANCEL;
+                alert.setResult(decline);
                 alert.hide();
             }
         } catch (Exception ignored) {}
+    }
+
+    private static void runOnFx(Runnable action) {
+        if (Platform.isFxApplicationThread()) {
+            action.run();
+        } else {
+            Platform.runLater(action);
+        }
+    }
+
+    private static void initAlertOwner(Alert alert) {
+        if (alert == null) return;
+        for (Window window : Window.getWindows()) {
+            if (window.isShowing() && window instanceof Stage stage) {
+                alert.initOwner(stage);
+                return;
+            }
+        }
     }
 
     private static boolean isInstallSuccess(SoftwareUpdateEntry entry, ProcessResult res) {
@@ -1697,6 +1725,7 @@ public class SoftwareUpdateViewModel {
     private CompletableFuture<PrepareOutcome> maybeCreateRestorePointAsync() {
         AppSettings settings = settingsStore.load();
         if (!settings.createSystemRestorePoint()) {
+            AppLogger.info("Restore point prompt skipped (createSystemRestorePoint disabled in settings)");
             return CompletableFuture.completedFuture(PrepareOutcome.PROCEED);
         }
         if (restorePointCreatedThisBatch.get()) {
@@ -1708,7 +1737,7 @@ public class SoftwareUpdateViewModel {
         // walk-away never holds globalBusy (+ installRunning) indefinitely.
         CompletableFuture<Boolean> confirmed = new CompletableFuture<>();
         try {
-            Platform.runLater(() -> {
+            runOnFx(() -> {
                 try {
                     if (disposed) {
                         confirmed.complete(false);
@@ -1716,8 +1745,12 @@ public class SoftwareUpdateViewModel {
                     }
                     Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                             "Would you like to create a System Restore Point before proceeding with the updates?\n\n"
-                                    + "(Auto-declines after 2 minutes. You can press Stop to cancel.)");
+                                    + "(Auto-declines after 2 minutes. You can press Stop to cancel.)",
+                            ButtonType.YES, ButtonType.NO);
+                    confirm.setTitle(I18n.ui("System restore point"));
                     confirm.setHeaderText(AppInfo.DISPLAY_NAME);
+                    initAlertOwner(confirm);
+                    confirm.initModality(Modality.APPLICATION_MODAL);
                     // Watcher: auto-close on timeout or Stop/dispose so the install
                     // chain can never hang forever on an unanswered modal.
                     Thread watcher = new Thread(() -> {
@@ -1731,7 +1764,7 @@ public class SoftwareUpdateViewModel {
                                         try {
                                             if (!confirmed.isDone()) {
                                                 AppLogger.info("Restore prompt auto-declined (cancel/dispose)");
-                                                confirm.setResult(ButtonType.CANCEL);
+                                                confirm.setResult(ButtonType.NO);
                                                 confirm.hide();
                                             }
                                         } catch (Exception ignored) {}
@@ -1750,7 +1783,7 @@ public class SoftwareUpdateViewModel {
                                     try {
                                         if (!confirmed.isDone()) {
                                             AppLogger.warning("Restore point prompt timed out after 120s - auto-declining");
-                                            confirm.setResult(ButtonType.CANCEL);
+                                            confirm.setResult(ButtonType.NO);
                                             confirm.hide();
                                         }
                                     } catch (Exception ignored) {}
@@ -1761,7 +1794,7 @@ public class SoftwareUpdateViewModel {
                     watcher.setDaemon(true);
                     watcher.start();
                     confirm.showAndWait().ifPresent(result -> {
-                        confirmed.complete(result == ButtonType.OK);
+                        confirmed.complete(result == ButtonType.YES);
                     });
                     if (!confirmed.isDone()) {
                         // Dialog closed without a button (window X / timeout hide): decline, not hang.
