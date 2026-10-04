@@ -5,7 +5,6 @@ import com.sbtools.netoptimizer.NetworkOptimizerService;
 import com.sbtools.netoptimizer.NetworkSnapshot;
 import com.sbtools.netoptimizer.OptimizationPreset;
 import com.sbtools.netoptimizer.PresetExpectations;
-import com.sbtools.netoptimizer.TcpSettings;
 import com.sbtools.settings.AppSettings;
 import com.sbtools.settings.SettingsStore;
 import com.sbtools.util.AppExecutors;
@@ -335,6 +334,9 @@ class OptimizationPanel extends VBox {
     void refreshPresetSelection() {
         if (presetGroup == null) return;
         OptimizationPreset savedPreset = OptimizationPreset.DEFAULT;
+        if (currentSettings == null) {
+            return;
+        }
         try {
             String raw = currentSettings.networkOptimizationPreset();
             if (raw != null) savedPreset = OptimizationPreset.valueOf(raw.trim().toUpperCase());
@@ -356,13 +358,11 @@ class OptimizationPanel extends VBox {
 
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
-                TcpSettings settings = service.getCurrentTcpSettings();
+                String body = service.formatCurrentTcpSettingsForDisplay();
                 Platform.runLater(() -> {
-                    StringBuilder sb = new StringBuilder();
-                    if (settings.settings().isEmpty()) {
-                        sb.append("No TCP global settings returned.\n\nPossible causes:\n- Not running on Windows\n- netsh output localized or permission denied (run as Administrator)\n");
-                    } else {
-                        settings.settings().forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
+                    StringBuilder sb = new StringBuilder(body);
+                    if (body.isBlank()) {
+                        sb.append("No TCP global settings returned.\n\nPossible causes:\n- Not running on Windows\n- Permission denied (run as Administrator)\n");
                     }
                     Alert alert = new Alert(Alert.AlertType.INFORMATION);
                     alert.setTitle(I18n.ui("Current TCP/IP settings"));

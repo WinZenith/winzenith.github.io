@@ -154,6 +154,31 @@ public class DriverCatalogAggregator {
         return findUpdates(installed, CancellationToken.NONE);
     }
 
+    /**
+     * Merge then publish one consistent snapshot. The callback runs under the
+     * lock so a later provider cannot queue an older copy after a newer one.
+     */
+    private static void publishSnapshot(
+            Map<String, DriverUpdateCandidate> byDevice,
+            Object publishLock,
+            List<DriverUpdateCandidate> providerResults,
+            CancellationToken token,
+            Consumer<List<DriverUpdateCandidate>> onProviderFinished) {
+        if (token != null && token.isCancelled()) return;
+        synchronized (publishLock) {
+            if (token != null && token.isCancelled()) return;
+            if (providerResults != null) {
+                for (DriverUpdateCandidate c : providerResults) {
+                    if (!isUsableCandidate(c)) continue;
+                    byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
+                }
+            }
+            if (onProviderFinished != null) {
+                onProviderFinished.accept(List.copyOf(byDevice.values()));
+            }
+        }
+    }
+
     private static boolean isUsableCandidate(DriverUpdateCandidate c) {
         return c != null && c.installed() != null
                 && c.installed().deviceId() != null && !c.installed().deviceId().isBlank()
@@ -215,19 +240,15 @@ public class DriverCatalogAggregator {
         final CancellationToken effectiveToken = token != null ? token : CancellationToken.NONE;
         if (installed == null) return;
         Map<String, DriverUpdateCandidate> byDevice = new ConcurrentHashMap<>();
-        runProviders(installed, effectiveToken, onProviderStarted, providerResults -> {
-            if (effectiveToken.isCancelled()) {
-                return;
-            }
-            if (providerResults == null) return;
-            for (DriverUpdateCandidate c : providerResults) {
-                if (!isUsableCandidate(c)) continue;
-                byDevice.merge(c.installed().deviceId(), c, DriverCatalogAggregator::pickBetter);
-            }
-            if (onProviderFinished != null) {
-                onProviderFinished.accept(List.copyOf(byDevice.values()));
-            }
-        }, precomputedProviders);
+        Object publishLock = new Object();
+        runProviders(installed, effectiveToken, onProviderStarted, providerResults ->
+                publishSnapshot(byDevice, publishLock, providerResults, effectiveToken, onProviderFinished),
+                precomputedProviders);
+        // After every provider task has joined, republish the map. A callback
+        // that threw, or a copy taken mid-merge, must not be the last word.
+        if (!effectiveToken.isCancelled()) {
+            publishSnapshot(byDevice, publishLock, List.of(), effectiveToken, onProviderFinished);
+        }
     }
 
     private void runProviders(

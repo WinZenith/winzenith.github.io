@@ -2086,6 +2086,7 @@ public class UninstallerTabView extends BorderPane {
                 }
             }
             if (!isRegistry && (com.sbtools.uninstaller.UninstallerService.isProtectedPath(path)
+                    || com.sbtools.uninstaller.UninstallerService.isUnderUserDocumentRoot(path)
                     || com.sbtools.uninstaller.UninstallerService.looksLikeSharedVendorDir(path, app.getName()))) {
                 return false;
             }

@@ -365,12 +365,13 @@ public class StartupService {
 
     public String getOriginalServiceStartType(String serviceName, String currentStartType) {
         String saved = ORIGINAL_SERVICE_START_TYPES.get(serviceName);
-        if (saved != null && !"Disabled".equalsIgnoreCase(saved)) return saved;
-        if (saved != null && "Disabled".equalsIgnoreCase(saved)) {
-            // Service was Disabled at first observation – cannot restore to Disabled when enabling
-            return "Manual";
+        if (saved != null && !"Disabled".equalsIgnoreCase(saved)) {
+            return saved;
         }
-        if ("Disabled".equalsIgnoreCase(currentStartType)) return "Manual";
+        if ("Disabled".equalsIgnoreCase(currentStartType)) {
+            // No in-app history: do not guess Manual (misleading in UI and on enable).
+            return null;
+        }
         return currentStartType;
     }
 
@@ -394,7 +395,10 @@ public class StartupService {
         saveOriginalStartTypes();
     }
 
-    /** Map wins over the row. Manual is only for a service we never observed enabled. */
+    /**
+     * @return start type to apply when enabling, or {@code null} when unknown (disabled
+     *         before first in-app observation with no saved map entry).
+     */
     static String rememberedStartType(String serviceName, String itemOriginal) {
         String saved = serviceName == null ? null : ORIGINAL_SERVICE_START_TYPES.get(serviceName);
         if (saved != null && !saved.isBlank() && !"Disabled".equalsIgnoreCase(saved)) {
@@ -403,7 +407,12 @@ public class StartupService {
         if (itemOriginal != null && !itemOriginal.isBlank() && !"Disabled".equalsIgnoreCase(itemOriginal)) {
             return itemOriginal;
         }
-        return "Manual";
+        return null;
+    }
+
+    /** True when enabling would require an explicit Manual fallback (no saved original). */
+    public static boolean isUnknownDisabledServiceEnable(String serviceName, String itemOriginal) {
+        return rememberedStartType(serviceName, itemOriginal) == null;
     }
 
     private record RegistryPaths(HKEY hive, String keyPath, String approvedPath) {}
@@ -799,6 +808,11 @@ public class StartupService {
      * {@link #toggleStatus(StartupItem)} remain safe by default.</p>
      */
     public void toggleStatus(StartupItem item, boolean allowCriticalDisable) throws Exception {
+        toggleStatus(item, allowCriticalDisable, false);
+    }
+
+    public void toggleStatus(StartupItem item, boolean allowCriticalDisable,
+                             boolean allowManualEnableForUnknown) throws Exception {
         if (item == null) throw new IllegalArgumentException("Startup item must not be null.");
         if (!allowCriticalDisable && StartupSafety.isCriticalDisable(item)) {
             String risk = StartupSafety.describeRisk(item);
@@ -870,6 +884,15 @@ public class StartupService {
                 newStartType = "Disabled";
             } else {
                 String original = rememberedStartType(serviceName, item.getOriginalServiceStartType());
+                if (original == null || original.isBlank()) {
+                    if (!allowManualEnableForUnknown) {
+                        throw new IOException("Cannot enable \"" + serviceName
+                                + "\": the start type before it was disabled is unknown "
+                                + "(it was already Disabled when first scanned, or disabled outside this app). "
+                                + "Confirm enabling as Manual (start on demand) in the UI.");
+                    }
+                    original = "Manual";
+                }
                 item.setOriginalServiceStartType(original);
                 scStartValue = startTypeToScArg(original);
                 newStartType = original;
@@ -890,9 +913,9 @@ public class StartupService {
                         + (applied == null ? "unknown" : applied) + ", expected " + scStartValue
                         + "). " + errMsg);
             }
-            if ("delayed-auto".equals(scStartValue) && !isDelayedAutostartSet(serviceName)) {
-                throw new IOException("Service start type was set to Automatic but DelayedAutostart was not applied. "
-                        + errMsg);
+            if ("delayed-auto".equals(scStartValue) && !ensureDelayedAutostartSet(serviceName)) {
+                throw new IOException("Service start type was set to Automatic (Delayed Start) but "
+                        + "DelayedAutostart could not be applied. " + errMsg);
             }
 
             item.setServiceStartType(newStartType);
@@ -1997,6 +2020,61 @@ public class StartupService {
     }
 
     /**
+     * After {@code sc config … delayed-auto}, SCM can lag before {@code DelayedAutostart}
+     * is visible. Poll briefly, then set the registry value when still missing.
+     */
+    static boolean ensureDelayedAutostartSet(String serviceName) {
+        if (isDelayedAutostartSet(serviceName)) {
+            return true;
+        }
+        for (int i = 0; i < 4; i++) {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return isDelayedAutostartSet(serviceName);
+            }
+            if (isDelayedAutostartSet(serviceName)) {
+                return true;
+            }
+        }
+        try {
+            setDelayedAutostartRegistry(serviceName, true);
+        } catch (IOException e) {
+            AppLogger.warning("Failed to set DelayedAutostart for " + serviceName + ": " + e.getMessage());
+        }
+        for (int i = 0; i < 4; i++) {
+            if (isDelayedAutostartSet(serviceName)) {
+                return true;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return isDelayedAutostartSet(serviceName);
+            }
+        }
+        return isDelayedAutostartSet(serviceName);
+    }
+
+    private static void setDelayedAutostartRegistry(String serviceName, boolean delayed) throws IOException {
+        if (!isSafeScServiceName(serviceName)) {
+            throw new IOException("Invalid service name.");
+        }
+        String keyPath = "SYSTEM\\CurrentControlSet\\Services\\" + serviceName;
+        try {
+            if (!Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, keyPath)) {
+                throw new IOException("Service registry key not found.");
+            }
+            Advapi32Util.registrySetIntValue(WinReg.HKEY_LOCAL_MACHINE, keyPath, "DelayedAutostart", delayed ? 1 : 0);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException(e.getMessage(), e);
+        }
+    }
+
+    /**
      * True when {@code DelayedAutostart} is 1 under the service key (required for delayed-auto).
      */
     static boolean isDelayedAutostartSet(String serviceName) {
@@ -2017,6 +2095,9 @@ public class StartupService {
             }
             if (v instanceof Number n) {
                 return n.intValue() == 1;
+            }
+            if (v instanceof byte[] bytes && bytes.length > 0) {
+                return (bytes[0] & 0xFF) == 1;
             }
             return false;
         } catch (Exception e) {

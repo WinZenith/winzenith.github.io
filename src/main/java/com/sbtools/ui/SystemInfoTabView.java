@@ -103,6 +103,7 @@ public class SystemInfoTabView extends BorderPane {
     private final java.util.concurrent.atomic.AtomicBoolean cancellationToken = new java.util.concurrent.atomic.AtomicBoolean(false);
     private final SystemInfoLoadGate loadGate = new SystemInfoLoadGate();
     private volatile Boolean lastAdminHint;
+    private volatile boolean disposed;
 
     public SystemInfoTabView(BooleanProperty busy, BooleanSupplier adminCheck) {
         this.busy = busy;
@@ -165,19 +166,38 @@ public class SystemInfoTabView extends BorderPane {
 
     private void tryStaleWhileRevalidate() {
         try {
-            SystemInfoData cached = service.tryLoadCachedSnapshot();
-            if (cached != null) {
-                currentData = cached;
-                buildTabs(cached);
-                String when = cached.collectedAt() != null && !cached.collectedAt().isBlank()
-                        ? " (collected " + cached.collectedAt() + ")" : "";
-                statusLabel.setText("Loaded cached snapshot" + when + ". Click Refresh for latest.");
-                refreshButton.setDisable(false);
-                exportButton.setDisable(false);
-                copyButton.setDisable(false);
-                copyTabButton.setDisable(false);
-            }
-        } catch (Exception ignored) {}
+            gatherExecutor.submit(() -> {
+                SystemInfoData cached;
+                try {
+                    cached = service.tryLoadCachedSnapshot();
+                } catch (Exception ignored) {
+                    return;
+                }
+                if (cached == null) {
+                    return;
+                }
+                Platform.runLater(() -> {
+                    if (disposed || currentData != null) {
+                        return;
+                    }
+                    try {
+                        currentData = cached;
+                        buildTabs(cached);
+                        String when = cached.collectedAt() != null && !cached.collectedAt().isBlank()
+                                ? " (collected " + cached.collectedAt() + ")" : "";
+                        statusLabel.setText("Loaded cached snapshot" + when + ". Click Refresh for latest.");
+                        refreshButton.setDisable(false);
+                        exportButton.setDisable(false);
+                        copyButton.setDisable(false);
+                        copyTabButton.setDisable(false);
+                    } catch (Exception ex) {
+                        AppLogger.error("Failed to render cached system info snapshot", ex);
+                    }
+                });
+            });
+        } catch (RuntimeException ex) {
+            AppLogger.warning("SystemInfo: could not schedule snapshot load: " + ex.getMessage());
+        }
     }
 
     private void loadInfo() {
@@ -1590,16 +1610,21 @@ public class SystemInfoTabView extends BorderPane {
             return;
         }
         Tab selected = tabPane.getSelectionModel().getSelectedItem();
-        String tabName = selected != null ? selected.getText() : "Overview";
-        String text = SystemInfoReportGenerator.generateSectionText(currentData, tabName);
+        String tabKey = selected != null ? I18n.tabSourceKey(selected) : null;
+        if (tabKey == null || tabKey.isBlank()) {
+            tabKey = "Overview";
+        }
+        String text = SystemInfoReportGenerator.generateSectionText(currentData, tabKey);
         if (text == null || text.isBlank()) {
-            text = SystemInfoReportGenerator.generatePlainTextReport(currentData, adminHintFast());
-            tabName = "Overview";
+            statusLabel.setText("Nothing to copy for this tab.");
+            return;
         }
         ClipboardContent content = new ClipboardContent();
         content.putString(text);
         Clipboard.getSystemClipboard().setContent(content);
-        statusLabel.setText("Tab '" + tabName + "' copied to clipboard.");
+        String displayName = selected != null && selected.getText() != null && !selected.getText().isBlank()
+                ? selected.getText() : tabKey;
+        statusLabel.setText("Tab '" + displayName + "' copied to clipboard.");
     }
 
     private void exportToFile() {
@@ -1702,6 +1727,7 @@ public class SystemInfoTabView extends BorderPane {
     }
 
     public void dispose() {
+        disposed = true;
         cancellationToken.set(true);
         java.util.concurrent.Future<?> task = currentTask;
         if (task != null) {

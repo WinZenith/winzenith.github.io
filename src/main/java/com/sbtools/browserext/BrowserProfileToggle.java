@@ -23,11 +23,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 /**
- * Surgical Jackson edit of Chromium {@code Preferences} and Firefox
- * {@code extensions.json}. {@code Secure Preferences} is never rewritten:
- * its {@code super_mac} is the profile integrity record, and dropping it makes
- * Chromium reset tracked preferences on the next launch.
- * Avoids PowerShell {@code ConvertTo-Json} (single-element array collapse,
+ * Surgical Jackson edit of Chromium {@code Preferences} / {@code Secure Preferences}
+ * (with MAC + {@code super_mac} refresh when validation succeeds) and Firefox
+ * {@code extensions.json}. Avoids PowerShell {@code ConvertTo-Json} (single-element array collapse,
  * number coercion) and restores the backup when verify-after-write fails.
  */
 public final class BrowserProfileToggle {
@@ -102,11 +100,51 @@ public final class BrowserProfileToggle {
         if (cancelled != null && cancelled.get()) return false;
         Path secure = profileDir.resolve("Secure Preferences");
         Path prefs = profileDir.resolve("Preferences");
-        // Authoritative copy for current Chromium lives in Secure Preferences.
-        // Rewriting that file (or deleting super_mac) makes the browser reset
-        // tracked prefs on next launch, so refuse instead of reporting success.
-        if (securePreferencesBlockToggle(secure, extensionId)) return false;
-        if (!Files.isRegularFile(prefs)) {
+        ObjectNode secureRoot = null;
+        boolean secureUnreadable = false;
+        if (Files.isRegularFile(secure)) {
+            try {
+                JsonNode parsed = MAPPER.readTree(Files.readAllBytes(secure));
+                if (parsed instanceof ObjectNode obj) secureRoot = obj;
+            } catch (Exception e) {
+                secureUnreadable = true;
+                AppLogger.warning("Secure Preferences unreadable in " + profileDir + ": " + e.getMessage());
+            }
+        }
+        ObjectNode prefsRoot = null;
+        if (Files.isRegularFile(prefs)) {
+            try {
+                JsonNode parsed = MAPPER.readTree(Files.readAllBytes(prefs));
+                if (parsed instanceof ObjectNode obj) prefsRoot = obj;
+            } catch (Exception e) {
+                AppLogger.warning("Preferences unreadable in " + profileDir + ": " + e.getMessage());
+                return false;
+            }
+        }
+        boolean inSecure = secureRoot != null
+                && secureRoot.path("extensions").path("settings").get(extensionId) instanceof ObjectNode;
+        boolean inPrefs = prefsRoot != null
+                && prefsRoot.path("extensions").path("settings").get(extensionId) instanceof ObjectNode;
+        if (!inSecure && !inPrefs) {
+            AppLogger.warning("Extension " + extensionId + " not found in Preferences or Secure Preferences");
+            return false;
+        }
+        if (secureUnreadable) {
+            AppLogger.warning("Refusing toggle: Secure Preferences exists but is unreadable in " + profileDir);
+            return false;
+        }
+        if (inSecure) {
+            return toggleChromiumWithSecure(profileDir, prefs, secure, prefsRoot, secureRoot,
+                    extensionId, enable, cancelled);
+        }
+        return toggleChromiumPreferencesOnly(profileDir, prefs, prefsRoot, extensionId, enable, cancelled);
+    }
+
+    private static boolean toggleChromiumPreferencesOnly(Path profileDir, Path prefs, ObjectNode prefsRoot,
+                                                         String extensionId, boolean enable,
+                                                         AtomicBoolean cancelled) throws Exception {
+        if (cancelled != null && cancelled.get()) return false;
+        if (prefsRoot == null || !Files.isRegularFile(prefs)) {
             AppLogger.warning("Preferences file not found in " + profileDir);
             return false;
         }
@@ -116,14 +154,12 @@ public final class BrowserProfileToggle {
         }
         List<Path> committedBaks = new ArrayList<>();
         try {
-            byte[] raw = Files.readAllBytes(prefs);
-            JsonNode root = MAPPER.readTree(raw);
-            if (!applyChromiumEdit(root, extensionId, enable, false)) {
+            if (!applyChromiumEdit(prefsRoot, extensionId, enable, false)) {
                 AppLogger.warning("Extension " + extensionId + " not found in Preferences");
                 return false;
             }
             Path bak = backupPath(prefs);
-            if (!writeAndVerify(prefs, root, bak, node -> chromiumStateMatches(node, extensionId, enable))) {
+            if (!writeAndVerify(prefs, prefsRoot, bak, node -> chromiumStateMatches(node, extensionId, enable))) {
                 return false;
             }
             committedBaks.add(bak);
@@ -142,24 +178,94 @@ public final class BrowserProfileToggle {
         }
     }
 
+    private static boolean toggleChromiumWithSecure(Path profileDir, Path prefs, Path secure,
+                                                    ObjectNode prefsRoot, ObjectNode secureRoot,
+                                                    String extensionId, boolean enable,
+                                                    AtomicBoolean cancelled) throws Exception {
+        if (cancelled != null && cancelled.get()) return false;
+        ChromiumPrefMac.ChromiumMacContext macCtx =
+                ChromiumPrefMac.resolveMacContext(secureRoot, extensionId, profileDir);
+        if (macCtx == null) {
+            AppLogger.warning("Refusing toggle of " + extensionId
+                    + ": could not validate Secure Preferences MAC (wrong seed/device or corrupt protection.macs)");
+            return false;
+        }
+        if (isLocked(secure) || (Files.isRegularFile(prefs) && isLocked(prefs))) {
+            AppLogger.warning("Profile preference files are locked (browser may be running): " + profileDir);
+            return false;
+        }
+        List<Path> committedBaks = new ArrayList<>();
+        try {
+            if (!applyChromiumEdit(secureRoot, extensionId, enable, false)) {
+                AppLogger.warning("Extension " + extensionId + " not found or is managed in Secure Preferences");
+                return false;
+            }
+            if (prefsRoot != null
+                    && prefsRoot.path("extensions").path("settings").get(extensionId) instanceof ObjectNode) {
+                applyChromiumEdit(prefsRoot, extensionId, enable, false);
+            }
+            ChromiumPrefMac.writeExtensionMac(secureRoot, extensionId, macCtx.seed(), macCtx.deviceId());
+            ChromiumPrefMac.writeSuperMac(secureRoot, macCtx.seed(), macCtx.deviceId());
+
+            Path secureBak = backupPath(secure);
+            if (!writeAndVerify(secure, secureRoot, secureBak,
+                    node -> chromiumStateMatches(node, extensionId, enable))) {
+                return false;
+            }
+            committedBaks.add(secureBak);
+
+            if (prefsRoot != null && Files.isRegularFile(prefs)
+                    && prefsRoot.path("extensions").path("settings").get(extensionId) instanceof ObjectNode) {
+                Path prefsBak = backupPath(prefs);
+                if (!writeAndVerify(prefs, prefsRoot, prefsBak,
+                        node -> chromiumStateMatches(node, extensionId, enable))) {
+                    rollbackCommitted(committedBaks);
+                    return false;
+                }
+                committedBaks.add(prefsBak);
+            }
+
+            Boolean verified = readChromiumEnabled(profileDir, extensionId);
+            if (verified == null || verified != enable) {
+                AppLogger.warning("Toggle verification failed for " + extensionId
+                        + " (expected enabled=" + enable + ", read enabled=" + verified + ")");
+                rollbackCommitted(committedBaks);
+                return false;
+            }
+            pruneBackups(profileDir, "Secure Preferences.bak.");
+            pruneBackups(profileDir, "Preferences.bak.");
+            return true;
+        } catch (Exception e) {
+            rollbackCommitted(committedBaks);
+            throw e;
+        }
+    }
+
     /**
-     * True when this toggle must not write. Secure Preferences holds the
-     * extension, or the file exists but cannot be read (treat as protected).
+     * Used by safety checks: refuse when Secure Preferences exists but cannot be
+     * parsed and the extension is not present in Preferences alone.
      */
     static boolean securePreferencesBlockToggle(Path secure, String extensionId) {
         if (secure == null || !Files.isRegularFile(secure)) return false;
+        Path prefs = secure.getParent() != null ? secure.getParent().resolve("Preferences") : null;
         try {
             JsonNode root = MAPPER.readTree(Files.readAllBytes(secure));
             JsonNode ext = root.path("extensions").path("settings").get(extensionId);
             if (ext != null && ext.isObject()) {
-                AppLogger.warning("Refusing toggle of " + extensionId
-                        + ": state is in MAC-protected Secure Preferences"
-                        + " (rewriting it drops super_mac and can reset other settings)");
-                return true;
+                ChromiumPrefMac.ChromiumMacContext ctx = root instanceof ObjectNode obj
+                        ? ChromiumPrefMac.resolveMacContext(obj, extensionId) : null;
+                return ctx == null;
             }
             return false;
         } catch (Exception e) {
-            AppLogger.warning("Refusing toggle: cannot read Secure Preferences: " + e.getMessage());
+            if (prefs != null && Files.isRegularFile(prefs)) {
+                try {
+                    JsonNode pr = MAPPER.readTree(Files.readAllBytes(prefs));
+                    JsonNode ext = pr.path("extensions").path("settings").get(extensionId);
+                    return ext == null || !ext.isObject();
+                } catch (Exception ignored) {
+                }
+            }
             return true;
         }
     }

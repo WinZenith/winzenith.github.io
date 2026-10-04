@@ -1086,14 +1086,8 @@ public class DriversTabView extends BorderPane {
                 row.setCandidate(newCandidate);
             }
         }
-        for (Map.Entry<String, DriverRow> rowEntry : rowByDevice.entrySet()) {
-            if (!candidateMap.containsKey(rowEntry.getKey())) {
-                DriverRow row = rowEntry.getValue();
-                if (row.candidate() != null) {
-                    row.setCandidate(null);
-                }
-            }
-        }
+        // Do not clear rows missing from this snapshot. Provider copies are
+        // cumulative; a partial copy must not move a found update to Up to Date.
     }
 
     /**
@@ -2594,6 +2588,8 @@ public class DriversTabView extends BorderPane {
             int succeeded = 0;
             int failed = 0;
             int skipped = 0;
+            boolean cancelled = false;
+            String failure = null;
             try {
                 List<InstalledDriver> installed = scanService.scanInstalled();
                 int total = installed == null ? 0 : installed.size();
@@ -2606,10 +2602,10 @@ public class DriversTabView extends BorderPane {
                     InstalledDriver driver = installed.get(i);
                     final int idx = i;
                     Platform.runLater(() -> {
-                        if (!token.isCancelled()) {
+                        if (!token.isCancelled() && driver != null) {
                             statusLabel.setText("Backing up " + (idx + 1) + "/" + total + ": "
                                     + driver.friendlyName() + "\u2026");
-                            double p = (double) idx / total;
+                            double p = total == 0 ? 0 : (double) idx / total;
                             progressBar.setProgress(p);
                             progressLabel.setText((int)(p * 100) + "%");
                         }
@@ -2626,7 +2622,13 @@ public class DriversTabView extends BorderPane {
                             break;
                         }
                         failed++;
-                        AppLogger.warning("Backup failed for " + driver.friendlyName() + ": " + ex.getMessage());
+                        AppLogger.warning("Backup failed for " + (driver == null ? "?" : driver.friendlyName())
+                                + ": " + ex.getMessage());
+                    } catch (Throwable t) {
+                        // One driver Error must not skip the lease release below.
+                        failed++;
+                        AppLogger.warning("Backup error for " + (driver == null ? "?" : driver.friendlyName())
+                                + ": " + t);
                     }
                 }
             } catch (java.util.concurrent.CancellationException | InterruptedException cancelEx) {
@@ -2635,67 +2637,62 @@ public class DriversTabView extends BorderPane {
                 if (cancelEx instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
                 }
-                final int cs = succeeded;
-                final int cf = failed;
-                Platform.runLater(() -> {
-                    if (isLeaseCurrent(capturedBackupLease)) {
-                        releaseOperation(capturedBackupLease);
-                    }
-                    backupFuture = null;
-                    updateControlStates();
-                    stopBackupButton.setVisible(false);
-                    stopBackupButton.setManaged(false);
-                    progressBar.setVisible(false);
-                    progressLabel.setVisible(false);
-                    String summary = "Backup cancelled: " + cs + " backed up, " + cf + " failed";
-                    statusLabel.setText(summary + ".");
-                    new Alert(Alert.AlertType.INFORMATION, summary + ".").showAndWait();
-                });
-                return;
-            } catch (Exception ex) {
-                Platform.runLater(() -> {
-                    if (isLeaseCurrent(capturedBackupLease)) {
-                        releaseOperation(capturedBackupLease);
-                    }
-                    backupFuture = null;
-                    updateControlStates();
-                    stopBackupButton.setVisible(false);
-                    stopBackupButton.setManaged(false);
-                    progressBar.setVisible(false);
-                    progressLabel.setVisible(false);
-                    setStatus("Backup failed: " + ex.getMessage());
-                    new Alert(Alert.AlertType.ERROR, "Backup failed:\n" + ex.getMessage()).showAndWait();
-                });
-                return;
-            }
-            final int s = succeeded;
-            final int f = failed;
-            final int k = skipped;
-            Platform.runLater(() -> {
-                if (isLeaseCurrent(capturedBackupLease)) {
+                cancelled = true;
+            } catch (Throwable ex) {
+                failure = ex.getMessage() == null ? ex.toString() : ex.getMessage();
+                AppLogger.warning("Backup failed: " + ex);
+            } finally {
+                final int s = succeeded;
+                final int f = failed;
+                final int k = skipped;
+                final boolean wasCancelled = cancelled;
+                final String failMsg = failure;
+                try {
+                    Platform.runLater(() -> finishBackupUi(
+                            capturedBackupLease, wasCancelled, failMsg, s, f, k));
+                } catch (Throwable scheduleEx) {
                     releaseOperation(capturedBackupLease);
+                    AppLogger.warning("Backup UI release failed: " + scheduleEx);
                 }
-                backupFuture = null;
-                updateControlStates();
-                stopBackupButton.setVisible(false);
-                stopBackupButton.setManaged(false);
-                progressBar.setVisible(false);
-                progressLabel.setVisible(false);
-                String summary = "Backup complete: " + s + " backed up, " + f + " failed";
-                if (k > 0) {
-                    summary += ", " + k + " skipped";
-                }
-                statusLabel.setText(summary + ".");
-                StringBuilder msg = new StringBuilder();
-                msg.append("Driver backup complete.\n\n");
-                msg.append(s).append(" driver(s) backed up successfully.\n");
-                msg.append(f).append(" driver(s) failed.\n");
-                if (k > 0) {
-                    msg.append(k).append(" driver(s) skipped (operation was cancelled).");
-                }
-                new Alert(Alert.AlertType.INFORMATION, msg.toString()).showAndWait();
-            });
+            }
         });
+    }
+
+    private void finishBackupUi(DriversOperationGate.Lease lease, boolean cancelled, String failure,
+                                 int succeeded, int failed, int skipped) {
+        if (isLeaseCurrent(lease)) {
+            releaseOperation(lease);
+        }
+        backupFuture = null;
+        updateControlStates();
+        stopBackupButton.setVisible(false);
+        stopBackupButton.setManaged(false);
+        progressBar.setVisible(false);
+        progressLabel.setVisible(false);
+        if (cancelled) {
+            String summary = "Backup cancelled: " + succeeded + " backed up, " + failed + " failed";
+            statusLabel.setText(summary + ".");
+            new Alert(Alert.AlertType.INFORMATION, summary + ".").showAndWait();
+            return;
+        }
+        if (failure != null) {
+            setStatus("Backup failed: " + failure);
+            new Alert(Alert.AlertType.ERROR, "Backup failed:\n" + failure).showAndWait();
+            return;
+        }
+        String summary = "Backup complete: " + succeeded + " backed up, " + failed + " failed";
+        if (skipped > 0) {
+            summary += ", " + skipped + " skipped";
+        }
+        statusLabel.setText(summary + ".");
+        StringBuilder msg = new StringBuilder();
+        msg.append("Driver backup complete.\n\n");
+        msg.append(succeeded).append(" driver(s) backed up successfully.\n");
+        msg.append(failed).append(" driver(s) failed.\n");
+        if (skipped > 0) {
+            msg.append(skipped).append(" driver(s) skipped (operation was cancelled).");
+        }
+        new Alert(Alert.AlertType.INFORMATION, msg.toString()).showAndWait();
     }
 
     private void stopBackup() {

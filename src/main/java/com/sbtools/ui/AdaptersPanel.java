@@ -74,18 +74,7 @@ class AdaptersPanel extends VBox {
         if (busy.get()) {
             isLoading.set(false);
             statusLabel.setText("Please wait, another operation is in progress...");
-            if (whenFinished != null) {
-                javafx.beans.value.ChangeListener<Boolean> retryWhenIdle = new javafx.beans.value.ChangeListener<>() {
-                    @Override
-                    public void changed(javafx.beans.value.ObservableValue<? extends Boolean> obs, Boolean wasBusy, Boolean nowBusy) {
-                        if (Boolean.FALSE.equals(nowBusy)) {
-                            busy.removeListener(this);
-                            loadAdapters(whenFinished);
-                        }
-                    }
-                };
-                busy.addListener(retryWhenIdle);
-            }
+            BusyIdleRetry.runWhenIdle(busy, () -> loadAdapters(whenFinished));
             return;
         }
         busy.set(true);
@@ -169,18 +158,20 @@ class AdaptersPanel extends VBox {
 
         adapterTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             boolean hasSel = sel != null && !busy.get();
-            enableBtn.setDisable(!hasSel || (sel != null && sel.isEnabled()));
-            disableBtn.setDisable(!hasSel || (sel != null && !sel.isEnabled()));
-            renewIpBtn.setDisable(!hasSel);
+            boolean canMutate = sel != null && adapterMutable(sel);
+            enableBtn.setDisable(!hasSel || !canMutate || (sel != null && sel.isEnabled()));
+            disableBtn.setDisable(!hasSel || !canMutate || (sel != null && !sel.isEnabled()));
+            renewIpBtn.setDisable(!hasSel || !canMutate);
         });
 
         busy.addListener((obs, old, nv) -> {
             refreshBtn.setDisable(nv);
             NetworkAdapterRow sel = adapterTable.getSelectionModel().getSelectedItem();
             boolean hasSelection = sel != null;
-            enableBtn.setDisable(nv || !hasSelection || (sel != null && sel.isEnabled()));
-            disableBtn.setDisable(nv || !hasSelection || (sel != null && !sel.isEnabled()));
-            renewIpBtn.setDisable(nv || !hasSelection);
+            boolean canMutate = sel != null && adapterMutable(sel);
+            enableBtn.setDisable(nv || !hasSelection || !canMutate || (sel != null && sel.isEnabled()));
+            disableBtn.setDisable(nv || !hasSelection || !canMutate || (sel != null && !sel.isEnabled()));
+            renewIpBtn.setDisable(nv || !hasSelection || !canMutate);
         });
 
         HBox toolbar = new HBox(12, refreshBtn, enableBtn, disableBtn, renewIpBtn, exportBtn, filterField, statusLabel);
@@ -247,6 +238,13 @@ class AdaptersPanel extends VBox {
         return adapterTable;
     }
 
+    private static boolean adapterMutable(NetworkAdapterRow row) {
+        if (row.getInterfaceIndex() > 0) {
+            return true;
+        }
+        return NetworkOptimizerService.isAdapterNameScriptSafe(row.getName());
+    }
+
     private boolean requireAdmin() {
         if (!adminCheck.getAsBoolean()) {
             new Alert(Alert.AlertType.WARNING, "Administrator privileges required.\n\nRight-click WinZenith.exe → Run as administrator.").showAndWait();
@@ -274,7 +272,7 @@ class AdaptersPanel extends VBox {
 
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
-                var result = service.setAdapterState(selected.getName(), enable);
+                var result = service.setAdapterState(selected.getName(), selected.getInterfaceIndex(), enable);
                 Platform.runLater(() -> {
                     if (result.success()) {
                         statusLabel.setText(result.message());
@@ -356,7 +354,7 @@ class AdaptersPanel extends VBox {
 
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
-                var result = service.renewIp(selected.getName());
+                var result = service.renewIp(selected.getName(), selected.getInterfaceIndex());
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? result.message() : "IP renewal failed.");
                     Alert a = new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,

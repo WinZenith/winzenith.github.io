@@ -43,6 +43,7 @@ class DnsCachePanel extends VBox {
     private volatile Future<?> currentTask;
     private volatile Future<?> dnsQueryTask;
     private final java.util.concurrent.atomic.AtomicLong dnsQueryGeneration = new java.util.concurrent.atomic.AtomicLong(0);
+    private final java.util.Map<String, Integer> adapterInterfaceIndex = new java.util.HashMap<>();
     // Adapter refresh is read-only and frequent (tab selects, Refresh button): coalesce
     // concurrent runs and track them separately so the handle of an in-flight mutating
     // op (flush/DNS) stored in currentTask is never lost.
@@ -95,8 +96,12 @@ class DnsCachePanel extends VBox {
                 Platform.runLater(() -> {
                     String selected = adapterCombo.getSelectionModel().getSelectedItem();
                     adapterCombo.getItems().clear();
+                    adapterInterfaceIndex.clear();
                     for (NetworkAdapterRow a : adapters) {
                         adapterCombo.getItems().add(a.getName());
+                        if (a.getInterfaceIndex() > 0) {
+                            adapterInterfaceIndex.put(a.getName(), a.getInterfaceIndex());
+                        }
                     }
                     if (!adapterCombo.getItems().isEmpty()) {
                         if (selected != null && adapterCombo.getItems().contains(selected)) {
@@ -741,7 +746,9 @@ class DnsCachePanel extends VBox {
                 if (Thread.currentThread().isInterrupted()) {
                     return;
                 }
-                NetworkOptimizerService.DnsServersQuery query = service.queryCurrentDnsServers(requestedAdapter);
+                int ifIndex = adapterInterfaceIndex.getOrDefault(requestedAdapter, 0);
+                NetworkOptimizerService.DnsServersQuery query =
+                        service.queryCurrentDnsServers(requestedAdapter, ifIndex);
                 Platform.runLater(() -> applyDnsQueryToLabel(generation, requestedAdapter, query));
             } catch (Exception e) {
                 if (Thread.currentThread().isInterrupted()
@@ -818,7 +825,8 @@ class DnsCachePanel extends VBox {
 
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
-                var result = service.setDnsServers(adapter, primary, secondary);
+                int ifIndex = adapterInterfaceIndex.getOrDefault(adapter, 0);
+                var result = service.setDnsServers(adapter, ifIndex, primary, secondary);
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "DNS updated." : "DNS update failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,
@@ -858,7 +866,8 @@ class DnsCachePanel extends VBox {
 
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
-                var result = service.setDnsServers(adapter, null, null);
+                int ifIndex = adapterInterfaceIndex.getOrDefault(adapter, 0);
+                var result = service.setDnsServers(adapter, ifIndex, null, null);
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success() ? "DNS reset to DHCP." : "DNS reset failed.");
                     new Alert(result.success() ? Alert.AlertType.INFORMATION : Alert.AlertType.ERROR,

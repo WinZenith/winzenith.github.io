@@ -6,10 +6,18 @@ import com.sbtools.cleaner.CleanerExtension;
 import com.sbtools.cleaner.CleanerUtils;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.WindowsServicingSafety;
-import com.sbtools.util.WindowsVersionUtil;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class WindowsUpdateCleanupCleaner implements CleanerExtension {
+
+    /** Live /StartComponentCleanup. Never killed; Cancel and the clean timeout wait for it. */
+    private static final AtomicReference<Process> ACTIVE_COMPONENT_CLEANUP = new AtomicReference<>();
+    /** Opened when DISM starts, released after the service records this category's bytes. */
+    private static final AtomicReference<CountDownLatch> RECORDED = new AtomicReference<>();
+    /** Exit 0 with no parseable size. DISM often prints no byte count. */
+    private static final java.util.concurrent.atomic.AtomicBoolean SUCCEEDED_WITHOUT_SIZE = new java.util.concurrent.atomic.AtomicBoolean();
 
     @Override
     public CleanupCategory getCategory() { return CleanupCategory.WINDOWS_UPDATE_CLEANUP; }
@@ -32,12 +40,6 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
             row.setErrorMessage("Scan canceled by user");
             return;
         }
-        if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
-            row.setTotalBytes(0);
-            row.setItemCount(0);
-            row.setSizeOrCountText("Skipped (not supported on this Windows version)");
-            return;
-        }
         if (WindowsServicingSafety.isServicingPending()) {
             String reasons = String.join("; ", WindowsServicingSafety.getPendingReasons());
             row.setTotalBytes(0);
@@ -58,8 +60,9 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image", "/AnalyzeComponentStore");
             pb.redirectErrorStream(true);
             p = startDismUntracked(pb);
-            // Cancellable wait: poll in 1s slices so Cancel unblocks promptly.
-            // Never kill DISM — that can leave CBS servicing corrupted.
+            ACTIVE_COMPONENT_CLEANUP.set(p);
+            // Never kill DISM. Returns wait in finally so dism.exe is gone
+            // before the scan result is delivered.
             boolean finished = false;
             long deadline = System.currentTimeMillis() + 120_000L;
             while (System.currentTimeMillis() < deadline) {
@@ -113,7 +116,12 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
                 }
             }
         } catch (Exception ignored) {
-            AppLogger.warning("DISM analyze failed; leaving process running if still alive");
+            AppLogger.warning("DISM analyze failed; waiting for the process if it started");
+        } finally {
+            if (p != null) {
+                waitForProcessNoKill(p);
+                ACTIVE_COMPONENT_CLEANUP.compareAndSet(p, null);
+            }
         }
         row.setTotalBytes(totalSize);
         row.setItemCount(itemCount);
@@ -133,11 +141,6 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
     @Override
     public long clean(java.nio.file.Path backupRootOrNull, com.sbtools.util.CancellationToken token) {
         if (token != null && token.isCancelled()) return 0L;
-        if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
-            AppLogger.info("Skipping DISM component cleanup on newer Windows version (Build "
-                    + WindowsVersionUtil.getBuildNumber() + ")");
-            return 0;
-        }
         if (WindowsServicingSafety.isServicingPending()) {
             AppLogger.info("Skipping DISM component cleanup: pending system restart ("
                     + String.join("; ", WindowsServicingSafety.getPendingReasons()) + ")");
@@ -147,60 +150,115 @@ public class WindowsUpdateCleanupCleaner implements CleanerExtension {
             AppLogger.info("Skipping DISM component cleanup: Windows Update / DISM already active");
             return 0;
         }
-        long cleaned = 0;
         Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder("dism", "/Online", "/Cleanup-Image", "/StartComponentCleanup");
             pb.redirectErrorStream(true);
             p = startDismUntracked(pb);
+            RECORDED.set(new CountDownLatch(1));
+            ACTIVE_COMPONENT_CLEANUP.set(p);
             boolean finished = false;
-            boolean cancelRequested = false;
             long deadline = System.currentTimeMillis() + 900_000L;
             while (System.currentTimeMillis() < deadline) {
                 if (token != null && token.isCancelled()) {
-                    cancelRequested = true;
                     AppLogger.info("DISM component cleanup cancel requested — waiting for process to finish (not killing)");
                     break;
                 }
                 try {
                     if (p.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) { finished = true; break; }
                 } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    cancelRequested = true;
+                    Thread.interrupted();
                     AppLogger.info("DISM component cleanup interrupted — waiting for process to finish (not killing)");
                     break;
                 }
             }
             if (!finished) {
-                if (cancelRequested) {
-                    waitForProcessNoKill(p);
-                    throw new java.util.concurrent.CancellationException(
-                            "DISM cleanup canceled after component cleanup finished");
-                }
-                AppLogger.warning("DISM cleanup timed out after ~15 minutes — waiting for process (not killing)");
-                waitForProcessNoKill(p);
-            } else {
-                if (token != null && token.isCancelled()) {
-                    AppLogger.info("DISM cleanup canceled after process finished");
-                    return 0L;
-                }
-                int exitCode = p.exitValue();
-                AppLogger.info("DISM component cleanup completed with exit code " + exitCode);
-                if (exitCode == 0) {
-                    String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                    // Report only parsed reclaimed bytes: falling back to the
-                    // scan estimate here fabricated "freed" totals (localized
-                    // DISM output, shared singleton across parallel scans).
-                    cleaned = parseCleanedBytes(output);
-                }
+                AppLogger.warning("DISM component cleanup still running — waiting for it to finish (not killing)");
             }
-        } catch (java.util.concurrent.CancellationException ce) {
-            throw ce;
+            // Cancel does not discard a finished cleanup. Later categories stop
+            // because the token is already cancelled; this category's bytes stay.
+            return readDismResult(p);
         } catch (Exception e) {
-            if (e instanceof java.util.concurrent.CancellationException) throw (java.util.concurrent.CancellationException) e;
             AppLogger.warning("DISM cleanup failed: " + e.getMessage());
+            return 0L;
+        } finally {
+            if (p != null) {
+                waitForProcessNoKill(p);
+                ACTIVE_COMPONENT_CLEANUP.compareAndSet(p, null);
+            }
         }
-        return cleaned;
+    }
+
+    /** True when DISM is running or its bytes are not stored on the summary yet. */
+    public static boolean componentCleanupNeedsRecord() {
+        Process p = ACTIVE_COMPONENT_CLEANUP.get();
+        return (p != null && p.isAlive()) || RECORDED.get() != null;
+    }
+
+    /**
+     * Block until the in-flight component cleanup exits. Does not kill DISM.
+     */
+    public static void awaitComponentCleanup() {
+        Process p = ACTIVE_COMPONENT_CLEANUP.get();
+        if (p != null) waitForProcessNoKill(p);
+    }
+
+    /**
+     * Wait until DISM exits and {@link #markComponentCleanupRecorded()} runs.
+     * Does not kill the process.
+     */
+    public static boolean awaitComponentCleanupRecorded(long waitMs) {
+        awaitComponentCleanup();
+        CountDownLatch latch = RECORDED.get();
+        if (latch == null) return true;
+        try {
+            return latch.await(Math.max(0L, waitMs), java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /** Call after this category's bytes are stored. No-op when DISM did not start. */
+    public static void markComponentCleanupRecorded() {
+        CountDownLatch latch = RECORDED.getAndSet(null);
+        if (latch != null) latch.countDown();
+    }
+
+    /**
+     * True once when the last component cleanup exited 0 without a parseable size.
+     * The service must not report that as "nothing was cleaned".
+     */
+    public static boolean consumeSucceededWithoutSize() {
+        return SUCCEEDED_WITHOUT_SIZE.getAndSet(false);
+    }
+
+    /**
+     * Exit 0 reports parsed reclaimed bytes. A cancel or timeout does not
+     * zero a cleanup that already completed.
+     */
+    static long cleanedBytesForExit(int exitCode, long parsedBytes) {
+        if (exitCode != 0) return 0L;
+        return Math.max(0L, parsedBytes);
+    }
+
+    private long readDismResult(Process p) {
+        waitForProcessNoKill(p);
+        try {
+            int exitCode = p.exitValue();
+            AppLogger.info("DISM component cleanup completed with exit code " + exitCode);
+            if (exitCode != 0) return 0L;
+            String output = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            long parsed = parseCleanedBytes(output);
+            if (parsed <= 0) {
+                SUCCEEDED_WITHOUT_SIZE.set(true);
+                AppLogger.info("DISM component cleanup succeeded; output had no reclaimed size");
+            }
+            return cleanedBytesForExit(exitCode, parsed);
+        } catch (Exception e) {
+            AppLogger.warning("DISM cleanup result unreadable: " + e.getMessage());
+            return 0L;
+        }
     }
 
     /**

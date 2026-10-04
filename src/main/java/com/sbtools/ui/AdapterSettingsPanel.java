@@ -40,6 +40,7 @@ class AdapterSettingsPanel extends VBox {
     // separately from loadProperties so neither handle clobbers the other.
     private final java.util.concurrent.atomic.AtomicBoolean refreshingAdapters = new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile Future<?> refreshTask;
+    private final java.util.Map<String, Integer> adapterInterfaceIndex = new java.util.HashMap<>();
 
     AdapterSettingsPanel(NetworkOptimizerService service, BooleanProperty busy) {
         this.service = service;
@@ -57,8 +58,12 @@ class AdapterSettingsPanel extends VBox {
                 Platform.runLater(() -> {
                     String prev = adapterCombo.getSelectionModel().getSelectedItem();
                     adapterCombo.getItems().clear();
+                    adapterInterfaceIndex.clear();
                     for (NetworkAdapterRow a : adapters) {
                         adapterCombo.getItems().add(a.getName());
+                        if (a.getInterfaceIndex() > 0) {
+                            adapterInterfaceIndex.put(a.getName(), a.getInterfaceIndex());
+                        }
                     }
                     if (!adapterCombo.getItems().isEmpty()) {
                         if (prev != null && adapterCombo.getItems().contains(prev)) {
@@ -207,7 +212,8 @@ class AdapterSettingsPanel extends VBox {
 
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
-                AdapterProperties props = service.getAdapterProperties(adapter);
+                int ifIndex = adapterInterfaceIndex.getOrDefault(adapter, 0);
+                AdapterProperties props = service.getAdapterProperties(adapter, ifIndex);
                 Platform.runLater(() -> {
                     allRows.clear();
                     propertyRows.clear();

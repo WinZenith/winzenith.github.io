@@ -1,20 +1,22 @@
-param([string]$AdapterName = "")
+param([string]$AdapterName = "", [int]$InterfaceIndex = 0)
 
-if (-not $AdapterName) {
-    ConvertTo-Json -Compress @{ success = $false; message = "AdapterName is required." }
+if (-not $AdapterName -and $InterfaceIndex -le 0) {
+    ConvertTo-Json -Compress @{ success = $false; message = "AdapterName or InterfaceIndex is required." }
     exit 1
 }
-if ($AdapterName -match '[\*\?]') {
+if ($InterfaceIndex -le 0 -and $AdapterName -match '[\*\?]') {
     ConvertTo-Json -Compress @{ success = $false; message = "Adapter name must not contain wildcard characters (* or ?)." }
     exit 1
 }
 
 try {
-    # Exact-match only. Never pass the raw name to ipconfig until -eq confirms it:
-    # ipconfig treats * and ? as wildcards and would release/renew every match.
-    $target = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Name -eq $AdapterName }
+    if ($InterfaceIndex -gt 0) {
+        $target = Get-NetAdapter -InterfaceIndex $InterfaceIndex -ErrorAction Stop
+    } else {
+        $target = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Name -eq $AdapterName }
+    }
     if (-not $target) {
-        ConvertTo-Json -Compress @{ success = $false; message = "Adapter not found: $AdapterName" }
+        ConvertTo-Json -Compress @{ success = $false; message = "Adapter not found." }
         exit 1
     }
     if (@($target).Count -gt 1) {
@@ -22,14 +24,23 @@ try {
         exit 1
     }
     $exact = [string]$target.Name
-    if ($exact -match '[\*\?]') {
-        ConvertTo-Json -Compress @{ success = $false; message = "Adapter name must not contain wildcard characters (* or ?)." }
-        exit 1
+    $idx = [int]$target.InterfaceIndex
+    $renewOut = ""
+    $ok = $false
+    if ($exact -match '[\*\?]' -or $InterfaceIndex -gt 0) {
+        # ipconfig treats * and ? as wildcards — renew by WMI/CIM interface index instead.
+        $cfg = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$idx" -ErrorAction Stop
+        if (-not $cfg) {
+            ConvertTo-Json -Compress @{ success = $false; message = "No IP configuration for interface index $idx." }
+            exit 1
+        }
+        $result = Invoke-CimMethod -InputObject $cfg -MethodName RenewDHCPLease -ErrorAction Stop
+        $ok = ($null -ne $result) -and ($result.ReturnValue -eq 0)
+        $renewOut = "RenewDHCPLease ReturnValue=$($result.ReturnValue)"
+    } else {
+        $renewOut = & ipconfig /renew $exact 2>&1
+        $ok = $LASTEXITCODE -eq 0
     }
-    # Renew only — do not /release first. /release drops the lease and leaves the
-    # NIC without an address if /renew then fails or times out.
-    $renewOut = & ipconfig /renew $exact 2>&1
-    $ok = $LASTEXITCODE -eq 0
     $msg = if ($ok) { "IP address renewed for $exact." } else { "IP renewal failed for $exact." }
     ConvertTo-Json -Compress @{
         success = $ok

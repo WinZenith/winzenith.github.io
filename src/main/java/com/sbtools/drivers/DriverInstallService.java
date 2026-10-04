@@ -1202,45 +1202,32 @@ public class DriverInstallService {
         return null;
     }
 
+    /**
+     * Full hardware ids only. A 4-hex {@code DEV_}/{@code PID_} slice would
+     * treat {@code DEV_2723} as a match inside {@code DEV_27231}.
+     */
+    private static final java.util.regex.Pattern INF_HW_ID = java.util.regex.Pattern.compile(
+            "(?:[A-Z][A-Z0-9]*\\\\)*(?:VEN_[0-9A-F]{4}&DEV_[0-9A-F]{4,}|VID_[0-9A-F]{4}&PID_[0-9A-F]{4,}|ACPI\\\\[A-Z0-9]{4,})(?:&[A-Z][A-Z0-9]*_[0-9A-F]+)*");
+
     private boolean isInfPlausibleForDevice(Path inf, DriverUpdateCandidate candidate) {
         try {
             if (candidate == null || candidate.installed() == null) return false;
-            String hw = candidate.installed().hardwareIds() == null ? "" : candidate.installed().hardwareIds().toUpperCase();
-            String devId = candidate.installed().deviceId() == null ? "" : candidate.installed().deviceId().toUpperCase();
-            // INFs are commonly UTF-16 LE (or ANSI); Files.readString assumes
-            // UTF-8 and garbles them, causing false refusals of correct INFs.
-            String content = readInfContent(inf).toUpperCase();
-            // HW evidence: VEN_/DEV_/SUBSYS_/ACPI_/USB VID/PID tokens
-            java.util.Set<String> tokens = new java.util.HashSet<>();
-            for (String src : new String[]{hw, devId}) {
-                for (String part : src.split("[;\\s,]+")) {
-                    if (part.length() >= 4) tokens.add(part);
-                    java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                            "(VEN_[0-9A-F]{4}|DEV_[0-9A-F]{4}|SUBSYS_[0-9A-F]+|VID_[0-9A-F]{4}|PID_[0-9A-F]{4}|ACPI\\\\[A-Z0-9]+)")
-                            .matcher(part);
-                    while (m.find()) tokens.add(m.group(1));
-                }
-            }
-            // Single-INF archives with no HW strings: allow (nothing to mismatch).
-            // Multi-INF archives require at least one HW token hit.
-            String infName = candidate.installed().infName();
-            if (infName != null && !infName.isBlank()
-                    && inf.getFileName().toString().equalsIgnoreCase(infName)) {
-                return true;
-            }
-            if (tokens.isEmpty()) return false;
-            for (String tok : tokens) {
-                // Vendor-only tokens (bare VEN_xxxx / VID_xxxx) match every
-                // same-vendor INF in a family bundle: require a
-                // device-specific token (DEV_/PID_/SUBSYS_/ACPI_ or a longer
-                // composite such as PCI\VEN_...&DEV_...).
-                if (tok.matches("(VEN|VID)_[0-9A-F]{4}")) continue;
-                if (tok.length() >= 8 && content.contains(tok)) return true;
-            }
-            return false;
+            // Same boundary rule as catalog matching. Filename equality is not
+            // evidence: oemN.inf / a shared family name would skip the HW check.
+            return infTextMatchesDevice(readInfContent(inf), candidate.installed());
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /** True when INF text contains a hardware id compatible with {@code driver}. */
+    public static boolean infTextMatchesDevice(String content, InstalledDriver driver) {
+        if (content == null || content.isBlank() || driver == null) return false;
+        java.util.regex.Matcher m = INF_HW_ID.matcher(content.toUpperCase(java.util.Locale.ROOT));
+        while (m.find()) {
+            if (DriverCatalogDatabase.hardwareCompatible(driver, m.group())) return true;
+        }
+        return false;
     }
 
     /**

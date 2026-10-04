@@ -811,10 +811,24 @@ public final class DriverCatalogDatabase {
     }
 
     private static String token(String norm, String prefix) {
-        int i = norm.indexOf(prefix);
-        if (i < 0 || i + prefix.length() + 4 > norm.length()) return null;
-        String v = norm.substring(i, i + prefix.length() + 4);
-        return v.matches(prefix + "[0-9A-F]{4}") ? v : null;
+        int from = 0;
+        while (from < norm.length()) {
+            int i = norm.indexOf(prefix, from);
+            if (i < 0 || i + prefix.length() + 4 > norm.length()) return null;
+            int end = i + prefix.length() + 4;
+            // DEV_27231 must not yield DEV_2723. A 4-hex token ends on a
+            // non-hex boundary; a longer id is a different device.
+            if (end < norm.length()) {
+                char next = norm.charAt(end);
+                if ((next >= '0' && next <= '9') || (next >= 'A' && next <= 'F')) {
+                    from = i + prefix.length();
+                    continue;
+                }
+            }
+            String v = norm.substring(i, end);
+            return v.matches(prefix + "[0-9A-F]{4}") ? v : null;
+        }
+        return null;
     }
 
     /** Extracts SUBSYS_XXXXXXXX (8 hex) or null when absent/malformed. */

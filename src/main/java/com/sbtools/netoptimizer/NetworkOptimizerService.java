@@ -58,6 +58,46 @@ public class NetworkOptimizerService {
         return trimmed;
     }
 
+    /** True when the name can be passed to legacy -AdapterName-only script paths. */
+    public static boolean isAdapterNameScriptSafe(String name) {
+        try {
+            sanitizeAdapterName(name);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    static String adapterLogLabel(String adapterName, int interfaceIndex) {
+        if (adapterName != null && !adapterName.isBlank()) {
+            return adapterName.trim();
+        }
+        return interfaceIndex > 0 ? ("ifIndex " + interfaceIndex) : "(unknown)";
+    }
+
+    /**
+     * PowerShell -File arguments for adapter-targeting scripts. When {@code interfaceIndex > 0},
+     * scripts resolve by index (safe for literal * / ? in names).
+     */
+    static String[] adapterMutationArgs(String adapterName, int interfaceIndex) {
+        String label = adapterName != null ? adapterName.trim() : "";
+        if (interfaceIndex > 0) {
+            return new String[] {"-AdapterName", label, "-InterfaceIndex", Integer.toString(interfaceIndex)};
+        }
+        return new String[] {"-AdapterName", sanitizeAdapterName(adapterName)};
+    }
+
+    private static List<String> adapterScriptCommand(Path script, String[] adapterArgs, String... more) {
+        List<String> cmd = new ArrayList<>(ProcessRunner.powershellScript(script.toString()));
+        for (String a : adapterArgs) {
+            cmd.add(a);
+        }
+        for (String a : more) {
+            cmd.add(a);
+        }
+        return cmd;
+    }
+
     public record AdapterListResult(boolean success, List<NetworkAdapterRow> adapters, String errorMessage) {
         public static AdapterListResult ok(List<NetworkAdapterRow> adapters) {
             return new AdapterListResult(true, adapters != null ? adapters : List.of(), null);
@@ -145,7 +185,17 @@ public class NetworkOptimizerService {
                 String dhcp = str(entry, "Dhcp");
                 String gateway = str(entry, "Gateway");
                 String dns = str(entry, "DnsServers");
-                adapters.add(new NetworkAdapterRow(name, desc, status, speed, mac, ip, enabled, dhcp, gateway, dns));
+                int ifIndex = 0;
+                Object idxObj = entry.get("InterfaceIndex");
+                if (idxObj instanceof Number n) {
+                    ifIndex = n.intValue();
+                } else if (idxObj != null) {
+                    try {
+                        ifIndex = Integer.parseInt(idxObj.toString().trim());
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                adapters.add(new NetworkAdapterRow(name, ifIndex, desc, status, speed, mac, ip, enabled, dhcp, gateway, dns));
             } catch (Exception e) {
                 AppLogger.warning("Failed to parse adapter entry: " + e.getMessage());
             }
@@ -218,17 +268,25 @@ public class NetworkOptimizerService {
             java.util.regex.Pattern.compile("(?i).*(virtual|wi-?fi direct|hosted network|microsoft.*virtual).*");
 
     /** Prefer physical WLAN NIC (Up first), matching net-wifi-info.ps1 selection. */
+    public record WifiAdapterRef(String name, int interfaceIndex) {
+    }
+
     public java.util.Optional<String> resolveWifiAdapterName(List<NetworkAdapterRow> adapters) {
+        return resolveWifiAdapter(adapters).map(WifiAdapterRef::name);
+    }
+
+    public java.util.Optional<WifiAdapterRef> resolveWifiAdapter(List<NetworkAdapterRow> adapters) {
         if (adapters == null || adapters.isEmpty()) return java.util.Optional.empty();
-        String up = null;
-        String any = null;
+        WifiAdapterRef up = null;
+        WifiAdapterRef any = null;
         for (NetworkAdapterRow a : adapters) {
             String desc = a.getDescription();
             if (desc == null || !WIRELESS_DESC.matcher(desc).matches()) continue;
             if (VIRTUAL_WIRELESS_DESC.matcher(desc).matches()) continue;
-            if (any == null) any = a.getName();
+            WifiAdapterRef ref = new WifiAdapterRef(a.getName(), a.getInterfaceIndex());
+            if (any == null) any = ref;
             if ("Up".equalsIgnoreCase(a.getStatus())) {
-                up = a.getName();
+                up = ref;
                 break;
             }
         }
@@ -567,11 +625,15 @@ public class NetworkOptimizerService {
     }
 
     public OperationResult renewIp(String adapterName) {
+        return renewIp(adapterName, 0);
+    }
+
+    public OperationResult renewIp(String adapterName, int interfaceIndex) {
         try {
-            String safeName = sanitizeName(adapterName);
+            String[] adapterArgs = adapterMutationArgs(adapterName, interfaceIndex);
+            String logLabel = adapterLogLabel(adapterName, interfaceIndex);
             Path script = PowerShellScripts.resolve("net-ip-renew.ps1");
-            ProcessResult pr = new ProcessRunner(90).run(
-                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", safeName));
+            ProcessResult pr = new ProcessRunner(90).run(adapterScriptCommand(script, adapterArgs));
             String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {
                 try {
@@ -581,9 +643,9 @@ public class NetworkOptimizerService {
                     String msg = str(data, "message");
                     String detail = str(data, "detail");
                     if (ok) {
-                        logChange("Renew IP", safeName, "ipconfig /renew (no release)", true);
+                        logChange("Renew IP", logLabel, "DHCP renew (no release)", true);
                         return OperationResult.ok(msg.isEmpty()
-                                ? ("IP address renewed for " + safeName + ".") : msg, detail);
+                                ? ("IP address renewed for " + logLabel + ".") : msg, detail);
                     }
                     return OperationResult.fail(msg.isEmpty() ? "IP renewal failed." : msg, detail);
                 } catch (Exception je) {
@@ -591,8 +653,8 @@ public class NetworkOptimizerService {
                 }
             }
             if (pr.exitCode() == 0) {
-                logChange("Renew IP", safeName, "ipconfig /renew (no release)", true);
-                return OperationResult.ok("IP address renewed for " + safeName + ".", pr.combinedOutput());
+                logChange("Renew IP", logLabel, "DHCP renew (no release)", true);
+                return OperationResult.ok("IP address renewed for " + logLabel + ".", pr.combinedOutput());
             }
             return OperationResult.fail("IP renewal failed.", pr.combinedOutput());
         } catch (IllegalArgumentException e) {
@@ -604,17 +666,16 @@ public class NetworkOptimizerService {
     }
 
     public OperationResult setAdapterState(String adapterName, boolean enable) {
+        return setAdapterState(adapterName, 0, enable);
+    }
+
+    public OperationResult setAdapterState(String adapterName, int interfaceIndex, boolean enable) {
         try {
-            String safeName = sanitizeName(adapterName);
-            // Exact-match via net-adapter-state.ps1: the script resolves the adapter
-            // with "-eq" (no wildcards) and pipes by InputObject, so a name
-            // containing "*" can never expand to every adapter. Never pass the
-            // raw name to Enable/Disable-NetAdapter -Name (wildcard-capable).
+            String[] adapterArgs = adapterMutationArgs(adapterName, interfaceIndex);
+            String logLabel = adapterLogLabel(adapterName, interfaceIndex);
             Path script = PowerShellScripts.resolve("net-adapter-state.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(),
-                            "-AdapterName", safeName,
-                            "-Enable", String.valueOf(enable)));
+                    adapterScriptCommand(script, adapterArgs, "-Enable", String.valueOf(enable)));
             String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {
                 try {
@@ -628,8 +689,8 @@ public class NetworkOptimizerService {
                         return OperationResult.fail("Requires Administrator: failed to " + (enable ? "enable" : "disable") + " adapter.", out);
                     }
                     if (ok) {
-                        logChange(enable ? "Enable Adapter" : "Disable Adapter", safeName, "", true);
-                        return OperationResult.ok(msg.isEmpty() ? ((enable ? "Enabled " : "Disabled ") + safeName + ".") : msg, out);
+                        logChange(enable ? "Enable Adapter" : "Disable Adapter", logLabel, "", true);
+                        return OperationResult.ok(msg.isEmpty() ? ((enable ? "Enabled " : "Disabled ") + logLabel + ".") : msg, out);
                     }
                     return OperationResult.fail(msg.isEmpty()
                             ? ("Failed to " + (enable ? "enable" : "disable") + " adapter.") : msg, out);
@@ -644,8 +705,10 @@ public class NetworkOptimizerService {
                 }
                 return OperationResult.fail("Failed to " + (enable ? "enable" : "disable") + " adapter.", out);
             }
-            logChange(enable ? "Enable Adapter" : "Disable Adapter", safeName, "", true);
-            return OperationResult.ok((enable ? "Enabled " : "Disabled ") + safeName + ".", out);
+            logChange(enable ? "Enable Adapter" : "Disable Adapter", logLabel, "", true);
+            return OperationResult.ok((enable ? "Enabled " : "Disabled ") + logLabel + ".", out);
+        } catch (IllegalArgumentException e) {
+            return OperationResult.fail(e.getMessage());
         } catch (Exception e) {
             AppLogger.warning("Failed to set adapter state: " + e.getMessage());
             return OperationResult.fail("Failed to set adapter state: " + e.getMessage());
@@ -702,6 +765,57 @@ public class NetworkOptimizerService {
         }
     }
 
+    /** Human-readable TCP state for UI; stable keys from {@code net-tcp-snapshot.ps1} plus raw netsh. */
+    public String formatCurrentTcpSettingsForDisplay() {
+        StringBuilder sb = new StringBuilder();
+        Map<String, Object> snap = readTcpSnapshotJson();
+        if (!snap.isEmpty()) {
+            sb.append("TCP tuning (stable read, locale-independent):\n");
+            appendTcpSnapshotLine(sb, "TCP AutoTuning", snap.get("AutoTuning"));
+            appendTcpSnapshotLine(sb, "RSS", snap.get("RSS"));
+            appendTcpSnapshotLine(sb, "RSC", snap.get("RSC"));
+            appendTcpSnapshotLine(sb, "ECN", snap.get("ECN"));
+            Object ack = snap.get("TcpAckFrequency");
+            Object noDelay = snap.get("TCPNoDelay");
+            appendTcpSnapshotLine(sb, "TCP Ack Frequency",
+                    ack == null ? "default (absent)" : ack.toString());
+            appendTcpSnapshotLine(sb, "TCP No Delay",
+                    noDelay == null ? "default (absent)" : noDelay.toString());
+            sb.append('\n');
+        }
+        TcpSettings settings = getCurrentTcpSettings();
+        if (settings.settings().isEmpty()) {
+            sb.append("netsh int tcp show global:\n(no output — not Windows, or access denied; run as Administrator)\n");
+        } else {
+            sb.append("netsh int tcp show global (raw):\n");
+            settings.settings().forEach((k, v) -> sb.append(k).append(": ").append(v).append('\n'));
+        }
+        return sb.toString();
+    }
+
+    private static void appendTcpSnapshotLine(StringBuilder sb, String label, Object value) {
+        String v = value == null || value.toString().isBlank() ? "(not reported)" : value.toString().trim();
+        sb.append("  ").append(label).append(": ").append(v).append('\n');
+    }
+
+    Map<String, Object> readTcpSnapshotJson() {
+        try {
+            Path script = PowerShellScripts.resolve("net-tcp-snapshot.ps1");
+            ProcessResult pr = new ProcessRunner(30).run(
+                    ProcessRunner.powershellScript(script.toString()));
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
+            if (stdout.isEmpty()) {
+                return Map.of();
+            }
+            Map<String, Object> data = mapper.readValue(stdout,
+                    new TypeReference<Map<String, Object>>() {});
+            return data != null ? data : Map.of();
+        } catch (Exception e) {
+            AppLogger.warning("TCP snapshot read failed: " + e.getMessage());
+            return Map.of();
+        }
+    }
+
     /** Result of a read-only DNS server query for one adapter. */
     public record DnsServersQuery(boolean success, List<String> servers, String errorMessage) {
         public static DnsServersQuery ok(List<String> servers) {
@@ -715,11 +829,14 @@ public class NetworkOptimizerService {
     }
 
     public DnsServersQuery queryCurrentDnsServers(String adapterName) {
+        return queryCurrentDnsServers(adapterName, 0);
+    }
+
+    public DnsServersQuery queryCurrentDnsServers(String adapterName, int interfaceIndex) {
         try {
-            String safeName = sanitizeName(adapterName);
+            String[] adapterArgs = adapterMutationArgs(adapterName, interfaceIndex);
             Path script = PowerShellScripts.resolve("net-dns-get.ps1");
-            ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", safeName));
+            ProcessResult pr = new ProcessRunner(30).run(adapterScriptCommand(script, adapterArgs));
             String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {
                 Map<String, Object> data = mapper.readValue(stdout,
@@ -743,8 +860,14 @@ public class NetworkOptimizerService {
     }
 
     public OperationResult setDnsServers(String adapterName, String primaryDns, String secondaryDns) {
+        return setDnsServers(adapterName, 0, primaryDns, secondaryDns);
+    }
+
+    public OperationResult setDnsServers(String adapterName, int interfaceIndex,
+                                         String primaryDns, String secondaryDns) {
         try {
-            String safeName = sanitizeName(adapterName);
+            String[] adapterArgs = adapterMutationArgs(adapterName, interfaceIndex);
+            String logLabel = adapterLogLabel(adapterName, interfaceIndex);
             String p1 = primaryDns != null ? primaryDns.trim() : "";
             String p2 = secondaryDns != null ? secondaryDns.trim() : "";
             if (!p1.isEmpty() && !isValidIpAddress(p1)) {
@@ -758,11 +881,8 @@ public class NetworkOptimizerService {
             }
             Path script = PowerShellScripts.resolve("net-dns-set.ps1");
             ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(),
-                            "-AdapterName", safeName,
-                            "-PrimaryDNS", p1,
-                            "-SecondaryDNS", p2));
-            String stdout = pr.stdout().trim();
+                    adapterScriptCommand(script, adapterArgs, "-PrimaryDNS", p1, "-SecondaryDNS", p2));
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {
                 Map<String, Object> data = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
@@ -771,12 +891,12 @@ public class NetworkOptimizerService {
                 String msg = str(data, "message");
                 if (ok) {
                     String target = !p1.isEmpty() ? p1 + (!p2.isEmpty() ? ", " + p2 : "") : "DHCP";
-                    logChange("Set DNS", safeName, target, true);
+                    logChange("Set DNS", logLabel, target, true);
                 }
                 return ok ? OperationResult.ok(msg, stdout) : OperationResult.fail(msg, stdout);
             }
             boolean ok = pr.exitCode() == 0;
-            if (ok) logChange("Set DNS", safeName, !p1.isEmpty() ? p1 : "DHCP", true);
+            if (ok) logChange("Set DNS", logLabel, !p1.isEmpty() ? p1 : "DHCP", true);
             return ok
                     ? OperationResult.ok("DNS servers updated.")
                     : OperationResult.fail("DNS update failed with exit code " + pr.exitCode(), pr.combinedOutput());
@@ -805,19 +925,22 @@ public class NetworkOptimizerService {
     }
 
     public AdapterProperties getAdapterProperties(String adapterName) {
-        String safeName = adapterName;
+        return getAdapterProperties(adapterName, 0);
+    }
+
+    public AdapterProperties getAdapterProperties(String adapterName, int interfaceIndex) {
+        String logLabel = adapterLogLabel(adapterName, interfaceIndex);
         try {
-            safeName = sanitizeName(adapterName);
+            String[] adapterArgs = adapterMutationArgs(adapterName, interfaceIndex);
             Path script = PowerShellScripts.resolve("net-adapter-properties.ps1");
-            ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString(), "-AdapterName", safeName));
-            String stdout = pr.stdout().trim();
+            ProcessResult pr = new ProcessRunner(30).run(adapterScriptCommand(script, adapterArgs));
+            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
             if (!stdout.isEmpty()) {
                 Map<String, Object> data = mapper.readValue(stdout,
                         new TypeReference<Map<String, Object>>() {});
                 if (data.containsKey("error")) {
                     AppLogger.warning("Adapter properties error: " + data.get("error"));
-                    return new AdapterProperties(safeName, Map.of());
+                    return new AdapterProperties(logLabel, Map.of());
                 }
                 Object propsObj = data.get("properties");
                 if (propsObj instanceof List<?> list) {
@@ -829,13 +952,15 @@ public class NetworkOptimizerService {
                             props.put(name, value);
                         }
                     }
-                    return new AdapterProperties(safeName, props);
+                    return new AdapterProperties(logLabel, props);
                 }
             }
+        } catch (IllegalArgumentException e) {
+            AppLogger.warning("Adapter properties rejected: " + e.getMessage());
         } catch (Exception e) {
             AppLogger.warning("Failed to get adapter properties: " + e.getMessage());
         }
-        return new AdapterProperties(safeName, Map.of());
+        return new AdapterProperties(logLabel, Map.of());
     }
 
     public WiFiInfo getCurrentWifiInfo() {
@@ -1142,13 +1267,8 @@ public class NetworkOptimizerService {
             AppLogger.warning("Snapshot TCP read failed: " + e.getMessage());
         }
         try {
-            Path script = PowerShellScripts.resolve("net-tcp-snapshot.ps1");
-            ProcessResult pr = new ProcessRunner(30).run(
-                    ProcessRunner.powershellScript(script.toString()));
-            String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
-            if (!stdout.isEmpty()) {
-                Map<String, Object> data = mapper.readValue(stdout,
-                        new TypeReference<Map<String, Object>>() {});
+            Map<String, Object> data = readTcpSnapshotJson();
+            if (!data.isEmpty()) {
                 Object a = data.get("TcpAckFrequency");
                 Object n = data.get("TCPNoDelay");
                 ack = a != null ? a.toString() : null;
@@ -1197,13 +1317,8 @@ public class NetworkOptimizerService {
             String ack = null;
             String noDelay = null;
             try {
-                Path script = PowerShellScripts.resolve("net-tcp-snapshot.ps1");
-                ProcessResult pr = new ProcessRunner(30).run(
-                        ProcessRunner.powershellScript(script.toString()));
-                String stdout = pr.stdout() != null ? pr.stdout().trim() : "";
-                if (!stdout.isEmpty()) {
-                    Map<String, Object> data = mapper.readValue(stdout,
-                            new TypeReference<Map<String, Object>>() {});
+                Map<String, Object> data = readTcpSnapshotJson();
+                if (!data.isEmpty()) {
                     Object a = data.get("TcpAckFrequency");
                     Object n = data.get("TCPNoDelay");
                     ack = a != null ? a.toString() : null;

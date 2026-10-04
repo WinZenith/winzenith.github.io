@@ -1,23 +1,27 @@
 param(
-    [string]$AdapterName,
+    [string]$AdapterName = "",
+    [int]$InterfaceIndex = 0,
     [string]$PrimaryDNS,
     [string]$SecondaryDNS
 )
 
-if (-not $AdapterName) {
-    ConvertTo-Json -Compress @{ success = $false; message = "AdapterName is required."; adapterName = ""; dnsServers = @() }
+if (-not $AdapterName -and $InterfaceIndex -le 0) {
+    ConvertTo-Json -Compress @{ success = $false; message = "AdapterName or InterfaceIndex is required."; adapterName = ""; dnsServers = @() }
     exit 1
 }
-if ($AdapterName -match '[\*\?]') {
+if ($InterfaceIndex -le 0 -and $AdapterName -match '[\*\?]') {
     ConvertTo-Json -Compress @{ success = $false; message = "Adapter name must not contain wildcard characters (* or ?)."; adapterName = $AdapterName; dnsServers = @() }
     exit 1
 }
 
 try {
-    # Exact-match then InterfaceIndex: -InterfaceAlias accepts wildcards even after Escape.
-    $target = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Name -eq $AdapterName }
+    if ($InterfaceIndex -gt 0) {
+        $target = Get-NetAdapter -InterfaceIndex $InterfaceIndex -ErrorAction Stop
+    } else {
+        $target = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Name -eq $AdapterName }
+    }
     if (-not $target) {
-        ConvertTo-Json -Compress @{ success = $false; message = "Adapter not found: $AdapterName"; adapterName = $AdapterName; dnsServers = @() }
+        ConvertTo-Json -Compress @{ success = $false; message = "Adapter not found."; adapterName = $AdapterName; dnsServers = @() }
         exit 1
     }
     if (@($target).Count -gt 1) {
@@ -25,8 +29,9 @@ try {
         exit 1
     }
     $ifIndex = [int]$target.InterfaceIndex
+    $label = if ($AdapterName) { $AdapterName } else { $target.Name }
     if ($ifIndex -le 0) {
-        ConvertTo-Json -Compress @{ success = $false; message = "Adapter has no valid interface index."; adapterName = $AdapterName; dnsServers = @() }
+        ConvertTo-Json -Compress @{ success = $false; message = "Adapter has no valid interface index."; adapterName = $label; dnsServers = @() }
         exit 1
     }
     $serverAddresses = @()
@@ -41,7 +46,7 @@ try {
         $output = @{
             success = $true
             message = "DNS reset to automatic (DHCP)."
-            adapterName = $AdapterName
+            adapterName = $label
             dnsServers = @()
         }
     } else {
@@ -49,7 +54,7 @@ try {
         $output = @{
             success = $true
             message = "DNS servers updated successfully."
-            adapterName = $AdapterName
+            adapterName = $label
             dnsServers = $serverAddresses
         }
     }

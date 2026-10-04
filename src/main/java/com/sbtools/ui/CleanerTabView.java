@@ -12,7 +12,6 @@ import com.sbtools.settings.SettingsStore;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.CancelableCompletableFuture;
 import com.sbtools.util.CancellationToken;
-import com.sbtools.util.WindowsVersionUtil;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.collections.FXCollections;
@@ -441,9 +440,18 @@ import java.util.concurrent.atomic.AtomicInteger;
             if (activeScanToken != null) activeScanToken.cancel();
             if (activeCleanToken != null) activeCleanToken.cancel();
             if (activeRescanToken != null) activeRescanToken.cancel();
-            if (activeScanFuture != null && !activeScanFuture.isDone()) activeScanFuture.cancel(true);
-            if (activeCleanFuture != null && !activeCleanFuture.isDone()) activeCleanFuture.cancel(true);
-            if (activeRescanFuture != null && !activeRescanFuture.isDone()) activeRescanFuture.cancel(true);
+            // Do not complete scan/clean futures here. Cancel only raises the token
+            // so the worker can finish the current step (DISM must not be killed)
+            // and return what already ran. Completing the future early dropped that
+            // and left dism.exe running, which then skipped the next cleanup.
+            boolean cleanRunning = activeCleanFuture != null && !activeCleanFuture.isDone();
+            boolean scanRunning = (activeScanFuture != null && !activeScanFuture.isDone())
+                    || (activeRescanFuture != null && !activeRescanFuture.isDone());
+            if (cleanRunning && statusLabel != null) {
+                statusLabel.setText("Stopping after the current step finishes. Windows component cleanup cannot be aborted.");
+            } else if (scanRunning && statusLabel != null) {
+                statusLabel.setText("Stopping after the current scan step finishes. DISM analysis cannot be aborted.");
+            }
             if (activeRestoreFuture != null && !activeRestoreFuture.isDone()) activeRestoreFuture.cancel(true);
         } catch (Exception ignored) {}
     }
@@ -786,6 +794,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             int done = scanned.incrementAndGet();
             Platform.runLater(() -> {
                 if (disposed) return;
+                if (cancelling.get() || scanTok.isCancelled()) return;
                 if (totalCategories > 0) {
                     progressBar.setProgress((double) done / totalCategories);
                 }
@@ -908,11 +917,6 @@ import java.util.concurrent.atomic.AtomicInteger;
                 .anyMatch(r -> r.getCategory().getRiskLevel() == CleanupCategory.RiskLevel.HIGH);
 
         StringBuilder dialogMsg = new StringBuilder();
-        if (WindowsVersionUtil.isNewerThanKnownSafeBuild()) {
-            dialogMsg.append("WARNING: Running on a newer Windows version (")
-                    .append(WindowsVersionUtil.getWindowsVersionString())
-                    .append("). Some cleanup operations will be skipped for safety.\n\n");
-        }
         String riskLabel = hasHighRisk ? " (includes HIGH-risk categories)" : "";
         dialogMsg.append("Do you confirm the cleanup of ").append(selected.size()).append(" categories")
                 .append(riskLabel).append("?\n\n");
@@ -1014,6 +1018,7 @@ import java.util.concurrent.atomic.AtomicInteger;
                 if (cancelling.get() || cleanTok.isCancelled()) return;
                 int done = cleaned.incrementAndGet();
                 Platform.runLater(() -> {
+                    if (cancelling.get() || cleanTok.isCancelled()) return;
                     progressBar.setProgress((double) done / totalCategories);
                     statusLabel.setText("Cleaning: " + done + "/" + totalCategories + "...");
                 });
@@ -1043,10 +1048,10 @@ import java.util.concurrent.atomic.AtomicInteger;
                     // Item-only categories (registry entries, empty folders) report 0 bytes
                     // with >0 items, so include them via totalItems.
                     boolean meaningful = summary.getTotalBytes() > 0 || summary.getTotalItems() > 0;
-                    if (!wasCanceled && meaningful) {
+                    // Keep a record when cancel stops later steps but earlier ones already deleted files.
+                    if (meaningful) {
                         try { historyStore.append(summary); } catch (Exception e) { AppLogger.warning("Failed to append history: " + e.getMessage()); }
-                    } else if (!wasCanceled && summary.hasErrors() && !meaningful) {
-                        // Don't pollute history with failed zero-byte sessions
+                    } else if (!wasCanceled && summary.hasErrors()) {
                         AppLogger.info("Skipping history append for failed/zero-byte clean");
                     }
 
@@ -1056,6 +1061,8 @@ import java.util.concurrent.atomic.AtomicInteger;
                         runOnFxIfActive(() -> {
                             StringBuilder sb = new StringBuilder();
                             sb.append("Cleanup canceled.\n\n");
+                            sb.append("The step already running was allowed to finish. ");
+                            sb.append("Windows component cleanup cannot be aborted.\n\n");
                             sb.append("Total freed: ").append(CleanupService.formatBytes(summary.getTotalBytes()));
                             sb.append(" (").append(summary.getTotalItems()).append(" items)\n");
                             if (!summary.getPerCategory().isEmpty()) {

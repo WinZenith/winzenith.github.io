@@ -786,6 +786,41 @@ public class StartupTabView extends BorderPane {
                 .filter(i -> i.getType() == StartupItemType.REGISTRY
                         && i.getLocation() != null && i.getLocation().contains("RunOnce"))
                 .toList();
+        boolean allowManualEnableForUnknown = false;
+        List<StartupItem> unknownServiceEnables = selected.stream()
+                .filter(i -> i.getType() == StartupItemType.SERVICE && !i.isEnabled())
+                .filter(i -> StartupService.isUnknownDisabledServiceEnable(
+                        i.getName(), i.getOriginalServiceStartType()))
+                .toList();
+        if (!unknownServiceEnables.isEmpty()) {
+            Alert unknown = new Alert(Alert.AlertType.CONFIRMATION);
+            unknown.setTitle(I18n.ui("Unknown service start type"));
+            unknown.setHeaderText(I18n.t("Original start type is unknown"));
+            StringBuilder body = new StringBuilder();
+            if (unknownServiceEnables.size() == 1) {
+                body.append("Windows service \"").append(unknownServiceEnables.get(0).getName())
+                        .append("\" is Disabled and was not disabled through this app, ")
+                        .append("so the previous start type (Automatic, Manual, etc.) is unknown.\n\n");
+            } else {
+                body.append(unknownServiceEnables.size())
+                        .append(" selected service(s) are Disabled with no recorded original start type:\n");
+                unknownServiceEnables.stream().limit(8).map(StartupItem::getName).forEach(n ->
+                        body.append("  • ").append(n).append("\n"));
+                if (unknownServiceEnables.size() > 8) {
+                    body.append("  …\n");
+                }
+                body.append("\n");
+            }
+            body.append("Enable as Manual (start on demand only)?\n")
+                    .append("Cancel to leave them Disabled.");
+            unknown.setContentText(body.toString());
+            unknown.initModality(Modality.APPLICATION_MODAL);
+            if (unknown.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                return;
+            }
+            allowManualEnableForUnknown = true;
+        }
+
         if (!runOnceItems.isEmpty()) {
             if (runOnceItems.size() == selected.size()) {
                 Alert info = new Alert(Alert.AlertType.INFORMATION);
@@ -895,6 +930,7 @@ public class StartupTabView extends BorderPane {
         }
 
         final List<StartupItem> itemsToToggle = selected;
+        final boolean manualEnableUnknown = allowManualEnableForUnknown;
 
         busy.set(true);
         progress.setVisible(true);
@@ -907,7 +943,7 @@ public class StartupTabView extends BorderPane {
                     // UI already showed explicit confirmation (including critical-service
                     // warning with Cancel-default). Pass consent through so the
                     // service-layer guard does not block the confirmed action.
-                    service.toggleStatus(item, true);
+                    service.toggleStatus(item, true, manualEnableUnknown);
                 } catch (Exception e) {
                     AppLogger.error("Failed to toggle status for " + item.getName(), e);
                     errors.add(item.getName() + ": " + e.getMessage());
@@ -1081,7 +1117,9 @@ public class StartupTabView extends BorderPane {
                         + "Estimated boot impact: " + StartupImpactService.formatImpact(item.getEstimatedBootImpactMs())
                         + (item.getType() == StartupItemType.SERVICE
                                 ? "\nStart type: " + item.getServiceStartType()
-                                + "\nOriginal start type: " + item.getOriginalServiceStartType()
+                                + "\nOriginal start type: "
+                                + (item.getOriginalServiceStartType() == null || item.getOriginalServiceStartType().isBlank()
+                                        ? "Unknown" : item.getOriginalServiceStartType())
                                 + "\nState: " + item.getServiceState()
                                 : "")
                         + (item.getType() == StartupItemType.TASK ? "\nTask path: " + item.getTaskPath() : "")

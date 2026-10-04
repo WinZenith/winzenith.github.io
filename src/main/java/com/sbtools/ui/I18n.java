@@ -150,6 +150,15 @@ public final class I18n {
         remember(TABS, tab);
     }
 
+    /** English section key stored by {@link #tab}; use for logic that must not depend on translated {@link Tab#getText()}. */
+    public static String tabSourceKey(Tab tab) {
+        if (tab == null) {
+            return null;
+        }
+        Object src = tab.getProperties().get(SRC);
+        return src instanceof String s ? s : null;
+    }
+
     public static void column(TableColumn<?, ?> column, String english) {
         if (column == null) {
             return;

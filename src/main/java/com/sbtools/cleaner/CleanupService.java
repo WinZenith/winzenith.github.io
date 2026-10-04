@@ -1,5 +1,6 @@
 package com.sbtools.cleaner;
 
+import com.sbtools.cleaner.impl.WindowsUpdateCleanupCleaner;
 import com.sbtools.util.AppExecutors;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
@@ -244,10 +245,11 @@ public class CleanupService {
                 long scannedBytes = row.getTotalBytes();
                 int scannedItems = row.getItemCount();
                 long cleaned = cleanCategory(row.getCategory(), registryBackup ? backupRoot : null, token);
+                boolean sizeUnknown = WindowsUpdateCleanupCleaner.consumeSucceededWithoutSize();
                 boolean itemOnly = scannedBytes == 0;
                 if (!itemOnly) totalBytes += cleaned;
                 if (cleaned == 0) {
-                    if (scannedItems > 0 && !token.isCancelled()) {
+                    if (scannedItems > 0 && !token.isCancelled() && !sizeUnknown) {
                         errors.add(row.getCategory().getDisplayName()
                                 + ": nothing was cleaned (files may be locked or in use)");
                     }
@@ -356,7 +358,7 @@ public class CleanupService {
         CompletableFuture<java.util.List<CleanupRow>> finalFuture = CompletableFuture
                 .allOf(futures.toArray(new CompletableFuture[0]))
                 .orTimeout(SCAN_OVERALL_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-                .handle((v, ex) -> completeScanAfterWait(rows, futures, executor, token, ex, "Scan timed out"));
+                .handleAsync((v, ex) -> completeScanAfterWait(rows, futures, executor, token, ex, "Scan timed out"));
 
         CancelableCompletableFuture<java.util.List<CleanupRow>> result = new CancelableCompletableFuture<>(
                 futures, executor, true);
@@ -392,6 +394,7 @@ public class CleanupService {
         // concurrent walk+delete double-counts). One worker iterates in order.
         java.util.Map<Integer, Long> cleanedByIndex = new java.util.concurrent.ConcurrentHashMap<>();
         java.util.Map<Integer, String> taskErrorMap = new java.util.concurrent.ConcurrentHashMap<>();
+        java.util.Set<Integer> sizeUnknown = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
         CompletableFuture<CleanSummary> finalFuture = CompletableFuture.supplyAsync(() -> {
             boolean wasCanceled = false;
@@ -405,6 +408,7 @@ public class CleanupService {
                 }
                 try {
                     long cleaned = cleanCategory(taskRow.getCategory(), backupRoot, token);
+                    if (WindowsUpdateCleanupCleaner.consumeSucceededWithoutSize()) sizeUnknown.add(idx);
                     cleanedByIndex.put(idx, cleaned);
                 } catch (java.util.concurrent.CancellationException ce) {
                     // Cooperative cancel — not an error
@@ -417,10 +421,11 @@ public class CleanupService {
                     AppLogger.warning("Clean failed for " + err);
                     cleanedByIndex.put(idx, 0L);
                 } finally {
+                    WindowsUpdateCleanupCleaner.markComponentCleanupRecorded();
                     safeProgress(onProgress);
                 }
             }
-            return buildCleanSummary(tasks, cleanedByIndex, taskErrorMap, token, wasCanceled, null);
+            return buildCleanSummary(tasks, cleanedByIndex, taskErrorMap, sizeUnknown, token, wasCanceled, null);
         }, executor);
 
         long timeoutSumTmp = 0;
@@ -435,19 +440,32 @@ public class CleanupService {
         final long effectiveTimeoutFinal = effectiveTimeout;
         CompletableFuture<CleanSummary> timedFuture = finalFuture
                 .orTimeout(effectiveTimeout, java.util.concurrent.TimeUnit.SECONDS);
-        CompletableFuture<CleanSummary> delivered = timedFuture.handle((summary, ex) -> {
+        // handleAsync: orTimeout's callback runs on the JVM's single delay thread.
+        // Waiting for DISM there would stall every other timed future in the process.
+        CompletableFuture<CleanSummary> delivered = timedFuture.handleAsync((summary, ex) -> {
             if (ex == null) {
                 return summary;
             }
             Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
             if (isTimeoutLike(cause) || isTimeoutLike(ex)) {
                 if (token != null) token.cancel();
+                // orTimeout completes this future in place, so the worker's return
+                // value is discarded. When DISM is in flight, wait for it (do not
+                // kill it) and for its bytes to be stored, then build the summary
+                // from that map.
+                if (WindowsUpdateCleanupCleaner.componentCleanupNeedsRecord()) {
+                    AppLogger.warning("Clean timed out during DISM component cleanup — waiting for it to finish (not killing)");
+                    WindowsUpdateCleanupCleaner.awaitComponentCleanupRecorded(120_000L);
+                    return buildCleanSummary(tasks, cleanedByIndex, taskErrorMap, sizeUnknown, token, true, java.util.List.of(
+                            "Cleanup timed out after " + effectiveTimeoutFinal
+                                    + "s. Windows component cleanup was allowed to finish."));
+                }
                 finalFuture.cancel(true);
                 try { executor.shutdownNow(); } catch (Exception ignored) {}
                 AppLogger.warning("Clean timed out after " + effectiveTimeoutFinal + "s for " + tasks.size() + " categories");
                 java.util.List<String> extra = java.util.List.of(
                         "Cleanup timed out after " + effectiveTimeoutFinal + "s (partial results shown)");
-                return buildCleanSummary(tasks, cleanedByIndex, taskErrorMap, token, true, extra);
+                return buildCleanSummary(tasks, cleanedByIndex, taskErrorMap, sizeUnknown, token, true, extra);
             }
             if (cause instanceof java.util.concurrent.CompletionException) {
                 throw (java.util.concurrent.CompletionException) cause;
@@ -485,6 +503,8 @@ public class CleanupService {
         Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
         if (isTimeoutLike(cause) || isTimeoutLike(ex)) {
             if (token != null) token.cancel();
+            // Join analyze/cleanup DISM before reporting the scan finished.
+            WindowsUpdateCleanupCleaner.awaitComponentCleanup();
             for (CompletableFuture<?> f : futures) {
                 try { f.cancel(true); } catch (Exception ignored) {}
             }
@@ -511,6 +531,7 @@ public class CleanupService {
             java.util.List<CleanupRow> tasks,
             java.util.Map<Integer, Long> cleanedByIndex,
             java.util.Map<Integer, String> taskErrorMap,
+            java.util.Set<Integer> sizeUnknown,
             CancellationToken token,
             boolean wasCanceled,
             java.util.List<String> extraErrors) {
@@ -530,7 +551,8 @@ public class CleanupService {
             long scannedBytes = r.getTotalBytes();
             if (taskErr != null) {
                 errors.add(taskErr);
-            } else if (cleaned == 0 && scannedItems > 0 && !canceled) {
+            } else if (cleaned == 0 && scannedItems > 0 && !canceled
+                    && (sizeUnknown == null || !sizeUnknown.contains(i))) {
                 errors.add(r.getCategory().getDisplayName()
                         + ": nothing was cleaned (files may be locked or in use)");
             }

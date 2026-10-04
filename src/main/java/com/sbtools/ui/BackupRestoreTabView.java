@@ -8,7 +8,6 @@ import com.sbtools.backup.SystemRestoreService;
 import com.sbtools.util.AppExecutors;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
-import com.sbtools.util.ProcessManager;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -1368,27 +1367,14 @@ public class BackupRestoreTabView extends BorderPane {
                     for (String hive : REGISTRY_FULL_HIVES) {
                         String safeName = hive.replace('\\', '_').replace(':', '_');
                         Path out = backupDir.resolve(safeName + ".hiv");
-                        try {
-                            ProcessBuilder pb = new ProcessBuilder("reg", "save", hive, out.toString(), "/y");
-                            pb.redirectErrorStream(true);
-                            Process p = ProcessManager.start(pb);
-                            boolean finished = p.waitFor(120, TimeUnit.SECONDS);
-                            if (!finished) {
-                                p.destroyForcibly();
-                                hivFailed++;
-                                AppLogger.warning("reg save timed out for " + hive);
-                                try { Files.deleteIfExists(out); } catch (Exception ignored) {}
-                            } else if (p.exitValue() == 0) {
-                                hivOk++;
-                                hivFiles.add(out.getFileName().toString());
-                            } else {
-                                hivFailed++;
-                                AppLogger.warning("reg save failed for " + hive + " (exit=" + p.exitValue() + ")");
-                                try { Files.deleteIfExists(out); } catch (Exception ignored) {}
-                            }
-                        } catch (Exception hiveEx) {
+                        final String hiveLabel = hive;
+                        Platform.runLater(() -> statusLabel.setText(
+                                "Saving hive " + hiveLabel + " (may take many minutes)..."));
+                        if (com.sbtools.backup.RegistryBackupSafety.runRegSaveHive(hive, out)) {
+                            hivOk++;
+                            hivFiles.add(out.getFileName().toString());
+                        } else {
                             hivFailed++;
-                            AppLogger.warning("reg save error for " + hive + ": " + hiveEx.getMessage());
                         }
                     }
                 }

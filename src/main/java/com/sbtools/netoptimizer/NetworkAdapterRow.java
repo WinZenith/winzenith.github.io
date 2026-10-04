@@ -18,16 +18,24 @@ public class NetworkAdapterRow {
     private final StringProperty dhcp = new SimpleStringProperty("");
     private final StringProperty gateway = new SimpleStringProperty("");
     private final StringProperty dnsServers = new SimpleStringProperty("");
+    private final int interfaceIndex;
 
     public NetworkAdapterRow(String name, String description, String status, String linkSpeed,
                               String macAddress, String ipAddress, boolean enabled) {
-        this(name, description, status, linkSpeed, macAddress, ipAddress, enabled, "", "", "");
+        this(name, 0, description, status, linkSpeed, macAddress, ipAddress, enabled, "", "", "");
     }
 
     public NetworkAdapterRow(String name, String description, String status, String linkSpeed,
                               String macAddress, String ipAddress, boolean enabled,
                               String dhcp, String gateway, String dnsServers) {
+        this(name, 0, description, status, linkSpeed, macAddress, ipAddress, enabled, dhcp, gateway, dnsServers);
+    }
+
+    public NetworkAdapterRow(String name, int interfaceIndex, String description, String status, String linkSpeed,
+                              String macAddress, String ipAddress, boolean enabled,
+                              String dhcp, String gateway, String dnsServers) {
         this.name.set(name);
+        this.interfaceIndex = interfaceIndex;
         this.description.set(description);
         this.status.set(status);
         this.linkSpeed.set(linkSpeed);
@@ -45,6 +53,9 @@ public class NetworkAdapterRow {
 
     public StringProperty nameProperty() { return name; }
     public String getName() { return name.get(); }
+
+    /** Windows {@code InterfaceIndex}; 0 when unknown. Prefer for mutations when the name is not script-safe. */
+    public int getInterfaceIndex() { return interfaceIndex; }
 
     public StringProperty descriptionProperty() { return description; }
     public String getDescription() { return description.get(); }

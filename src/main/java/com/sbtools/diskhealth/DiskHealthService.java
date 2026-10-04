@@ -51,7 +51,13 @@ public class DiskHealthService {
             throw new IOException("Failed to get disk health: " + result.combinedOutput());
         }
         String json = result.stdout().trim();
-        if (json.isBlank()) return new HealthResult(List.of(), false);
+        String stderr = result.stderr() != null ? result.stderr().trim() : "";
+        if (json.isBlank()) {
+            if (!stderr.isBlank()) {
+                throw new IOException("Disk health returned no data: " + stderr);
+            }
+            throw new IOException("Disk health returned no data (empty script output). Click Refresh to retry.");
+        }
         try {
             JsonNode root = JsonMapper.mapper().readTree(json);
             boolean smartctlAvailable = root.has("smartctlAvailable") && root.get("smartctlAvailable").asBoolean(false);

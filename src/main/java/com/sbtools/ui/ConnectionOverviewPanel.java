@@ -49,6 +49,7 @@ class ConnectionOverviewPanel extends VBox {
         final String sel = section;
         if (busy.get()) {
             outputArea.setText("Please wait, another operation is in progress...");
+            BusyIdleRetry.runWhenIdle(busy, this::loadSection);
             return;
         }
         busy.set(true);

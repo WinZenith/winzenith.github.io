@@ -1,40 +1,39 @@
-param([string]$AdapterName = "", [string]$Enable = "true")
+param([string]$AdapterName = "", [string]$Enable = "true", [int]$InterfaceIndex = 0)
 
-if (-not $AdapterName) {
-    ConvertTo-Json -Compress @{ success = $false; message = "AdapterName is required." }
+if (-not $AdapterName -and $InterfaceIndex -le 0) {
+    ConvertTo-Json -Compress @{ success = $false; message = "AdapterName or InterfaceIndex is required." }
     exit 1
 }
 
-if ($AdapterName -match '[\*\?]') {
+if ($InterfaceIndex -le 0 -and $AdapterName -match '[\*\?]') {
     ConvertTo-Json -Compress @{ success = $false; message = "Adapter name must not contain wildcard characters (* or ?)." }
     exit 1
 }
 
 try {
-    # String + Parse (repo convention, cf. browser-extensions.ps1): -File argv
-    # arrives as text, and [bool] params do not bind reliably from the CLI.
     $enableFlag = [bool]::Parse($Enable)
-    # Exact-match lookup only. Never pass the raw name to -Name / -InterfaceAlias:
-    # both parameters accept wildcards, so an adapter literally named "*" would
-    # otherwise match (and disable) every adapter on the system.
-    # "-eq" is an exact, non-wildcard comparison; piping binds by InputObject
-    # so no name string is ever re-parsed as a wildcard pattern.
-    $target = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Name -eq $AdapterName }
-    if (-not $target) {
-        ConvertTo-Json -Compress @{ success = $false; message = "Adapter not found: $AdapterName" }
+    if ($InterfaceIndex -gt 0) {
+        $target = @(Get-NetAdapter -InterfaceIndex $InterfaceIndex -ErrorAction Stop)
+    } else {
+        $target = @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Name -eq $AdapterName })
+    }
+    if (-not $target -or $target.Count -eq 0) {
+        ConvertTo-Json -Compress @{ success = $false; message = "Adapter not found." }
         exit 1
     }
-    if (@($target).Count -gt 1) {
+    if ($target.Count -gt 1) {
         ConvertTo-Json -Compress @{ success = $false; message = "Multiple adapters matched; refusing to change state." }
         exit 1
     }
+    $one = $target[0]
     if ($enableFlag) {
-        $target | Enable-NetAdapter -Confirm:$false -ErrorAction Stop | Out-Null
+        $one | Enable-NetAdapter -Confirm:$false -ErrorAction Stop | Out-Null
     } else {
-        $target | Disable-NetAdapter -Confirm:$false -ErrorAction Stop | Out-Null
+        $one | Disable-NetAdapter -Confirm:$false -ErrorAction Stop | Out-Null
     }
     $verb = if ($enableFlag) { "Enabled" } else { "Disabled" }
-    ConvertTo-Json -Compress @{ success = $true; message = "$verb $AdapterName." }
+    $label = if ($AdapterName) { $AdapterName } else { $one.Name }
+    ConvertTo-Json -Compress @{ success = $true; message = "$verb $label." }
 } catch {
     ConvertTo-Json -Compress @{ success = $false; message = $_.Exception.Message }
     exit 1

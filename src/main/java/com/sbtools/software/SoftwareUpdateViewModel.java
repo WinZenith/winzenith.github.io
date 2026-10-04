@@ -43,6 +43,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CancellationException;
@@ -89,6 +90,8 @@ public class SoftwareUpdateViewModel {
                     + "in the background and can leave a pending reboot.\n\n"
                     + "Reboot before installing more updates.";
     private final AtomicBoolean installCancelled = new AtomicBoolean(false);
+    /** Restore prompt or restore-failed prompt currently inside showAndWait. */
+    private volatile Alert openInstallDialog;
     private final AtomicBoolean installRunning = new AtomicBoolean(false);
     private final AtomicBoolean restorePointCreatedThisBatch = new AtomicBoolean(false);
     private final List<SoftwareUpdateEntry> failedEntries = new ArrayList<>();
@@ -417,16 +420,52 @@ public class SoftwareUpdateViewModel {
     }
 
     public void cancelInstall() {
+        // Take effect immediately. A confirm dialog left installCancelled false while the
+        // next package started, and its 2-minute auto-decline discarded Stop entirely.
+        if (disposed || !installRunning.get() || installCancelled.get()) return;
+        installCancelled.set(true);
         Platform.runLater(() -> {
-            if (disposed) return;
-            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                    "Cancel remaining updates?\n\n(Auto-declines after 2 minutes.)");
-            confirm.setHeaderText(I18n.t("Cancel Install"));
-            if (showBoundedAlert(confirm) == ButtonType.OK) {
-                installCancelled.set(true);
-                statusText.set("Canceling updates...");
-            }
+            if (!disposed) statusText.set("Canceling updates...");
+            dismissOpenInstallDialog();
         });
+    }
+
+    /** Closes the restore prompt so Stop is not stuck behind showAndWait. */
+    private void dismissOpenInstallDialog() {
+        Alert open = openInstallDialog;
+        if (open == null) return;
+        try {
+            ButtonType decline = open.getButtonTypes().contains(ButtonType.CANCEL)
+                    ? ButtonType.CANCEL
+                    : ButtonType.NO;
+            open.setResult(decline);
+            open.hide();
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Restore-prompt answers. {@link #CLOSED} is the window close button (no result).
+     * A 2-minute timeout is reported as {@link #NO}, not {@link #CLOSED}.
+     */
+    public enum RestorePromptAnswer { YES, NO, CANCEL, CLOSED }
+
+    /** What to do before any restore-point process starts. */
+    public enum RestorePromptDecision { CREATE, PROCEED, ABORT, RESTORE_FAILED }
+
+    /** Stop/dispose aborts even if the user had chosen Yes or No. Window close aborts; No continues. */
+    public static RestorePromptDecision decideRestorePrompt(RestorePromptAnswer answer, boolean cancelledOrDisposed) {
+        if (cancelledOrDisposed || answer == null || answer == RestorePromptAnswer.CANCEL
+                || answer == RestorePromptAnswer.CLOSED) {
+            return RestorePromptDecision.ABORT;
+        }
+        if (answer == RestorePromptAnswer.YES) return RestorePromptDecision.CREATE;
+        return RestorePromptDecision.PROCEED;
+    }
+
+    /** A cancel during VSS aborts the install even when the snapshot call returns success. */
+    public static RestorePromptDecision decideAfterRestoreCreate(boolean created, boolean cancelledOrDisposed) {
+        if (cancelledOrDisposed) return RestorePromptDecision.ABORT;
+        return created ? RestorePromptDecision.PROCEED : RestorePromptDecision.RESTORE_FAILED;
     }
 
     public void updateSelected(List<SoftwareUpdateEntry> selected) {
@@ -1526,18 +1565,23 @@ public class SoftwareUpdateViewModel {
                     Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                             "System Restore Point creation failed or was skipped.\n\n"
                                     + "Continue installing updates without a restore point?\n\n"
-                                    + "(Auto-cancels after 2 minutes. You can press Stop to cancel.)",
+                                    + "(Auto-cancels after 2 minutes. Stop aborts.)",
                             ButtonType.YES, ButtonType.NO);
                     confirm.setTitle(I18n.ui("System restore point"));
                     confirm.setHeaderText(I18n.t("Restore point unavailable"));
-                    initAlertOwner(confirm);
-                    confirm.initModality(Modality.APPLICATION_MODAL);
+                    initStoppableAlert(confirm);
                     // Same bounded walk-away as the restore prompt: unanswered, this
                     // dialog used to hold installRunning + globalBusy forever.
                     armModalAutoClose(confirm, proceed);
-                    confirm.showAndWait().ifPresentOrElse(
-                            result -> proceed.complete(result == ButtonType.YES),
-                            () -> proceed.complete(false));
+                    openInstallDialog = confirm;
+                    try {
+                        confirm.showAndWait().ifPresentOrElse(
+                                result -> proceed.complete(result == ButtonType.YES
+                                        && !installCancelled.get() && !disposed),
+                                () -> proceed.complete(false));
+                    } finally {
+                        openInstallDialog = null;
+                    }
                     if (!proceed.isDone()) {
                         proceed.complete(false);
                     }
@@ -1733,42 +1777,34 @@ public class SoftwareUpdateViewModel {
         }
         // Stage 1 (FX thread only): ask the user. Stage 2 (background): run the blocking
         // restore-point creation. Never run ProcessRunner on the FX thread (UI freeze, #2).
-        // Bounded: auto-declines after 120s and immediately on Stop/dispose so a
-        // walk-away never holds globalBusy (+ installRunning) indefinitely.
-        CompletableFuture<Boolean> confirmed = new CompletableFuture<>();
+        // Bounded: after 120s continue without a restore point. Stop, Cancel, and
+        // the window close abort. Never hold globalBusy (+ installRunning) forever.
+        CompletableFuture<RestorePromptAnswer> choice = new CompletableFuture<>();
         try {
             runOnFx(() -> {
                 try {
-                    if (disposed) {
-                        confirmed.complete(false);
+                    if (disposed || installCancelled.get()) {
+                        choice.complete(RestorePromptAnswer.CANCEL);
                         return;
                     }
                     Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                             "Would you like to create a System Restore Point before proceeding with the updates?\n\n"
-                                    + "(Auto-declines after 2 minutes. You can press Stop to cancel.)",
-                            ButtonType.YES, ButtonType.NO);
+                                    + "No continues without a restore point. Cancel, or Stop, aborts the update.\n\n"
+                                    + "(After 2 minutes the update continues without a restore point.)",
+                            ButtonType.YES, ButtonType.NO, ButtonType.CANCEL);
                     confirm.setTitle(I18n.ui("System restore point"));
                     confirm.setHeaderText(AppInfo.DISPLAY_NAME);
-                    initAlertOwner(confirm);
-                    confirm.initModality(Modality.APPLICATION_MODAL);
-                    // Watcher: auto-close on timeout or Stop/dispose so the install
-                    // chain can never hang forever on an unanswered modal.
+                    // Not application-modal: that modality ate toolbar Stop, so the
+                    // cancel path below could never run. showAndWait still nests.
+                    initStoppableAlert(confirm);
                     Thread watcher = new Thread(() -> {
                         try {
                             long deadline = System.currentTimeMillis() + 120_000L;
-                            while (!confirmed.isDone() && System.currentTimeMillis() < deadline) {
+                            while (!choice.isDone() && System.currentTimeMillis() < deadline) {
                                 // Only install cancel / dispose — leftover scanCancelled from Stop scan
                                 // used to auto-close this dialog and then PROCEED without a restore.
                                 if (disposed || installCancelled.get()) {
-                                    Platform.runLater(() -> {
-                                        try {
-                                            if (!confirmed.isDone()) {
-                                                AppLogger.info("Restore prompt auto-declined (cancel/dispose)");
-                                                confirm.setResult(ButtonType.NO);
-                                                confirm.hide();
-                                            }
-                                        } catch (Exception ignored) {}
-                                    });
+                                    Platform.runLater(() -> hideRestorePrompt(confirm, choice, ButtonType.CANCEL));
                                     return;
                                 }
                                 try {
@@ -1778,31 +1814,29 @@ public class SoftwareUpdateViewModel {
                                     return;
                                 }
                             }
-                            if (!confirmed.isDone()) {
+                            if (!choice.isDone()) {
                                 Platform.runLater(() -> {
-                                    try {
-                                        if (!confirmed.isDone()) {
-                                            AppLogger.warning("Restore point prompt timed out after 120s - auto-declining");
-                                            confirm.setResult(ButtonType.NO);
-                                            confirm.hide();
-                                        }
-                                    } catch (Exception ignored) {}
+                                    AppLogger.warning("Restore point prompt timed out after 120s - continuing without a restore point");
+                                    hideRestorePrompt(confirm, choice, ButtonType.NO);
                                 });
                             }
                         } catch (Exception ignored) {}
                     }, "restore-prompt-watcher");
                     watcher.setDaemon(true);
                     watcher.start();
-                    confirm.showAndWait().ifPresent(result -> {
-                        confirmed.complete(result == ButtonType.YES);
-                    });
-                    if (!confirmed.isDone()) {
-                        // Dialog closed without a button (window X / timeout hide): decline, not hang.
-                        confirmed.complete(false);
+                    openInstallDialog = confirm;
+                    Optional<ButtonType> result;
+                    try {
+                        result = confirm.showAndWait();
+                    } finally {
+                        openInstallDialog = null;
+                    }
+                    if (!choice.isDone()) {
+                        choice.complete(toRestorePromptAnswer(result.orElse(null)));
                     }
                 } catch (Exception ex) {
                     AppLogger.warning("Restore point prompt failed: " + ex.getMessage());
-                    confirmed.complete(false);
+                    if (!choice.isDone()) choice.complete(RestorePromptAnswer.CANCEL);
                 }
             });
         } catch (Exception ex) {
@@ -1810,23 +1844,33 @@ public class SoftwareUpdateViewModel {
             return CompletableFuture.completedFuture(PrepareOutcome.CANCELLED);
         }
         try {
-            return confirmed.thenApplyAsync(wantsRestore -> {
-                if (installCancelled.get() || disposed) {
+            return choice.thenApplyAsync(answer -> {
+                RestorePromptDecision decision = decideRestorePrompt(answer, installCancelled.get() || disposed);
+                if (decision == RestorePromptDecision.ABORT) {
                     AppLogger.info("Restore skipped: install was cancelled during prompt");
                     return PrepareOutcome.CANCELLED;
                 }
-                if (!Boolean.TRUE.equals(wantsRestore)) {
+                if (decision == RestorePromptDecision.PROCEED) {
                     return PrepareOutcome.PROCEED;
                 }
                 try {
-                    boolean created = restoreService.createRestorePoint("WinZenith software update").success();
-                    if (created) {
+                    if (installCancelled.get() || disposed) return PrepareOutcome.CANCELLED;
+                    boolean created = restoreService.createRestorePoint(
+                            "WinZenith software update", installCancelled).success();
+                    RestorePromptDecision after = decideAfterRestoreCreate(
+                            created, installCancelled.get() || disposed);
+                    if (after == RestorePromptDecision.ABORT) return PrepareOutcome.CANCELLED;
+                    if (after == RestorePromptDecision.PROCEED) {
                         restorePointCreatedThisBatch.set(true);
                         return PrepareOutcome.PROCEED;
                     }
                     AppLogger.warning("Restore point creation failed or skipped.");
                     return PrepareOutcome.RESTORE_FAILED;
+                } catch (CancellationException ce) {
+                    AppLogger.info("Restore point creation cancelled");
+                    return PrepareOutcome.CANCELLED;
                 } catch (Exception ex) {
+                    if (installCancelled.get() || disposed) return PrepareOutcome.CANCELLED;
                     AppLogger.warning("Restore point creation failed: " + ex.getMessage());
                     return PrepareOutcome.RESTORE_FAILED;
                 }
@@ -1835,6 +1879,37 @@ public class SoftwareUpdateViewModel {
             AppLogger.warning("Restore point background stage rejected (shutting down?): " + ex.getMessage());
             return CompletableFuture.completedFuture(PrepareOutcome.CANCELLED);
         }
+    }
+
+    /** Non-modal so toolbar Stop is delivered during {@code showAndWait}'s nested loop. */
+    private static void initStoppableAlert(Alert alert) {
+        initAlertOwner(alert);
+        alert.initModality(Modality.NONE);
+        // Stay visible: a dialog left behind the main window would otherwise
+        // continue the update after the 2-minute skip.
+        alert.setOnShown(ev -> {
+            if (alert.getDialogPane().getScene() != null
+                    && alert.getDialogPane().getScene().getWindow() instanceof Stage stage) {
+                stage.setAlwaysOnTop(true);
+                stage.toFront();
+            }
+        });
+    }
+
+    private static void hideRestorePrompt(Alert alert, CompletableFuture<RestorePromptAnswer> choice, ButtonType result) {
+        try {
+            if (choice != null && !choice.isDone() && alert != null) {
+                alert.setResult(result);
+                alert.hide();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static RestorePromptAnswer toRestorePromptAnswer(ButtonType result) {
+        if (result == ButtonType.YES) return RestorePromptAnswer.YES;
+        if (result == ButtonType.NO) return RestorePromptAnswer.NO;
+        if (result == ButtonType.CANCEL) return RestorePromptAnswer.CANCEL;
+        return RestorePromptAnswer.CLOSED;
     }
 
     private void showBatchResultDialog(List<SoftwareUpdateEntry> failedEntries, List<SoftwareUpdateEntry> techMismatchEntries,

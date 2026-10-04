@@ -233,6 +233,7 @@ class WiFiPanel extends VBox {
     void loadCurrentInfo() {
         if (busy.get()) {
             statusLabel.setText("Please wait, another operation is in progress...");
+            BusyIdleRetry.runWhenIdle(busy, this::loadCurrentInfo);
             return;
         }
         busy.set(true);
@@ -398,16 +399,16 @@ class WiFiPanel extends VBox {
         currentTask = AppExecutors.ioPool().submit(() -> {
             try {
                 List<NetworkAdapterRow> adapters = service.listAdapters();
-                var wifiName = service.resolveWifiAdapterName(adapters);
-                if (wifiName.isEmpty()) {
+                var wifiRef = service.resolveWifiAdapter(adapters);
+                if (wifiRef.isEmpty()) {
                     Platform.runLater(() -> {
                         statusLabel.setText("No Wi-Fi adapter found.");
                         new Alert(Alert.AlertType.WARNING, "No Wi-Fi adapter found on this system.").showAndWait();
                     });
                     return;
                 }
-                String wifiAdapterName = wifiName.get();
-                var result = service.setAdapterState(wifiAdapterName, enable);
+                var ref = wifiRef.get();
+                var result = service.setAdapterState(ref.name(), ref.interfaceIndex(), enable);
                 Platform.runLater(() -> {
                     statusLabel.setText(result.success()
                             ? "Wi-Fi adapter " + (enable ? "enabled" : "disabled") + "."

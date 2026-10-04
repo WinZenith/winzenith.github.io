@@ -450,3 +450,41 @@ Sep 22, 2026 10:07:37 AM com.sbtools.util.AppLogger info
 INFO: Restored browser profile backup set (2) from C:\Users\durot\AppData\Local\Temp\wz-bext17629885690816379488\restore\Preferences.bak.20260922-120000-001
 Sep 22, 2026 10:07:37 AM com.sbtools.util.AppLogger info
 INFO: Restored browser profile backup set (1) from C:\Users\durot\AppData\Local\Temp\wz-bext17629885690816379488\restore-other\Preferences.bak.SNAP
+Oct 04, 2026 9:56:22 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Oct 04, 2026 9:56:22 PM com.sbtools.util.AppLogger info
+INFO: DriverCatalogDatabase: Loaded 95 catalog entries (bundled)
+Oct 04, 2026 10:06:20 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Oct 04, 2026 10:06:20 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing toggle of extone: could not validate Secure Preferences MAC (wrong seed/device or corrupt protection.macs)
+Oct 04, 2026 10:06:20 PM com.sbtools.util.AppLogger warning
+WARNING: Secure Preferences unreadable in C:\Users\durot\AppData\Local\Temp\wz-bext1147582749634287034\bad-secure: Unrecognized token 'not': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 5]
+Oct 04, 2026 10:06:20 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing toggle: Secure Preferences exists but is unreadable in C:\Users\durot\AppData\Local\Temp\wz-bext1147582749634287034\bad-secure
+Oct 04, 2026 10:06:20 PM com.sbtools.util.AppLogger warning
+WARNING: Extension a@b.c is managed by Firefox (system, built-in, or browser block) and cannot be toggled.
+Oct 04, 2026 10:06:20 PM com.sbtools.util.AppLogger warning
+WARNING: Extension a@b.c is managed by Firefox (system, built-in, or browser block) and cannot be toggled.
+Oct 04, 2026 10:06:20 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup set (2) from C:\Users\durot\AppData\Local\Temp\wz-bext1147582749634287034\restore\Preferences.bak.20260922-120000-001
+Oct 04, 2026 10:06:20 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup set (1) from C:\Users\durot\AppData\Local\Temp\wz-bext1147582749634287034\restore-other\Preferences.bak.SNAP
+Oct 04, 2026 10:07:08 PM com.sbtools.util.AppLogger init
+INFO: Logging to C:\Users\durot\IdeaProjects\BasicSDriverUpdate\logs\app.log (portable=true)
+Oct 04, 2026 10:07:08 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing toggle of extone: could not validate Secure Preferences MAC (wrong seed/device or corrupt protection.macs)
+Oct 04, 2026 10:07:08 PM com.sbtools.util.AppLogger warning
+WARNING: Secure Preferences unreadable in C:\Users\durot\AppData\Local\Temp\wz-bext11642720305317982536\bad-secure: Unrecognized token 'not': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 5]
+Oct 04, 2026 10:07:08 PM com.sbtools.util.AppLogger warning
+WARNING: Refusing toggle: Secure Preferences exists but is unreadable in C:\Users\durot\AppData\Local\Temp\wz-bext11642720305317982536\bad-secure
+Oct 04, 2026 10:07:08 PM com.sbtools.util.AppLogger warning
+WARNING: Extension a@b.c is managed by Firefox (system, built-in, or browser block) and cannot be toggled.
+Oct 04, 2026 10:07:08 PM com.sbtools.util.AppLogger warning
+WARNING: Extension a@b.c is managed by Firefox (system, built-in, or browser block) and cannot be toggled.
+Oct 04, 2026 10:07:08 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup set (2) from C:\Users\durot\AppData\Local\Temp\wz-bext11642720305317982536\restore\Preferences.bak.20260922-120000-001
+Oct 04, 2026 10:07:08 PM com.sbtools.util.AppLogger info
+INFO: Restored browser profile backup set (1) from C:\Users\durot\AppData\Local\Temp\wz-bext11642720305317982536\restore-other\Preferences.bak.SNAP

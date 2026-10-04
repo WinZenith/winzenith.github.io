@@ -22,6 +22,15 @@ import java.util.regex.Pattern;
  */
 public final class RegistryBackupSafety {
 
+    /** Small autostart / core areas (Run, RunOnce, …). */
+    public static final long REG_EXPORT_CORE_SECONDS = 120;
+    /** Services, Uninstall trees, and other large subtrees. */
+    public static final long REG_EXPORT_EXTENDED_SECONDS = 600;
+    /** Full-hive {@code reg save} (multi-GB on typical systems). */
+    public static final long REG_HIVE_SAVE_SECONDS = 3600;
+    /** Large {@code .reg} imports use the extended budget. */
+    private static final long REG_IMPORT_LARGE_FILE_BYTES = 512 * 1024;
+
     public static final String[] CORE_REGISTRY_KEYS = {
             "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
             "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
@@ -241,6 +250,54 @@ public final class RegistryBackupSafety {
         return false;
     }
 
+    public static boolean isExtendedRegistryKey(String fullKey) {
+        String norm = normalizeHivePath(fullKey).toUpperCase(Locale.ROOT);
+        for (String k : EXTENDED_REGISTRY_KEYS) {
+            String a = normalizeHivePath(k).toUpperCase(Locale.ROOT);
+            if (norm.equals(a) || norm.startsWith(a + "\\")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static long exportTimeoutSecondsForKey(String fullKey) {
+        return isExtendedRegistryKey(fullKey) ? REG_EXPORT_EXTENDED_SECONDS : REG_EXPORT_CORE_SECONDS;
+    }
+
+    /**
+     * Saves a full hive via {@code reg save}. Long-running; drains child output.
+     */
+    public static boolean runRegSaveHive(String hive, Path outputFile) {
+        if (hive == null || hive.isBlank() || outputFile == null) {
+            return false;
+        }
+        try {
+            Path parent = outputFile.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            ProcessBuilder pb = new ProcessBuilder("reg", "save", hive.trim(), outputFile.toString(), "/y");
+            pb.redirectErrorStream(true);
+            Process p = ProcessManager.start(pb);
+            if (!waitForRegProcess(p, REG_HIVE_SAVE_SECONDS, "reg save " + hive)) {
+                try {
+                    Files.deleteIfExists(outputFile);
+                } catch (Exception ignored) {
+                }
+                return false;
+            }
+            return Files.isRegularFile(outputFile) && Files.size(outputFile) > 0;
+        } catch (Exception e) {
+            AppLogger.warning("reg save error for " + hive + ": " + e.getMessage());
+            try {
+                Files.deleteIfExists(outputFile);
+            } catch (Exception ignored) {
+            }
+            return false;
+        }
+    }
+
     private static boolean keyExists(String fullKey) {
         return queryKeyPresence(fullKey) == KeyPresence.PRESENT;
     }
@@ -448,23 +505,45 @@ public final class RegistryBackupSafety {
         drain.start();
     }
 
-    private static boolean runRegImport(Path regFile) {
+    private static boolean waitForRegProcess(Process process, long timeoutSeconds, String label) {
+        drainInBackground(process);
         try {
-            ProcessBuilder pb = new ProcessBuilder("reg", "import", regFile.toString());
-            pb.redirectErrorStream(true);
-            Process process = ProcessManager.start(pb);
-            boolean finished = process.waitFor(120, TimeUnit.SECONDS);
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
-                AppLogger.warning("reg import timed out for " + regFile.getFileName());
+                AppLogger.warning(label + " timed out after " + timeoutSeconds + "s");
                 return false;
             }
             if (process.exitValue() != 0) {
-                AppLogger.warning("reg import failed for " + regFile.getFileName()
-                        + " (exit=" + process.exitValue() + ")");
+                AppLogger.warning(label + " failed (exit=" + process.exitValue() + ")");
                 return false;
             }
             return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            process.destroyForcibly();
+            AppLogger.warning(label + " interrupted");
+            return false;
+        }
+    }
+
+    static long importTimeoutSeconds(Path regFile) {
+        try {
+            if (Files.size(regFile) > REG_IMPORT_LARGE_FILE_BYTES) {
+                return REG_EXPORT_EXTENDED_SECONDS;
+            }
+        } catch (IOException ignored) {
+        }
+        return REG_EXPORT_CORE_SECONDS;
+    }
+
+    private static boolean runRegImport(Path regFile) {
+        try {
+            long timeout = importTimeoutSeconds(regFile);
+            ProcessBuilder pb = new ProcessBuilder("reg", "import", regFile.toString());
+            pb.redirectErrorStream(true);
+            Process process = ProcessManager.start(pb);
+            return waitForRegProcess(process, timeout, "reg import " + regFile.getFileName());
         } catch (Exception e) {
             AppLogger.warning("reg import error for " + regFile.getFileName() + ": " + e.getMessage());
             return false;
@@ -474,15 +553,14 @@ public final class RegistryBackupSafety {
     private static boolean runRegExport(String fullKey, Path outputFile) {
         try {
             Files.createDirectories(outputFile.getParent());
+            long timeout = exportTimeoutSecondsForKey(fullKey);
             ProcessBuilder pb = new ProcessBuilder("reg", "export", fullKey, outputFile.toString(), "/y");
             pb.redirectErrorStream(true);
             Process p = ProcessManager.start(pb);
-            boolean finished = p.waitFor(120, TimeUnit.SECONDS);
-            if (!finished) {
-                p.destroyForcibly();
+            if (!waitForRegProcess(p, timeout, "reg export " + fullKey)) {
                 return false;
             }
-            return p.exitValue() == 0 && Files.isRegularFile(outputFile);
+            return Files.isRegularFile(outputFile);
         } catch (Exception e) {
             AppLogger.warning("reg export failed for " + fullKey + ": " + e.getMessage());
             return false;

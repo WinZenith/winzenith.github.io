@@ -13,6 +13,7 @@ import com.sbtools.shredder.ShredderFileEntry;
 import com.sbtools.shredder.ShredderResult;
 import com.sbtools.shredder.ShredderSafety;
 import com.sbtools.shredder.ShredderService;
+import com.sbtools.util.AppExecutors;
 import com.sbtools.util.AppLogger;
 import com.sbtools.util.AppPaths;
 
@@ -80,34 +81,23 @@ public class DiskToolsTabView extends BorderPane {
     private void acquireGlobalBusy(java.util.concurrent.atomic.AtomicBoolean token) {
         if (globalBusy == null || token == null) return;
         if (token.compareAndSet(false, true)) {
-            setGlobalBusy(true);
+            AppExecutors.acquireBusy(globalBusy);
         }
     }
 
     private void releaseGlobalBusy(java.util.concurrent.atomic.AtomicBoolean token) {
         if (globalBusy == null || token == null) return;
         if (token.compareAndSet(true, false)) {
-            setGlobalBusy(false);
+            AppExecutors.releaseBusy(globalBusy);
         }
-    }
-
-    private void setGlobalBusy(boolean value) {
-        if (globalBusy == null) return;
-        try {
-            if (Platform.isFxApplicationThread()) {
-                globalBusy.set(value);
-            } else {
-                Platform.runLater(() -> {
-                    try { globalBusy.set(value); } catch (Exception ignored) {}
-                });
-            }
-        } catch (Exception ignored) {}
     }
 
     private final BooleanProperty defragBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty wipeBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty secureBusy = new SimpleBooleanProperty(false);
     private final BooleanProperty benchBusy = new SimpleBooleanProperty(false);
+    private final BooleanProperty healthLoadBusy = new SimpleBooleanProperty(false);
+    private final BooleanProperty recycleLoadBusy = new SimpleBooleanProperty(false);
     private final BooleanSupplier adminCheck;
     /**
      * Shared App busy flag driving the window-close "operation in progress"
@@ -259,10 +249,13 @@ public class DiskToolsTabView extends BorderPane {
         wipeBusy.addListener(diskOpListener);
         secureBusy.addListener(diskOpListener);
         benchBusy.addListener(diskOpListener);
+        healthLoadBusy.addListener(diskOpListener);
+        recycleLoadBusy.addListener(diskOpListener);
     }
 
     private boolean diskMutationActive() {
-        return defragBusy.get() || wipeBusy.get() || secureBusy.get() || benchBusy.get() || recycleBinBusy.get();
+        return defragBusy.get() || wipeBusy.get() || secureBusy.get() || benchBusy.get()
+                || recycleBinBusy.get() || healthLoadBusy.get() || recycleLoadBusy.get();
     }
 
     /** One disk-mutation at a time: defrag, benchmark, free-space wipe, and secure delete. */
@@ -280,6 +273,16 @@ public class DiskToolsTabView extends BorderPane {
         updateBenchStartButton();
         updateDeleteButtons();
         updateRecycleWipeButton();
+        refreshHealthBtn.setDisable(diskMutationActive());
+        refreshRecycleBinBtn.setDisable(diskMutationActive());
+    }
+
+    private boolean refuseDiskRefreshWhileBusy() {
+        if (!diskMutationActive()) return false;
+        new Alert(Alert.AlertType.WARNING,
+                "Another disk operation is already running. Wait for it to finish before refreshing.")
+                .showAndWait();
+        return true;
     }
 
     private void updateRecycleWipeButton() {
@@ -1003,7 +1006,10 @@ public class DiskToolsTabView extends BorderPane {
     }
 
     private void loadDiskHealth() {
-        refreshHealthBtn.setDisable(true);
+        if (refuseDiskRefreshWhileBusy()) return;
+
+        healthLoadBusy.set(true);
+        syncDiskActionButtons();
         healthProgress.setProgress(-1);
         healthProgress.setVisible(true);
         healthStatus.setText("Loading disk health data...");
@@ -1044,9 +1050,10 @@ public class DiskToolsTabView extends BorderPane {
                 });
             } finally {
                 Platform.runLater(() -> {
-                    refreshHealthBtn.setDisable(false);
+                    healthLoadBusy.set(false);
                     healthProgress.setVisible(false);
                     releaseGlobalBusy(healthGlobalToken);
+                    syncDiskActionButtons();
                 });
             }
         }, "disk-health-load").start();
@@ -1761,7 +1768,10 @@ public class DiskToolsTabView extends BorderPane {
 
     private void loadRecycleBin() {
         if (!AppPaths.isWindows()) return;
-        refreshRecycleBinBtn.setDisable(true);
+        if (refuseDiskRefreshWhileBusy()) return;
+
+        recycleLoadBusy.set(true);
+        syncDiskActionButtons();
         secureWipeRecycleBinBtn.setDisable(true);
         recycleBinProgress.setProgress(-1);
         recycleBinProgress.setVisible(true);
@@ -1795,9 +1805,10 @@ public class DiskToolsTabView extends BorderPane {
                 });
             } finally {
                 Platform.runLater(() -> {
-                    refreshRecycleBinBtn.setDisable(false);
+                    recycleLoadBusy.set(false);
                     recycleBinProgress.setVisible(false);
                     releaseGlobalBusy(recycleLoadGlobalToken);
+                    syncDiskActionButtons();
                 });
             }
         }, "load-recyclebin").start();
@@ -1839,6 +1850,7 @@ public class DiskToolsTabView extends BorderPane {
                 .toList();
 
         newDaemonThread(() -> {
+            final AtomicBoolean reloadRecycleBin = new AtomicBoolean();
             try {
                 int passCount = getSelectedPassCount();
                 FolderDeleteResult result = shredderService.secureWipeRecycleBin(recyclePaths, passCount,
@@ -1847,8 +1859,7 @@ public class DiskToolsTabView extends BorderPane {
                 Platform.runLater(() -> {
                     if (recycleBinCancelled.get()) {
                         recycleBinStatus.setText("Recycle Bin wipe cancelled.");
-                        // Refresh to reflect partial progress instead of clearing.
-                        loadRecycleBin();
+                        reloadRecycleBin.set(true);
                     } else if (result.isSuccess()) {
                         recycleBinStatus.setText("Recycle Bin securely wiped: " + result.getFilesDeleted() + " item(s) removed.");
                         String msg = "Recycle Bin securely wiped.\n" + result.getFilesDeleted() + " file(s) overwritten.";
@@ -1856,14 +1867,12 @@ public class DiskToolsTabView extends BorderPane {
                             msg += "\n" + result.getScheduledForReboot().size() + " file(s) scheduled for deletion on next reboot.";
                         }
                         new Alert(Alert.AlertType.INFORMATION, msg).showAndWait();
-                        // Re-query so leftovers on other volumes are not hidden by a local clear.
-                        loadRecycleBin();
+                        reloadRecycleBin.set(true);
                     } else {
                         recycleBinStatus.setText("Recycle Bin wipe failed: " + result.getMessage());
                         new Alert(Alert.AlertType.ERROR, "Recycle Bin wipe failed:\n" + result.getMessage()
                                 + "\n\nThe list was NOT cleared. Click Refresh to reload actual contents.").showAndWait();
-                        // Re-query actual Recycle Bin contents; never clear on failure.
-                        loadRecycleBin();
+                        reloadRecycleBin.set(true);
                     }
                 });
             } catch (Exception e) {
@@ -1878,11 +1887,13 @@ public class DiskToolsTabView extends BorderPane {
                 Platform.runLater(() -> {
                     recycleBinBusy.set(false);
                     syncDiskActionButtons();
-                    refreshRecycleBinBtn.setDisable(false);
                     recycleBinProgress.setVisible(false);
                     stopRecycleBinBtn.setVisible(false);
                     stopRecycleBinBtn.setDisable(false);
                     releaseGlobalBusy(recycleGlobalToken);
+                    if (reloadRecycleBin.get()) {
+                        loadRecycleBin();
+                    }
                 });
             }
         }, "wipe-recyclebin").start();

@@ -45,6 +45,7 @@ try {
         $dns = if ($dnsMap.ContainsKey($adapter.Name)) { $dnsMap[$adapter.Name] } else { "" }
         $result += [PSCustomObject]@{
             Name = $adapter.Name
+            InterfaceIndex = [int]$adapter.InterfaceIndex
             InterfaceDescription = $adapter.InterfaceDescription
             Status = $adapter.Status
             LinkSpeed = if ($adapter.LinkSpeed) { $adapter.LinkSpeed.ToString() } else { "" }
